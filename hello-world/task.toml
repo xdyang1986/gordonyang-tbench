@@ -1,0 +1,21 @@
+version = "1.0"
+
+[metadata]
+author_name = "Matt Deitke"
+author_email = ""
+difficulty = "easy"
+category = "software-engineering"
+tags = ["hello-world"]
+
+# Adjust timeouts as needed for your task
+[verifier]
+timeout_sec = 60.0
+
+# Adjust timeouts as needed for your task
+[agent]
+timeout_sec = 120.0
+
+# Adjust resource limits as needed for your task
+[environment]
+cpus = 2
+memory = "4G"

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(**/instruction.md)",
+      "Write(**/instruction.md)"
+    ]
+  }
+}
