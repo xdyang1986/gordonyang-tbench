@@ -1,0 +1,38 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/database-seeding"
+description = "Implement a streaming database-copy tool: pluggable compression codecs plus local chunked copy and a compressed TCP file-transfer protocol."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["python", "sockets", "compression", "streaming", "wire-protocol"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "medium"
+category = "software-engineering"
+languages = ["python"]
+tags = ["python", "sockets", "compression", "streaming", "io"]
+expert_time_estimate_min = 30.0
+junior_time_estimate_min = 90.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
