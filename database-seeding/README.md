@@ -35,53 +35,54 @@ silently corrupts data or hangs.
 ## Completion Rates
 
 > Calibration target: Opus or Avocado must pass **at least once and fail at
-> least once** out of 5. Sonnet is informational only.
+> least once** out of 5. GPT-5.5 is informational only.
 
-_Measured on the final 15-test suite (k=5)._
+_Measured on the final validation run (commit `f76773b`, 15-test suite, k=5)._
 
 | Model | Pass rate (k=5) |
 |-------|-----------------|
-| Oracle | 3/3 (mean 1.000, Docker) |
-| Sonnet 4.6 | 2/5 passed (mean 0.400, informational) |
-| Opus 4.6 | 1/5 passed (mean 0.200) — **calibration target met** |
-| Avocado | 5/5 passed (mean 1.000) |
+| Oracle | 3/3 (mean 1.000) |
+| GPT-5.5 (codex) | 2/5 passed (mean 0.400, informational) |
+| Opus 4.6 | 0/5 passed (mean 0.000) |
+| Avocado | 4/5 passed (mean 0.800) — **calibration target met** |
 
 ## Model Analysis
 
-Per-model results over k=5 (15 tests per trial):
+Per-model results over k=5 (15 tests per trial), from the final validation run:
 
-- **Sonnet 4.6 — 2/5 passed, 3/5 failed** (informational). All 3 failing trials
+- **GPT-5.5 — 2/5 passed, 3/5 failed** (informational). All 3 failing trials
   failed on the same `test_transfer_interrupted_midstream_leaves_no_file`
-  (14/15 each).
-- **Opus 4.6 — 1/5 passed, 4/5 failed.** All 4 failing trials failed on the
-  *same single test*, `test_transfer_interrupted_midstream_leaves_no_file`
-  (14/15 each; all other tests green). The one passing trial was 15/15. In the
-  failing trials the receiver wrote decompressed bytes straight to the
-  destination and did not remove it when the connection was severed mid-stream —
-  leaving a partial, corrupt file at DST.
-- **Avocado — 5/5 passed** (15/15 each). Avocado implemented clean-on-failure
-  delivery, compression, and the disk pre-check in every trial.
+  (14/15 each); every other test passed.
+- **Opus 4.6 — 0/5 passed.** Every trial failed on the *same single test*,
+  `test_transfer_interrupted_midstream_leaves_no_file` (14/15 each; all other
+  tests green).
+- **Avocado — 4/5 passed** (15/15 each). Its one failing trial also failed only
+  on `test_transfer_interrupted_midstream_leaves_no_file` (14/15). Avocado
+  implemented clean-on-failure delivery, compression, and the disk pre-check in
+  the passing trials.
 
-**Dominant failure mode (all models): atomic / clean-on-failure delivery.**
-7 of 7 total model failures across all three models (100%) are the receiver
-leaving a partial file at the destination after an interrupted transfer, because
-it streams directly to the final path instead of writing to a temp file and
-renaming on success (or deleting on error). No other failure mode appeared in
-any trial. The disk-space pre-check and the compression-in-transit test each
-passed in all 15 model trials (Sonnet + Opus + Avocado) — models implement those
-required behaviors reliably, so those tests harden spec⇄test coverage without
-adding to the difficulty signal, which isolates entirely on the clean-on-failure
-decision. Run-to-run pass counts vary around the boundary (e.g. Opus 1–3 / 5
-across runs), the expected signature of a well-calibrated task.
+**Dominant failure mode (all models): clean termination on an interrupted
+transfer.** 9 of 9 total model failures across all three models (100%) are on
+`test_transfer_interrupted_midstream_leaves_no_file`. When the proxy severs the
+connection mid-stream the implementation does not terminate cleanly — the `send`
+process blocks until the test's 60 s timeout trips — instead of detecting the
+short stream, failing fast, and leaving no partial file at DST. No other failure
+mode appeared in any trial. The disk-space pre-check and the compression-in-transit
+test each passed in all 15 model trials (GPT-5.5 + Opus + Avocado) — models
+implement those required behaviors reliably, so those tests harden spec⇄test
+coverage without adding to the difficulty signal, which isolates entirely on the
+interrupted-transfer handling. Run-to-run pass counts vary around the boundary
+(Avocado 4–5 / 5, Opus 0–1 / 5 across runs), the expected signature of a
+well-calibrated task.
 
-**Why this is a reasoning gap, not a task-setup issue.** The other 12 tests
-passed in 100% of trials across both models, the oracle is a deterministic 3/3,
-and the required behavior is solvable in-environment — two Opus trials and all
-five Avocado trials do it correctly. The instruction explicitly asks for "no
+**Why this is a reasoning gap, not a task-setup issue.** The other 14 tests
+passed in 100% of trials across all three models, the oracle is a deterministic
+3/3, and the required behavior is solvable in-environment — Avocado does it
+correctly in four of five trials. The instruction explicitly asks for "no
 corrupt file on failure"; the failing trials simply did not reason about the
-partial-failure path (commit-on-success / cleanup-on-error). The difficulty
-isolates on that single design decision rather than on any environmental
-flakiness or under-specification.
+partial-failure path (detect a short / severed stream, fail fast, clean up). The
+difficulty isolates on that single design decision rather than on any
+environmental flakiness or under-specification.
 
 ## Anti-Cheating Analysis
 
@@ -110,7 +111,7 @@ flakiness or under-specification.
 # from the repo root (gordonyang-tbench/)
 codimango bench run -p database-seeding -a oracle            # verified: 1.0
 codimango bench run -p database-seeding -a oracle -k 3       # expect 3/3
-codimango bench run -p database-seeding -a claude-code -m claude-sonnet-4-6 -k 5
+codimango bench run -p database-seeding -a codex -m gpt-5.5 -k 5
 codimango bench run -p database-seeding -a claude-code -m claude-opus-4-6 -k 5
 codimango bench run -p database-seeding -a metacode -m meta/avocado_dvsc_tester -k 5
 ```
