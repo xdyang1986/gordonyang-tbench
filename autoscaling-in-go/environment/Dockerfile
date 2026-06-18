@@ -7,8 +7,6 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
-# Ship the starter repo. NOTE: autoscaler/algorithm.go is intentionally absent —
-# the agent must create it. The package does not compile until the agent does.
-# The module has no third-party dependencies (standard library only), so no
-# module download is required.
-COPY app/ /app/
+# From-scratch task: NO starter code is shipped. The agent writes the entire
+# Go program at /app per instruction.md. The standard library is sufficient
+# (no third-party modules required).

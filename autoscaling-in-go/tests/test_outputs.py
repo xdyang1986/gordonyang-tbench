@@ -1,48 +1,24 @@
-"""Verifier for the autoscaling-in-go task.
+"""Black-box verifier for the from-scratch autoscaler program.
 
-The agent's job is to create autoscaler/algorithm.go so the package compiles and
-behaves per the documented policy. To grade ONLY the agent's algorithm.go and
-prevent tampering with the rest of the repo or the tests, this verifier:
+The agent writes a Go `package main` at /app that reads a workload from stdin and
+writes CSV scaling decisions to stdout. These tests build that program and drive
+it with crafted workloads, asserting on observable output only.
 
-  1. Restores pristine copies of every non-implementation file (engine.go,
-     types.go, clock.go, cmd/autoscalesim/main.go, go.mod) over /app.
-  2. Removes any *_test.go the agent may have left in the package, then copies in
-     the hidden unit + behavioral suites.
-  3. Runs `go build`, the unit suite, the closed-loop behavioral suite, and the
-     end-to-end simulation binary.
-
-Anything the agent wrote outside autoscaler/algorithm.go (and any new non-test
-helper files) is discarded or overwritten, so the only thing that can make these
-tests pass is a correct algorithm.go.
+Fairness note: the exact tick at which a sustained drop begins to scale in is a
+boundary convention the spec does not pin down. So scale-in is verified
+*asymptotically* (a transient dip is held; sustained low demand eventually drains
+to the floor) and the rate limiter via a per-step invariant — never an exact tick
+— so any correct convention passes. Immediate scale-up and clamping are exact
+because the spec fixes them.
 """
 
 import os
-import shutil
 import subprocess
 
 import pytest
 
 APP = "/app"
-TESTS = "/tests"
-PRISTINE = os.path.join(TESTS, "pristine")
-PKG_DIR = os.path.join(APP, "autoscaler")
-
-UNIT_TESTS = "|".join(
-    [
-        "TestScaleUpOnSpike",
-        "TestTransientDropHeld",
-        "TestSustainedDropScalesDown",
-        "TestRawDesiredNoFPOverprovision",
-        "TestLimitScaleDownRate",
-        "TestGradualScaleDown",
-        "TestToleranceDeadBand",
-        "TestRespectsMaxReplicas",
-        "TestRespectsMinReplicas",
-        "TestTickPropagatesMetricError",
-        "TestConfigValidation",
-        "TestRunLoop",
-    ]
-)
+BIN = "/tmp/agent_autoscaler"
 
 GO_ENV = {
     **os.environ,
@@ -53,100 +29,203 @@ GO_ENV = {
 }
 
 
-def _go(*args, timeout=240):
-    """Run a `go` command in /app and return the CompletedProcess."""
-    return subprocess.run(
-        ["go", *args],
-        cwd=APP,
-        env=GO_ENV,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+def _find_main_pkg():
+    """Locate the directory (relative to APP) holding `func main`, so the build
+    works regardless of whether the agent put main at /app root or in a subdir."""
+    for root, _dirs, files in os.walk(APP):
+        for f in files:
+            if f.endswith(".go"):
+                try:
+                    if "func main(" in open(os.path.join(root, f)).read():
+                        rel = os.path.relpath(root, APP)
+                        return "." if rel == "." else "./" + rel
+                except OSError:
+                    pass
+    return None
 
 
 @pytest.fixture(scope="session", autouse=True)
-def prepare_repo():
-    """Restore pristine files and inject the hidden test suites."""
-    # 1. Restore every non-implementation file from pristine copies. This leaves
-    #    the agent's autoscaler/algorithm.go (and any extra helper files) intact
-    #    but reverts engine.go/types.go/clock.go/main.go/go.mod to originals.
-    for root, _dirs, files in os.walk(PRISTINE):
-        rel = os.path.relpath(root, PRISTINE)
-        dest_dir = APP if rel == "." else os.path.join(APP, rel)
-        os.makedirs(dest_dir, exist_ok=True)
-        for f in files:
-            shutil.copy2(os.path.join(root, f), os.path.join(dest_dir, f))
+def built():
+    """Ensure a Go module exists and build the agent's program (any layout)."""
+    if not os.path.exists(os.path.join(APP, "go.mod")):
+        subprocess.run(
+            ["go", "mod", "init", "autoscaler"],
+            cwd=APP,
+            env=GO_ENV,
+            capture_output=True,
+            text=True,
+        )
 
-    # 2. Drop any *_test.go the agent might have added (avoids symbol clashes),
-    #    then copy in the authoritative hidden suites.
-    for d in (PKG_DIR, os.path.join(APP, "cmd", "autoscalesim")):
-        if os.path.isdir(d):
-            for f in os.listdir(d):
-                if f.endswith("_test.go"):
-                    os.remove(os.path.join(d, f))
-    os.makedirs(PKG_DIR, exist_ok=True)
-    shutil.copy2(
-        os.path.join(TESTS, "autoscaler_test.go"),
-        os.path.join(PKG_DIR, "autoscaler_test.go"),
-    )
-    shutil.copy2(
-        os.path.join(TESTS, "behavior_test.go"),
-        os.path.join(PKG_DIR, "behavior_test.go"),
-    )
-    shutil.copy2(
-        os.path.join(TESTS, "predictive_test.go"),
-        os.path.join(PKG_DIR, "predictive_test.go"),
-    )
+    def _build(pkg):
+        return subprocess.run(
+            ["go", "build", "-o", BIN, pkg],
+            cwd=APP,
+            env=GO_ENV,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+
+    r = _build(".")
+    if r.returncode != 0:
+        # main not at /app root — find the package that declares func main
+        pkg = _find_main_pkg()
+        if pkg and pkg != ".":
+            r = _build(pkg)
+    assert (
+        r.returncode == 0
+    ), f"`go build` failed (no buildable `func main` found):\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    assert os.path.exists(BIN), "build produced no binary"
     yield
 
 
-def test_package_builds():
-    """The agent's algorithm.go must make the whole module compile."""
-    r = _go("build", "./...")
-    assert (
-        r.returncode == 0
-    ), f"`go build ./...` failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
-
-
-def test_unit_suite():
-    """The hidden unit suite (algorithm + engine correctness) must pass."""
-    r = _go("test", "-race", "-count=1", "-run", UNIT_TESTS, "./autoscaler/", "-v")
-    assert (
-        r.returncode == 0
-    ), f"unit suite failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
-
-
-def test_behavioral_simulation():
-    """The hidden closed-loop behavioral suite must pass."""
-    r = _go("test", "-count=1", "-run", "TestClosedLoopWorkload", "./autoscaler/", "-v")
-    assert (
-        r.returncode == 0
-    ), f"behavioral suite failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
-
-
-def test_predictive_suite():
-    """The hidden predictive (seasonal) scale-up suite must pass — unit tests
-    for predictiveFloor plus behavioral pre-scaling / off-by-default /
-    never-scales-down checks."""
-    r = _go(
-        "test", "-race", "-count=1", "-run", "TestPredictive", "./autoscaler/", "-v"
+def run(stdin, timeout=30):
+    return subprocess.run(
+        [BIN], input=stdin, capture_output=True, text=True, timeout=timeout
     )
-    assert (
-        r.returncode == 0
-    ), f"predictive suite failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
 
 
-def test_simulation_binary_runs():
-    """End-to-end: the simulation binary must run and exhibit the policy —
-    a scale-up, a held transient dip, and a scale-down."""
-    r = _go("run", "./cmd/autoscalesim", timeout=120)
+def rows(out):
+    """Parse CSV into {tick: (cpu_str, replicas_int, action_str)} and check header."""
+    lines = [l for l in out.strip().split("\n") if l != ""]
+    assert lines, "no output"
+    assert lines[0] == "tick,cpu,replicas,action", f"bad/missing header: {lines[0]!r}"
+    res = {}
+    for l in lines[1:]:
+        parts = l.split(",")
+        assert len(parts) == 4, f"bad row: {l!r}"
+        t, cpu, rep, act = parts
+        res[int(t)] = (cpu, int(rep), act)
+    return res
+
+
+CFG = "target=0.60 min=1 max=50 tolerance=0.10 down_window=300 max_scale_down_frac=1.0 tick=30 start={start}"
+
+
+# ---- format / determinism / validation (exact, unambiguous) ----
+
+
+def test_output_format_and_header():
+    r = run(CFG.format(start=4) + "\n0.60\n")
+    assert r.returncode == 0, r.stderr
+    rs = rows(r.stdout)
+    assert rs[0][0] == "0.60", f"cpu must be 2 decimals, got {rs[0][0]!r}"
+
+
+def test_deterministic():
+    stdin = CFG.format(start=10) + "\n0.60\n0.60\n0.10\n0.60\n"
+    a = run(stdin)
+    b = run(stdin)
     assert (
-        r.returncode == 0
-    ), f"`go run ./cmd/autoscalesim` failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
-    out = r.stdout
-    assert "▲ up" in out, f"simulation never scaled up:\n{out}"
-    assert "▼ down" in out, f"simulation never scaled down:\n{out}"
+        a.stdout == b.stdout and a.stdout != ""
+    ), "output must be byte-identical across runs"
+
+
+def test_invalid_config_exits_nonzero():
+    cfg = "target=1.5 min=1 max=2 tolerance=0.1 down_window=0 max_scale_down_frac=1.0 tick=30 start=1"
     assert (
-        "hold (dip absorbed)" in out
-    ), f"simulation did not absorb the transient dip:\n{out}"
+        run(cfg + "\n0.60\n").returncode != 0
+    ), "invalid config (target>1) must exit non-zero"
+
+
+def test_bad_sample_unparseable_exits_nonzero():
+    assert (
+        run(CFG.format(start=4) + "\nabc\n").returncode != 0
+    ), "unparseable sample must exit non-zero"
+
+
+def test_bad_sample_out_of_range_exits_nonzero():
+    assert (
+        run(CFG.format(start=4) + "\n1.5\n").returncode != 0
+    ), "out-of-range sample (>1) must exit non-zero"
+
+
+# ---- scale-up & clamps (exact: spec fixes immediate scale-up + bounds) ----
+
+
+def test_scale_up_immediate_on_spike():
+    r = run(CFG.format(start=4) + "\n0.60\n1.00\n")
+    rs = rows(r.stdout)
+    assert rs[0][1] == 4 and rs[0][2] == "none"
+    # ceil(4 * 1.0/0.6) = 7, applied on the very next tick (no up-side delay)
+    assert rs[1] == ("1.00", 7, "up"), f"expected immediate scale-up to 7, got {rs[1]}"
+
+
+def test_respects_max_replicas():
+    cfg = "target=0.60 min=1 max=8 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=6"
+    rs = rows(run(cfg + "\n1.00\n").stdout)
+    assert rs[0][1] == 8, f"must clamp to max=8, got {rs[0][1]}"
+
+
+# ---- transient-dip absorption (exact: a single dip must not scale in) ----
+
+
+def test_transient_dip_held():
+    r = run(
+        CFG.format(start=10) + "\n0.60\n0.60\n0.60\n0.10\n0.60\n"
+    )  # down_window=300 (10 ticks)
+    rs = rows(r.stdout)
+    assert (
+        rs[3][1] == 10 and rs[3][2] == "none"
+    ), f"transient dip must hold at 10, got {rs[3]}"
+    assert rs[4][1] == 10, f"fleet must stay 10 after recovery, got {rs[4]}"
+
+
+# ---- sustained scale-in (asymptotic: convention-robust) ----
+
+
+def test_sustained_drop_eventually_scales_in():
+    # high once, then sustained low for many ticks (down_window=60 == 2 ticks).
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=60 max_scale_down_frac=1.0 tick=30 start=10"
+    samples = "\n".join(["0.60"] + ["0.10"] * 15)
+    rs = rows(run(cfg + "\n" + samples + "\n").stdout)
+    # the FIRST low tick is still within the window -> must hold (no premature scale-in)
+    assert rs[1][1] == 10, f"must not scale in on the first low tick, got {rs[1]}"
+    # after sustained low demand, the fleet must drain to the floor
+    last = max(rs)
+    assert (
+        rs[last][1] == 1
+    ), f"sustained low must eventually drain to min=1, got {rs[last][1]}"
+
+
+def test_idle_eventually_reaches_min():
+    cfg = "target=0.60 min=2 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=6"
+    samples = "\n".join(["0.00"] * 6)
+    rs = rows(run(cfg + "\n" + samples + "\n").stdout)
+    last = max(rs)
+    assert rs[last][1] == 2, f"sustained idle must reach min=2, got {rs[last][1]}"
+    assert all(rs[i][1] >= 2 for i in rs), "must never drop below min"
+
+
+# ---- rate-limited scale-in (invariant: convention-robust) ----
+
+
+def test_rate_limited_scale_in_is_gradual():
+    frac = 0.5
+    cfg = f"target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac={frac} tick=30 start=10"
+    samples = "\n".join(["0.10"] * 8)
+    rs = rows(run(cfg + "\n" + samples + "\n").stdout)
+    seq = [rs[i][1] for i in sorted(rs)]
+    # invariant: no single step removes more than max(1, floor(prev*frac))
+    down_steps = 0
+    for prev, cur in zip(seq, seq[1:]):
+        removed = prev - cur
+        if removed > 0:
+            down_steps += 1
+            cap = max(1, int(prev * frac))
+            assert removed <= cap, f"removed {removed} > rate cap {cap} (from {prev})"
+    # the big drop (10 -> 1) must be spread over several steps, not done at once
+    assert (
+        down_steps >= 3
+    ), f"scale-in must be gradual (>=3 down steps), got {down_steps}: {seq}"
+    assert seq[-1] == 1, f"must still converge to min=1, got {seq[-1]}"
+
+
+# ---- tolerance dead-band (exact: spec fixes it) ----
+
+
+def test_tolerance_dead_band():
+    rs = rows(
+        run(CFG.format(start=5) + "\n0.63\n").stdout
+    )  # ratio 1.05, within 0.10 band
+    assert rs[0] == ("0.63", 5, "none"), f"within tolerance must hold, got {rs[0]}"
