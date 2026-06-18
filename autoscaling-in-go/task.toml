@@ -1,0 +1,38 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/autoscaling-in-go"
+description = "Implement the recommendation and asymmetric stabilization math of a Go CPU-utilization autoscaler so a hidden Go unit suite and a closed-loop behavioral simulation pass."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "autoscaling", "control-loop", "algorithms"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "medium"
+category = "software-engineering"
+languages = ["go"]
+tags = ["go", "autoscaling", "control-systems", "stabilization", "algorithms"]
+expert_time_estimate_min = 25.0
+junior_time_estimate_min = 75.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
