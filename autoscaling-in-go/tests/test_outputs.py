@@ -229,3 +229,51 @@ def test_tolerance_dead_band():
         run(CFG.format(start=5) + "\n0.63\n").stdout
     )  # ratio 1.05, within 0.10 band
     assert rs[0] == ("0.63", 5, "none"), f"within tolerance must hold, got {rs[0]}"
+
+
+# ---- predictive (trend-based) scale-up (directional: convention-robust) ----
+#
+# Mechanism-agnostic: we never assert exact pre-scaled values (the extrapolation
+# formula has many valid forms). We assert direction only: with prediction ON, a
+# rising trend pre-scales the fleet EARLIER than the reactive path; prediction is
+# scale-UP only (never pulls the fleet below the reactive path on a falling
+# trend); predict_lookahead=0 means OFF (the reactive baseline).
+
+PRED_BASE = (
+    "target=0.60 min=1 max=50 tolerance=0.10 down_window=300 "
+    "max_scale_down_frac=1.0 tick=30 start=2"
+)
+
+
+def _fleet_seq(cfg, samples):
+    rs = rows(run(cfg + "\n" + samples + "\n").stdout)
+    return [rs[i][1] for i in sorted(rs)]
+
+
+def test_predictive_prescales_on_rising_ramp():
+    ramp = "\n".join(["0.30", "0.45", "0.60", "0.75", "0.90", "1.00"])
+    off = _fleet_seq(PRED_BASE + " predict_lookahead=0", ramp)
+    on = _fleet_seq(PRED_BASE + " predict_lookahead=120", ramp)
+    # prediction is scale-up-only: never below the reactive (off) fleet
+    assert all(
+        o >= f for o, f in zip(on, off)
+    ), f"prediction lowered fleet: on={on} off={off}"
+    # and it acts EARLIER: strictly higher than reactive at >= 1 tick on the ramp
+    assert any(o > f for o, f in zip(on, off)), (
+        f"prediction must pre-scale up earlier on a rising ramp (off-by-default "
+        f"baseline does not): on={on} off={off}"
+    )
+
+
+def test_predictive_never_scales_down_on_falling_trend():
+    base = (
+        "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 "
+        "max_scale_down_frac=1.0 tick=30 start=10"
+    )
+    falling = "\n".join(["1.00", "0.80", "0.60", "0.40", "0.20", "0.10"])
+    off = _fleet_seq(base + " predict_lookahead=0", falling)
+    on = _fleet_seq(base + " predict_lookahead=120", falling)
+    # a falling forecast must never accelerate scale-in below the reactive path
+    assert all(
+        o >= f for o, f in zip(on, off)
+    ), f"prediction must not scale down (only up): on={on} off={off}"

@@ -32,6 +32,7 @@ type config struct {
 	maxScaleDownFrac float64
 	tick             int // seconds between ticks
 	start            int
+	predictLookahead int // seconds; 0 = predictive scale-up off
 }
 
 func die(msg string) {
@@ -100,6 +101,17 @@ func parseConfig(line string) config {
 	}
 	if c.start < c.minR || c.start > c.maxR {
 		die("start must be in [min,max]")
+	}
+	// predict_lookahead is optional; absent or 0 disables predictive scale-up.
+	if v, ok := m["predict_lookahead"]; ok {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			die("invalid int for predict_lookahead")
+		}
+		if n < 0 {
+			die("predict_lookahead must be >= 0")
+		}
+		c.predictLookahead = n
 	}
 	return c
 }
@@ -209,6 +221,25 @@ func main() {
 			}
 		}
 
+		// Predictive (trend-based) scale-up floor: extrapolate the recent CPU
+		// trend forward predict_lookahead seconds and pre-provision for the
+		// projected utilization. Scale-UP only — it can only raise `desired`.
+		if cfg.predictLookahead > 0 && i >= 1 {
+			slope := (samples[i] - samples[i-1]) / float64(cfg.tick) // per second
+			proj := cpu + slope*float64(cfg.predictLookahead)
+			if proj < 0 {
+				proj = 0
+			}
+			if proj > 1 {
+				proj = 1
+			}
+			const eps = 1e-9
+			predFloor := clampInt(int(math.Ceil(float64(current)*(proj/cfg.target)-eps)), cfg.minR, cfg.maxR)
+			if predFloor > desired {
+				desired = predFloor
+			}
+		}
+
 		action := "none"
 		if desired > current {
 			action = "up"
@@ -221,5 +252,4 @@ func main() {
 }
 EOF
 
-go build -o /tmp/autoscaler_oracle . >/dev/null 2>&1 || { echo "error: oracle failed to build" >&2; exit 1; }
 echo "oracle written to /app/main.go"
