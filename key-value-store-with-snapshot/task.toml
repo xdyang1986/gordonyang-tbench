@@ -1,7 +1,7 @@
 schema_version = "1.1"
 
 [task]
-name = "codimango/key-value-store"
+name = "codimango/key-value-store-with-snapshot"
 description = "Implement a thread-safe, heterogeneous-typed in-memory key/value store in C# (.NET 8) with consistent, atomic JSON snapshot-to-disk and safe load-back."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["csharp", "dotnet", "key-value-store", "serialization", "concurrency"]

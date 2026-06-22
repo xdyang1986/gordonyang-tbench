@@ -1,4 +1,4 @@
-# codimango/key-value-store
+# codimango/key-value-store-with-snapshot
 
 ## Description
 
