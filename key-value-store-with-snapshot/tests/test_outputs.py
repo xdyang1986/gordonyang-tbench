@@ -36,6 +36,16 @@ EXPECTED_TESTS = [
     "Snapshot_overwrites_previous_snapshot",
     "Load_replaces_existing_contents",
     "Concurrent_writes_are_thread_safe",
+    "Large_snapshot_round_trips_many_entries",
+    "Log_replays_on_open",
+    "Log_appends_survive_across_reopen_and_continue",
+    "Log_recovers_from_truncated_tail",
+    "Compact_rewrites_log_to_live_state",
+    "Compact_keeps_log_open_for_further_appends",
+    "Ttl_entry_expires_after_clock_advances",
+    "Set_without_ttl_never_expires",
+    "Ttl_survives_snapshot_and_load",
+    "Ttl_expired_entry_dropped_on_log_replay",
 ]
 
 GRADING_CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
