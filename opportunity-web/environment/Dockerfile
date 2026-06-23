@@ -11,6 +11,15 @@ ENV CI=1 \
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_UPDATE_NOTIFIER=false
 
+# The cloud (VMVM) builder routes traffic through a TLS-terminating forward proxy
+# and injects its CA at /usr/local/share/ca-certificates/fwdproxy.crt (added to the
+# system trust store before this Dockerfile's steps run). Node/npm do NOT use the
+# system store, so without this they fail with UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+# Pointing NODE_EXTRA_CA_CERTS at that CA makes every npm operation trust the proxy.
+# Outside the proxy (local builds) the file is absent — Node just emits a harmless
+# warning and uses its built-in CAs.
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/fwdproxy.crt
+
 WORKDIR /app
 
 # Bring in the starter codebase (the participant's Ads Opportunity Board repo).
