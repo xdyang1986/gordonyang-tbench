@@ -167,13 +167,20 @@ public class KeyValueStoreTests
     {
         using var store = new KeyValueStore();
 
+        // Snapshot into a directory that already exists, so the ONLY possible reason
+        // to throw is the unregistered type — not a missing parent directory. This
+        // keeps the negative assertion type-agnostic yet behaviorally precise.
+        var dir = Path.Combine(Path.GetTempPath(), "kvdb-tests");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
+
         // Behavior: persisting an unregistered type must fail loudly rather than
         // silently writing it. Implementations may enforce this eagerly (at Set) or
         // lazily (at Snapshot); both are accepted, so the whole sequence is wrapped.
         Assert.ThrowsAny<Exception>(() =>
         {
             store.Set("key", new Person("X", 1, DateTime.UnixEpoch)); // Person not registered
-            store.Snapshot(TempPath());
+            store.Snapshot(path);
         });
     }
 

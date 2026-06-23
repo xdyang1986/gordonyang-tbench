@@ -2,14 +2,14 @@ Create a key-value store that supports different type of keys and values. And al
 
 Related APIs:
 1. void Set(object key, object? value, TimeSpan? ttl = null) - Insert or update the key/value. The entry expires ttl (optional) after it is set.
-2. object? Get(object key) - Returns the value for key.
+2. object? Get(object key) - Returns the value for key. If the key is not present, you should treat is as an error/failure case.
 3. bool TryGet(object key, out object? value) - Returns true and the raw value if present, else false.
 4. bool TryGet<TValue>(object key, out TValue value) - Returns true only if present and assignable to TValue.
 5. bool Remove(object key) - Removes key; returns true if it existed.
 6. bool ContainsKey(object key) - Whether key exists.
 7. void Clear() - Removes all entries.
 8. void Snapshot(string path) - Writes a consistent JSON snapshot to path.
-9. void Load(string path) - Replaces all contents with the snapshot at path.
+9. void Load(string path) - Replaces all contents with the snapshot at path. Please explicitly fail the process while the snapshot is invalid.
 10. void Dispose() - Releases the internal lock.
 11. store[key] get/set -- Indexer for Get/Set.
 12. Count property -- Number of entries.
