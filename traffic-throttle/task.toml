@@ -1,0 +1,43 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/traffic-throttle"
+description = "Implement a concurrent, health-aware token-bucket traffic throttler in Go."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "concurrency", "rate-limiting", "token-bucket"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "software-engineering"
+languages = ["go"]
+tags = ["go", "concurrency", "rate-limiting", "token-bucket", "systems"]
+expert_time_estimate_min = 45.0
+junior_time_estimate_min = 150.0
+
+[verifier]
+# Verify in the agent's own container: it already has the Go toolchain + gcc
+# (needed for the race detector). Test files are copied to /tests only at verify
+# time. The grading test is injected into the candidate's package and exercises
+# their real code (compile + -race + exact concurrency counts), so there is no
+# oracle answer key on disk to leak and outputs cannot be hardcoded.
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

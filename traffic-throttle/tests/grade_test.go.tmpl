@@ -1,0 +1,510 @@
+package __PKG__
+
+// Grading tests for the traffic throttler. These are compiled *into* the
+// candidate's package (internal test) so they reference the exported API
+// directly without depending on the module's import path. All composite
+// literals use keyed/untyped fields so they tolerate reasonable type choices
+// (int vs float64 for Rate/Burst/n, named vs literal func types, etc.).
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func gradeFixedNow(ts time.Time) func() time.Time {
+	return func() time.Time { return ts }
+}
+
+// Burst tolerance: a full bucket lets Burst takes through, then rejects.
+func TestGradeBurstAllow(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 5}}},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	// A single take larger than the burst can never be satisfied.
+	if th.AllowN("svc", OpRead, 6) {
+		t.Fatalf("AllowN beyond the burst capacity must fail")
+	}
+	for i := 0; i < 5; i++ {
+		if !th.Allow("svc", OpRead) {
+			t.Fatalf("Allow #%d should succeed within burst of 5", i+1)
+		}
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("Allow should fail once the burst is exhausted")
+	}
+}
+
+// Reads and writes are throttled independently per service.
+func TestGradeSeparateReadWrite(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{
+				OpRead:  {Rate: 1, Burst: 2},
+				OpWrite: {Rate: 1, Burst: 3},
+			}},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpRead, 2) {
+		t.Fatalf("read bucket should allow its burst of 2")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("read bucket should be drained")
+	}
+	if !th.AllowN("svc", OpWrite, 3) {
+		t.Fatalf("write bucket should allow its burst of 3")
+	}
+	if th.Allow("svc", OpWrite) {
+		t.Fatalf("write bucket should be drained")
+	}
+}
+
+// Refill rate scales with health: at health 0.5, one second restores Rate*0.5.
+func TestGradeHealthScaling(t *testing.T) {
+	var mu sync.Mutex
+	cur := time.Unix(0, 0)
+	nowFn := func() time.Time { mu.Lock(); defer mu.Unlock(); return cur }
+	advance := func(d time.Duration) { mu.Lock(); cur = cur.Add(d); mu.Unlock() }
+
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 10, Burst: 10}}},
+		},
+		Health: func(string) float64 { return 0.5 },
+		Now:    nowFn,
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpRead, 10) {
+		t.Fatalf("should drain the full burst of 10")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("bucket should be empty after draining")
+	}
+
+	advance(time.Second) // refill = 10 tokens/s * 0.5 health * 1s = 5
+	if !th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("expected 5 tokens refilled at health 0.5")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("expected no more than 5 tokens after 1s at health 0.5")
+	}
+}
+
+// At health 0 nothing refills; once drained Allow is false and Wait honors ctx.
+func TestGradeHealthZeroAllowFalse(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 10, Burst: 3}}},
+		},
+		Health:        func(string) float64 { return 0 },
+		RetryInterval: 200 * time.Millisecond,
+		Now:           gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpRead, 3) {
+		t.Fatalf("initial burst should be available even at health 0")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("health 0 should block once the burst is drained")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := th.Wait(ctx, "svc", OpRead); err == nil {
+		t.Fatalf("Wait should return a (ctx) error when health is 0")
+	}
+}
+
+// With a positive rate, a drained bucket refills over real time and Wait wakes.
+func TestGradeWaitSucceedsWithRefill(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 100, Burst: 1}}},
+		},
+		// Health nil -> fully healthy; Now nil -> real clock.
+	})
+	defer th.Close()
+
+	if !th.Allow("svc", OpRead) {
+		t.Fatalf("first token should be available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := th.WaitN(ctx, "svc", OpRead, 1); err != nil {
+		t.Fatalf("Wait should succeed after refill, got %v", err)
+	}
+}
+
+// Unconfigured services/ops are allowed through (fail-open).
+func TestGradeNoConfigAllowed(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 1}}},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	for i := 0; i < 1000; i++ {
+		if !th.Allow("unknown", OpRead) {
+			t.Fatalf("unconfigured service must be allowed")
+		}
+	}
+	for i := 0; i < 1000; i++ {
+		if !th.Allow("svc", OpWrite) { // svc has no OpWrite limit
+			t.Fatalf("unconfigured op must be allowed")
+		}
+	}
+	if err := th.Wait(context.Background(), "unknown", OpRead); err != nil {
+		t.Fatalf("Wait on unconfigured service should return nil, got %v", err)
+	}
+}
+
+// Limits can be added/changed at runtime via Register.
+func TestGradeRegisterRuntime(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{},
+		Now:     gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpWrite, 100000) {
+		t.Fatalf("unconfigured service should be unlimited before Register")
+	}
+	th.Register("svc", ServiceConfig{Ops: map[Op]Limit{OpWrite: {Rate: 1, Burst: 2}}})
+	if !th.AllowN("svc", OpWrite, 2) {
+		t.Fatalf("registered burst of 2 should be available")
+	}
+	if th.Allow("svc", OpWrite) {
+		t.Fatalf("should be throttled after the registered burst is used")
+	}
+}
+
+// Concurrency correctness: with no refill, exactly Burst takes succeed total.
+func TestGradeConcurrentAllow(t *testing.T) {
+	const burst = 500
+	const goroutines = 2000
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 0, Burst: burst}}},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)), // frozen clock -> no refill
+	})
+	defer th.Close()
+
+	var success int64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if th.Allow("svc", OpRead) {
+				atomic.AddInt64(&success, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if success != burst {
+		t.Fatalf("expected exactly %d successful takes, got %d", burst, success)
+	}
+}
+
+// Register and Allow must be safe to call concurrently (run under -race).
+func TestGradeConcurrentRegisterAndAllow(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{},
+		Now:     gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					th.Register("svc", ServiceConfig{Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 10}}})
+				}
+			}
+		}()
+	}
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 5000; i++ {
+				th.Allow("svc", OpRead)
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// The background poller refreshes health on its interval and stops after Close.
+func TestGradePollerAndClose(t *testing.T) {
+	var calls int64
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 1}}},
+		},
+		Health:       func(string) float64 { atomic.AddInt64(&calls, 1); return 1 },
+		PollInterval: 5 * time.Millisecond,
+	})
+
+	time.Sleep(60 * time.Millisecond)
+	th.Close()
+	after := atomic.LoadInt64(&calls)
+
+	time.Sleep(40 * time.Millisecond)
+	if got := atomic.LoadInt64(&calls); got != after {
+		t.Fatalf("Health polled after Close: before=%d after=%d", after, got)
+	}
+	if after < 2 {
+		t.Fatalf("expected the poller to refresh health repeatedly, got %d calls", after)
+	}
+}
+
+// Different services hold independent buckets: draining one must not affect another.
+func TestGradeServicesIndependent(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"a": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 2}}},
+			"b": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 4}}},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	if !th.AllowN("a", OpRead, 2) {
+		t.Fatalf("service a should allow its burst of 2")
+	}
+	if th.Allow("a", OpRead) {
+		t.Fatalf("service a should be drained")
+	}
+	if !th.AllowN("b", OpRead, 4) {
+		t.Fatalf("service b must be unaffected by draining a (full burst of 4)")
+	}
+	if th.Allow("b", OpRead) {
+		t.Fatalf("service b should now be drained")
+	}
+}
+
+// Tokens never accumulate past the burst, no matter how long the bucket idles.
+func TestGradeBurstCap(t *testing.T) {
+	var mu sync.Mutex
+	cur := time.Unix(0, 0)
+	nowFn := func() time.Time { mu.Lock(); defer mu.Unlock(); return cur }
+	advance := func(d time.Duration) { mu.Lock(); cur = cur.Add(d); mu.Unlock() }
+
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 100, Burst: 5}}},
+		},
+		Now: nowFn,
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("should drain the full burst")
+	}
+	advance(10 * time.Second) // uncapped this would be 1000 tokens
+	if !th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("burst should refill up to capacity after idling")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("tokens must be capped at the burst (no unbounded accumulation)")
+	}
+}
+
+// Wait must honor context cancellation even when blocked purely by lack of
+// capacity at positive health (distinct from the health==0 retry path).
+func TestGradeWaitCancelWhenStarved(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {Ops: map[Op]Limit{OpRead: {Rate: 1, Burst: 1}}},
+		},
+		// Health nil -> fully healthy; frozen clock -> the bucket never refills.
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	if !th.Allow("svc", OpRead) {
+		t.Fatalf("first token should be available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := th.Wait(ctx, "svc", OpRead); err == nil {
+		t.Fatalf("Wait should return a ctx error when starved and cancelled")
+	}
+}
+
+// Health is read into a cache; with no poller, changes take effect only after
+// Refresh(). This verifies both Refresh() and that health is not read live.
+func TestGradeRefreshUpdatesCachedHealth(t *testing.T) {
+	var hmu sync.Mutex
+	health := 0.0
+	getH := func(string) float64 { hmu.Lock(); defer hmu.Unlock(); return health }
+	setH := func(v float64) { hmu.Lock(); health = v; hmu.Unlock() }
+
+	var cmu sync.Mutex
+	cur := time.Unix(0, 0)
+	nowFn := func() time.Time { cmu.Lock(); defer cmu.Unlock(); return cur }
+	advance := func(d time.Duration) { cmu.Lock(); cur = cur.Add(d); cmu.Unlock() }
+
+	th := New(Options{
+		Configs:      map[string]ServiceConfig{"svc": {Ops: map[Op]Limit{OpRead: {Rate: 10, Burst: 5}}}},
+		Health:       getH,
+		PollInterval: 0, // no poller: the only way health updates is Refresh()
+		Now:          nowFn,
+	})
+	defer th.Close()
+
+	if !th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("initial burst should be available")
+	}
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("bucket should be empty after draining")
+	}
+
+	setH(1)
+	advance(time.Second)
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("health change must not take effect until Refresh() is called")
+	}
+
+	th.Refresh()
+	advance(time.Second)
+	if !th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("after Refresh() at health 1 the bucket should refill")
+	}
+}
+
+// The per-service aggregate (Total) caps the combined read+write throughput,
+// even when each per-op bucket still has tokens.
+func TestGradeAggregateCap(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {
+				Ops: map[Op]Limit{
+					OpRead:  {Rate: 1, Burst: 100},
+					OpWrite: {Rate: 1, Burst: 100},
+				},
+				Total: Limit{Rate: 1, Burst: 10},
+			},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	got := 0
+	for i := 0; i < 100; i++ {
+		if th.Allow("svc", OpRead) {
+			got++
+		}
+	}
+	for i := 0; i < 100; i++ {
+		if th.Allow("svc", OpWrite) {
+			got++
+		}
+	}
+	if got != 10 {
+		t.Fatalf("aggregate must cap combined reads+writes at 10, got %d", got)
+	}
+}
+
+// An op takes from BOTH its per-op bucket and the aggregate atomically; if either
+// is short, NEITHER is consumed (rollback / no partial consumption).
+func TestGradeAggregateRollback(t *testing.T) {
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {
+				Ops: map[Op]Limit{
+					OpRead:  {Rate: 1, Burst: 1},
+					OpWrite: {Rate: 1, Burst: 10},
+				},
+				Total: Limit{Rate: 1, Burst: 10},
+			},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)),
+	})
+	defer th.Close()
+
+	// OpRead holds only 1 token; a take of 5 must fail on the per-op bucket.
+	if th.AllowN("svc", OpRead, 5) {
+		t.Fatalf("take of 5 on OpRead (burst 1) must fail")
+	}
+	// Rollback: the failed take must NOT have drawn from the shared aggregate,
+	// so OpWrite still sees the full aggregate of 10.
+	if !th.AllowN("svc", OpWrite, 10) {
+		t.Fatalf("failed OpRead take must not consume the aggregate (rollback)")
+	}
+	// Aggregate now exhausted: OpRead must fail despite its own token.
+	if th.Allow("svc", OpRead) {
+		t.Fatalf("aggregate exhausted: OpRead must fail despite a per-op token")
+	}
+}
+
+// Under heavy concurrency, the aggregate must bound the total successes exactly,
+// which requires the two-bucket take to be atomic (run under -race).
+func TestGradeAggregateConcurrent(t *testing.T) {
+	const agg = 300
+	const each = 1000
+	th := New(Options{
+		Configs: map[string]ServiceConfig{
+			"svc": {
+				Ops: map[Op]Limit{
+					OpRead:  {Rate: 0, Burst: 10000},
+					OpWrite: {Rate: 0, Burst: 10000},
+				},
+				Total: Limit{Rate: 0, Burst: agg},
+			},
+		},
+		Now: gradeFixedNow(time.Unix(0, 0)), // frozen clock -> no refill
+	})
+	defer th.Close()
+
+	var success int64
+	var wg sync.WaitGroup
+	wg.Add(2 * each)
+	for i := 0; i < each; i++ {
+		go func() {
+			defer wg.Done()
+			if th.Allow("svc", OpRead) {
+				atomic.AddInt64(&success, 1)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if th.Allow("svc", OpWrite) {
+				atomic.AddInt64(&success, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if success != agg {
+		t.Fatalf("aggregate must cap total successes at %d, got %d", agg, success)
+	}
+}
