@@ -424,16 +424,43 @@ cat > /app/src/components/OpportunityTable.tsx <<'TSX'
 import type { Opportunity, OppState } from '../types';
 import { OpportunityRow } from './OpportunityRow';
 
+export const COLUMNS = [
+  { key: 'customer', label: 'Customer', align: 'left', width: 220 },
+  { key: 'industry', label: 'Industry', align: 'left', width: 130 },
+  { key: 'product', label: 'Product', align: 'left', width: 180 },
+  { key: 'spend', label: 'Current spend', align: 'right', width: 130 },
+  { key: 'uplift', label: 'Est. uplift', align: 'right', width: 130 },
+  { key: 'confidence', label: 'Confidence', align: 'left', width: 120 },
+  { key: 'status', label: 'Status', align: 'left', width: 130 },
+  { key: 'assignee', label: 'Assigned to', align: 'left', width: 160 },
+] as const;
+
+export type ColumnWidths = Record<string, number>;
+
+export const DEFAULT_WIDTHS: ColumnWidths = Object.fromEntries(
+  COLUMNS.map((c) => [c.key, c.width]),
+);
+
 type Props = {
   opportunities: Opportunity[];
   getState: (id: string) => OppState;
   updateState: (id: string, patch: Partial<OppState>) => void;
+  widths: ColumnWidths;
+  onResize: (key: string, width: number) => void;
 };
 
 const headerClass =
-  'px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500';
+  'relative px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500';
 
-export function OpportunityTable({ opportunities, getState, updateState }: Props) {
+const MIN_WIDTH = 60;
+
+export function OpportunityTable({
+  opportunities,
+  getState,
+  updateState,
+  widths,
+  onResize,
+}: Props) {
   if (opportunities.length === 0) {
     return (
       <div className="rounded-lg bg-white p-10 text-center text-slate-500 shadow-sm ring-1 ring-slate-200">
@@ -442,19 +469,46 @@ export function OpportunityTable({ opportunities, getState, updateState }: Props
     );
   }
 
+  const startResize = (key: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = widths[key] ?? DEFAULT_WIDTHS[key];
+    const onMove = (ev: MouseEvent) => {
+      onResize(key, Math.max(MIN_WIDTH, startW + (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   return (
     <div className="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-slate-200">
-      <table className="min-w-full divide-y divide-slate-200">
+      <table className="min-w-full table-fixed divide-y divide-slate-200">
+        <colgroup>
+          {COLUMNS.map((c) => (
+            <col key={c.key} style={{ width: `${widths[c.key] ?? c.width}px` }} />
+          ))}
+        </colgroup>
         <thead className="bg-slate-50">
           <tr>
-            <th className={headerClass}>Customer</th>
-            <th className={headerClass}>Industry</th>
-            <th className={headerClass}>Product</th>
-            <th className={`${headerClass} text-right`}>Current spend</th>
-            <th className={`${headerClass} text-right`}>Est. uplift</th>
-            <th className={headerClass}>Confidence</th>
-            <th className={headerClass}>Status</th>
-            <th className={headerClass}>Assigned to</th>
+            {COLUMNS.map((c) => (
+              <th
+                key={c.key}
+                data-testid={`col-${c.key}`}
+                className={`${headerClass} ${c.align === 'right' ? 'text-right' : 'text-left'}`}
+              >
+                {c.label}
+                <span
+                  data-testid={`resize-${c.key}`}
+                  onMouseDown={(e) => startResize(c.key, e)}
+                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize select-none hover:bg-blue-200"
+                />
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -480,7 +534,11 @@ cat > /app/src/App.tsx <<'TSX'
 import { useEffect, useMemo, useState } from 'react';
 import { Header } from './components/Header';
 import { Toolbar } from './components/Toolbar';
-import { OpportunityTable } from './components/OpportunityTable';
+import {
+  OpportunityTable,
+  DEFAULT_WIDTHS,
+  type ColumnWidths,
+} from './components/OpportunityTable';
 import { OPPORTUNITIES } from './data/opportunities';
 import { useOpportunityState } from './hooks/useOpportunityState';
 import {
@@ -501,7 +559,7 @@ const PAGE_SIZE = 50;
 // restored automatically after a refresh, alongside the per-row workflow state.
 const VIEW_KEY = 'opp-board-view-v1';
 
-type ViewState = { filters: Filters; sortKey: SortKey };
+type ViewState = { filters: Filters; sortKey: SortKey; widths: ColumnWidths };
 
 function loadView(): ViewState | null {
   try {
@@ -515,8 +573,15 @@ function loadView(): ViewState | null {
 export default function App() {
   const [filters, setFilters] = useState<Filters>(() => loadView()?.filters ?? EMPTY_FILTERS);
   const [sortKey, setSortKey] = useState<SortKey>(() => loadView()?.sortKey ?? 'estUpliftMonthly');
+  const [columnWidths, setColumnWidths] = useState<ColumnWidths>(() => ({
+    ...DEFAULT_WIDTHS,
+    ...(loadView()?.widths ?? {}),
+  }));
   const [page, setPage] = useState(0);
   const { getState, updateState } = useOpportunityState();
+
+  const handleResize = (key: string, width: number) =>
+    setColumnWidths((w) => ({ ...w, [key]: width }));
 
   const industries = useMemo(() => uniqueValues(OPPORTUNITIES, 'industry'), []);
   const products = useMemo(() => uniqueValues(OPPORTUNITIES, 'product'), []);
@@ -534,11 +599,14 @@ export default function App() {
   // Persist the view so it is restored automatically on refresh.
   useEffect(() => {
     try {
-      localStorage.setItem(VIEW_KEY, JSON.stringify({ filters, sortKey }));
+      localStorage.setItem(
+        VIEW_KEY,
+        JSON.stringify({ filters, sortKey, widths: columnWidths }),
+      );
     } catch {
       // ignore quota/availability errors
     }
-  }, [filters, sortKey]);
+  }, [filters, sortKey, columnWidths]);
 
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const current = Math.min(page, pageCount - 1);
@@ -562,6 +630,8 @@ export default function App() {
         opportunities={paged}
         getState={getState}
         updateState={updateState}
+        widths={columnWidths}
+        onResize={handleResize}
       />
       <div className="flex items-center justify-center gap-3">
         <button

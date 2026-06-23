@@ -8,10 +8,12 @@ Supported features:
 5. Sort by these columns: uplift & spend descending, confidence High>Medium>Low; default = uplift desc; sort options labelled so "uplift"/"spend"/"confidence". When two opportunites have the same confidence, break the tie by estimated uplift, highest first.
 6. Status include: New, Contacted, Won and Lost -- default is New.
 7. Assignee is a dropdown with the sales name (come from the provided reps data src/data/reps.ts), default is "unassigned".
-8. Any change should be persisted and reload automatically after refresh.
+8. Any change(e.g. status, search) should be persisted and reload automatically after refresh.
 9. Support priority sort option: if the sort option contains priority. Priority = round( (estUpliftMonthly / currentSpendMonthly) × confidenceWeight × 1000 ), where confidenceWeight is High = 1.0, Medium = 0.7, Low = 0.4. Sort descending; ties broken by estimated uplift, highest first.
+10. The column support width change.
 
 Notes:
-1. Stable data-testid hooks: search, filter-industry, filter-product, filter-confidence, filter-status, sort, summary-count, summary-uplift, opp-row, row-status, row-assignee
+1. Stable data-testid hooks: search, filter-industry, filter-product, filter-confidence, filter-status, sort, summary-count, summary-uplift, opp-row, row-status, row-assignee;
+2. testid hooks for the width change: col-<key> on each column header and resize-<key> on its drag handle, for keys: customer, industry, product, spend, uplift, confidence, status, assignee.
 2. Opportunities come from the src/data/opportunities.ts.
 3. The feed may have thousands of rows, so render the table efficiently.

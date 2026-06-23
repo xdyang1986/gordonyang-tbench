@@ -45,7 +45,7 @@ verify time):
    pagination and virtualization render correctly (jsdom cannot run virtualization).
    Behaviour is asserted through prompt-pinned `data-testid` hooks, with all expected
    values computed from the shipped dataset. Each assertion surfaces as its own pytest
-   case (31 total: build + suite-ran + 29 behaviour cases).
+   case (33 total: build + suite-ran + 31 behaviour cases).
 
 The dataset is ~2,000 rows (`src/data/opportunities.ts` — 20 curated seed rows + 1,980 generated fixtures), so the large-data requirement is real and reproducible.
 
@@ -53,7 +53,10 @@ The dataset is ~2,000 rows (`src/data/opportunities.ts` — 20 curated seed rows
 
 `search`, `filter-industry`, `filter-product`, `filter-confidence`, `filter-status`,
 `sort`, `summary-count`, `summary-uplift`, `opp-row` (one per visible row, contains
-the customer name), `row-status`, `row-assignee`.
+the customer name), `row-status`, `row-assignee`, plus per-column header + resize
+hooks `col-<key>` and `resize-<key>` for keys `customer, industry, product, spend,
+uplift, confidence, status, assignee` (drag `resize-<key>` to resize a column; widths
+persist).
 
 ## Completion Rates
 

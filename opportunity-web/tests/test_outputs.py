@@ -67,6 +67,8 @@ EXPECTED_TESTS = [
     "search persists across refresh",
     "filter selection persists across refresh",
     "sort selection persists across refresh",
+    "resizing a column changes its width",
+    "column width persists across refresh",
 ]
 
 
