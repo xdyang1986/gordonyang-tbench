@@ -497,9 +497,24 @@ import {
 // filtered set, not just the current page.
 const PAGE_SIZE = 50;
 
+// Persist the toolbar/view state (search + filters + sort) so every change is
+// restored automatically after a refresh, alongside the per-row workflow state.
+const VIEW_KEY = 'opp-board-view-v1';
+
+type ViewState = { filters: Filters; sortKey: SortKey };
+
+function loadView(): ViewState | null {
+  try {
+    const raw = localStorage.getItem(VIEW_KEY);
+    return raw ? (JSON.parse(raw) as ViewState) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [sortKey, setSortKey] = useState<SortKey>('estUpliftMonthly');
+  const [filters, setFilters] = useState<Filters>(() => loadView()?.filters ?? EMPTY_FILTERS);
+  const [sortKey, setSortKey] = useState<SortKey>(() => loadView()?.sortKey ?? 'estUpliftMonthly');
   const [page, setPage] = useState(0);
   const { getState, updateState } = useOpportunityState();
 
@@ -514,6 +529,15 @@ export default function App() {
   // Reset to the first page whenever the result set changes.
   useEffect(() => {
     setPage(0);
+  }, [filters, sortKey]);
+
+  // Persist the view so it is restored automatically on refresh.
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ filters, sortKey }));
+    } catch {
+      // ignore quota/availability errors
+    }
   }, [filters, sortKey]);
 
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));

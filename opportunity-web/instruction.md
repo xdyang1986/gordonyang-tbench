@@ -8,7 +8,7 @@ Supported features:
 5. Sort by these columns: uplift & spend descending, confidence High>Medium>Low; default = uplift desc; sort options labelled so "uplift"/"spend"/"confidence". When two opportunites have the same confidence, break the tie by estimated uplift, highest first.
 6. Status include: New, Contacted, Won and Lost -- default is New.
 7. Assignee is a dropdown with the sales name (come from the provided reps data src/data/reps.ts), default is "unassigned".
-8. Status and assignee should be persisted.
+8. Any change should be persisted and reload automatically after refresh (e.g. filter, sort etc.).
 9. Support priority sort option: if the sort option contains priority. Priority = round( (estUpliftMonthly / currentSpendMonthly) × confidenceWeight × 1000 ), where confidenceWeight is High = 1.0, Medium = 0.7, Low = 0.4. Sort descending; ties broken by estimated uplift, highest first.
 
 Notes:

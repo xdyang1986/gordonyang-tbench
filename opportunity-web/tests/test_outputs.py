@@ -64,6 +64,9 @@ EXPECTED_TESTS = [
     "filters by status using per-row state",
     "changing status removes a row from an active status filter",
     "persists status and assignee across remount",
+    "search persists across refresh",
+    "filter selection persists across refresh",
+    "sort selection persists across refresh",
 ]
 
 

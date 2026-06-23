@@ -17,10 +17,12 @@ total estimated monthly uplift over the *full filtered set*); multi-term search 
 customer name + rationale; dropdown filters for industry, product, confidence, and
 status; sorting by estimated uplift, current spend, confidence (High>Medium>Low,
 tie-broken by uplift), and a computed **priority** score (ROI = uplift/spend, weighted
-by confidence, scaled and rounded); and per-opportunity workflow state (status +
-assignee) that persists to `localStorage`, stays tied to the opportunity across
-re-sorts, and keeps the view reactive (a row whose status no longer matches an active
-status filter must leave the table immediately).
+by confidence, scaled and rounded); per-opportunity workflow state (status +
+assignee) that stays tied to the opportunity across re-sorts and keeps the view
+reactive (a row whose status no longer matches an active status filter must leave the
+table immediately); and **full persistence to `localStorage`** — every change,
+including the search query, active filters, and sort selection (not just row state),
+is restored automatically after a refresh.
 
 This tests whether an agent can turn a terse product brief plus a data contract into a
 correct, integrated, and **performant** React app — composing derived/memoized views,
@@ -43,7 +45,7 @@ verify time):
    pagination and virtualization render correctly (jsdom cannot run virtualization).
    Behaviour is asserted through prompt-pinned `data-testid` hooks, with all expected
    values computed from the shipped dataset. Each assertion surfaces as its own pytest
-   case (28 total: build + suite-ran + 26 behaviour cases).
+   case (31 total: build + suite-ran + 29 behaviour cases).
 
 The dataset is ~2,000 rows (`src/data/opportunities.ts` — 20 curated seed rows + 1,980 generated fixtures), so the large-data requirement is real and reproducible.
 
@@ -61,30 +63,30 @@ Empirical pass rates with real-browser (Playwright) grading:
 |-------|-----------------|
 | Oracle | **3/3** |
 | Sonnet 4.6 (informational) | 5/5 |
-| **Opus 4.6** | **4/5 (0.80)** |
+| Opus 4.6 | 5/5 |
 | **Avocado** | **4/5 (0.80)** |
 
-> Calibration target: **both Opus 4.6 and Avocado are in-band** — each passes ≥1 and
-> fails ≥1 of 5.
+> Calibration target: **Avocado is in-band** — it passes ≥1 and fails ≥1 of 5. Opus
+> 4.6 solves it cleanly (5/5).
 
 ## Model Analysis
 
 - **Avocado — 4/5 passed.** The 1 failing trial **never created `src/App.tsx`** (built
   the root component elsewhere), so the contracted entry point was missing → setup
-  error across cases. A genuine spec-following gap.
-- **Opus 4.6 — 4/5 passed.** The 1 failing trial built successfully but the grading
-  run did not complete on the first attempt (a transient browser-launch hiccup under
-  concurrent trials); the grading runner has since been hardened with launch retries.
-  In an earlier run Opus also failed by not bounding the rendered rows
-  (`table renders a bounded window`) — the large-data differentiator.
+  error across all cases. A genuine spec-following gap.
+- **Opus 4.6 — 5/5 passed.** Handles the full app, including the trickier requirements
+  (large-data bounded rendering, ROI priority, reactive status-filter, and full
+  view-persistence across refresh).
 - **Sonnet 4.6 — 5/5 passed** (informational only).
 - **Oracle — 3/3.**
 
-**Dominant failure modes (across models):** (1) entry-contract adherence — not creating
-the root component at the contracted `src/App.tsx`; and (2) large-data handling —
-failing to bound the rendered rows. Both are genuine engineering / spec-following
-reasoning gaps, not task-setup issues: the environment is fully baked and offline (no
-verify-time downloads), and the grading runs the agent's *real* app in a real browser
+**Dominant failure mode:** entry-contract adherence — not creating the root component
+at the contracted `src/App.tsx`. Earlier iterations also showed large-data handling
+(failing to bound the rendered rows) and full-view persistence (persisting search/
+filters/sort across refresh, not just row state) as differentiators. All are genuine
+engineering / spec-following reasoning gaps, not task-setup issues: the environment is
+fully baked and offline (no verify-time downloads), and the grading runs the agent's
+*real* app in a real browser
 (so virtualization is graded fairly, not penalized as a jsdom artifact). The
 arithmetically tricky ROI priority and the reactive status-filter rule add further
 correctness surface that weaker implementations slip on.

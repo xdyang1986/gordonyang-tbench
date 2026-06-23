@@ -21,25 +21,23 @@ COPY project/ /app/
 # everything it needs.
 RUN npm ci
 
-# Test-only tooling for the hidden grader (--no-save: not in the agent-visible
-# package.json). The hidden suite runs in a REAL headless Chromium so
-# virtualization/pagination both render correctly; tsx runs the TS grading script.
-#
-# Install Chromium from the Debian apt mirror (reliable in restricted-egress cloud
-# builders) instead of Playwright's CDN. playwright.azureedge.net is blocked/flaky
-# in the VMVM builder — its ffmpeg download fails and aborts the build — and we
-# don't need ffmpeg (video only). We drive this system Chromium via playwright-core
-# (no browser download), pointed at it by PW_CHROMIUM.
-ENV PW_CHROMIUM=/usr/bin/chromium \
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# Headless browser for the hidden grader. Chromium is an OS package, installed from
+# the Debian apt mirror (reliable in restricted-egress cloud builders) — NOT from
+# Playwright's CDN (playwright.azureedge.net is blocked/flaky in the VMVM builder;
+# its ffmpeg download aborts the build, and we don't need ffmpeg/video). The grader
+# drives this system Chromium via playwright-core, pointed at it by PW_CHROMIUM.
+ENV PW_CHROMIUM=/usr/bin/chromium
 RUN apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
-# WARM the npm cache for the test-only grader deps (playwright-core, tsx) WITHOUT
-# installing them into the agent-visible /app/node_modules. Keeping them out of the
-# agent's view avoids leaking "this is browser-graded", and warming the cache keeps
-# verification offline. The test layer (tests/test_outputs.py) installs them at
-# verify time from this warmed cache (--prefer-offline).
+
+# Pre-WARM the npm cache for the test-only JS grader deps (playwright-core, tsx)
+# WITHOUT installing them into the agent-visible /app/node_modules: install into a
+# throwaway /tmp/warm prefix, then delete it. This keeps the grader tooling out of
+# the agent's view (no "browser-graded" leak) while letting the test layer install
+# them at verify time OFFLINE-fast from the warmed cache (tests/test_outputs.py uses
+# --prefer-offline). Build-time dep packaging avoids a slow/flaky verify-time
+# network install against the verifier timeout.
 RUN npm install --prefix /tmp/warm --no-save --no-audit --no-fund \
       playwright-core@1.49.1 \
       tsx@4.19.2 \
