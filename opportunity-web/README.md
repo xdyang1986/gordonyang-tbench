@@ -43,7 +43,7 @@ verify time):
    pagination and virtualization render correctly (jsdom cannot run virtualization).
    Behaviour is asserted through prompt-pinned `data-testid` hooks, with all expected
    values computed from the shipped dataset. Each assertion surfaces as its own pytest
-   case (25 total: build + suite-ran + 23 behaviour cases).
+   case (28 total: build + suite-ran + 26 behaviour cases).
 
 The dataset is ~2,000 rows (`src/data/opportunities.ts` — 20 curated seed rows + 1,980 generated fixtures), so the large-data requirement is real and reproducible.
 

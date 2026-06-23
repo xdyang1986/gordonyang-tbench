@@ -35,9 +35,15 @@ ENV PW_CHROMIUM=/usr/bin/chromium \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
-RUN npm install --no-save \
+# WARM the npm cache for the test-only grader deps (playwright-core, tsx) WITHOUT
+# installing them into the agent-visible /app/node_modules. Keeping them out of the
+# agent's view avoids leaking "this is browser-graded", and warming the cache keeps
+# verification offline. The test layer (tests/test_outputs.py) installs them at
+# verify time from this warmed cache (--prefer-offline).
+RUN npm install --prefix /tmp/warm --no-save --no-audit --no-fund \
       playwright-core@1.49.1 \
-      tsx@4.19.2
+      tsx@4.19.2 \
+ && rm -rf /tmp/warm
 
 # Bake the Python test runner at build time so verification needs NO network
 # downloads (the template's verify-time `uv` install is a flaky single point of
