@@ -6,7 +6,7 @@
 // jsdom). Behaviour is asserted through prompt-pinned data-testid hooks; expected
 // values are computed from the fixed dataset. Results are written as JSON for the
 // pytest layer to surface. Run with tsx from /app so the TS dataset imports resolve.
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type Page } from 'playwright-core';
 import { writeFileSync } from 'node:fs';
 import { OPPORTUNITIES } from '../src/data/opportunities.ts';
 import { SALES_REPS } from '../src/data/reps.ts';
@@ -99,7 +99,10 @@ async function launchWithRetry(attempts = 3): Promise<Browser> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      return await chromium.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+      return await chromium.launch({
+        executablePath: process.env.PW_CHROMIUM || undefined,
+        args: ['--no-sandbox', '--disable-dev-shm-usage'],
+      });
     } catch (e) {
       lastErr = e;
       await new Promise((r) => setTimeout(r, 1000 * (i + 1)));

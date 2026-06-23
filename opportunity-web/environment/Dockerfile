@@ -21,16 +21,23 @@ COPY project/ /app/
 # everything it needs.
 RUN npm ci
 
-# Warm the test-only tooling the hidden grader uses, WITHOUT touching the
-# agent-visible package.json / package-lock.json (--no-save). These live in
-# node_modules only, so grading runs offline at verify time. The hidden suite runs
-# in a REAL headless Chromium (Playwright) so virtualization/pagination both render
-# correctly; tsx runs the TypeScript grading script and imports the TS dataset.
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Test-only tooling for the hidden grader (--no-save: not in the agent-visible
+# package.json). The hidden suite runs in a REAL headless Chromium so
+# virtualization/pagination both render correctly; tsx runs the TS grading script.
+#
+# Install Chromium from the Debian apt mirror (reliable in restricted-egress cloud
+# builders) instead of Playwright's CDN. playwright.azureedge.net is blocked/flaky
+# in the VMVM builder — its ffmpeg download fails and aborts the build — and we
+# don't need ffmpeg (video only). We drive this system Chromium via playwright-core
+# (no browser download), pointed at it by PW_CHROMIUM.
+ENV PW_CHROMIUM=/usr/bin/chromium \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
 RUN npm install --no-save \
-      playwright@1.49.1 \
-      tsx@4.19.2 \
- && npx playwright install --with-deps chromium
+      playwright-core@1.49.1 \
+      tsx@4.19.2
 
 # Bake the Python test runner at build time so verification needs NO network
 # downloads (the template's verify-time `uv` install is a flaky single point of

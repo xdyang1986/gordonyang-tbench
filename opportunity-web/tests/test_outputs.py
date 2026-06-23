@@ -26,7 +26,7 @@ AGENT_APP = APP / "src/App.tsx"
 HIDDEN_TESTS_DIR = Path("/tests/grading")
 GRADE_DIR = APP / "__grading__"
 TSX_BIN = APP / "node_modules/.bin/tsx"
-PW_PKG = APP / "node_modules/playwright"
+PW_PKG = APP / "node_modules/playwright-core"
 PW_RESULTS = Path("/tmp/pw-results.json")
 PORT = 4173
 BASE_URL = f"http://127.0.0.1:{PORT}"
@@ -34,7 +34,7 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 # Test-only tooling (baked into the image; reinstalled here if the agent pruned
 # node_modules, e.g. via `npm ci`). The Chromium binary lives at $PLAYWRIGHT_BROWSERS_PATH
 # (outside node_modules), so it survives and no re-download is needed.
-GRADING_DEPS = ["playwright@1.49.1", "tsx@4.19.2"]
+GRADING_DEPS = ["playwright-core@1.49.1", "tsx@4.19.2"]
 
 # The canonical Playwright test titles the agent's app must satisfy.
 EXPECTED_TESTS = [
