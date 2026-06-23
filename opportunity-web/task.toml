@@ -1,0 +1,47 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/opportunity-web"
+description = "Build, from scratch, an Ads Opportunity Board: a React + TypeScript single-page app over a fixed dataset that lists upsell opportunities and lets a sales rep search, multi-filter, sort, and track per-opportunity status + assignee with localStorage persistence. Graded headlessly against rendered behaviour."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["typescript", "react", "frontend", "vite", "state-management"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "software-engineering"
+languages = ["typescript"]
+tags = ["typescript", "react", "frontend", "vite", "localstorage"]
+expert_time_estimate_min = 40.0
+junior_time_estimate_min = 120.0
+
+[verifier]
+# Verify in the agent's own container: it already has Node and the warmed
+# node_modules (app deps + the test-only Vitest/jsdom/Testing-Library tooling),
+# plus the agent's implementation under /app. The hidden Vitest files are copied
+# in only at verification time, so the agent never sees them during its run.
+# (Separate mode would require a dedicated tests/Dockerfile verifier image.)
+timeout_sec = 600.0
+# Run the grader as a non-root user so in-process agent code can't read root-owned
+# oracle files. Off by default because this template's test.sh uses apt-get (needs
+# root); enable it when your verifier imports/runs agent code in-process.
+# user = "nobody"
+
+[agent]
+timeout_sec = 1200.0
+
+[environment]
+build_timeout_sec = 1200.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
