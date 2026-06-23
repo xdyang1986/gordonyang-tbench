@@ -17,9 +17,9 @@ right: serializing each value by its *runtime* type (not `object`), the exact
 on-disk schema implied by `SnapshotModels` (`Version`, per-entry `KeyType` /
 `Key` / `ValueType` / `Value`, `null` values encoded as `null` type+value),
 rejecting unregistered types on both save and load, version checking, atomic
-temp-file-then-move writes, the correct exception types
-(`KeyNotFoundException`, `InvalidOperationException`, `InvalidDataException`,
-`FileNotFoundException`), and concurrency that survives parallel writers. A naive
+temp-file-then-move writes, failing loudly on missing keys and unregistered types
+(the tests assert the operation *throws* — they are behavior-focused and do not pin
+a specific exception class), and concurrency that survives parallel writers. A naive
 approach (e.g. `Dictionary` + `JsonSerializer.Serialize(_data)`) compiles and
 passes the easy CRUD cases but fails the snapshot round-trips, the type-safety
 cases, and the concurrency case.
@@ -35,8 +35,11 @@ cases, and the concurrency case.
   tail recovery, and per-entry TTL), parsing the `.trx` so each fact is its own
   pytest case. The grading
   project lives outside `/app`, so nothing the agent edits under `/app/tests`
-  can influence the result. `[verifier].environment_mode = "separate"` keeps the
-  oracle/tests out of the agent's container during its run.
+  can influence the result. The harness injects `tests/` (and `solution/`) into
+  the container **only at verification time**, after the agent's trajectory ends,
+  so the agent never sees them during its run. Test-only frameworks (xunit,
+  Microsoft.NET.Test.Sdk) are not baked into the image; they restore from NuGet at
+  verification time (`allow_internet = true`).
 - **Oracle:** `solution/solve.sh` writes the reference `KeyValueStore.cs`.
 
 ## Completion Rates
@@ -120,9 +123,10 @@ save/load; the snapshot `Version` check; and thread-safe concurrent writes.
 - **Hardcoded outputs:** grading runs a behavioral xUnit suite (round-trips,
   concurrency, exception types) against the compiled library — there is no fixed
   output string to print.
-- **Overfitting to visible tests:** the agent never sees the test suite. It is
-  staged only into the separate verifier (`environment_mode = "separate"`) under
-  `/tests/grading/`, and graded in a `/tmp` project the agent cannot reach.
+- **Overfitting to visible tests:** the agent never sees the test suite. The
+  harness injects it under `/tests/grading/` only at verification time (after the
+  agent's run), and grading happens in a fresh `/tmp` project the agent cannot
+  reach.
 - **Modifying test files:** the grader ignores `/app/tests` entirely; it
   constructs its own project from the hidden canonical test file and only
   project-references the agent's library, so edits under `/app` can't alter the

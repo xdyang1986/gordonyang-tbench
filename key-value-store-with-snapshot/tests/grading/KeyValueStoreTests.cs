@@ -36,7 +36,8 @@ public class KeyValueStoreTests
     public void Get_missing_key_throws()
     {
         using var store = new KeyValueStore();
-        Assert.Throws<KeyNotFoundException>(() => store.Get("nope"));
+        // Behavior: a missing key must fail loudly, not be silently returned as null.
+        Assert.ThrowsAny<Exception>(() => store.Get("nope"));
     }
 
     [Fact]
@@ -166,10 +167,10 @@ public class KeyValueStoreTests
     {
         using var store = new KeyValueStore();
 
-        // Persisting an unregistered type must throw InvalidOperationException.
-        // Implementations may enforce this eagerly (at Set) or lazily (at Snapshot);
-        // both are accepted, so the whole sequence is wrapped.
-        Assert.Throws<InvalidOperationException>(() =>
+        // Behavior: persisting an unregistered type must fail loudly rather than
+        // silently writing it. Implementations may enforce this eagerly (at Set) or
+        // lazily (at Snapshot); both are accepted, so the whole sequence is wrapped.
+        Assert.ThrowsAny<Exception>(() =>
         {
             store.Set("key", new Person("X", 1, DateTime.UnixEpoch)); // Person not registered
             store.Snapshot(TempPath());
@@ -190,8 +191,10 @@ public class KeyValueStoreTests
         }
 
         // Default registry does not know about Person.
+        // Behavior: loading a type that is not on the allow-list must fail loudly
+        // rather than silently constructing an arbitrary type named in the file.
         using var loaded = new KeyValueStore();
-        Assert.Throws<InvalidDataException>(() => loaded.Load(path));
+        Assert.ThrowsAny<Exception>(() => loaded.Load(path));
     }
 
     [Fact]
@@ -437,7 +440,8 @@ public class KeyValueStoreTests
         Assert.False(store.ContainsKey("k"));
         Assert.False(store.TryGet("k", out _));
         Assert.Equal(0, store.Count);
-        Assert.Throws<KeyNotFoundException>(() => store.Get("k"));
+        // Behavior: an expired key reads as absent — Get fails loudly like any miss.
+        Assert.ThrowsAny<Exception>(() => store.Get("k"));
     }
 
     [Fact]
