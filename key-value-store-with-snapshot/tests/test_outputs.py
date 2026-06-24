@@ -25,6 +25,7 @@ TRX_NS = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
 # The canonical scenarios the agent's implementation must satisfy.
 EXPECTED_TESTS = [
     "Replicate_and_converge",
+    "Follower_write_is_forwarded_to_leader",
     "Quorum_commit_with_minority_partitioned",
     "Quorum_rejected_when_majority_unreachable",
     "Rejected_write_leaves_leader_state_unchanged",

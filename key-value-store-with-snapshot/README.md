@@ -27,7 +27,7 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
   helper (the serialization allow-list). The agent writes the cluster from scratch
   under `src/KeyValueDb/`. The agent never sees the test suite.
 - **Grading:** `tests/test_outputs.py` builds a *fresh* xUnit project under `/tmp`
-  that project-references the agent's library and runs the canonical 10-scenario
+  that project-references the agent's library and runs the canonical 11-scenario
   suite, parsing the `.trx` so each scenario is its own pytest case. The grading
   project lives outside `/app`; the harness injects `tests/` only at verification
   time (after the agent's run), so the agent never sees them. Test-only frameworks
@@ -39,19 +39,18 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 ## Completion Rates
 
 Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
-out of 5), graded against the 10-scenario suite.
+out of 5), graded against the 11-scenario suite.
 
 | Model | Pass rate (k=5) |
 |-------|-----------|
-| Oracle | 10/10 scenarios pass; 1/1 and 3/3 trials pass (deterministic) |
+| Oracle | 11/11 scenarios pass; 1/1 and 3/3 trials pass (deterministic) |
 | Sonnet 4.6 | **0/5 passed** (mean 0.000) — informational only |
-| Opus 4.6 | **2/5 passed** (mean 0.400) |
-| Avocado | **5/5 passed** (mean 1.000) |
+| Opus 4.6 | **1/5 passed** (mean 0.200) |
+| Avocado | **4/5 passed** (mean 0.800) |
 
-> Calibration target met via **Opus 4.6 (2/5)** — passes ≥1 and fails ≥1 of 5.
-> Avocado solves the task (5/5), confirming it is cleanly solvable from the spec.
-> All failures are genuine behavioral gaps — no crashes, no plan-mode dropouts; the
-> oracle is deterministic (3/3).
+> Calibration target met by **both** Opus 4.6 (1/5) and Avocado (4/5) — each passes
+> ≥1 and fails ≥1 of 5. All failures are genuine behavioral gaps — no crashes, no
+> plan-mode dropouts; the oracle is deterministic (3/3).
 
 > Novelty check: **LOW** contamination risk (see `docs/plans/`). The design omits the
 > canonical, heavily-memorized Raft machinery (timeout election, replicated log,
@@ -63,37 +62,43 @@ out of 5), graded against the 10-scenario suite.
 Every trial compiled and ran (one Sonnet trial compiled but failed all scenarios at
 runtime — see below), so all failures are **behavioral**, not setup/harness artifacts.
 
-### Opus 4.6 — 2/5 passed
-- 2 trials passed all 10 scenarios.
+### Opus 4.6 — 1/5 passed
+- 1 trial passed all 11 scenarios.
 - 3 trials failed **only** `Unregistered_value_type_is_rejected_registered_round_trips`:
   the implementation does not enforce the **registry allow-list on the write path** —
   an unregistered value type is committed instead of the write being rejected
   (`Set` should return `false`). Every hard distributed scenario — quorum
-  commit/reject, no-local-apply, tombstone no-resurrection, anti-entropy catch-up,
-  failover ordering, epoch-beats-seq, conflict resolution — **passed** in all trials.
+  commit/reject, no-local-apply, follower forwarding, tombstone no-resurrection,
+  anti-entropy catch-up, failover ordering, epoch-beats-seq, conflict resolution —
+  **passed** in these trials.
+- 1 trial compiled but failed **all 11** scenarios — a pervasive correctness bug (the
+  cluster never replicates/commits correctly), i.e. a weaker attempt at the contract.
 
-### Avocado — 5/5 passed
-- Passed all 10 scenarios in every trial, including the allow-list case. Confirms the
-  task is solvable from the provided spec.
+### Avocado — 4/5 passed
+- 4 trials passed all 11 scenarios.
+- 1 trial failed **only** the allow-list scenario (the same gap as Opus). Confirms the
+  task is solvable from the spec while still exposing the dominant gap.
 
 ### Sonnet 4.6 — 0/5 passed (informational)
-- 4 trials failed **only** the allow-list scenario (the same gap as Opus).
-- 1 trial compiled but failed **all 10** scenarios — a pervasive correctness bug
-  (the cluster never replicates/commits correctly), i.e. a weaker attempt that didn't
-  realize the contract.
+- All 5 trials failed **only** the allow-list scenario — the full consensus machinery
+  was implemented correctly every time, but the allow-list gate was consistently
+  skipped.
 
 ### Dominant failure mode (across all models)
-**Registry allow-list enforcement on writes** — Opus 3/3 failing trials + Sonnet 4/5
-trials. The spec requires replicated values to be on the allow-list (instruction
-point 5) and writes to fail via a `bool` return (points 6 & 8); an unregistered value
-must therefore be **rejected** (`Set` → `false`). Models implement the consensus
-machinery correctly but skip enforcing this gate on the replication path. It is a
-genuine spec-adherence/reasoning gap, not a task-setup issue: the reference solution
-enforces it (an allow-list check before the quorum write), and the harder consensus
-scenarios are solved by frontier models — so the task is clearly solvable, and the
+**Registry allow-list enforcement on the replication path** — Opus 3 failing trials +
+Avocado 1 + Sonnet 5. The spec requires replicated values to be on the allow-list
+(instruction rule 5) and writes to fail via a `bool` return (rules 6 & 8); an
+unregistered value must therefore be **rejected** (`Set` → `false`) *before* it can be
+committed to other nodes. Models implement the consensus machinery correctly but skip
+enforcing this gate on the write/replication path. It is a genuine
+spec-adherence/reasoning gap, not a task-setup issue: the reference solution enforces
+it (an allow-list check before the quorum write), and the harder consensus scenarios
+are solved by frontier models — so the task is clearly solvable, and the
 differentiation is a specific, clean correctness detail rather than a crash or
-ambiguity. (Note: enforcing on the *replication* path, not just locally, is the
-subtlety — the value must be rejected before it can be committed to other nodes.)
+ambiguity. The remaining surface (quorum-reject with no-local-apply, tombstone
+no-resurrection, `(epoch,seq)` conflict resolution where higher epoch beats higher
+seq, follower forwarding) is exercised by the suite and occasionally trips weaker
+attempts (one Opus trial failed everything).
 
 ## Anti-Cheating Analysis
 

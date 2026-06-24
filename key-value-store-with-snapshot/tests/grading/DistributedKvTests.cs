@@ -23,6 +23,19 @@ public class DistributedKvTests
     }
 
     [Fact]
+    public void Follower_write_is_forwarded_to_leader()
+    {
+        var c = New();                          // 3 nodes, leader 0
+        Assert.True(c.Set(1, "k", "v"));        // issued at a follower -> forwarded to leader
+        c.Settle();
+        Assert.Equal("v", c.Get(0, "k"));
+        Assert.Equal("v", c.Get(2, "k"));
+        Assert.True(c.Remove(2, "k"));          // follower Remove is likewise forwarded
+        c.Settle();
+        Assert.False(c.ContainsKey(0, "k"));
+    }
+
+    [Fact]
     public void Quorum_commit_with_minority_partitioned()
     {
         var c = New();                          // 3 nodes, majority = 2
