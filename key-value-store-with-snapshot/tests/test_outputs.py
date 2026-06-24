@@ -1,9 +1,11 @@
-"""Grade the agent's KeyValueStore implementation.
+"""Grade the agent's distributed KeyValueDb implementation.
 
-The agent implements /app/src/KeyValueDb/KeyValueStore.cs. We grade it by building
-a *fresh* xUnit grading project (under /tmp, outside anything the agent could have
-modified) that project-references the agent's library and runs the canonical test
-suite. Parsing the .trx report lets each xUnit fact surface as its own pytest case.
+The agent implements the in-process replicated cluster (the `IReplicatedKvCluster`
+interface + `DistributedKv.CreateCluster` factory) from scratch under
+/app/src/KeyValueDb/. We grade it by building a *fresh* xUnit project (under /tmp,
+outside anything the agent could have modified) that project-references the agent's
+library and runs the canonical scenario suite. Parsing the .trx report lets each
+scenario surface as its own pytest case.
 """
 
 import os
@@ -15,37 +17,23 @@ from pathlib import Path
 import pytest
 
 AGENT_LIB_CSPROJ = "/app/src/KeyValueDb/KeyValueDb.csproj"
-HIDDEN_TESTS = "/tests/grading/KeyValueStoreTests.cs"
+HIDDEN_TESTS = "/tests/grading/DistributedKvTests.cs"
 GRADE_DIR = Path("/tmp/kvdb-grading")
 
 TRX_NS = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
 
-# The canonical xUnit facts the agent's implementation must satisfy.
+# The canonical scenarios the agent's implementation must satisfy.
 EXPECTED_TESTS = [
-    "Set_and_Get_round_trips_a_value",
-    "Get_missing_key_throws",
-    "Store_holds_mixed_key_types_simultaneously",
-    "TryGet_generic_returns_typed_value",
-    "Remove_and_ContainsKey_and_Clear_behave",
-    "Indexer_gets_and_sets",
-    "Snapshot_then_Load_reproduces_primitive_data",
-    "Snapshot_then_Load_round_trips_custom_key_and_value_types",
-    "Null_values_round_trip",
-    "Snapshot_throws_for_unregistered_value_type",
-    "Load_throws_for_unregistered_type",
-    "Snapshot_overwrites_previous_snapshot",
-    "Load_replaces_existing_contents",
-    "Concurrent_writes_are_thread_safe",
-    "Large_snapshot_round_trips_many_entries",
-    "Log_replays_on_open",
-    "Log_appends_survive_across_reopen_and_continue",
-    "Log_recovers_from_truncated_tail",
-    "Compact_rewrites_log_to_live_state",
-    "Compact_keeps_log_open_for_further_appends",
-    "Ttl_entry_expires_after_clock_advances",
-    "Set_without_ttl_never_expires",
-    "Ttl_survives_snapshot_and_load",
-    "Ttl_expired_entry_dropped_on_log_replay",
+    "Replicate_and_converge",
+    "Quorum_commit_with_minority_partitioned",
+    "Quorum_rejected_when_majority_unreachable",
+    "Rejected_write_leaves_leader_state_unchanged",
+    "Deleted_key_is_not_resurrected_after_sync",
+    "Anti_entropy_catches_up_lagging_follower",
+    "Failover_new_epoch_supersedes_stale_data",
+    "Higher_epoch_beats_higher_seq",
+    "Conflicting_partition_resolved_by_epoch",
+    "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 
 GRADING_CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
@@ -81,9 +69,6 @@ def grading_results():
     assert os.path.exists(
         AGENT_LIB_CSPROJ
     ), f"Agent library project missing at {AGENT_LIB_CSPROJ}"
-    assert os.path.exists(
-        "/app/src/KeyValueDb/KeyValueStore.cs"
-    ), "KeyValueStore.cs was not implemented by the agent"
     assert os.path.exists(HIDDEN_TESTS), f"Hidden test file missing at {HIDDEN_TESTS}"
 
     if GRADE_DIR.exists():
@@ -91,7 +76,7 @@ def grading_results():
     GRADE_DIR.mkdir(parents=True)
 
     (GRADE_DIR / "Grading.csproj").write_text(GRADING_CSPROJ)
-    shutil.copy(HIDDEN_TESTS, GRADE_DIR / "KeyValueStoreTests.cs")
+    shutil.copy(HIDDEN_TESTS, GRADE_DIR / "DistributedKvTests.cs")
 
     trx = GRADE_DIR / "results.trx"
     proc = _run(
@@ -127,18 +112,21 @@ def grading_results():
 
 
 def test_suite_built_and_ran(grading_results):
-    """The agent's library must compile and the test suite must execute."""
+    """The agent's library must compile (interface + factory implemented) and run."""
     assert grading_results["built"], (
         "The grading suite did not produce a result file — the agent's "
-        "implementation likely failed to compile.\n\n" + grading_results["diagnostics"]
+        "implementation likely failed to compile (missing/mismatched "
+        "IReplicatedKvCluster or DistributedKv.CreateCluster).\n\n"
+        + grading_results["diagnostics"]
     )
 
 
 @pytest.mark.parametrize("test_name", EXPECTED_TESTS)
-def test_xunit_fact_passes(grading_results, test_name):
+def test_scenario_passes(grading_results, test_name):
     outcome = grading_results["outcomes"].get(test_name)
     assert outcome is not None, (
-        f"Expected test '{test_name}' did not run.\n\n" + grading_results["diagnostics"]
+        f"Expected scenario '{test_name}' did not run.\n\n"
+        + grading_results["diagnostics"]
     )
     assert outcome == "Passed", (
         f"'{test_name}' outcome was {outcome!r}, expected 'Passed'.\n\n"

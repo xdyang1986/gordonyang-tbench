@@ -1,28 +1,28 @@
-Create a key-value store that supports different type of keys and values. And also support to make a snapshot into the disk and restore from the snapshot.
+Build a distributed key value store that support read and write in multiple nodes.
 
-Related APIs:
-1. void Set(object key, object? value, TimeSpan? ttl = null) - Insert or update the key/value. The entry expires ttl (optional) after it is set.
-2. object? Get(object key) - Returns the value for key. If the key is not present, you should treat is as an error/failure case.
-3. bool TryGet(object key, out object? value) - Returns true and the raw value if present, else false.
-4. bool TryGet<TValue>(object key, out TValue value) - Returns true only if present and assignable to TValue.
-5. bool Remove(object key) - Removes key; returns true if it existed.
-6. bool ContainsKey(object key) - Whether key exists.
-7. void Clear() - Removes all entries.
-8. void Snapshot(string path) - Writes a consistent JSON snapshot to path.
-9. void Load(string path) - Replaces all contents with the snapshot at path. Please explicitly fail the process while the snapshot is invalid.
-10. void Dispose() - Releases the internal lock.
-11. store[key] get/set -- Indexer for Get/Set.
-12. Count property -- Number of entries.
-13. void OpenLog(string path) - bind the store to an append-only log. replay a record into the store, auto append a record for every subsequent set/remove/clear.
-14. void Compact() - rewrites the open log to one record per live key.
+1. There are N nodes, and one of them is the configured leader. Write should go to the leader (forward to leader if from follower) and read from local commit even it's stale.
+2. Deletes are durable across sync.
+3. Conflict rule: higher (epoch, seq) wins, higher epoch beats higher seq.
+4. epoch bumps after manual failover(leader promotion)
+5. replicated values must be on the registry allow-list.
+6. If the Set/Remove false, let's return bool instead of throw exception.
+7. If the Get on a miss key, let's throw it.
+8. Write commits only when it gets strict majority acknowledge, otherwise return false.
+9. Partition(ids…) splits cluster and drops cross-cut messages; Heal() restores connectivity (does not catch up stale nodes); PromoteLeader(id) forces failover with epoch bump; Settle() converges connected nodes by (epoch,seq) (tombstones included).
 
-Construction:
-1. KeyValueStore() - Creates a new store.
-2. KeyValueStore(registry?, Func<DateTimeOffset>? clock) - registry parameter is optional with a default. clock is the time source for the TTL expiry, default to UTC now.
+Interface:
 
-Notes:
-1. Snapshot must be saved to a given path, if its parent directory doesn't exist, it should be created.
-2. The log is one record per line, one record per mutation.
-3. OpenLog must replay the log and recover from a truncated or corrupt tail, if the final record is not completed, discard it and keep all complete record, don't throw.
-4. TTL is persisted as an absolute expiry in snapshot/load and the log;
-5. Implement the files directly, don't stop to ask for plan approval.
+IReplicatedKvCluster DistributedKv.CreateCluster(int nodes, int leaderId, TypeRegistry? registry = null);
+
+interface IReplicatedKvCluster {
+    bool Set(int nodeId, object key, object? value);
+    object? Get(int nodeId, object key);
+    bool Remove(int nodeId, object key);
+    bool ContainsKey(int nodeId, object key);
+    int  Count(int nodeId);
+    void Partition(params int[] ids);
+    void Heal();
+    void PromoteLeader(int nodeId);
+    void Settle();
+    int  LeaderId { get; }
+}

@@ -1,138 +1,113 @@
-# codimango/key-value-store-with-snapshot
+# codimango/key-value-store-with-snapshot (distributed)
 
 ## Description
 
-The agent is given a real C# (.NET 8) library, `KeyValueDb`, with one file removed:
-`src/KeyValueDb/KeyValueStore.cs`. The supporting types (`TypeRegistry`,
-`SnapshotModels`), the project README (the design spec), the runnable demo, and the
-`.csproj`/solution all remain. The agent must re-implement `KeyValueStore` so that
-the library behaves as specified: a single in-memory store that holds
-**heterogeneous key and value types** (`int`, `string`, `Guid`, composite
-`record` keys, …), is **thread-safe**, and can take a **consistent, atomic JSON
-snapshot to disk** and **load it back** through a type allow-list.
+The agent implements, from scratch in C# (.NET 8), an **in-process distributed
+key/value store** with **leader + quorum** replication. The cluster is N replica
+nodes wired by a test-controlled in-memory transport (no sockets/timers/threads on
+the critical path → deterministic grading). The public contract — the
+`IReplicatedKvCluster` interface and the `DistributedKv.CreateCluster` factory — is
+pinned in `instruction.md`; the agent reconstructs it and the hidden scenario suite
+compiles against it.
 
-It tests whether the model can reconstruct a non-trivial public contract from a
-spec rather than from a stub, and get a pile of subtle details simultaneously
-right: serializing each value by its *runtime* type (not `object`), the exact
-on-disk schema implied by `SnapshotModels` (`Version`, per-entry `KeyType` /
-`Key` / `ValueType` / `Value`, `null` values encoded as `null` type+value),
-rejecting unregistered types on both save and load, version checking, atomic
-temp-file-then-move writes, failing loudly on missing keys and unregistered types
-(the tests assert the operation *throws* — they are behavior-focused and do not pin
-a specific exception class), and concurrency that survives parallel writers. A naive
-approach (e.g. `Dictionary` + `JsonSerializer.Serialize(_data)`) compiles and
-passes the easy CRUD cases but fails the snapshot round-trips, the type-safety
-cases, and the concurrency case.
+The store must get a pile of distributed-systems details simultaneously right:
+**synchronous quorum writes** (commit only on a strict majority, counting the
+leader); a **rejected write applies nowhere — not even on the leader** (no
+read-your-write on a leader stuck in a minority partition); **versioned tombstones**
+so a delete is never resurrected by a stale replica during sync; an **`(epoch, seq)`
+conflict rule** where a higher epoch beats a higher seq; **manual, epoch-bumping
+failover**; and **`Settle()` anti-entropy** that converges only the currently
+*connected* nodes. A model that pattern-matches a single-leader "replicate to all
+reachable" design passes the easy convergence cases but fails the quorum-reject,
+no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 
 ## How it is built / graded
 
-- **Starter code:** the participant's `KeyValueDb` repo, with `KeyValueStore.cs`
-  deleted (Dockerfile build step). The agent never sees the test suite.
+- **Starter code:** the `KeyValueDb` library project with only the `TypeRegistry`
+  helper (the serialization allow-list). The agent writes the cluster from scratch
+  under `src/KeyValueDb/`. The agent never sees the test suite.
 - **Grading:** `tests/test_outputs.py` builds a *fresh* xUnit project under `/tmp`
-  that project-references the agent's library and runs the canonical 24-fact
-  suite (CRUD + type-safety, snapshot/load round-trips incl. a 50k-entry
-  large-snapshot, an append-only write-ahead log with replay/compaction/truncated-
-  tail recovery, and per-entry TTL), parsing the `.trx` so each fact is its own
-  pytest case. The grading
-  project lives outside `/app`, so nothing the agent edits under `/app/tests`
-  can influence the result. The harness injects `tests/` (and `solution/`) into
-  the container **only at verification time**, after the agent's trajectory ends,
-  so the agent never sees them during its run. Test-only frameworks (xunit,
-  Microsoft.NET.Test.Sdk) are not baked into the image; they restore from NuGet at
-  verification time (`allow_internet = true`).
-- **Oracle:** `solution/solve.sh` writes the reference `KeyValueStore.cs`.
+  that project-references the agent's library and runs the canonical 10-scenario
+  suite, parsing the `.trx` so each scenario is its own pytest case. The grading
+  project lives outside `/app`; the harness injects `tests/` only at verification
+  time (after the agent's run), so the agent never sees them. Test-only frameworks
+  restore from NuGet at verification time (`allow_internet = true`) — none ship in
+  the image.
+- **Oracle:** `solution/solve.sh` writes the reference cluster (synchronous quorum,
+  tombstones, `(epoch,seq)` versioning, `Settle` anti-entropy, manual failover).
 
 ## Completion Rates
 
-Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail
-≥1 out of 5), graded against the 24-fact suite.
+Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
+out of 5), graded against the 10-scenario suite.
 
 | Model | Pass rate (k=5) |
 |-------|-----------|
-| Oracle | 24/24 facts pass; 1/1 and 3/3 trials pass (harness, plus local offline `--network none`) |
+| Oracle | 10/10 scenarios pass; 1/1 and 3/3 trials pass (deterministic) |
 | Sonnet 4.6 | **0/5 passed** (mean 0.000) — informational only |
-| Opus 4.6 | **1/5 passed** (mean 0.200) |
-| Avocado | **4/5 passed** (mean 0.800) |
+| Opus 4.6 | **2/5 passed** (mean 0.400) |
+| Avocado | **5/5 passed** (mean 1.000) |
 
-> Calibration target met: **both** Opus 4.6 (1/5) and Avocado (4/5) pass ≥1 and
-> fail ≥1 of 5. Oracle validated via the harness and locally (`docker build` +
-> grading project, `--network none`). Sonnet rates are informational and not part
-> of validation.
+> Calibration target met via **Opus 4.6 (2/5)** — passes ≥1 and fails ≥1 of 5.
+> Avocado solves the task (5/5), confirming it is cleanly solvable from the spec.
+> All failures are genuine behavioral gaps — no crashes, no plan-mode dropouts; the
+> oracle is deterministic (3/3).
+
+> Novelty check: **LOW** contamination risk (see `docs/plans/`). The design omits the
+> canonical, heavily-memorized Raft machinery (timeout election, replicated log,
+> RequestVote/AppendEntries) in favor of a static leader, manual epoch failover, and
+> `Settle` anti-entropy — so a memorized Raft/Dynamo solution cannot pass.
 
 ## Model Analysis
 
-Every trial across all three models **compiled** against the hidden suite (the
-public API is pinned in `instruction.md`), so all failures are **behavioral**. All
-trials in this run also actually implemented the file — see the note on plan mode
-below.
+Every trial compiled and ran (one Sonnet trial compiled but failed all scenarios at
+runtime — see below), so all failures are **behavioral**, not setup/harness artifacts.
 
-### Opus 4.6 — 1/5 passed
-- 1 trial passed all 24 facts.
-- The other 4 trials each failed the **same 2** facts (passed the other 22):
-  `Get_missing_key_throws` and `Ttl_entry_expires_after_clock_advances`. Root
-  cause is a single contract error: `Get` returns `null` for a missing (or
-  expired) key instead of throwing `KeyNotFoundException` — e.g.
-  `if (_data.TryGetValue(key, out var e) && !IsExpired(e)) return e.Value; return null;`.
-  The expired-key TTL assertion fails for the same reason (it expects `Get` to
-  throw once the clock passes the entry's expiry).
+### Opus 4.6 — 2/5 passed
+- 2 trials passed all 10 scenarios.
+- 3 trials failed **only** `Unregistered_value_type_is_rejected_registered_round_trips`:
+  the implementation does not enforce the **registry allow-list on the write path** —
+  an unregistered value type is committed instead of the write being rejected
+  (`Set` should return `false`). Every hard distributed scenario — quorum
+  commit/reject, no-local-apply, tombstone no-resurrection, anti-entropy catch-up,
+  failover ordering, epoch-beats-seq, conflict resolution — **passed** in all trials.
 
-### Avocado — 4/5 passed
-- 4 trials passed all 24 facts.
-- 1 trial failed exactly one fact: `Compact_rewrites_log_to_live_state` — the
-  append-only log was not rewritten to one record per live key after `Compact()`.
+### Avocado — 5/5 passed
+- Passed all 10 scenarios in every trial, including the allow-list case. Confirms the
+  task is solvable from the provided spec.
 
 ### Sonnet 4.6 — 0/5 passed (informational)
-- 4/5 trials failed the **same** `Get_missing_key_throws` +
-  `Ttl_entry_expires_after_clock_advances` pair as Opus (the `Get`-returns-`null`
-  contract gap).
-- 1/5 trial instead failed `Load_throws_for_unregistered_type` plus both
-  compaction facts (`Compact_rewrites_log_to_live_state`,
-  `Compact_keeps_log_open_for_further_appends`).
+- 4 trials failed **only** the allow-list scenario (the same gap as Opus).
+- 1 trial compiled but failed **all 10** scenarios — a pervasive correctness bug
+  (the cluster never replicates/commits correctly), i.e. a weaker attempt that didn't
+  realize the contract.
 
 ### Dominant failure mode (across all models)
-The dominant reasoning gap is the **`Get` exception contract**: `Get` must throw
-`KeyNotFoundException` for a key that is absent or has expired, while the separate
-`TryGet` API is the non-throwing path. Models conflate the nullable `object?`
-return (which exists because `null` is a *storable value* — see
-`Null_values_round_trip`) with "missing ⇒ return null", and so never throw. This
-accounts for **8 of the 9 failing trials** (Opus 4 + Sonnet 4). The secondary gap
-is **log compaction** (`Compact` must rewrite the open log to one record per live
-key and leave it usable for further appends): Avocado's single failure and one
-Sonnet trial. Both are genuine reasoning/robustness gaps, not task-setup issues —
-the standard .NET idiom (indexer/`Get` throws, `TryGetValue`/`TryGet` doesn't) is
-discoverable from the API list, the reference solution implements both correctly,
-and stronger configurations get them right (Avocado 4/5) — so the task is clearly
-solvable from the provided context.
-
-> **Plan mode (resolved).** An earlier calibration of this task saw 2/5 Opus
-> trials score 0 because the agent drafted a plan, called `ExitPlanMode` to request
-> approval, and halted without ever writing `KeyValueStore.cs` — a harness artifact,
-> not a reasoning gap. `instruction.md` now instructs the agent to implement the
-> files directly without stopping for plan approval; in the run above **every**
-> trial across all three models produced an implementation, so all reported
-> failures are genuine behavioral gaps.
-
-Other reasoning surface the task exercises (handled correctly by the passing
-trials but failure-prone in general): serializing each value by its *runtime* type
-to match the `SnapshotModels` schema; encoding `null` values as
-`ValueType=null`/`Value=null`; the exact `TypeRegistry` exception contract on
-save/load; the snapshot `Version` check; and thread-safe concurrent writes.
+**Registry allow-list enforcement on writes** — Opus 3/3 failing trials + Sonnet 4/5
+trials. The spec requires replicated values to be on the allow-list (instruction
+point 5) and writes to fail via a `bool` return (points 6 & 8); an unregistered value
+must therefore be **rejected** (`Set` → `false`). Models implement the consensus
+machinery correctly but skip enforcing this gate on the replication path. It is a
+genuine spec-adherence/reasoning gap, not a task-setup issue: the reference solution
+enforces it (an allow-list check before the quorum write), and the harder consensus
+scenarios are solved by frontier models — so the task is clearly solvable, and the
+differentiation is a specific, clean correctness detail rather than a crash or
+ambiguity. (Note: enforcing on the *replication* path, not just locally, is the
+subtlety — the value must be rejected before it can be committed to other nodes.)
 
 ## Anti-Cheating Analysis
 
-- **Hardcoded outputs:** grading runs a behavioral xUnit suite (round-trips,
-  concurrency, exception types) against the compiled library — there is no fixed
-  output string to print.
-- **Overfitting to visible tests:** the agent never sees the test suite. The
-  harness injects it under `/tests/grading/` only at verification time (after the
-  agent's run), and grading happens in a fresh `/tmp` project the agent cannot
-  reach.
-- **Modifying test files:** the grader ignores `/app/tests` entirely; it
-  constructs its own project from the hidden canonical test file and only
-  project-references the agent's library, so edits under `/app` can't alter the
-  assertions.
-- **Bypassing the intended solution path:** the only thing graded is the
-  observable behavior of `KeyValueStore` through its public API; the agent must
-  actually implement the store (snapshot format, type allow-list, concurrency) to
-  pass. Deleting `KeyValueStore.cs` (rather than stubbing it) means there is no
-  partial scaffold to game.
+- **Hardcoded outputs:** grading runs a behavioral scenario suite (quorum
+  commit/reject, partition/heal convergence, tombstone no-resurrection, failover
+  ordering) against the compiled library — there is no fixed output string to print.
+- **Overfitting to visible tests:** the agent never sees the suite. The harness
+  injects it under `/tests/grading/` only at verification time, and grading happens
+  in a fresh `/tmp` project the agent cannot reach.
+- **Modifying test files:** the grader ignores `/app/tests`; it constructs its own
+  project from the hidden scenario file and only project-references the agent's
+  library, so edits under `/app` can't alter the assertions.
+- **Bypassing the intended solution path:** only the observable behavior of the
+  cluster through its public contract is graded. The agent must actually implement
+  quorum commit, tombstones, `(epoch,seq)` resolution, and `Settle` anti-entropy to
+  pass; the exact API names (`IReplicatedKvCluster`, `PromoteLeader`, `Settle`) have
+  zero public footprint, so a verbatim match would itself be a red flag.

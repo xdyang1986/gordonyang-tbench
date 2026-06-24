@@ -2,9 +2,9 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/key-value-store-with-snapshot"
-description = "Implement a thread-safe, heterogeneous-typed in-memory key/value store in C# (.NET 8) with consistent, atomic JSON snapshot-to-disk and safe load-back."
+description = "Implement an in-process distributed key/value store in C# (.NET 8): N replica nodes with a configured leader, synchronous quorum writes, versioned tombstones, manual epoch-bump failover, and Settle-driven anti-entropy convergence."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["csharp", "dotnet", "key-value-store", "serialization", "concurrency"]
+keywords = ["csharp", "dotnet", "distributed-systems", "replication", "consensus", "quorum"]
 
 [metadata]
 author_name = "Gordon Yang"
@@ -12,21 +12,16 @@ author_email = "gordonyang@meta.com"
 difficulty = "hard"
 category = "software-engineering"
 languages = ["csharp"]
-tags = ["csharp", "dotnet", "serialization", "concurrency", "persistence"]
-expert_time_estimate_min = 30.0
-junior_time_estimate_min = 90.0
+tags = ["csharp", "dotnet", "distributed-systems", "replication", "quorum", "consensus"]
+expert_time_estimate_min = 45.0
+junior_time_estimate_min = 120.0
 
 [verifier]
-# Verify in the agent's own container: it already has the .NET SDK, the warmed
-# NuGet cache, and the agent's implementation under /app. Test files are copied in
-# only at verification time, so the agent never sees them during its run. (Separate
-# mode would require a dedicated tests/Dockerfile verifier image.)
+# Verify in the agent's own container: it already has the .NET SDK and the agent's
+# implementation under /app. Test files are copied in only at verification time, so
+# the agent never sees them during its run. Test-only frameworks restore from NuGet
+# at verification time (allow_internet = true).
 timeout_sec = 900.0
-# Run the grader as a non-root user so in-process agent code (Flow B) can't read
-# root-owned oracle files. Off by default because this template's test.sh uses
-# apt-get (needs root); enable it when your verifier imports/runs agent code
-# in-process and does not itself need root.
-# user = "nobody"
 
 [agent]
 timeout_sec = 1800.0
