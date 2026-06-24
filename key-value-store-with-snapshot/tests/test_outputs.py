@@ -2,25 +2,27 @@
 
 The agent implements the in-process replicated cluster (the `IReplicatedKvCluster`
 interface + `DistributedKv.CreateCluster` factory) from scratch under
-/app/src/KeyValueDb/. We grade it by building a *fresh* xUnit project (under /tmp,
+/app/src/KeyValueDb/. We grade it with a *fresh* .NET console program (under /tmp,
 outside anything the agent could have modified) that project-references the agent's
-library and runs the canonical scenario suite. Parsing the .trx report lets each
-scenario surface as its own pytest case.
+library and runs the canonical scenario suite, printing one `SCENARIO <name>
+PASS/FAIL` line per scenario.
+
+The grader is a plain console app (SDK-only, no test-framework packages) so it needs
+no NuGet restore at verification time and runs fully offline. Each `SCENARIO` line
+surfaces as its own pytest case.
 """
 
 import os
+import re
 import shutil
 import subprocess
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
 AGENT_LIB_CSPROJ = "/app/src/KeyValueDb/KeyValueDb.csproj"
-HIDDEN_TESTS = "/tests/grading/DistributedKvTests.cs"
+HIDDEN_GRADER = "/tests/grading/GradingProgram.cs"
 GRADE_DIR = Path("/tmp/kvdb-grading")
-
-TRX_NS = {"t": "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"}
 
 # The canonical scenarios the agent's implementation must satisfy.
 EXPECTED_TESTS = [
@@ -37,19 +39,16 @@ EXPECTED_TESTS = [
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 
+# Console grading project: SDK-only (Exe), references the agent's library, no
+# external packages -> no NuGet needed, builds and runs offline.
 GRADING_CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
-    <IsTestProject>true</IsTestProject>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="{lib}" />
   </ItemGroup>
@@ -58,6 +57,8 @@ GRADING_CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
     lib=AGENT_LIB_CSPROJ
 )
 
+SCENARIO_RE = re.compile(r"^SCENARIO (\S+) (PASS|FAIL)(?::\s*(.*))?$")
+
 
 def _run(cmd, cwd=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=480)
@@ -65,60 +66,46 @@ def _run(cmd, cwd=None):
 
 @pytest.fixture(scope="session")
 def grading_results():
-    """Build & run the canonical suite against the agent's library once."""
+    """Build & run the console grading harness against the agent's library once."""
     assert shutil.which("dotnet"), "dotnet SDK not found in the grading environment"
     assert os.path.exists(
         AGENT_LIB_CSPROJ
     ), f"Agent library project missing at {AGENT_LIB_CSPROJ}"
-    assert os.path.exists(HIDDEN_TESTS), f"Hidden test file missing at {HIDDEN_TESTS}"
+    assert os.path.exists(HIDDEN_GRADER), f"Hidden grader missing at {HIDDEN_GRADER}"
 
     if GRADE_DIR.exists():
         shutil.rmtree(GRADE_DIR)
     GRADE_DIR.mkdir(parents=True)
 
     (GRADE_DIR / "Grading.csproj").write_text(GRADING_CSPROJ)
-    shutil.copy(HIDDEN_TESTS, GRADE_DIR / "DistributedKvTests.cs")
+    shutil.copy(HIDDEN_GRADER, GRADE_DIR / "GradingProgram.cs")
 
-    trx = GRADE_DIR / "results.trx"
     proc = _run(
-        [
-            "dotnet",
-            "test",
-            "Grading.csproj",
-            "-c",
-            "Release",
-            "--logger",
-            f"trx;LogFileName={trx}",
-            "--results-directory",
-            str(GRADE_DIR),
-        ],
+        ["dotnet", "run", "-c", "Release", "--project", "Grading.csproj"],
         cwd=str(GRADE_DIR),
     )
 
     diagnostics = (
-        f"dotnet test exit={proc.returncode}\n"
+        f"dotnet run exit={proc.returncode}\n"
         f"----- STDOUT -----\n{proc.stdout[-6000:]}\n"
         f"----- STDERR -----\n{proc.stderr[-3000:]}\n"
     )
 
     outcomes = {}
-    if trx.exists():
-        root = ET.parse(trx).getroot()
-        for r in root.findall(".//t:UnitTestResult", TRX_NS):
-            name = r.get("testName", "")
-            short = name.split(".")[-1]
-            outcomes[short] = r.get("outcome", "Unknown")
+    for line in proc.stdout.splitlines():
+        m = SCENARIO_RE.match(line.strip())
+        if m:
+            outcomes[m.group(1)] = "Passed" if m.group(2) == "PASS" else "Failed"
 
-    return {"outcomes": outcomes, "diagnostics": diagnostics, "built": trx.exists()}
+    return {"outcomes": outcomes, "diagnostics": diagnostics, "built": len(outcomes) > 0}
 
 
 def test_suite_built_and_ran(grading_results):
     """The agent's library must compile (interface + factory implemented) and run."""
     assert grading_results["built"], (
-        "The grading suite did not produce a result file — the agent's "
-        "implementation likely failed to compile (missing/mismatched "
-        "IReplicatedKvCluster or DistributedKv.CreateCluster).\n\n"
-        + grading_results["diagnostics"]
+        "The grader produced no scenario results — the agent's implementation likely "
+        "failed to compile (missing/mismatched IReplicatedKvCluster or "
+        "DistributedKv.CreateCluster).\n\n" + grading_results["diagnostics"]
     )
 
 
@@ -126,8 +113,7 @@ def test_suite_built_and_ran(grading_results):
 def test_scenario_passes(grading_results, test_name):
     outcome = grading_results["outcomes"].get(test_name)
     assert outcome is not None, (
-        f"Expected scenario '{test_name}' did not run.\n\n"
-        + grading_results["diagnostics"]
+        f"Expected scenario '{test_name}' did not run.\n\n" + grading_results["diagnostics"]
     )
     assert outcome == "Passed", (
         f"'{test_name}' outcome was {outcome!r}, expected 'Passed'.\n\n"

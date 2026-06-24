@@ -26,13 +26,14 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 - **Starter code:** the `KeyValueDb` library project with only the `TypeRegistry`
   helper (the serialization allow-list). The agent writes the cluster from scratch
   under `src/KeyValueDb/`. The agent never sees the test suite.
-- **Grading:** `tests/test_outputs.py` builds a *fresh* xUnit project under `/tmp`
-  that project-references the agent's library and runs the canonical 11-scenario
-  suite, parsing the `.trx` so each scenario is its own pytest case. The grading
-  project lives outside `/app`; the harness injects `tests/` only at verification
-  time (after the agent's run), so the agent never sees them. Test-only frameworks
-  restore from NuGet at verification time (`allow_internet = true`) — none ship in
-  the image.
+- **Grading:** `tests/test_outputs.py` builds a *fresh* .NET **console** grading
+  program under `/tmp` that project-references the agent's library and runs the
+  canonical 11-scenario suite, printing one `SCENARIO <name> PASS/FAIL` line each
+  (parsed so every scenario is its own pytest case). The grader is SDK-only (no test
+  framework, no external packages), so it builds and runs **fully offline** — no
+  NuGet access is needed at verification time. The grading project lives outside
+  `/app`; the harness injects `tests/` only at verification time (after the agent's
+  run), so the agent never sees them.
 - **Oracle:** `solution/solve.sh` writes the reference cluster (synchronous quorum,
   tombstones, `(epoch,seq)` versioning, `Settle` anti-entropy, manual failover).
 
