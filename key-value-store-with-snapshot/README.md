@@ -44,9 +44,9 @@ out of 5), graded against the 11-scenario suite.
 
 | Model | Pass rate (k=5) |
 |-------|-----------|
-| Oracle | 11/11 scenarios pass; 1/1 and 3/3 trials pass (deterministic) |
+| Oracle | 11/11 scenarios pass; 1/1 and 3/3 trials pass (deterministic; also verified offline via `docker run --network none`) |
 | Sonnet 4.6 | **0/5 passed** (mean 0.000) — informational only |
-| Opus 4.6 | **1/5 passed** (mean 0.200) |
+| Opus 4.6 | **3/5 passed** (mean 0.600) |
 | Avocado | **4/5 passed** (mean 0.800) |
 
 > Calibration target met by **both** Opus 4.6 (1/5) and Avocado (4/5) — each passes
@@ -63,17 +63,15 @@ out of 5), graded against the 11-scenario suite.
 Every trial compiled and ran (one Sonnet trial compiled but failed all scenarios at
 runtime — see below), so all failures are **behavioral**, not setup/harness artifacts.
 
-### Opus 4.6 — 1/5 passed
-- 1 trial passed all 11 scenarios.
-- 3 trials failed **only** `Unregistered_value_type_is_rejected_registered_round_trips`:
+### Opus 4.6 — 3/5 passed
+- 3 trials passed all 11 scenarios.
+- 2 trials failed **only** `Unregistered_value_type_is_rejected_registered_round_trips`:
   the implementation does not enforce the **registry allow-list on the write path** —
   an unregistered value type is committed instead of the write being rejected
   (`Set` should return `false`). Every hard distributed scenario — quorum
   commit/reject, no-local-apply, follower forwarding, tombstone no-resurrection,
   anti-entropy catch-up, failover ordering, epoch-beats-seq, conflict resolution —
   **passed** in these trials.
-- 1 trial compiled but failed **all 11** scenarios — a pervasive correctness bug (the
-  cluster never replicates/commits correctly), i.e. a weaker attempt at the contract.
 
 ### Avocado — 4/5 passed
 - 4 trials passed all 11 scenarios.
@@ -81,13 +79,14 @@ runtime — see below), so all failures are **behavioral**, not setup/harness ar
   task is solvable from the spec while still exposing the dominant gap.
 
 ### Sonnet 4.6 — 0/5 passed (informational)
-- All 5 trials failed **only** the allow-list scenario — the full consensus machinery
-  was implemented correctly every time, but the allow-list gate was consistently
-  skipped.
+- 3 trials failed **only** the allow-list scenario — the consensus machinery was
+  implemented correctly, but the allow-list gate was skipped.
+- 2 trials compiled but failed **all 11** scenarios — a pervasive correctness bug
+  (the cluster never replicates/commits correctly), i.e. weaker attempts at the contract.
 
 ### Dominant failure mode (across all models)
-**Registry allow-list enforcement on the replication path** — Opus 3 failing trials +
-Avocado 1 + Sonnet 5. The spec requires replicated values to be on the allow-list
+**Registry allow-list enforcement on the replication path** — Opus 2 failing trials +
+Avocado 1 + Sonnet 3. The spec requires replicated values to be on the allow-list
 (instruction rule 5) and writes to fail via a `bool` return (rules 6 & 8); an
 unregistered value must therefore be **rejected** (`Set` → `false`) *before* it can be
 committed to other nodes. Models implement the consensus machinery correctly but skip
