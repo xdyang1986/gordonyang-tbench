@@ -2,13 +2,12 @@ Build an autoscaling feature in Go from scratch at /app (stdlib only) that decid
 
 Required behavior:
 
-The autoscaler targets a configurable average CPU (default 60%) and adjusts replica count between a min and max. It must:
-1. Scale up immediately when CPU usage is above the target.
-2. Ignore transient drops: a brief, single-sample dip in CPU must not scale the fleet in. Only scale in after low CPU has persisted for a configurable stabilization window.
-3. Scale in gradually: when scaling down, remove at most a configurable fraction of the fleet per step, never below the minimum.
-4. Stay within [min, max] replicas and avoid thrashing near the target (a tolerance dead band).
-5. The replica formula: desired = ceil(current * cpu / target), clamped to bounds, then adjusted by the stabilization window and the scale-down rate limit.
-6. Support predictive scale up, it can predict the traffic based on previous data and pre-scale up if needed, don't need to pre-scale down. By default, it's off.
+1. It should scale up immediately when CPU usage is above the target.
+2. Please ignore transient drops: a brief, single-sample dip in CPU must not scale the fleet in. Only scale in after low CPU has persisted for a configurable stabilization window.
+3. It should scale in gradually: when scaling down, remove at most a configurable fraction of the fleet per step, never below the minimum.
+4. It should stay within [min, max] replicas and avoid thrashing near the target (a tolerance dead band).
+5. Please use this replica formula: desired = ceil(current * cpu / target), and consider bounds, stabilization window and the scale-down rate limit.
+6. It needs to support predictive scale up, it can predict the traffic based on previous data and pre-scale up if needed, don't need to pre-scale down. By default, it's off.
 
 Input:
 
@@ -33,9 +32,9 @@ Output
 Write to stdout: a header line, then one line per input sample, in CSV:
 tick,cpu,replicas,action
 
-1. tick — 0-based sample index.
-2. cpu — the input sample echoed, formatted to exactly 2 decimals.
-3. replicas — fleet size after this tick's decision.
-4. action — exactly one of up if increased, down if decreased, none if unchanged.
+1. tick is a 0-based sample index.
+2. cpu is the input sample echoed, formatted to exactly 2 decimals.
+3. replicas is the fleet size after this tick's decision.
+4. action means exactly one of up if increased, down if decreased, none if unchanged.
 
 The output must be deterministic.
