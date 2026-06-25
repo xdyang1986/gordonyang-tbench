@@ -3,10 +3,10 @@ Build an autoscaling feature in Go from scratch at /app (stdlib only) that decid
 Required behavior:
 
 1. It should scale up immediately when CPU usage is above the target.
-2. Please ignore transient drops: a brief, single-sample dip in CPU must not scale the fleet in. Only scale in after low CPU has persisted for a configurable stabilization window.
+2. It should ignore transient drops: a brief, single-sample dip in CPU must not scale the fleet in. Only scale in after low CPU has persisted for a configurable stabilization window.
 3. It should scale in gradually: when scaling down, remove at most a configurable fraction of the fleet per step, never below the minimum.
 4. It should stay within [min, max] replicas and avoid thrashing near the target (a tolerance dead band).
-5. Please use this replica formula: desired = ceil(current * cpu / target), and consider bounds, stabilization window and the scale-down rate limit.
+5. Let's use this replica formula: desired = ceil(current * cpu / target), and consider bounds, stabilization window and the scale-down rate limit.
 6. It needs to support predictive scale up, it can predict the traffic based on previous data and pre-scale up if needed, don't need to pre-scale down. By default, it's off.
 
 Input:
@@ -35,6 +35,6 @@ tick,cpu,replicas,action
 1. tick is a 0-based sample index.
 2. cpu is the input sample echoed, formatted to exactly 2 decimals.
 3. replicas is the fleet size after this tick's decision.
-4. action means exactly one of up if increased, down if decreased, none if unchanged.
+4. action: it has three value: up/down/none, up means increase, down means decrease and none means unchanged.
 
 The output must be deterministic.
