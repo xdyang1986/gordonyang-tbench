@@ -16,3 +16,4 @@ Notes:
 1. Stable data-testid hooks: search, filter-industry, filter-product, filter-confidence, filter-status, sort, summary-count, summary-uplift, opp-row, row-status, row-assignee;
 2. testid hooks for the width change: col-<key> on each column header and resize-<key> on its drag handle, for keys: customer, industry, product, spend, uplift, confidence, status, assignee.
 2. Opportunities come from the src/data/opportunities.ts.
+3. The feed may have thousands of rows, handle the scenario properly.
