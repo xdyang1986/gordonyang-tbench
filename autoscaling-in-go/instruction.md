@@ -6,7 +6,7 @@ required behavior:
 2. It ignores transient drops: a brief, single-sample dip in CPU must not scale the fleet in. Only scale in after low CPU has persisted for a configurable stabilization window.
 3. It needs to scale in gradually: when scaling down, remove at most a configurable fraction of the fleet per step, never below the minimum.
 4. It must stay within [min, max] replicas and avoid thrashing near the target (a tolerance dead band).
-5. Let's use this replica formula: desired = ceil(current * cpu / target), and consider bounds, stabilization window and the scale-down rate limit.
+5. Replic should be calculated based on this formula: desired = ceil(current * cpu / target), and consider bounds, stabilization window and the scale-down rate limit.
 6. It needs to support predictive scale up, it can predict the traffic based on previous data and pre-scale up if needed, don't need to pre-scale down. By default, it's off.
 
 input:
@@ -15,12 +15,12 @@ The first line is the configuration: a single line of space-separated key=value 
 
 configuration key:
 target: target average CPU (fraction). range (0,1]
-min: minimum replicas. range: >= 1
-max: maximum replicas. range >= min
+min: minimum replicas.
+max: maximum replicas.
 tolerance: dead-band around target. range: [0,1)
-down_window: scale-down stabilization window, seconds. range: >= 0
-max_scale_down_frac: max fraction of fleet removable per tick; range (0,1]
-tick: seconds between ticks. range: >= 1
+down_window: scale-down stabilization window, seconds.
+max_scale_down_frac: max fraction of fleet removable per tick;
+tick: seconds between ticks.
 start: initial replica count.
 predict_lookahead: optional, if omitted or 0, means disable. Otherwise, it's the look-ahead seconds.
 
