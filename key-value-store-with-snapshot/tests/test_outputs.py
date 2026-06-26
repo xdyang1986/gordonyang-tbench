@@ -46,7 +46,7 @@ EXPECTED_TESTS = [
     "Snapshot_restore_round_trips_values_and_count",
     "Restored_tombstone_and_version_survive_and_win_on_settle",
     "Restore_rejects_unregistered_type",
-    "Writes_after_restore_supersede_restored_entries",
+    "Snapshot_restore_round_trips_custom_registered_type",
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 

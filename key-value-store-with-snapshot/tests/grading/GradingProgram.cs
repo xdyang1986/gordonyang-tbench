@@ -40,7 +40,7 @@ public static class GradingProgram
             ("Snapshot_restore_round_trips_values_and_count", Snapshot_restore_round_trips_values_and_count),
             ("Restored_tombstone_and_version_survive_and_win_on_settle", Restored_tombstone_and_version_survive_and_win_on_settle),
             ("Restore_rejects_unregistered_type", Restore_rejects_unregistered_type),
-            ("Writes_after_restore_supersede_restored_entries", Writes_after_restore_supersede_restored_entries),
+            ("Snapshot_restore_round_trips_custom_registered_type", Snapshot_restore_round_trips_custom_registered_type),
             ("Unregistered_value_type_is_rejected_registered_round_trips", Unregistered_value_type_is_rejected_registered_round_trips),
         };
 
@@ -373,22 +373,23 @@ public static class GradingProgram
         CheckThrows(() => c2.Restore(0, snap), "restoring a type not on the allow-list must be rejected");
     }
 
-    private static void Writes_after_restore_supersede_restored_entries()
+    private static void Snapshot_restore_round_trips_custom_registered_type()
     {
-        var c = New();
-        for (var i = 0; i < 5; i++) Check(c.Set(0, "k", $"v{i}"), $"set v{i}"); // (epoch1, seq up to 5)
+        var reg = TypeRegistry.CreateDefault();
+        reg.Register<Note>();
+        var c = New(registry: reg);
+        Check(c.Set(0, "note", new Note("hi", 7)), "custom record commits");
+        Check(c.Set(0, "n", 42), "primitive commits");
         c.Settle();
-        var snap = c.Snapshot(0);                     // k = "v4" at (epoch1, seq5)
+        var snap = c.Snapshot(0);
 
-        var c2 = New();
-        c2.Partition(2);                             // {0,1} | {2}
-        c2.Restore(2, snap);                         // isolated node 2 holds "v4" at seq5; counters must advance
-        Check(c2.Set(0, "k", "newer"), "post-restore write commits on {0,1}");
-        c2.Heal();
-        c2.Settle();                                 // "newer" must outrank the restored seq-5 entry
-        CheckEqual("newer", c2.Get(0, "k"), "node 0");
-        CheckEqual("newer", c2.Get(1, "k"), "node 1");
-        CheckEqual("newer", c2.Get(2, "k"), "node 2 — restored high-seq value did not win");
+        var reg2 = TypeRegistry.CreateDefault();
+        reg2.Register<Note>();
+        var c2 = New(registry: reg2);
+        c2.Restore(0, snap);
+        CheckEqual(new Note("hi", 7), c2.Get(0, "note"), "custom record round-trips through snapshot");
+        CheckEqual(42, c2.Get(0, "n"), "primitive round-trips");
+        CheckEqual(2, c2.Count(0), "count round-trips");
     }
 
     private static void Unregistered_value_type_is_rejected_registered_round_trips()

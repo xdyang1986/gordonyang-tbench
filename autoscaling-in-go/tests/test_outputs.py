@@ -279,3 +279,47 @@ def test_predictive_scale_up_only_on_falling_trend():
     assert all(
         o >= f for o, f in zip(on, off)
     ), f"prediction must not scale down (only up): on={on} off={off}"
+
+
+# ---- hard edge cases: exact interaction boundaries (fair, derived from the rules) ----
+
+
+def test_exact_integer_ratio_no_over_provision_up():
+    # ratio is exactly 2.0 -> exactly 8 replicas, not 9 (no FP over-provision).
+    cfg = "target=0.50 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=4"
+    rs = rows(run(cfg + "\n1.00\n").stdout)
+    assert rs[0] == ("1.00", 8, "up"), f"exact 2.0x must give 8 up, got {rs[0]}"
+
+
+def test_exact_integer_ratio_no_under_provision_down():
+    # ratio is exactly 0.5 -> exactly 4 replicas.
+    cfg = "target=0.50 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=8"
+    rs = rows(run(cfg + "\n0.25\n").stdout)
+    assert rs[0] == ("0.25", 4, "down"), f"exact 0.5x must give 4 down, got {rs[0]}"
+
+
+def test_scale_up_is_not_rate_limited():
+    # max_scale_down_frac gates scale-DOWN only; a spike scales up fully in one tick.
+    cfg = "target=0.50 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=0.10 tick=30 start=2"
+    rs = rows(run(cfg + "\n1.00\n").stdout)
+    assert rs[0] == (
+        "1.00",
+        4,
+        "up",
+    ), f"scale-up must ignore the down rate limit, got {rs[0]}"
+
+
+def test_clamp_to_max_still_reports_up():
+    # desired (10) exceeds max=8 -> clamp to 8, and the action is still 'up'.
+    cfg = "target=0.60 min=1 max=8 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=6"
+    rs = rows(run(cfg + "\n1.00\n").stdout)
+    assert rs[0] == ("1.00", 8, "up"), f"clamped scale-up must report up, got {rs[0]}"
+
+
+def test_rate_limited_scale_in_exact_geometric():
+    # each tick removes at most floor(current * frac); the drain is geometric:
+    # 10 -> 5 -> 3 -> 2 -> 1, never below min.
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=0.5 tick=30 start=10"
+    rs = rows(run(cfg + "\n" + "\n".join(["0.10"] * 5) + "\n").stdout)
+    seq = [rs[i][1] for i in sorted(rs)]
+    assert seq == [5, 3, 2, 1, 1], f"geometric rate-limited drain mismatch: {seq}"

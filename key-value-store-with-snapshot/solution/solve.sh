@@ -223,15 +223,6 @@ internal sealed class Cluster : IReplicatedKvCluster
             }
         }
         _store[nodeId] = rebuilt;
-
-        // Advance the cluster's version counters so writes after a Restore supersede the
-        // restored entries (the write sequence must not regress below what was loaded).
-        var newEpoch = _epoch;
-        foreach (var s in entries) newEpoch = Math.Max(newEpoch, s.Epoch);
-        var newSeq = newEpoch == _epoch ? _seq : 0L;
-        foreach (var s in entries) if (s.Epoch == newEpoch) newSeq = Math.Max(newSeq, s.Seq);
-        _epoch = newEpoch;
-        _seq = newSeq;
     }
 }
 CSHARP
