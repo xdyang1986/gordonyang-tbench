@@ -2,12 +2,11 @@ Build an autoscaling feature in Go from scratch at /app that decides how many in
 
 Requirements:
 
-1. Scale up and down based on the CPU usage.
+1. Scale up and down based on the CPU usage. The desired replica count that brings the average CPU to target is ceil(current * cpu / target)(round up). When |cpu/target - 1| <= tolerance, don't scale up or down.
 2. Don't scale down if there is a transient drop in CPU.
-3. Scale down should not be too fast.
+3. Scale down should not be too fast: per tick, remove at most floor(current * max_scale_down_frac) replicas, but always at least 1 when scaling in.
 4. You should consider min and max constraints while doing the scaling.
 5. Support predictive scale up, the prediction is based on previous data and pre-scale up if needed, don't based on the prediction to do the scale down. The feature is off by default. And only pre-scale on a clear sustained upward trend.
-6. Add a new safety guard rule, if any data fetch is failure because of whatever reason that cannot make a right decision for a while (such as one hour), we should fallback to a safe instance count (such as max count in the previous 7 days).
 
 Input: The first line is the configuration: a single line of space-separated key=value pairs. Every remaining non-blank line is one CPU sample.
 
