@@ -92,7 +92,10 @@ mix won't flip a "too easy" verdict; the strong reference models (avocado/gpt-5.
 > RequestVote/AppendEntries) in favor of a static leader, manual epoch failover, and
 > `Settle` anti-entropy — so a memorized Raft/Dynamo solution cannot pass.
 
-## Model Analysis
+## Model Analysis (historical — old 11-scenario suite, original ambiguous spec)
+
+> This section analyses the **original** runs that motivated the re-calibration. For the
+> current, passing numbers see **Current — PASSING** under Completion Rates above.
 
 Every trial compiled and ran (one Sonnet trial compiled but failed all scenarios at
 runtime — see below), so all failures are **behavioral**, not setup/harness artifacts.
@@ -127,13 +130,14 @@ implementation defaulting a **null `registry` to a permissive value** instead of
 `TypeRegistry.CreateDefault()`. The old `instruction.md` never said which default to
 use, and the grader's allow-list scenario constructs the cluster with no registry, so
 passing it hinged on *guessing* the reference's choice (`registry ??
-TypeRegistry.CreateDefault()`). That is a **spec/test-alignment gap**, not a
-distributed-systems reasoning gap: a model can get all the hard consensus logic right
-and still fail purely on the unstated default. Rule 5 has since been amended to state
-the null default explicitly. Because that scenario was the sole differentiator, fixing
-the spec is expected to push pass rates toward 5/5 — see the stale-numbers note under
-**Completion Rates** above; the task needs re-calibration (a genuine new
-differentiator) or retirement.
+TypeRegistry.CreateDefault()`). That was a **spec/test-alignment gap**, not a
+distributed-systems reasoning gap: a model could get all the hard consensus logic right
+and still fail purely on the unstated default. **Resolution:** rule 5 was amended to state
+the null default explicitly. That removed the sole differentiator and made the task too
+easy (confirmed: avocado 5/5, gpt-5.5 5/5), so it was **re-calibrated** — adding the
+differentiator and stress scenarios plus the `Snapshot`/`Restore` capability — and the task
+now **passes** calibration (avocado 0/5, gpt-5.5 3/5). See **Current — PASSING** under
+Completion Rates above.
 
 ## Anti-Cheating Analysis
 
