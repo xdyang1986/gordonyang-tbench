@@ -16,8 +16,8 @@ public static class GradingProgram
 
     public static int Main()
     {
-        // 26-scenario behavioral suite (11 core consensus + 7 differentiator/stress
-        // + 4 fair corner cases + 4 snapshot/restore scenarios).
+        // 32-scenario behavioral suite (11 core consensus + 7 differentiator/stress
+        // + 4 fair corner cases + 4 snapshot/restore + 6 quorum-read scenarios).
         var scenarios = new (string Name, Action Body)[]
         {
             ("Replicate_and_converge", Replicate_and_converge),
@@ -45,6 +45,12 @@ public static class GradingProgram
             ("Restored_tombstone_and_version_survive_and_win_on_settle", Restored_tombstone_and_version_survive_and_win_on_settle),
             ("Restore_rejects_unregistered_type", Restore_rejects_unregistered_type),
             ("Snapshot_restore_round_trips_custom_registered_type", Snapshot_restore_round_trips_custom_registered_type),
+            ("Quorum_read_returns_committed_value_to_lagging_reader_and_repairs_it", Quorum_read_returns_committed_value_to_lagging_reader_and_repairs_it),
+            ("Quorum_read_fails_without_a_majority", Quorum_read_fails_without_a_majority),
+            ("Quorum_read_returns_newest_across_divergence_and_repairs", Quorum_read_returns_newest_across_divergence_and_repairs),
+            ("Quorum_read_of_deleted_key_throws_and_propagates_tombstone", Quorum_read_of_deleted_key_throws_and_propagates_tombstone),
+            ("Stale_local_read_versus_quorum_read", Stale_local_read_versus_quorum_read),
+            ("Quorum_read_majority_threshold_in_four_node_cluster", Quorum_read_majority_threshold_in_four_node_cluster),
             ("Unregistered_value_type_is_rejected_registered_round_trips", Unregistered_value_type_is_rejected_registered_round_trips),
         };
 
@@ -441,6 +447,76 @@ public static class GradingProgram
         CheckEqual(new Note("hi", 7), c2.Get(0, "note"), "custom record round-trips through snapshot");
         CheckEqual(42, c2.Get(0, "n"), "primitive round-trips");
         CheckEqual(2, c2.Count(0), "count round-trips");
+    }
+
+    // ---- quorum (linearizable) reads with read-repair ----
+
+    private static void Quorum_read_returns_committed_value_to_lagging_reader_and_repairs_it()
+    {
+        var c = New();
+        c.Partition(2);                              // {0,1} | {2}
+        Check(c.Set(0, "k", "v"), "commits on majority {0,1}; node 2 lags");
+        c.Heal();                                   // Heal does not catch node 2 up
+        CheckThrows(() => c.Get(2, "k"), "local read on the lagging node misses");
+        CheckEqual("v", c.QuorumGet(2, "k"), "quorum read returns the committed value");
+        CheckEqual("v", c.Get(2, "k"), "read-repair updated node 2 locally, with no Settle()");
+    }
+
+    private static void Quorum_read_fails_without_a_majority()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "v"), "set");
+        c.Settle();
+        c.Partition(2);                             // node 2 isolated, cannot reach a majority
+        CheckThrows(() => c.QuorumGet(2, "k"), "no reachable majority -> quorum read throws");
+        CheckEqual("v", c.Get(2, "k"), "a stale local read still works for node 2");
+    }
+
+    private static void Quorum_read_returns_newest_across_divergence_and_repairs()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "old"), "old");
+        c.Settle();
+        c.Partition(2);                             // node 2 keeps "old" (epoch 1)
+        c.PromoteLeader(1);                         // epoch 2
+        Check(c.Set(1, "k", "new"), "epoch-2 write on {0,1}");
+        c.Heal();
+        CheckEqual("new", c.QuorumGet(2, "k"), "quorum read returns the newest (higher-epoch) value");
+        CheckEqual("new", c.Get(2, "k"), "node 2 repaired to the newest value");
+    }
+
+    private static void Quorum_read_of_deleted_key_throws_and_propagates_tombstone()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "v"), "set");
+        c.Settle();
+        c.Partition(2);                             // node 2 keeps the live value
+        Check(c.Remove(0, "k"), "delete commits on {0,1}");
+        c.Heal();
+        CheckThrows(() => c.QuorumGet(0, "k"), "newest is a tombstone -> quorum read throws");
+        Check(!c.ContainsKey(2, "k"), "read-repair propagated the tombstone to node 2");
+    }
+
+    private static void Stale_local_read_versus_quorum_read()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "v1"), "v1 everywhere");
+        c.Settle();
+        c.Partition(2);                             // node 2 frozen at v1
+        Check(c.Set(0, "k", "v2"), "v2 on {0,1}");
+        CheckEqual("v1", c.Get(2, "k"), "partitioned node's local read is stale (v1)");
+        c.Heal();
+        CheckEqual("v2", c.QuorumGet(2, "k"), "quorum read returns the latest (v2)");
+    }
+
+    private static void Quorum_read_majority_threshold_in_four_node_cluster()
+    {
+        var c = New(nodes: 4, leader: 0);           // strict majority = 3
+        Check(c.Set(0, "k", "v"), "commit");
+        c.Settle();
+        c.Partition(3);                            // {0,1,2} | {3}
+        CheckEqual("v", c.QuorumGet(0, "k"), "majority side (3 of 4) can quorum-read");
+        CheckThrows(() => c.QuorumGet(3, "k"), "isolated node cannot reach a majority");
     }
 
     private static void Unregistered_value_type_is_rejected_registered_round_trips()

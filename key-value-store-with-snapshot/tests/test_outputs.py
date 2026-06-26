@@ -51,6 +51,12 @@ EXPECTED_TESTS = [
     "Restored_tombstone_and_version_survive_and_win_on_settle",
     "Restore_rejects_unregistered_type",
     "Snapshot_restore_round_trips_custom_registered_type",
+    "Quorum_read_returns_committed_value_to_lagging_reader_and_repairs_it",
+    "Quorum_read_fails_without_a_majority",
+    "Quorum_read_returns_newest_across_divergence_and_repairs",
+    "Quorum_read_of_deleted_key_throws_and_propagates_tombstone",
+    "Stale_local_read_versus_quorum_read",
+    "Quorum_read_majority_threshold_in_four_node_cluster",
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 

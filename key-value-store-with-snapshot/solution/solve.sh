@@ -52,6 +52,10 @@ public interface IReplicatedKvCluster
     /// <summary>Replace a node's state from a snapshot; unregistered types are rejected.</summary>
     void Restore(int nodeId, byte[] snapshot);
 
+    /// <summary>Quorum (linearizable) read: needs a reachable majority; returns the newest
+    /// value and repairs reachable nodes that are behind. Throws on no quorum / missing.</summary>
+    object? QuorumGet(int nodeId, object key);
+
     int LeaderId { get; }
 }
 
@@ -223,6 +227,29 @@ internal sealed class Cluster : IReplicatedKvCluster
             }
         }
         _store[nodeId] = rebuilt;
+    }
+
+    // Quorum read: must reach a strict majority from nodeId; returns the newest version
+    // among the reachable nodes and repairs the reachable ones that are behind.
+    public object? QuorumGet(int nodeId, object key)
+    {
+        var reachable = Enumerable.Range(0, _n).Where(j => Connected(nodeId, j)).ToList();
+        if (reachable.Count < Majority)
+            throw new InvalidOperationException($"No read quorum reachable from node {nodeId}.");
+
+        Entry? newest = null;
+        foreach (var j in reachable)
+            if (_store[j].TryGetValue(key, out var e) && (newest is null || e.Ver.NewerThan(newest.Ver)))
+                newest = e;
+
+        if (newest is not null)                                     // read-repair laggards in the quorum
+            foreach (var j in reachable)
+                if (!_store[j].TryGetValue(key, out var e) || newest.Ver.NewerThan(e.Ver))
+                    _store[j][key] = newest;
+
+        if (newest is null || newest.Tombstone)
+            throw new KeyNotFoundException($"Key '{key}' is not present (quorum read) on node {nodeId}.");
+        return newest.Value;
     }
 }
 CSHARP
