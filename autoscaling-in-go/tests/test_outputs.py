@@ -323,3 +323,88 @@ def test_rate_limited_scale_in_exact_geometric():
     rs = rows(run(cfg + "\n" + "\n".join(["0.10"] * 5) + "\n").stdout)
     seq = [rs[i][1] for i in sorted(rs)]
     assert seq == [5, 3, 2, 1, 1], f"geometric rate-limited drain mismatch: {seq}"
+
+
+# ---- cooldown windows (separate up/down; last gate; off when 0/omitted) ----
+
+
+def test_up_cooldown_suppresses_then_resumes():
+    # up at tick0; tick1 is within up_cooldown (60s, tick=30) -> held; tick2 (60s elapsed) -> up.
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=4 up_cooldown=60"
+    rs = rows(run(cfg + "\n1.00\n1.00\n1.00\n").stdout)
+    assert rs[0] == ("1.00", 7, "up"), f"tick0 should scale up to 7, got {rs[0]}"
+    assert rs[1] == (
+        "1.00",
+        7,
+        "none",
+    ), f"tick1 within up_cooldown must hold, got {rs[1]}"
+    assert rs[2] == (
+        "1.00",
+        12,
+        "up",
+    ), f"tick2 after cooldown must resume scale-up, got {rs[2]}"
+
+
+def test_down_cooldown_suppresses_then_resumes():
+    # down at tick0; tick1 within down_cooldown (60s) -> held; tick2 (60s elapsed) -> down.
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=10 down_cooldown=60"
+    rs = rows(run(cfg + "\n0.30\n0.30\n0.30\n").stdout)
+    assert rs[0] == ("0.30", 5, "down"), f"tick0 should scale down to 5, got {rs[0]}"
+    assert rs[1] == (
+        "0.30",
+        5,
+        "none",
+    ), f"tick1 within down_cooldown must hold, got {rs[1]}"
+    assert rs[2] == (
+        "0.30",
+        3,
+        "down",
+    ), f"tick2 after cooldown must resume scale-down, got {rs[2]}"
+
+
+def test_cooldowns_are_independent():
+    # An up (with a long up_cooldown) must not block a subsequent down (down_cooldown=0).
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=5 up_cooldown=300 down_cooldown=0"
+    rs = rows(run(cfg + "\n1.00\n0.10\n").stdout)
+    assert rs[0] == ("1.00", 9, "up"), f"tick0 should scale up to 9, got {rs[0]}"
+    assert rs[1] == (
+        "0.10",
+        2,
+        "down",
+    ), f"down must not be blocked by up_cooldown, got {rs[1]}"
+
+
+def test_cooldown_off_by_default():
+    # Omitted cooldown keys behave identically to up_cooldown=0 down_cooldown=0, and
+    # both allow consecutive same-direction actions (no suppression).
+    base = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=4"
+    seq_omitted = [rows(run(base + "\n1.00\n1.00\n").stdout)[i][1] for i in (0, 1)]
+    seq_zero = [
+        rows(run(base + " up_cooldown=0 down_cooldown=0" + "\n1.00\n1.00\n").stdout)[i][
+            1
+        ]
+        for i in (0, 1)
+    ]
+    assert seq_omitted == seq_zero, f"omitted must equal 0: {seq_omitted} vs {seq_zero}"
+    rs = rows(run(base + "\n1.00\n1.00\n").stdout)
+    assert (
+        rs[1][2] == "up"
+    ), f"with no cooldown, consecutive scale-ups are allowed, got {rs[1]}"
+
+
+def test_up_cooldown_holds_a_spike():
+    # A bigger spike during the up_cooldown window is held — cooldown overrides the
+    # otherwise-immediate scale-up.
+    cfg = "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 max_scale_down_frac=1.0 tick=30 start=4 up_cooldown=120"
+    rs = rows(run(cfg + "\n0.80\n1.00\n1.00\n").stdout)
+    assert rs[0] == ("0.80", 6, "up"), f"tick0 should scale up to 6, got {rs[0]}"
+    assert rs[1] == (
+        "1.00",
+        6,
+        "none",
+    ), f"spike within up_cooldown must hold, got {rs[1]}"
+    assert rs[2] == (
+        "1.00",
+        6,
+        "none",
+    ), f"still within up_cooldown -> hold, got {rs[2]}"

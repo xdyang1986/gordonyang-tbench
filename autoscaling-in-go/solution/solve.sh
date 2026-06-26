@@ -28,6 +28,8 @@ type config struct {
 	tick             int // seconds between ticks
 	start            int
 	predictLookahead int // seconds; 0 = predictive scale-up off
+	upCooldown       int // seconds; 0 = no scale-up cooldown
+	downCooldown     int // seconds; 0 = no scale-down cooldown
 }
 
 func die(msg string) {
@@ -108,6 +110,25 @@ func parseConfig(line string) config {
 		}
 		c.predictLookahead = n
 	}
+	// up_cooldown / down_cooldown are optional; absent or 0 disables that cooldown.
+	for _, k := range []string{"up_cooldown", "down_cooldown"} {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			die("invalid int for " + k)
+		}
+		if n < 0 {
+			die(k + " must be >= 0")
+		}
+		if k == "up_cooldown" {
+			c.upCooldown = n
+		} else {
+			c.downCooldown = n
+		}
+	}
 	return c
 }
 
@@ -169,6 +190,7 @@ func main() {
 	fmt.Fprintln(w, "tick,cpu,replicas,action")
 
 	current := cfg.start
+	lastUp, lastDown := -1, -1 // tick-time (seconds) of the last applied up/down; -1 = none yet
 	var history []rec
 
 	for i, cpu := range samples {
@@ -238,6 +260,21 @@ func main() {
 		} else if desired < current {
 			action = "down"
 		}
+
+		// Cooldown gate (last gate): suppress a same-direction action that falls within
+		// its cooldown window; the two cooldowns are independent. A suppressed tick holds
+		// (action none) and does not reset any cooldown.
+		if action == "up" && cfg.upCooldown > 0 && lastUp >= 0 && now-lastUp < cfg.upCooldown {
+			desired, action = current, "none"
+		} else if action == "down" && cfg.downCooldown > 0 && lastDown >= 0 && now-lastDown < cfg.downCooldown {
+			desired, action = current, "none"
+		}
+		if action == "up" {
+			lastUp = now
+		} else if action == "down" {
+			lastDown = now
+		}
+
 		current = desired
 		fmt.Fprintf(w, "%d,%.2f,%d,%s\n", i, cpu, current, action)
 	}
