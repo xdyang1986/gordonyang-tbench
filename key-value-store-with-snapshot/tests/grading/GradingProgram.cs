@@ -16,7 +16,7 @@ public static class GradingProgram
 
     public static int Main()
     {
-        // 15-scenario behavioral suite (11 core consensus + 4 differentiator scenarios).
+        // 18-scenario behavioral suite (11 core consensus + 7 differentiator/stress scenarios).
         var scenarios = new (string Name, Action Body)[]
         {
             ("Replicate_and_converge", Replicate_and_converge),
@@ -33,6 +33,9 @@ public static class GradingProgram
             ("Even_cluster_three_of_four_commits_and_laggard_catches_up", Even_cluster_three_of_four_commits_and_laggard_catches_up),
             ("Settle_does_not_cross_active_partition", Settle_does_not_cross_active_partition),
             ("Higher_epoch_tombstone_beats_stale_live_value", Higher_epoch_tombstone_beats_stale_live_value),
+            ("Multi_key_convergence_after_failover_partition_and_delete", Multi_key_convergence_after_failover_partition_and_delete),
+            ("Sequential_failovers_discard_stale_minority_writes", Sequential_failovers_discard_stale_minority_writes),
+            ("Higher_epoch_write_revives_key_over_older_tombstone", Higher_epoch_write_revives_key_over_older_tombstone),
             ("Unregistered_value_type_is_rejected_registered_round_trips", Unregistered_value_type_is_rejected_registered_round_trips),
         };
 
@@ -245,6 +248,71 @@ public static class GradingProgram
         CheckThrows(() => c.Get(2, "k"), "deleted key throws on node 2");
         Check(!c.ContainsKey(0, "k"), "node 0 deleted");
         Check(!c.ContainsKey(1, "k"), "node 1 deleted");
+    }
+
+    // ---- composed stress scenarios: many rules must all hold for the final converged
+    // state to be correct; one slip (lost tombstone, regressed version, dropped key,
+    // wrong epoch winner) produces a wrong answer somewhere. ----
+
+    private static void Multi_key_convergence_after_failover_partition_and_delete()
+    {
+        var c = New();                              // 3 nodes, leader 0, epoch 1
+        Check(c.Set(0, "a", 1), "a=1");             // seq1, all nodes
+        Check(c.Set(0, "b", 2), "b=2");             // seq2
+        Check(c.Set(0, "c", 3), "c=3");             // seq3
+        c.Settle();
+        c.Partition(2);                             // {0,1} | {2}; node 2 freezes at a=1,b=2,c=3
+        Check(c.Set(0, "a", 10), "a=10 on {0,1}");  // seq4
+        Check(c.Remove(0, "b"), "delete b on {0,1}"); // seq5 tombstone
+        Check(c.Set(0, "d", 4), "d=4 on {0,1}");    // seq6
+        c.PromoteLeader(1);                         // epoch 2, seq restarts; leader 1
+        Check(c.Set(1, "c", 30), "c=30 epoch 2 on {0,1}"); // (epoch2, seq1)
+        c.Heal();
+        c.Settle();                                 // converge all three nodes by (epoch,seq)
+        foreach (var node in new[] { 0, 1, 2 })
+        {
+            CheckEqual(10, c.Get(node, "a"), $"a on node {node}");          // higher seq wins
+            Check(!c.ContainsKey(node, "b"), $"b deleted on node {node}");  // tombstone, no resurrection
+            CheckEqual(30, c.Get(node, "c"), $"c on node {node}");          // higher epoch beats stale c=3
+            CheckEqual(4, c.Get(node, "d"), $"d on node {node}");           // late write propagates
+            CheckEqual(3, c.Count(node), $"count excludes tombstone on node {node}");
+        }
+    }
+
+    private static void Sequential_failovers_discard_stale_minority_writes()
+    {
+        var c = New();                              // 3 nodes, leader 0, epoch 1
+        Check(c.Set(0, "k", "v1"), "v1");           // (epoch1, seq1) everywhere
+        c.Settle();
+        c.Partition(0);                             // old leader {0} isolated | {1,2}
+        Check(!c.Set(0, "k", "stale"), "isolated old leader cannot commit (minority)");
+        c.PromoteLeader(1);                         // epoch 2, leader 1 (on majority side)
+        Check(c.Set(1, "k", "v2"), "epoch-2 commit on {1,2}");
+        c.PromoteLeader(2);                         // epoch 3, leader 2 (still on {1,2})
+        Check(c.Set(2, "k", "v3"), "epoch-3 commit on {1,2}");
+        Check(!c.ContainsKey(0, "k") || Equals("v1", c.Get(0, "k")), "node 0 still holds only stale v1");
+        c.Heal();
+        c.Settle();                                 // highest epoch wins
+        CheckEqual("v3", c.Get(0, "k"), "node 0");
+        CheckEqual("v3", c.Get(1, "k"), "node 1");
+        CheckEqual("v3", c.Get(2, "k"), "node 2");
+    }
+
+    private static void Higher_epoch_write_revives_key_over_older_tombstone()
+    {
+        var c = New();                              // 3 nodes, leader 0, epoch 1
+        Check(c.Set(0, "k", "v"), "set");           // (epoch1, seq1)
+        c.Settle();
+        Check(c.Remove(0, "k"), "delete");          // (epoch1, seq2) tombstone everywhere
+        c.Settle();
+        c.Partition(2);                             // node 2 keeps the epoch-1 tombstone
+        c.PromoteLeader(1);                         // epoch 2, leader 1
+        Check(c.Set(1, "k", "reborn"), "epoch-2 re-create on {0,1}"); // (epoch2, seq1) live
+        c.Heal();
+        c.Settle();                                 // higher epoch live write beats older tombstone
+        CheckEqual("reborn", c.Get(0, "k"), "node 0");
+        CheckEqual("reborn", c.Get(1, "k"), "node 1");
+        CheckEqual("reborn", c.Get(2, "k"), "node 2 (tombstone does not stick across a newer epoch)");
     }
 
     private static void Unregistered_value_type_is_rejected_registered_round_trips()

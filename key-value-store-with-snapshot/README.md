@@ -28,7 +28,7 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
   under `src/KeyValueDb/`. The agent never sees the test suite.
 - **Grading:** `tests/test_outputs.py` builds a *fresh* .NET **console** grading
   program under `/tmp` that project-references the agent's library and runs the
-  canonical 15-scenario suite, printing one `SCENARIO <name> PASS/FAIL` line each
+  canonical 18-scenario suite, printing one `SCENARIO <name> PASS/FAIL` line each
   (parsed so every scenario is its own pytest case). The grader is SDK-only (no test
   framework, no external packages), so it builds and runs **fully offline** — no
   NuGet access is needed at verification time. The grading project lives outside
@@ -59,8 +59,13 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 > split commits nowhere), **`Settle()` must not cross an active partition**, and a
 > **higher-epoch tombstone beating a stale higher-seq live value** (no cross-epoch
 > resurrection). No `instruction.md` or oracle change was needed; the reference oracle
-> passes all **15/15** offline (`docker run --network none`). Calibration re-run with the
-> new suite is pending — numbers below are still the old 11-scenario, old-spec runs.
+> passes all offline (`docker run --network none`). A first re-run with these four still
+> showed avocado 5/5 and gpt-5.5 5/5 (Opus 4/5 — a real mix — but the gate evaluates
+> avocado before Opus completes, so it logged "too easy"). Three **composed stress
+> scenarios** were then added (multi-key convergence after failover+partition+delete;
+> sequential failovers discarding stale minority writes; a higher-epoch write reviving a
+> key over an older tombstone) — oracle passes **18/18** offline. Calibration re-run with
+> the full suite is pending — numbers below are still the old 11-scenario, old-spec runs.
 
 Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
 out of 5), graded against the 11-scenario suite — **measured under the old, ambiguous spec**.

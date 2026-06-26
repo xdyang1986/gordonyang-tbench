@@ -40,6 +40,9 @@ EXPECTED_TESTS = [
     "Even_cluster_three_of_four_commits_and_laggard_catches_up",
     "Settle_does_not_cross_active_partition",
     "Higher_epoch_tombstone_beats_stale_live_value",
+    "Multi_key_convergence_after_failover_partition_and_delete",
+    "Sequential_failovers_discard_stale_minority_writes",
+    "Higher_epoch_write_revives_key_over_older_tombstone",
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 
