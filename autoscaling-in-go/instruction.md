@@ -5,8 +5,8 @@ Requirements:
 1. Scale up and down based on the CPU usage. The desired replica count that brings the average CPU to target is round up of current * cpu / target. When |cpu/target - 1| <= tolerance, don't scale up or down.
 2. Don't scale down if there is a transient drop in CPU.
 3. Scale down should not be too fast: per tick, remove at most current * max_scale_down_frac (floor) replicas, but always at least 1 when scaling in.
-4. You should consider min and max constraints while doing the scaling.
-5. Support predictive scale up, the prediction is based on previous data and pre-scale up if needed, don't based on the prediction to do the scale down. The feature is off by default. And only pre-scale on a clear sustained upward trend.
+4. You should respect min and max constraints while doing the scaling.
+5. It should support predictive scale up based on previous data and pre-scale up if needed, scale down is not needed. The feature is off by default. And only pre-scale on a clear sustained upward trend.
 
 Input: The first line is the configuration: a single line of space-separated key=value pairs. Every remaining non-blank line is one CPU sample.
 
