@@ -39,40 +39,45 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 
 ## Completion Rates
 
-> **⚠️ STALE — these numbers predate a spec fix and no longer hold.** The runs below
-> were collected while `instruction.md` did **not** state what registry the cluster
-> uses when the `registry` argument is null. The grader's allow-list scenario calls the
-> factory with no registry, so passing it required *guessing* that null defaults to
-> `TypeRegistry.CreateDefault()` (primitives pre-registered, custom types not). That
-> guess was the **sole** pass/fail differentiator — every non-degenerate trial passed
-> all 10 consensus scenarios and failed only the allow-list one. Rule 5 now states the
-> null default explicitly, which closes that gap.
->
-> **Post-fix re-validation (commit `eae9923`, 2026-06-26) confirmed the task was too
-> easy and FAILED calibration.** Platform result: `avocado 5/5`, `gpt-5.5 5/5`
-> (`opus: no trials`); failing check = *"Metacode or Opus pass/fail balance: Too easy."*
-> Oracle 3/3, structural 8/8, AI assessment **Accept**, contamination MEDIUM all still
-> passed. With the allow-list guess removed, the original suite had no differentiator left.
->
-> **Differentiator added (2026-06-26):** four new hidden scenarios on behavior the rules
-> already require but the old suite under-tested — strict majority with **even N** (2|2
-> split commits nowhere), **`Settle()` must not cross an active partition**, and a
-> **higher-epoch tombstone beating a stale higher-seq live value** (no cross-epoch
-> resurrection). No `instruction.md` or oracle change was needed; the reference oracle
-> passes all offline (`docker run --network none`). A first re-run with these four still
-> showed avocado 5/5 and gpt-5.5 5/5 (Opus 4/5 — a real mix — but the gate evaluates
-> avocado before Opus completes, so it logged "too easy"). Three **composed stress
-> scenarios** were then added (multi-key convergence after failover+partition+delete;
-> sequential failovers discarding stale minority writes; a higher-epoch write reviving a
-> key over an older tombstone) — oracle passes **18/18** offline. Calibration re-run with
-> the full suite is pending — numbers below are still the old 11-scenario, old-spec runs.
+### Current — PASSING (commit `41eba0b`, 2026-06-26, 22-scenario suite)
 
-Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
-out of 5), graded against the 11-scenario suite — **measured under the old, ambiguous spec**.
+Platform validation **passes**: balance check *"avocado not trivial and ≥1 agent solved."*
+Oracle 3/3, AI assessment **Accept** (0 Crit / 0 High / 2 Med / 1 Low), contamination MEDIUM.
+
+| Model | Pass rate (k=5) |
+|-------|-----------|
+| Oracle | 3/3 (deterministic; full suite verified **22/22** offline via `docker run --network none`) |
+| gpt-5.5 | **3/5** — healthy mix (passes ≥1, fails ≥1) |
+| Avocado | **0/5** — non-trivial |
+| Opus 4.6 | mixed (≥1 fail) |
+
+The task is solvable (gpt-5.5 3/5, oracle 3/3) yet non-trivial (avocado 0/5). gpt-5.5
+solving it 3/5 from the high-level rule 10 confirms the snapshot/restore semantics are
+derivable from the spec + the `TypeRegistry` docstring, not a guess.
+
+<details><summary>How it got here (evolution log)</summary>
+
+1. **Spec fix.** The original 11-scenario suite's only differentiator was *guessing* that a
+   null `registry` defaults to `TypeRegistry.CreateDefault()`. Rule 5 now states this, removing
+   the unstated-default trap — but that left the task too easy (avocado 5/5, gpt-5.5 5/5).
+2. **+4 differentiator scenarios** (even-N quorum, `Settle()` not crossing an active partition,
+   higher-epoch tombstone beats stale higher-seq value): still avocado/gpt 5/5 (Opus 4/5).
+3. **+3 composed stress scenarios** (multi-key convergence; sequential failovers; higher-epoch
+   write reviving a key over a tombstone): still avocado/gpt 5/5.
+4. **+ `Snapshot`/`Restore` capability** (rule 10) with 4 scenarios (round-trip; tombstone+recency
+   preserved; allow-list enforced on restore; post-restore writes supersede) → **calibration
+   passes**: avocado 0/5, gpt-5.5 3/5.
+
+Note on the platform gate: the "Metacode or Opus pass/fail balance" check evaluates as soon as
+avocado finishes and does **not** wait for Opus to complete its trials — so an Opus-only pass/fail
+mix won't flip a "too easy" verdict; the strong reference models (avocado/gpt-5.5) must not all pass.
+
+</details>
+
+#### Historical — old 11-scenario suite under the original ambiguous spec (for reference only)
 
 | Model | Pass rate (k=5) — STALE |
 |-------|-----------|
-| Oracle | 11/11 scenarios pass; 1/1 and 3/3 trials pass (deterministic; also verified offline via `docker run --network none`) |
 | Sonnet 4.6 | **0/5 passed** (mean 0.000) — informational only |
 | Opus 4.6 | **3/5 passed** (mean 0.600) |
 | Avocado | **4/5 passed** (mean 0.800) |

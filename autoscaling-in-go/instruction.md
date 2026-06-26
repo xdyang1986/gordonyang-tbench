@@ -22,6 +22,7 @@ configuration key looks like this:
     "predict_lookahead": optional, if omitted or 0, means disable. Otherwise, it's the look-ahead seconds.
 
 Remaining lines: one CPU sample per tick, each a single float in [0,1] giving the measured average CPU at that tick. Tick i (0-based) means the time of i * tick seconds. If there is blank lines, please ignore them.
+If the input is not valid, exit with a non-zero status.
 
 output:
 
