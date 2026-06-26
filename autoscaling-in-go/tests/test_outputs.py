@@ -162,6 +162,19 @@ def test_transient_dip_held():
     assert rs[4][1] == 10, f"fleet must stay 10 after recovery, got {rs[4]}"
 
 
+def test_multi_tick_transient_dip_held():
+    # A multi-tick dip (3 consecutive low samples) that is still shorter than the
+    # down_window (300s = 10 ticks) must NOT scale in — this holds under any reasonable
+    # stabilization strategy (windowed-max, consecutive-low, or averaging).
+    r = run(CFG.format(start=10) + "\n0.60\n0.60\n0.10\n0.10\n0.10\n0.60\n0.60\n")
+    rs = rows(r.stdout)
+    for t in (2, 3, 4):
+        assert (
+            rs[t][1] == 10 and rs[t][2] == "none"
+        ), f"multi-tick transient dip must hold at 10 at tick {t}, got {rs[t]}"
+    assert rs[6][1] == 10, f"fleet must stay 10 after recovery, got {rs[6]}"
+
+
 # ---- sustained scale-in (asymptotic: convention-robust) ----
 
 
