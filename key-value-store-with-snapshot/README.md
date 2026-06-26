@@ -28,7 +28,7 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
   under `src/KeyValueDb/`. The agent never sees the test suite.
 - **Grading:** `tests/test_outputs.py` builds a *fresh* .NET **console** grading
   program under `/tmp` that project-references the agent's library and runs the
-  canonical 11-scenario suite, printing one `SCENARIO <name> PASS/FAIL` line each
+  canonical 15-scenario suite, printing one `SCENARIO <name> PASS/FAIL` line each
   (parsed so every scenario is its own pytest case). The grader is SDK-only (no test
   framework, no external packages), so it builds and runs **fully offline** — no
   NuGet access is needed at verification time. The grading project lives outside
@@ -46,11 +46,21 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 > `TypeRegistry.CreateDefault()` (primitives pre-registered, custom types not). That
 > guess was the **sole** pass/fail differentiator — every non-degenerate trial passed
 > all 10 consensus scenarios and failed only the allow-list one. Rule 5 now states the
-> null default explicitly, which closes that gap; the task is therefore expected to pass
-> for nearly all models and **no longer meets the calibration target** as written.
-> **Re-run K=5 after the spec fix and either re-calibrate with a new, legitimate
-> differentiator or retire the task.** The table below is kept only for historical
-> reference.
+> null default explicitly, which closes that gap.
+>
+> **Post-fix re-validation (commit `eae9923`, 2026-06-26) confirmed the task was too
+> easy and FAILED calibration.** Platform result: `avocado 5/5`, `gpt-5.5 5/5`
+> (`opus: no trials`); failing check = *"Metacode or Opus pass/fail balance: Too easy."*
+> Oracle 3/3, structural 8/8, AI assessment **Accept**, contamination MEDIUM all still
+> passed. With the allow-list guess removed, the original suite had no differentiator left.
+>
+> **Differentiator added (2026-06-26):** four new hidden scenarios on behavior the rules
+> already require but the old suite under-tested — strict majority with **even N** (2|2
+> split commits nowhere), **`Settle()` must not cross an active partition**, and a
+> **higher-epoch tombstone beating a stale higher-seq live value** (no cross-epoch
+> resurrection). No `instruction.md` or oracle change was needed; the reference oracle
+> passes all **15/15** offline (`docker run --network none`). Calibration re-run with the
+> new suite is pending — numbers below are still the old 11-scenario, old-spec runs.
 
 Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
 out of 5), graded against the 11-scenario suite — **measured under the old, ambiguous spec**.

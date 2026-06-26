@@ -28,6 +28,10 @@ public static class GradingProgram
             ("Failover_new_epoch_supersedes_stale_data", Failover_new_epoch_supersedes_stale_data),
             ("Higher_epoch_beats_higher_seq", Higher_epoch_beats_higher_seq),
             ("Conflicting_partition_resolved_by_epoch", Conflicting_partition_resolved_by_epoch),
+            ("Even_cluster_split_in_half_rejects_write", Even_cluster_split_in_half_rejects_write),
+            ("Even_cluster_three_of_four_commits_and_laggard_catches_up", Even_cluster_three_of_four_commits_and_laggard_catches_up),
+            ("Settle_does_not_cross_active_partition", Settle_does_not_cross_active_partition),
+            ("Higher_epoch_tombstone_beats_stale_live_value", Higher_epoch_tombstone_beats_stale_live_value),
             ("Unregistered_value_type_is_rejected_registered_round_trips", Unregistered_value_type_is_rejected_registered_round_trips),
         };
 
@@ -185,6 +189,61 @@ public static class GradingProgram
         c.Settle();
         CheckEqual("vNew", c.Get(0, "k"), "node 0");
         CheckEqual("vNew", c.Get(2, "k"), "node 2");
+    }
+
+    private static void Even_cluster_split_in_half_rejects_write()
+    {
+        var c = New(nodes: 4, leader: 0);           // N=4, strict majority = 3
+        c.Partition(0, 1);                          // {0,1} | {2,3} -> leader side has only 2 of 4
+        Check(!c.Set(0, "k", "v"), "2 of 4 is not a strict majority -> reject");
+        Check(!c.ContainsKey(0, "k"), "leader did not apply locally");
+        Check(!c.ContainsKey(1, "k"), "node 1 unaffected");
+        Check(!c.ContainsKey(2, "k"), "node 2 unaffected");
+        Check(!c.ContainsKey(3, "k"), "node 3 unaffected");
+    }
+
+    private static void Even_cluster_three_of_four_commits_and_laggard_catches_up()
+    {
+        var c = New(nodes: 4, leader: 0);           // N=4, strict majority = 3
+        c.Partition(3);                             // {0,1,2} | {3} -> leader side has 3 of 4
+        Check(c.Set(0, "k", "v"), "3 of 4 is a strict majority -> commit");
+        Check(c.ContainsKey(0, "k"), "leader has it");
+        Check(c.ContainsKey(1, "k"), "node 1 has it");
+        Check(c.ContainsKey(2, "k"), "node 2 has it");
+        Check(!c.ContainsKey(3, "k"), "isolated node lags");
+        c.Heal();
+        c.Settle();
+        CheckEqual("v", c.Get(3, "k"), "isolated node catches up");
+    }
+
+    private static void Settle_does_not_cross_active_partition()
+    {
+        var c = New();                              // 3 nodes, leader 0
+        c.Partition(2);                             // {0,1} | {2}
+        Check(c.Set(0, "k", "v"), "commits on majority {0,1}");
+        c.Settle();                                 // still partitioned: must NOT reach node 2
+        Check(c.ContainsKey(0, "k"), "node 0 has it");
+        Check(c.ContainsKey(1, "k"), "node 1 has it");
+        Check(!c.ContainsKey(2, "k"), "Settle converges only connected nodes, not across the partition");
+        c.Heal();
+        c.Settle();                                 // now connected: node 2 catches up
+        CheckEqual("v", c.Get(2, "k"), "node 2 catches up after heal");
+    }
+
+    private static void Higher_epoch_tombstone_beats_stale_live_value()
+    {
+        var c = New();                              // 3 nodes, leader 0
+        for (var i = 0; i < 5; i++) Check(c.Set(0, "k", $"v{i}"), $"set v{i}"); // epoch 1, high seq
+        c.Settle();
+        c.Partition(2);                             // node 2 keeps the live, high-seq epoch-1 value
+        c.PromoteLeader(1);                         // epoch 2, seq restarts
+        Check(c.Remove(1, "k"), "epoch-2 delete commits on {0,1}");           // tombstone (epoch 2)
+        c.Heal();
+        c.Settle();                                 // higher epoch wins, even though it is a tombstone
+        Check(!c.ContainsKey(2, "k"), "stale live value does not resurrect over a higher-epoch delete");
+        CheckThrows(() => c.Get(2, "k"), "deleted key throws on node 2");
+        Check(!c.ContainsKey(0, "k"), "node 0 deleted");
+        Check(!c.ContainsKey(1, "k"), "node 1 deleted");
     }
 
     private static void Unregistered_value_type_is_rejected_registered_round_trips()

@@ -36,6 +36,10 @@ EXPECTED_TESTS = [
     "Failover_new_epoch_supersedes_stale_data",
     "Higher_epoch_beats_higher_seq",
     "Conflicting_partition_resolved_by_epoch",
+    "Even_cluster_split_in_half_rejects_write",
+    "Even_cluster_three_of_four_commits_and_laggard_catches_up",
+    "Settle_does_not_cross_active_partition",
+    "Higher_epoch_tombstone_beats_stale_live_value",
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 
@@ -97,7 +101,11 @@ def grading_results():
         if m:
             outcomes[m.group(1)] = "Passed" if m.group(2) == "PASS" else "Failed"
 
-    return {"outcomes": outcomes, "diagnostics": diagnostics, "built": len(outcomes) > 0}
+    return {
+        "outcomes": outcomes,
+        "diagnostics": diagnostics,
+        "built": len(outcomes) > 0,
+    }
 
 
 def test_suite_built_and_ran(grading_results):
@@ -113,7 +121,8 @@ def test_suite_built_and_ran(grading_results):
 def test_scenario_passes(grading_results, test_name):
     outcome = grading_results["outcomes"].get(test_name)
     assert outcome is not None, (
-        f"Expected scenario '{test_name}' did not run.\n\n" + grading_results["diagnostics"]
+        f"Expected scenario '{test_name}' did not run.\n\n"
+        + grading_results["diagnostics"]
     )
     assert outcome == "Passed", (
         f"'{test_name}' outcome was {outcome!r}, expected 'Passed'.\n\n"
