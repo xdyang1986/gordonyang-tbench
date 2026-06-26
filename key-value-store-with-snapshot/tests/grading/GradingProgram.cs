@@ -16,6 +16,7 @@ public static class GradingProgram
 
     public static int Main()
     {
+        // 15-scenario behavioral suite (11 core consensus + 4 differentiator scenarios).
         var scenarios = new (string Name, Action Body)[]
         {
             ("Replicate_and_converge", Replicate_and_converge),
