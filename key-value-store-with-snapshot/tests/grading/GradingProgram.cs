@@ -16,8 +16,8 @@ public static class GradingProgram
 
     public static int Main()
     {
-        // 22-scenario behavioral suite (11 core consensus + 7 differentiator/stress
-        // scenarios + 4 snapshot/restore scenarios).
+        // 26-scenario behavioral suite (11 core consensus + 7 differentiator/stress
+        // + 4 fair corner cases + 4 snapshot/restore scenarios).
         var scenarios = new (string Name, Action Body)[]
         {
             ("Replicate_and_converge", Replicate_and_converge),
@@ -37,6 +37,10 @@ public static class GradingProgram
             ("Multi_key_convergence_after_failover_partition_and_delete", Multi_key_convergence_after_failover_partition_and_delete),
             ("Sequential_failovers_discard_stale_minority_writes", Sequential_failovers_discard_stale_minority_writes),
             ("Higher_epoch_write_revives_key_over_older_tombstone", Higher_epoch_write_revives_key_over_older_tombstone),
+            ("Stale_local_read_returns_last_committed_value", Stale_local_read_returns_last_committed_value),
+            ("Null_value_is_stored_and_distinct_from_missing", Null_value_is_stored_and_distinct_from_missing),
+            ("Two_node_cluster_requires_both_for_quorum", Two_node_cluster_requires_both_for_quorum),
+            ("LeaderId_reflects_configuration_and_failover", LeaderId_reflects_configuration_and_failover),
             ("Snapshot_restore_round_trips_values_and_count", Snapshot_restore_round_trips_values_and_count),
             ("Restored_tombstone_and_version_survive_and_win_on_settle", Restored_tombstone_and_version_survive_and_win_on_settle),
             ("Restore_rejects_unregistered_type", Restore_rejects_unregistered_type),
@@ -318,6 +322,53 @@ public static class GradingProgram
         CheckEqual("reborn", c.Get(0, "k"), "node 0");
         CheckEqual("reborn", c.Get(1, "k"), "node 1");
         CheckEqual("reborn", c.Get(2, "k"), "node 2 (tombstone does not stick across a newer epoch)");
+    }
+
+    // ---- additional fair corner cases derived directly from the stated rules ----
+
+    private static void Stale_local_read_returns_last_committed_value()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "v1"), "v1 committed everywhere");
+        c.Settle();
+        c.Partition(2);                              // {0,1} | {2}
+        Check(c.Set(0, "k", "v2"), "v2 commits on the majority {0,1}");
+        CheckEqual("v2", c.Get(0, "k"), "leader sees the new value");
+        CheckEqual("v1", c.Get(2, "k"), "partitioned node reads its last local commit (stale), not v2 and not an error");
+    }
+
+    private static void Null_value_is_stored_and_distinct_from_missing()
+    {
+        var c = New();
+        Check(c.Set(0, "k", null), "null is a legal value (object? value)");
+        c.Settle();
+        Check(c.ContainsKey(0, "k"), "a key set to null is present");
+        CheckEqual(null, c.Get(0, "k"), "Get returns the null value — a null value is not a miss");
+        CheckEqual(1, c.Count(0), "a null-valued key counts");
+        CheckEqual(null, c.Get(2, "k"), "null value replicates and reads back as null");
+        Check(c.Remove(0, "k"), "removing the key");
+        c.Settle();
+        Check(!c.ContainsKey(0, "k"), "now absent");
+        CheckThrows(() => c.Get(0, "k"), "a genuinely missing key throws");
+    }
+
+    private static void Two_node_cluster_requires_both_for_quorum()
+    {
+        var c = New(nodes: 2, leader: 0);            // strict majority of 2 is 2 (both nodes)
+        Check(c.Set(0, "k", "v"), "both reachable -> commit");
+        c.Settle();
+        CheckEqual("v", c.Get(1, "k"), "follower has it");
+        c.Partition(1);                              // {0} | {1}
+        Check(!c.Set(0, "k", "v2"), "1 of 2 is not a strict majority -> reject");
+        CheckEqual("v", c.Get(0, "k"), "rejected write is not applied locally; old value stands");
+    }
+
+    private static void LeaderId_reflects_configuration_and_failover()
+    {
+        var c = New(nodes: 3, leader: 0);
+        CheckEqual(0, c.LeaderId, "configured leader");
+        c.PromoteLeader(2);
+        CheckEqual(2, c.LeaderId, "leader after manual failover");
     }
 
     // ---- snapshot / restore: serialize a node's committed state and rebuild it
