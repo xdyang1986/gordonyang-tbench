@@ -39,19 +39,33 @@ no-resurrection, failover-ordering, and epoch-vs-seq scenarios.
 
 ## Completion Rates
 
-Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
-out of 5), graded against the 11-scenario suite.
+> **⚠️ STALE — these numbers predate a spec fix and no longer hold.** The runs below
+> were collected while `instruction.md` did **not** state what registry the cluster
+> uses when the `registry` argument is null. The grader's allow-list scenario calls the
+> factory with no registry, so passing it required *guessing* that null defaults to
+> `TypeRegistry.CreateDefault()` (primitives pre-registered, custom types not). That
+> guess was the **sole** pass/fail differentiator — every non-degenerate trial passed
+> all 10 consensus scenarios and failed only the allow-list one. Rule 5 now states the
+> null default explicitly, which closes that gap; the task is therefore expected to pass
+> for nearly all models and **no longer meets the calibration target** as written.
+> **Re-run K=5 after the spec fix and either re-calibrate with a new, legitimate
+> differentiator or retire the task.** The table below is kept only for historical
+> reference.
 
-| Model | Pass rate (k=5) |
+Out of K=5 trials each (calibration target: Avocado or Opus must pass ≥1 and fail ≥1
+out of 5), graded against the 11-scenario suite — **measured under the old, ambiguous spec**.
+
+| Model | Pass rate (k=5) — STALE |
 |-------|-----------|
 | Oracle | 11/11 scenarios pass; 1/1 and 3/3 trials pass (deterministic; also verified offline via `docker run --network none`) |
 | Sonnet 4.6 | **0/5 passed** (mean 0.000) — informational only |
 | Opus 4.6 | **3/5 passed** (mean 0.600) |
 | Avocado | **4/5 passed** (mean 0.800) |
 
-> Calibration target met by **both** Opus 4.6 (1/5) and Avocado (4/5) — each passes
-> ≥1 and fails ≥1 of 5. All failures are genuine behavioral gaps — no crashes, no
-> plan-mode dropouts; the oracle is deterministic (3/3).
+> Under the old spec the calibration target was met by both Opus 4.6 and Avocado (each
+> passed ≥1 and failed ≥1 of 5), but only because the allow-list scenario turned on an
+> unstated default rather than a genuine reasoning gap (see below). With the default now
+> specified, that differentiation disappears.
 
 > Novelty check: **LOW** contamination risk (see `docs/plans/`). The design omits the
 > canonical, heavily-memorized Raft machinery (timeout election, replicated log,
@@ -66,39 +80,40 @@ runtime — see below), so all failures are **behavioral**, not setup/harness ar
 ### Opus 4.6 — 3/5 passed
 - 3 trials passed all 11 scenarios.
 - 2 trials failed **only** `Unregistered_value_type_is_rejected_registered_round_trips`:
-  the implementation does not enforce the **registry allow-list on the write path** —
-  an unregistered value type is committed instead of the write being rejected
-  (`Set` should return `false`). Every hard distributed scenario — quorum
-  commit/reject, no-local-apply, follower forwarding, tombstone no-resurrection,
-  anti-entropy catch-up, failover ordering, epoch-beats-seq, conflict resolution —
-  **passed** in these trials.
+  with no registry passed, the cluster accepted an unregistered `Note` value
+  (`Set` returned `true` where the grader expects `false`). Every hard distributed
+  scenario — quorum commit/reject, no-local-apply, follower forwarding, tombstone
+  no-resurrection, anti-entropy catch-up, failover ordering, epoch-beats-seq, conflict
+  resolution — **passed** in these trials.
 
 ### Avocado — 4/5 passed
 - 4 trials passed all 11 scenarios.
-- 1 trial failed **only** the allow-list scenario (the same gap as Opus). Confirms the
-  task is solvable from the spec while still exposing the dominant gap.
+- 1 trial failed **only** the allow-list scenario (the same gap as Opus).
 
 ### Sonnet 4.6 — 0/5 passed (informational)
 - 3 trials failed **only** the allow-list scenario — the consensus machinery was
-  implemented correctly, but the allow-list gate was skipped.
+  implemented correctly.
 - 2 trials compiled but failed **all 11** scenarios — a pervasive correctness bug
   (the cluster never replicates/commits correctly), i.e. weaker attempts at the contract.
 
-### Dominant failure mode (across all models)
-**Registry allow-list enforcement on the replication path** — Opus 2 failing trials +
-Avocado 1 + Sonnet 3. The spec requires replicated values to be on the allow-list
-(instruction rule 5) and writes to fail via a `bool` return (rules 6 & 8); an
-unregistered value must therefore be **rejected** (`Set` → `false`) *before* it can be
-committed to other nodes. Models implement the consensus machinery correctly but skip
-enforcing this gate on the write/replication path. It is a genuine
-spec-adherence/reasoning gap, not a task-setup issue: the reference solution enforces
-it (an allow-list check before the quorum write), and the harder consensus scenarios
-are solved by frontier models — so the task is clearly solvable, and the
-differentiation is a specific, clean correctness detail rather than a crash or
-ambiguity. The remaining surface (quorum-reject with no-local-apply, tombstone
-no-resurrection, `(epoch,seq)` conflict resolution where higher epoch beats higher
-seq, follower forwarding) is exercised by the suite and occasionally trips weaker
-attempts (one Opus trial failed everything).
+### Dominant failure mode (across all models) — an unstated default, not a reasoning gap
+Across every non-degenerate trial the consensus machinery (quorum commit/reject,
+no-local-apply, follower forwarding, tombstone no-resurrection, `(epoch,seq)`
+resolution, manual failover, anti-entropy) was implemented **correctly** and passed.
+The **only** scenario that ever distinguished pass from fail was the allow-list one,
+and the observable failure (`Set` returning `true` for an unregistered `Note`) does
+**not** prove the allow-list was skipped — it is equally explained by the
+implementation defaulting a **null `registry` to a permissive value** instead of
+`TypeRegistry.CreateDefault()`. The old `instruction.md` never said which default to
+use, and the grader's allow-list scenario constructs the cluster with no registry, so
+passing it hinged on *guessing* the reference's choice (`registry ??
+TypeRegistry.CreateDefault()`). That is a **spec/test-alignment gap**, not a
+distributed-systems reasoning gap: a model can get all the hard consensus logic right
+and still fail purely on the unstated default. Rule 5 has since been amended to state
+the null default explicitly. Because that scenario was the sole differentiator, fixing
+the spec is expected to push pass rates toward 5/5 — see the stale-numbers note under
+**Completion Rates** above; the task needs re-calibration (a genuine new
+differentiator) or retirement.
 
 ## Anti-Cheating Analysis
 

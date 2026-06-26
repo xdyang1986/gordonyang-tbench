@@ -4,7 +4,7 @@ Build a distributed key value store that support read and write in multiple node
 2. Deletes are durable across sync.
 3. Conflict rule: higher (epoch, seq) wins, higher epoch beats higher seq.
 4. epoch bumps after manual failover(leader promotion)
-5. replicated values must be on the registry allow-list.
+5. replicated values must be on the registry allow-list. When registry is null, CreateCluster() will use the default registry.
 6. If the Set/Remove false, let's return bool instead of throw exception.
 7. If the Get on a miss key, throw exception.
 8. Write commits only when it gets strict majority acknowledge, otherwise return fails, no local apply on failure.
