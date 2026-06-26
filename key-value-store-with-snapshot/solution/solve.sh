@@ -10,6 +10,7 @@ cat > /app/src/KeyValueDb/DistributedKv.cs <<'CSHARP'
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 
 namespace KeyValueDb;
 
@@ -45,8 +46,19 @@ public interface IReplicatedKvCluster
     /// <summary>Anti-entropy: converge all currently-connected nodes by (epoch, seq).</summary>
     void Settle();
 
+    /// <summary>Serialize a node's committed state (values, tombstones, (epoch,seq) versions).</summary>
+    byte[] Snapshot(int nodeId);
+
+    /// <summary>Replace a node's state from a snapshot; unregistered types are rejected.</summary>
+    void Restore(int nodeId, byte[] snapshot);
+
     int LeaderId { get; }
 }
+
+// Serialized snapshot entry. Types are stored by their registry name (not CLR type),
+// so a Restore can re-validate them against the allow-list before deserializing.
+internal sealed record SnapEntry(
+    string KeyType, string Key, bool Tombstone, string? ValueType, string? Value, int Epoch, long Seq);
 
 public static class DistributedKv
 {
@@ -163,6 +175,63 @@ internal sealed class Cluster : IReplicatedKvCluster
             foreach (var node in members)
                 _store[node] = new Dictionary<object, Entry>(merged);
         }
+    }
+
+    public byte[] Snapshot(int nodeId)
+    {
+        var entries = new List<SnapEntry>();
+        foreach (var kv in _store[nodeId])
+        {
+            var keyType = _registry.GetName(kv.Key.GetType());          // key type must be allow-listed
+            var keyJson = JsonSerializer.Serialize(kv.Key, kv.Key.GetType());
+            var e = kv.Value;
+            if (e.Tombstone)
+            {
+                entries.Add(new SnapEntry(keyType, keyJson, true, null, null, e.Ver.Epoch, e.Ver.Seq));
+            }
+            else
+            {
+                string? valType = e.Value is null ? null : _registry.GetName(e.Value.GetType());
+                string? valJson = e.Value is null ? null : JsonSerializer.Serialize(e.Value, e.Value.GetType());
+                entries.Add(new SnapEntry(keyType, keyJson, false, valType, valJson, e.Ver.Epoch, e.Ver.Seq));
+            }
+        }
+        return JsonSerializer.SerializeToUtf8Bytes(entries);
+    }
+
+    public void Restore(int nodeId, byte[] snapshot)
+    {
+        var entries = JsonSerializer.Deserialize<List<SnapEntry>>(snapshot) ?? new List<SnapEntry>();
+        var rebuilt = new Dictionary<object, Entry>();
+        foreach (var s in entries)
+        {
+            var keyType = _registry.Resolve(s.KeyType);                 // throws if not allow-listed
+            var key = JsonSerializer.Deserialize(s.Key, keyType)!;
+            if (s.Tombstone)
+            {
+                rebuilt[key] = new Entry(null, true, new Version(s.Epoch, s.Seq));
+            }
+            else
+            {
+                object? value = null;
+                if (s.ValueType is not null && s.Value is not null)
+                {
+                    var valType = _registry.Resolve(s.ValueType);       // throws if not allow-listed
+                    value = JsonSerializer.Deserialize(s.Value, valType);
+                }
+                rebuilt[key] = new Entry(value, false, new Version(s.Epoch, s.Seq));
+            }
+        }
+        _store[nodeId] = rebuilt;
+
+        // Advance the cluster's version counters so writes after a Restore supersede the
+        // restored entries (the write sequence must not regress below what was loaded).
+        var newEpoch = _epoch;
+        foreach (var s in entries) newEpoch = Math.Max(newEpoch, s.Epoch);
+        var newSeq = newEpoch == _epoch ? _seq : 0L;
+        foreach (var s in entries) if (s.Epoch == newEpoch) newSeq = Math.Max(newSeq, s.Seq);
+        _epoch = newEpoch;
+        _seq = newSeq;
     }
 }
 CSHARP

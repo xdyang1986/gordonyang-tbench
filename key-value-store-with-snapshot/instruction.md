@@ -9,6 +9,7 @@ Build a distributed key value store that support read and write in multiple node
 7. If the Get on a miss key, throw exception.
 8. Write commits only when it gets strict majority acknowledge, otherwise return fails, no local apply on failure.
 9. Partition(ids…) splits cluster and drops cross-cut messages; Heal() restores connectivity (does not catch up stale nodes); PromoteLeader(id) forces failover with epoch bump; Settle() converges connected nodes by (epoch,seq) (tombstones included).
+10. Support snapshot save and restore: Snapshot(id) returns a snapshot of the local commit; Restore(id, snapshot) restores the local commit from a snapshot.
 
 Interface:
 
@@ -24,5 +25,7 @@ interface IReplicatedKvCluster {
     void Heal();
     void PromoteLeader(int nodeId);
     void Settle();
-    int  LeaderId { get; }
+    int  LeaderId { get; };
+    byte[] Snapshot(int nodeId);
+    void   Restore(int nodeId, byte[] snapshot);
 }

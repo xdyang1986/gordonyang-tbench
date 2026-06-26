@@ -43,6 +43,10 @@ EXPECTED_TESTS = [
     "Multi_key_convergence_after_failover_partition_and_delete",
     "Sequential_failovers_discard_stale_minority_writes",
     "Higher_epoch_write_revives_key_over_older_tombstone",
+    "Snapshot_restore_round_trips_values_and_count",
+    "Restored_tombstone_and_version_survive_and_win_on_settle",
+    "Restore_rejects_unregistered_type",
+    "Writes_after_restore_supersede_restored_entries",
     "Unregistered_value_type_is_rejected_registered_round_trips",
 ]
 

@@ -16,7 +16,8 @@ public static class GradingProgram
 
     public static int Main()
     {
-        // 18-scenario behavioral suite (11 core consensus + 7 differentiator/stress scenarios).
+        // 22-scenario behavioral suite (11 core consensus + 7 differentiator/stress
+        // scenarios + 4 snapshot/restore scenarios).
         var scenarios = new (string Name, Action Body)[]
         {
             ("Replicate_and_converge", Replicate_and_converge),
@@ -36,6 +37,10 @@ public static class GradingProgram
             ("Multi_key_convergence_after_failover_partition_and_delete", Multi_key_convergence_after_failover_partition_and_delete),
             ("Sequential_failovers_discard_stale_minority_writes", Sequential_failovers_discard_stale_minority_writes),
             ("Higher_epoch_write_revives_key_over_older_tombstone", Higher_epoch_write_revives_key_over_older_tombstone),
+            ("Snapshot_restore_round_trips_values_and_count", Snapshot_restore_round_trips_values_and_count),
+            ("Restored_tombstone_and_version_survive_and_win_on_settle", Restored_tombstone_and_version_survive_and_win_on_settle),
+            ("Restore_rejects_unregistered_type", Restore_rejects_unregistered_type),
+            ("Writes_after_restore_supersede_restored_entries", Writes_after_restore_supersede_restored_entries),
             ("Unregistered_value_type_is_rejected_registered_round_trips", Unregistered_value_type_is_rejected_registered_round_trips),
         };
 
@@ -313,6 +318,77 @@ public static class GradingProgram
         CheckEqual("reborn", c.Get(0, "k"), "node 0");
         CheckEqual("reborn", c.Get(1, "k"), "node 1");
         CheckEqual("reborn", c.Get(2, "k"), "node 2 (tombstone does not stick across a newer epoch)");
+    }
+
+    // ---- snapshot / restore: serialize a node's committed state and rebuild it
+    // elsewhere. The snapshot must preserve values, tombstones, and (epoch,seq) versions,
+    // encode types by registry name (allow-list enforced on Restore), and advance the
+    // write counter so post-Restore writes supersede restored entries. ----
+
+    private static void Snapshot_restore_round_trips_values_and_count()
+    {
+        var c = New();
+        Check(c.Set(0, "a", 1), "a=1");
+        Check(c.Set(0, "b", 2), "b=2");
+        Check(c.Set(0, "c", 3), "c=3");
+        c.Settle();
+        var snap = c.Snapshot(0);
+
+        var c2 = New();                              // fresh, empty cluster
+        c2.Restore(0, snap);
+        CheckEqual(1, c2.Get(0, "a"), "a round-trips");
+        CheckEqual(2, c2.Get(0, "b"), "b round-trips");
+        CheckEqual(3, c2.Get(0, "c"), "c round-trips");
+        CheckEqual(3, c2.Count(0), "count round-trips");
+    }
+
+    private static void Restored_tombstone_and_version_survive_and_win_on_settle()
+    {
+        var c = New();
+        Check(c.Set(0, "k", "v"), "set");            // (epoch1, seq1)
+        c.Settle();
+        Check(c.Remove(0, "k"), "delete");           // (epoch1, seq2) tombstone
+        c.Settle();
+        var snap = c.Snapshot(0);                     // snapshot carries the tombstone at seq2
+
+        var c2 = New();
+        Check(c2.Set(0, "k", "old"), "older live value");  // (epoch1, seq1) on all nodes
+        c2.Settle();
+        c2.Restore(0, snap);                          // node 0 now holds the tombstone (seq2)
+        c2.Settle();                                  // tombstone (seq2) must beat the live value (seq1)
+        Check(!c2.ContainsKey(0, "k"), "node 0 deleted");
+        Check(!c2.ContainsKey(1, "k"), "node 1 deleted — restored tombstone + version survived and won");
+        Check(!c2.ContainsKey(2, "k"), "node 2 deleted");
+    }
+
+    private static void Restore_rejects_unregistered_type()
+    {
+        var reg = TypeRegistry.CreateDefault();
+        reg.Register<Note>();
+        var c = New(registry: reg);
+        Check(c.Set(0, "k", new Note("hi", 1)), "registered type commits");
+        var snap = c.Snapshot(0);
+
+        var c2 = New();                              // default registry: no Note
+        CheckThrows(() => c2.Restore(0, snap), "restoring a type not on the allow-list must be rejected");
+    }
+
+    private static void Writes_after_restore_supersede_restored_entries()
+    {
+        var c = New();
+        for (var i = 0; i < 5; i++) Check(c.Set(0, "k", $"v{i}"), $"set v{i}"); // (epoch1, seq up to 5)
+        c.Settle();
+        var snap = c.Snapshot(0);                     // k = "v4" at (epoch1, seq5)
+
+        var c2 = New();
+        c2.Partition(2);                             // {0,1} | {2}
+        c2.Restore(2, snap);                         // isolated node 2 holds "v4" at seq5; counters must advance
+        Check(c2.Set(0, "k", "newer"), "post-restore write commits on {0,1}");
+        c2.Heal();
+        c2.Settle();                                 // "newer" must outrank the restored seq-5 entry
+        CheckEqual("newer", c2.Get(0, "k"), "node 0");
+        CheckEqual("newer", c2.Get(1, "k"), "node 1");
+        CheckEqual("newer", c2.Get(2, "k"), "node 2 — restored high-seq value did not win");
     }
 
     private static void Unregistered_value_type_is_rejected_registered_round_trips()

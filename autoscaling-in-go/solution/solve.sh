@@ -213,10 +213,12 @@ func main() {
 			}
 		}
 
-		// predictive floor: extrapolate trend forward, can only raise desired
-		if cfg.predictLookahead > 0 && i >= 1 {
-			slope := (samples[i] - samples[i-1]) / float64(cfg.tick) // per second
-			proj := cpu + slope*float64(cfg.predictLookahead)
+		// predictive floor: only on a confirmed monotone rise over the last 3
+		// samples; project a 3-point smoothed trend forward. scale-up only.
+		if cfg.predictLookahead > 0 && i >= 2 &&
+			samples[i] > samples[i-1] && samples[i-1] > samples[i-2] {
+			avgDelta := (samples[i] - samples[i-2]) / 2 // per tick
+			proj := cpu + avgDelta*(float64(cfg.predictLookahead)/float64(cfg.tick))
 			if proj < 0 {
 				proj = 0
 			}

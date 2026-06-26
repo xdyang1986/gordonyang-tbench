@@ -222,14 +222,18 @@ def test_tolerance_dead_band():
     assert rs[0] == ("0.63", 5, "none"), f"within tolerance must hold, got {rs[0]}"
 
 
-# ---- predictive (trend-based) scale-up (directional: convention-robust) ----
-# Direction only, no exact values: ON pre-scales earlier on a rising trend, never
-# below the reactive path on a falling one; predict_lookahead=0 is the baseline.
+# ---- predictive scale-up: directional / trend-gating (convention-robust) ----
+# The spec describes the scenario only (pre-scale up on a clear sustained rise,
+# never on transient blips; scale-up only; off by default) without pinning a
+# formula, so these assert direction and trend-gating, not exact values. A naive
+# "pre-scale on any positive slope" recall solution fails the transient-blip gate.
 
 PRED_BASE = (
     "target=0.60 min=1 max=50 tolerance=0.10 down_window=300 "
-    "max_scale_down_frac=1.0 tick=30 start=2"
+    "max_scale_down_frac=1.0 tick=30 start=4"
 )
+RAMP = "\n".join(["0.30", "0.45", "0.60", "0.75", "0.90"])
+ZIGZAG = "\n".join(["0.40", "0.60", "0.40", "0.60", "0.40", "0.60"])
 
 
 def _fleet_seq(cfg, samples):
@@ -237,22 +241,34 @@ def _fleet_seq(cfg, samples):
     return [rs[i][1] for i in sorted(rs)]
 
 
-def test_predictive_prescales_on_rising_ramp():
-    ramp = "\n".join(["0.30", "0.45", "0.60", "0.75", "0.90", "1.00"])
-    off = _fleet_seq(PRED_BASE + " predict_lookahead=0", ramp)
-    on = _fleet_seq(PRED_BASE + " predict_lookahead=120", ramp)
-    # prediction is scale-up-only: never below the reactive (off) fleet
-    assert all(
-        o >= f for o, f in zip(on, off)
-    ), f"prediction lowered fleet: on={on} off={off}"
-    # and it acts EARLIER: strictly higher than reactive at >= 1 tick on the ramp
-    assert any(o > f for o, f in zip(on, off)), (
-        f"prediction must pre-scale up earlier on a rising ramp (off-by-default "
-        f"baseline does not): on={on} off={off}"
-    )
+def test_predictive_off_by_default():
+    # an omitted key behaves identically to predict_lookahead=0 (reactive).
+    seq0 = _fleet_seq(PRED_BASE + " predict_lookahead=0", RAMP)
+    seq_omitted = _fleet_seq(PRED_BASE, RAMP)
+    assert seq_omitted == seq0, f"omitted key must equal 0: {seq_omitted} vs {seq0}"
 
 
-def test_predictive_never_scales_down_on_falling_trend():
+def test_predictive_prescales_on_sustained_rise():
+    off = _fleet_seq(PRED_BASE + " predict_lookahead=0", RAMP)
+    on = _fleet_seq(PRED_BASE + " predict_lookahead=120", RAMP)
+    # scale-up only: never below the reactive fleet
+    assert all(o >= f for o, f in zip(on, off)), f"scale-up only: on={on} off={off}"
+    # and it pre-scales: strictly higher than reactive somewhere on the ramp
+    assert any(
+        o > f for o, f in zip(on, off)
+    ), f"prediction must pre-scale up on a sustained rise: on={on} off={off}"
+
+
+def test_predictive_ignores_transient_blips():
+    # a choppy series with no sustained trend must NOT trigger pre-scaling; the
+    # fleet stays on the reactive baseline. A 2-point "any positive slope"
+    # extrapolation would pre-scale on every up-tick and fail here.
+    off = _fleet_seq(PRED_BASE + " predict_lookahead=0", ZIGZAG)
+    on = _fleet_seq(PRED_BASE + " predict_lookahead=120", ZIGZAG)
+    assert on == off, f"transient blips must not pre-scale: on={on} off={off}"
+
+
+def test_predictive_scale_up_only_on_falling_trend():
     base = (
         "target=0.60 min=1 max=50 tolerance=0.10 down_window=0 "
         "max_scale_down_frac=1.0 tick=30 start=10"
@@ -260,7 +276,6 @@ def test_predictive_never_scales_down_on_falling_trend():
     falling = "\n".join(["1.00", "0.80", "0.60", "0.40", "0.20", "0.10"])
     off = _fleet_seq(base + " predict_lookahead=0", falling)
     on = _fleet_seq(base + " predict_lookahead=120", falling)
-    # a falling forecast must never accelerate scale-in below the reactive path
     assert all(
         o >= f for o, f in zip(on, off)
     ), f"prediction must not scale down (only up): on={on} off={off}"
