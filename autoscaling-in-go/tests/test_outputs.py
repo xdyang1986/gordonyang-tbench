@@ -1,15 +1,7 @@
-"""Black-box verifier for the from-scratch autoscaler program.
+"""Black-box tests: build the agent's Go program and drive it via stdin/stdout.
 
-The agent writes a Go `package main` at /app that reads a workload from stdin and
-writes CSV scaling decisions to stdout. These tests build that program and drive
-it with crafted workloads, asserting on observable output only.
-
-Fairness note: the exact tick at which a sustained drop begins to scale in is a
-boundary convention the spec does not pin down. So scale-in is verified
-*asymptotically* (a transient dip is held; sustained low demand eventually drains
-to the floor) and the rate limiter via a per-step invariant — never an exact tick
-— so any correct convention passes. Immediate scale-up and clamping are exact
-because the spec fixes them.
+Scale-in is checked asymptotically and the rate limiter via a per-step invariant
+(the exact scale-in tick is convention-dependent). Scale-up and clamps are exact.
 """
 
 import os
@@ -30,8 +22,7 @@ GO_ENV = {
 
 
 def _find_main_pkg():
-    """Locate the directory (relative to APP) holding `func main`, so the build
-    works regardless of whether the agent put main at /app root or in a subdir."""
+    """Find the dir holding `func main` (agent may put it at root or a subdir)."""
     for root, _dirs, files in os.walk(APP):
         for f in files:
             if f.endswith(".go"):
@@ -46,7 +37,7 @@ def _find_main_pkg():
 
 @pytest.fixture(scope="session", autouse=True)
 def built():
-    """Ensure a Go module exists and build the agent's program (any layout)."""
+    """Init a module if needed and build the agent's program."""
     if not os.path.exists(os.path.join(APP, "go.mod")):
         subprocess.run(
             ["go", "mod", "init", "autoscaler"],
@@ -68,7 +59,7 @@ def built():
 
     r = _build(".")
     if r.returncode != 0:
-        # main not at /app root — find the package that declares func main
+        # main not at root — find the package that declares func main
         pkg = _find_main_pkg()
         if pkg and pkg != ".":
             r = _build(pkg)
@@ -86,7 +77,7 @@ def run(stdin, timeout=30):
 
 
 def rows(out):
-    """Parse CSV into {tick: (cpu_str, replicas_int, action_str)} and check header."""
+    """Parse CSV into {tick: (cpu_str, replicas_int, action_str)}; check header."""
     lines = [l for l in out.strip().split("\n") if l != ""]
     assert lines, "no output"
     assert lines[0] == "tick,cpu,replicas,action", f"bad/missing header: {lines[0]!r}"
@@ -232,12 +223,8 @@ def test_tolerance_dead_band():
 
 
 # ---- predictive (trend-based) scale-up (directional: convention-robust) ----
-#
-# Mechanism-agnostic: we never assert exact pre-scaled values (the extrapolation
-# formula has many valid forms). We assert direction only: with prediction ON, a
-# rising trend pre-scales the fleet EARLIER than the reactive path; prediction is
-# scale-UP only (never pulls the fleet below the reactive path on a falling
-# trend); predict_lookahead=0 means OFF (the reactive baseline).
+# Direction only, no exact values: ON pre-scales earlier on a rising trend, never
+# below the reactive path on a falling one; predict_lookahead=0 is the baseline.
 
 PRED_BASE = (
     "target=0.60 min=1 max=50 tolerance=0.10 down_window=300 "
