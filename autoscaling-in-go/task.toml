@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/autoscaling-in-go"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Write a Go program from scratch that reads a workload trace on stdin and emits CPU-autoscaling decisions (ratio rule, tolerance dead-band, FP exact-integer guard, asymmetric stabilization windows, rate-limited scale-in, bounds) as CSV; graded black-box on the output."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "autoscaling", "control-loop", "algorithms"]
