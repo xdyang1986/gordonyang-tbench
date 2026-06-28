@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/database-seeding"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Implement a streaming database-copy tool: pluggable compression codecs plus local chunked copy and a compressed TCP file-transfer protocol."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["python", "sockets", "compression", "streaming", "wire-protocol"]
