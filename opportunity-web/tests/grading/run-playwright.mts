@@ -725,6 +725,7 @@ async function main() {
       // Default sort is uplift desc; the row with the lowest uplift is last in the
       // full order, i.e. deep in a ~2000-row list.
       const byU = [...OPPORTUNITIES].sort((a, b) => b.estUpliftMonthly - a.estUpliftMonthly);
+      const total = byU.length;
       const first = byU[0];
       const last = byU[byU.length - 1];
       const present = async (name: string) =>
@@ -766,6 +767,23 @@ async function main() {
         !(await present(last.customerName)),
         'bottom row must unmount after scrolling back to the top',
       );
+
+      // Mid-scroll windowing accuracy: at 50% the window must be centered near the
+      // middle — the ~middle row is mounted while BOTH the top and bottom rows are not.
+      // (Fraction-based, so independent of the agent's row height; catches a window that
+      // is mis-centered, top-anchored, or end-anchored.)
+      const mid = byU[Math.floor(total * 0.5)];
+      await scrollList(page, 0.5);
+      await page.waitForFunction(
+        (name) =>
+          Array.from(document.querySelectorAll('[data-testid="opp-row"]')).some((r) =>
+            (r.textContent || '').includes(name),
+          ),
+        mid.customerName,
+        { timeout: 8000 },
+      );
+      assert(!(await present(first.customerName)), 'top row must not be mounted at mid-scroll');
+      assert(!(await present(last.customerName)), 'bottom row must not be mounted at mid-scroll');
     } finally {
       await close();
     }
