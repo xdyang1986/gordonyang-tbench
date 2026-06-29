@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/key-value-store-with-snapshot"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Implement an in-process distributed key/value store in C# (.NET 8): N replica nodes with a configured leader, synchronous quorum writes, versioned tombstones, manual epoch-bump failover, and Settle-driven anti-entropy convergence."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["csharp", "dotnet", "distributed-systems", "replication", "consensus", "quorum"]
