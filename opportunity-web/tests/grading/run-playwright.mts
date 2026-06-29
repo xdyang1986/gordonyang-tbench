@@ -87,6 +87,21 @@ async function waitUplift(page: Page, n: number) {
 async function setRowStatus(page: Page, name: string, status: string) {
   await rowFor(page, name).locator('[data-testid="row-status"]').selectOption(status);
 }
+// Scroll the list's scroll container to a fraction (0 = top, 1 = bottom). Finds the
+// scrollable ancestor of the rows so it works regardless of how the agent names it.
+async function scrollList(page: Page, frac: number) {
+  await page.evaluate((f) => {
+    const row = document.querySelector('[data-testid="opp-row"]');
+    let el: HTMLElement | null = row ? (row.parentElement as HTMLElement | null) : null;
+    while (el) {
+      const s = getComputedStyle(el);
+      if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) break;
+      el = el.parentElement;
+    }
+    const t: HTMLElement = el || (document.scrollingElement as HTMLElement) || document.documentElement;
+    t.scrollTop = Math.round(f * (t.scrollHeight - t.clientHeight));
+  }, frac);
+}
 async function setSearch(page: Page, v: string) {
   await page.fill('[data-testid="search"]', v);
 }
@@ -709,32 +724,20 @@ async function main() {
     try {
       // Default sort is uplift desc; the row with the lowest uplift is last in the
       // full order, i.e. deep in a ~2000-row list.
-      const last = [...OPPORTUNITIES].sort((a, b) => b.estUpliftMonthly - a.estUpliftMonthly).slice(-1)[0];
-      // It must NOT be in the DOM initially (rules out render-all).
-      assert(
-        (await rowFor(page, last.customerName).count()) === 0,
-        'deep row should not be mounted initially (render-all or unbounded DOM?)',
-      );
-      // Scroll the list's scroll container to the bottom (find the scrollable ancestor
-      // of the rows; works regardless of how the agent names it).
-      await page.evaluate(() => {
-        const row = document.querySelector('[data-testid="opp-row"]');
-        let el: HTMLElement | null = row ? (row.parentElement as HTMLElement | null) : null;
-        while (el) {
-          const s = getComputedStyle(el);
-          if (
-            (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
-            el.scrollHeight > el.clientHeight + 4
-          )
-            break;
-          el = el.parentElement;
-        }
-        const target: HTMLElement =
-          el || (document.scrollingElement as HTMLElement) || document.documentElement;
-        target.scrollTop = target.scrollHeight;
-      });
-      // After scrolling, the deep last row must render (windowing followed the scroll);
-      // pagination would never reveal it by scrolling.
+      const byU = [...OPPORTUNITIES].sort((a, b) => b.estUpliftMonthly - a.estUpliftMonthly);
+      const first = byU[0];
+      const last = byU[byU.length - 1];
+      const present = async (name: string) =>
+        (await page.locator('[data-testid="opp-row"]', { hasText: name }).count()) > 0;
+
+      // Initially: the top row is mounted, the deep last row is not (rules out render-all).
+      assert(await present(first.customerName), 'top row should be mounted initially');
+      assert(!(await present(last.customerName)), 'deep row must not be mounted initially (render-all or unbounded DOM?)');
+
+      // Scroll to the bottom: the deep last row mounts (windowing follows the scroll;
+      // pagination never reveals it by scrolling), the top row UNMOUNTS (only on-screen
+      // rows are rendered), and the DOM stays bounded.
+      await scrollList(page, 1);
       await page.waitForFunction(
         (name) =>
           Array.from(document.querySelectorAll('[data-testid="opp-row"]')).some((r) =>
@@ -743,8 +746,26 @@ async function main() {
         last.customerName,
         { timeout: 8000 },
       );
-      // DOM stays bounded (still virtualized, not render-all).
+      assert(
+        !(await present(first.customerName)),
+        'top row must unmount after scrolling to the bottom (off-screen rows must not stay in the DOM)',
+      );
       assert((await rowCount(page)) <= MAX_RENDERED_ROWS, `DOM not bounded after scroll (${await rowCount(page)} rows)`);
+
+      // Scroll back to the top: the top row returns and the bottom row unmounts.
+      await scrollList(page, 0);
+      await page.waitForFunction(
+        (name) =>
+          Array.from(document.querySelectorAll('[data-testid="opp-row"]')).some((r) =>
+            (r.textContent || '').includes(name),
+          ),
+        first.customerName,
+        { timeout: 8000 },
+      );
+      assert(
+        !(await present(last.customerName)),
+        'bottom row must unmount after scrolling back to the top',
+      );
     } finally {
       await close();
     }
