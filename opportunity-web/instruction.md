@@ -11,6 +11,7 @@ Supported features:
 8. Any change(e.g. status, search) should be persisted and reload automatically after refresh.
 9. Support priority sort option: if the sort option contains priority. Priority = round( (estUpliftMonthly / currentSpendMonthly) × confidenceWeight × 1000 ), where confidenceWeight is High = 1.0, Medium = 0.7, Low = 0.4. Sort descending; ties broken by estimated uplift, highest first. if the currentSpend is zero, the priority is the highest.
 10. The column support width change.
+11. The header's total est. uplift sums only opportunities whose status is New or Contacted; Won and Lost are excluded. The visible count still counts all matching rows.
 
 Notes:
 1. Stable data-testid hooks: search, filter-industry, filter-product, filter-confidence, filter-status, sort, summary-count, summary-uplift, opp-row, row-status, row-assignee;

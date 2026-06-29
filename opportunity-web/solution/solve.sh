@@ -544,7 +544,6 @@ import { useOpportunityState } from './hooks/useOpportunityState';
 import {
   EMPTY_FILTERS,
   filterAndSort,
-  totalUplift,
   uniqueValues,
   type Filters,
   type SortKey,
@@ -615,9 +614,16 @@ export default function App() {
   const btn =
     'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 disabled:opacity-40';
 
+  // Rule 11: the header total est. uplift sums only OPEN pipeline (status New or
+  // Contacted); Won and Lost are excluded. The visible count still counts all rows.
+  const openUplift = visible.reduce((s, o) => {
+    const st = getState(o.id).status;
+    return st === 'Won' || st === 'Lost' ? s : s + o.estUpliftMonthly;
+  }, 0);
+
   return (
     <div className="mx-auto flex min-h-full max-w-7xl flex-col gap-4 px-4 py-6">
-      <Header count={visible.length} totalUplift={totalUplift(visible)} />
+      <Header count={visible.length} totalUplift={openUplift} />
       <Toolbar
         filters={filters}
         sortKey={sortKey}
