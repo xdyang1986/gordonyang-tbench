@@ -57,6 +57,7 @@ EXPECTED_TESTS = [
     "sorts by confidence high first",
     "confidence sort tiebreaks by uplift descending",
     "priority sort orders by uplift weighted by confidence",
+    "zero-spend opportunity sorts first under priority (highest priority)",
     "summary reflects the filtered view",
     "per-opportunity state stays with the opportunity after re-sort",
     "new opportunity defaults to status New and unassigned",

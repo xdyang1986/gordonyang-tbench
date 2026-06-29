@@ -9,7 +9,7 @@ Supported features:
 6. Status include: New, Contacted, Won and Lost -- default is New.
 7. Assignee is a dropdown with the sales name (come from the provided reps data src/data/reps.ts), default is "unassigned".
 8. Any change(e.g. status, search) should be persisted and reload automatically after refresh.
-9. Support priority sort option: if the sort option contains priority. Priority = round( (estUpliftMonthly / currentSpendMonthly) × confidenceWeight × 1000 ), where confidenceWeight is High = 1.0, Medium = 0.7, Low = 0.4. Sort descending; ties broken by estimated uplift, highest first.
+9. Support priority sort option: if the sort option contains priority. Priority = round( (estUpliftMonthly / currentSpendMonthly) × confidenceWeight × 1000 ), where confidenceWeight is High = 1.0, Medium = 0.7, Low = 0.4. Sort descending; ties broken by estimated uplift, highest first. if the currentSpend is zero, the priority is the highest.
 10. The column support width change.
 
 Notes:

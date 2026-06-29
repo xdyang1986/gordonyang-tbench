@@ -143,7 +143,7 @@ export const OPPORTUNITIES: Opportunity[] = [
     customerName: 'Coastal Brew Co.',
     industry: 'CPG',
     product: 'Reels Ads',
-    currentSpendMonthly: 12000,
+    currentSpendMonthly: 0,
     estUpliftMonthly: 5200,
     confidence: 'Medium',
     rationale:

@@ -29,4 +29,3 @@ Every remaining non-blank line is one CPU sample per tick, each a single float i
 If the input is not valid, exit with a non-zero status.
 
 Write the output to stdout: a header line, then one line per input sample, in CSV with this format: tick,cpu,replicas,action -- tick is a 0-based sample index and cpu is the input sample echoed, formatted to exactly 2 decimals. replicas is the fleet size after this tick's decision and action has three values: up/down/none (up means increase, down means decrease and none means unchanged).
-The output must be deterministic.
