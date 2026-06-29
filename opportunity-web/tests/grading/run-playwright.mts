@@ -102,6 +102,11 @@ async function scrollList(page: Page, frac: number) {
     t.scrollTop = Math.round(f * (t.scrollHeight - t.clientHeight));
   }, frac);
 }
+async function optionValues(page: Page, testid: string): Promise<string[]> {
+  return page.$$eval(`[data-testid="${testid}"] option`, (os) =>
+    os.map((o) => (o as HTMLOptionElement).value),
+  );
+}
 async function setSearch(page: Page, v: string) {
   await page.fill('[data-testid="search"]', v);
 }
@@ -784,6 +789,68 @@ async function main() {
       );
       assert(!(await present(first.customerName)), 'top row must not be mounted at mid-scroll');
       assert(!(await present(last.customerName)), 'bottom row must not be mounted at mid-scroll');
+    } finally {
+      await close();
+    }
+  });
+
+  await test('filter dropdowns expose all values present in the data', async () => {
+    const { page, close } = await fresh();
+    try {
+      const inds = [...new Set(OPPORTUNITIES.map((o) => o.industry))];
+      const prods = [...new Set(OPPORTUNITIES.map((o) => o.product))];
+      const indOpts = await optionValues(page, 'filter-industry');
+      const prodOpts = await optionValues(page, 'filter-product');
+      const confOpts = await optionValues(page, 'filter-confidence');
+      const statOpts = await optionValues(page, 'filter-status');
+      for (const v of inds) assert(indOpts.includes(v), `industry filter missing '${v}'`);
+      for (const v of prods) assert(prodOpts.includes(v), `product filter missing '${v}'`);
+      for (const v of ['High', 'Medium', 'Low']) assert(confOpts.includes(v), `confidence filter missing '${v}'`);
+      for (const v of ['New', 'Contacted', 'Won', 'Lost']) assert(statOpts.includes(v), `status filter missing '${v}'`);
+      // The per-row assignee dropdown must offer every rep from reps.ts.
+      const aVals = await page
+        .locator('[data-testid="opp-row"]')
+        .first()
+        .locator('[data-testid="row-assignee"] option')
+        .evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+      for (const rep of SALES_REPS) assert(aVals.includes(rep), `assignee dropdown missing '${rep}'`);
+    } finally {
+      await close();
+    }
+  });
+
+  await test('whitespace-only search matches all rows', async () => {
+    const { page, close } = await fresh();
+    try {
+      await setSearch(page, '   ');
+      await waitSummary(page, OPPORTUNITIES.length);
+    } finally {
+      await close();
+    }
+  });
+
+  await test('spend sort places the zero-spend row last and formats it as $0', async () => {
+    const { page, close } = await fresh();
+    try {
+      const zero = OPPORTUNITIES.find((o) => o.currentSpendMonthly === 0)!;
+      assert(!!zero, 'fixture needs a zero-spend row');
+      await selectByLabel(page, 'sort', /spend/i);
+      await scrollList(page, 1);
+      await page.waitForFunction(
+        (name) =>
+          Array.from(document.querySelectorAll('[data-testid="opp-row"]')).some((r) =>
+            (r.textContent || '').includes(name),
+          ),
+        zero!.customerName,
+        { timeout: 8000 },
+      );
+      const texts = await page.locator('[data-testid="opp-row"]').allTextContents();
+      assert(
+        (texts[texts.length - 1] || '').includes(zero!.customerName),
+        'zero-spend row must sort last under spend-descending',
+      );
+      const zText = (await rowFor(page, zero!.customerName).textContent()) ?? '';
+      assert(zText.includes('$0'), 'zero-spend amount must format as $0 (USD, no decimals)');
     } finally {
       await close();
     }
