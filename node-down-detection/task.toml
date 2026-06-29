@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/node-down-detection"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Implement a Go library for probabilistic, region-aware node failure detection: a phi accrual failure detector plus partition-tolerant cross-region aggregation."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "distributed-systems", "failure-detection", "phi-accrual", "concurrency"]

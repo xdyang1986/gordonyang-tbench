@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/traffic-throttle"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Implement a concurrent, health-aware token-bucket traffic throttler in Go."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "concurrency", "rate-limiting", "token-bucket"]

@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/opportunity-web"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Build, from scratch, an Ads Opportunity Board: a React + TypeScript single-page app over a fixed dataset that lists upsell opportunities and lets a sales rep search, multi-filter, sort, and track per-opportunity status + assignee with localStorage persistence. Graded headlessly against rendered behaviour."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["typescript", "react", "frontend", "vite", "state-management"]
