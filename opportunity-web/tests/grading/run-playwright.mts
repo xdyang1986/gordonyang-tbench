@@ -704,6 +704,52 @@ async function main() {
     }
   });
 
+  await test('virtualized list reveals deep rows on scroll (not pagination)', async () => {
+    const { page, close } = await fresh();
+    try {
+      // Default sort is uplift desc; the row with the lowest uplift is last in the
+      // full order, i.e. deep in a ~2000-row list.
+      const last = [...OPPORTUNITIES].sort((a, b) => b.estUpliftMonthly - a.estUpliftMonthly).slice(-1)[0];
+      // It must NOT be in the DOM initially (rules out render-all).
+      assert(
+        (await rowFor(page, last.customerName).count()) === 0,
+        'deep row should not be mounted initially (render-all or unbounded DOM?)',
+      );
+      // Scroll the list's scroll container to the bottom (find the scrollable ancestor
+      // of the rows; works regardless of how the agent names it).
+      await page.evaluate(() => {
+        const row = document.querySelector('[data-testid="opp-row"]');
+        let el: HTMLElement | null = row ? (row.parentElement as HTMLElement | null) : null;
+        while (el) {
+          const s = getComputedStyle(el);
+          if (
+            (s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+            el.scrollHeight > el.clientHeight + 4
+          )
+            break;
+          el = el.parentElement;
+        }
+        const target: HTMLElement =
+          el || (document.scrollingElement as HTMLElement) || document.documentElement;
+        target.scrollTop = target.scrollHeight;
+      });
+      // After scrolling, the deep last row must render (windowing followed the scroll);
+      // pagination would never reveal it by scrolling.
+      await page.waitForFunction(
+        (name) =>
+          Array.from(document.querySelectorAll('[data-testid="opp-row"]')).some((r) =>
+            (r.textContent || '').includes(name),
+          ),
+        last.customerName,
+        { timeout: 8000 },
+      );
+      // DOM stays bounded (still virtualized, not render-all).
+      assert((await rowCount(page)) <= MAX_RENDERED_ROWS, `DOM not bounded after scroll (${await rowCount(page)} rows)`);
+    } finally {
+      await close();
+    }
+  });
+
   async function dragResizeCustomer(page: Page, dx: number): Promise<number> {
     const col = page.locator('[data-testid="col-customer"]');
     const handle = page.locator('[data-testid="resize-customer"]');

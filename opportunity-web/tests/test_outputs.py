@@ -40,6 +40,7 @@ GRADING_DEPS = ["playwright-core@1.49.1", "tsx@4.19.2"]
 EXPECTED_TESTS = [
     "summary shows the full opportunity count",
     "table renders a bounded window for large datasets",
+    "virtualized list reveals deep rows on scroll (not pagination)",
     "summary shows total uplift formatted as USD",
     "formats currency amounts in a row",
     "search filters by customer name",

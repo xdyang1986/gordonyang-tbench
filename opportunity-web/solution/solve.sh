@@ -421,6 +421,7 @@ export function OpportunityRow({ opp, state, onUpdate }: Props) {
 TSX
 
 cat > /app/src/components/OpportunityTable.tsx <<'TSX'
+import { useState } from 'react';
 import type { Opportunity, OppState } from '../types';
 import { OpportunityRow } from './OpportunityRow';
 
@@ -454,6 +455,12 @@ const headerClass =
 
 const MIN_WIDTH = 60;
 
+// Virtualization geometry: only the on-screen window of rows is mounted (no
+// pagination), so the DOM stays small no matter how large the feed is.
+const ROW_HEIGHT = 48;
+const VIEWPORT = 600;
+const OVERSCAN = 8;
+
 export function OpportunityTable({
   opportunities,
   getState,
@@ -461,6 +468,8 @@ export function OpportunityTable({
   widths,
   onResize,
 }: Props) {
+  const [scrollTop, setScrollTop] = useState(0);
+
   if (opportunities.length === 0) {
     return (
       <div className="rounded-lg bg-white p-10 text-center text-slate-500 shadow-sm ring-1 ring-slate-200">
@@ -485,43 +494,63 @@ export function OpportunityTable({
     window.addEventListener('mouseup', onUp);
   };
 
+  // Compute the visible window from the scroll position. Clamp the start so that
+  // scrolling to the bottom always mounts the final rows.
+  const total = opportunities.length;
+  const windowCount = Math.ceil(VIEWPORT / ROW_HEIGHT) + OVERSCAN * 2;
+  const maxStart = Math.max(0, total - windowCount);
+  const startIndex = Math.min(maxStart, Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
+  const endIndex = Math.min(total, startIndex + windowCount);
+  const windowRows = opportunities.slice(startIndex, endIndex);
+  const topPad = startIndex * ROW_HEIGHT;
+  const botPad = (total - endIndex) * ROW_HEIGHT;
+
   return (
-    <div className="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-slate-200">
-      <table className="min-w-full table-fixed divide-y divide-slate-200">
-        <colgroup>
-          {COLUMNS.map((c) => (
-            <col key={c.key} style={{ width: `${widths[c.key] ?? c.width}px` }} />
-          ))}
-        </colgroup>
-        <thead className="bg-slate-50">
-          <tr>
+    <div className="rounded-lg bg-white shadow-sm ring-1 ring-slate-200">
+      <div
+        data-testid="table-scroll"
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        style={{ height: VIEWPORT, overflowY: 'auto' }}
+        className="overflow-x-auto"
+      >
+        <table className="min-w-full table-fixed divide-y divide-slate-200">
+          <colgroup>
             {COLUMNS.map((c) => (
-              <th
-                key={c.key}
-                data-testid={`col-${c.key}`}
-                className={`${headerClass} ${c.align === 'right' ? 'text-right' : 'text-left'}`}
-              >
-                {c.label}
-                <span
-                  data-testid={`resize-${c.key}`}
-                  onMouseDown={(e) => startResize(c.key, e)}
-                  className="absolute right-0 top-0 h-full w-2 cursor-col-resize select-none hover:bg-blue-200"
-                />
-              </th>
+              <col key={c.key} style={{ width: `${widths[c.key] ?? c.width}px` }} />
             ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {opportunities.map((opp) => (
-            <OpportunityRow
-              key={opp.id}
-              opp={opp}
-              state={getState(opp.id)}
-              onUpdate={(patch) => updateState(opp.id, patch)}
-            />
-          ))}
-        </tbody>
-      </table>
+          </colgroup>
+          <thead className="sticky top-0 z-10 bg-slate-50">
+            <tr>
+              {COLUMNS.map((c) => (
+                <th
+                  key={c.key}
+                  data-testid={`col-${c.key}`}
+                  className={`${headerClass} ${c.align === 'right' ? 'text-right' : 'text-left'}`}
+                >
+                  {c.label}
+                  <span
+                    data-testid={`resize-${c.key}`}
+                    onMouseDown={(e) => startResize(c.key, e)}
+                    className="absolute right-0 top-0 h-full w-2 cursor-col-resize select-none hover:bg-blue-200"
+                  />
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {topPad > 0 && <tr aria-hidden="true" style={{ height: `${topPad}px` }} />}
+            {windowRows.map((opp) => (
+              <OpportunityRow
+                key={opp.id}
+                opp={opp}
+                state={getState(opp.id)}
+                onUpdate={(patch) => updateState(opp.id, patch)}
+              />
+            ))}
+            {botPad > 0 && <tr aria-hidden="true" style={{ height: `${botPad}px` }} />}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -549,10 +578,9 @@ import {
   type SortKey,
 } from './lib/filter';
 
-// The feed has thousands of rows; render only one page at a time so the DOM stays
-// small and the board stays responsive. The summary still reflects the full
-// filtered set, not just the current page.
-const PAGE_SIZE = 50;
+// The feed has thousands of rows; the table virtualizes (renders only the on-screen
+// window of rows — no pagination) so the DOM stays small. The summary still reflects
+// the full filtered set, not just the on-screen window.
 
 // Persist the toolbar/view state (search + filters + sort) so every change is
 // restored automatically after a refresh, alongside the per-row workflow state.
@@ -576,7 +604,6 @@ export default function App() {
     ...DEFAULT_WIDTHS,
     ...(loadView()?.widths ?? {}),
   }));
-  const [page, setPage] = useState(0);
   const { getState, updateState } = useOpportunityState();
 
   const handleResize = (key: string, width: number) =>
@@ -590,11 +617,6 @@ export default function App() {
     [filters, sortKey, getState],
   );
 
-  // Reset to the first page whenever the result set changes.
-  useEffect(() => {
-    setPage(0);
-  }, [filters, sortKey]);
-
   // Persist the view so it is restored automatically on refresh.
   useEffect(() => {
     try {
@@ -606,13 +628,6 @@ export default function App() {
       // ignore quota/availability errors
     }
   }, [filters, sortKey, columnWidths]);
-
-  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  const current = Math.min(page, pageCount - 1);
-  const paged = visible.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE);
-
-  const btn =
-    'rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 disabled:opacity-40';
 
   // Rule 11: the header total est. uplift sums only OPEN pipeline (status New or
   // Contacted); Won and Lost are excluded. The visible count still counts all rows.
@@ -633,35 +648,12 @@ export default function App() {
         onSortKeyChange={setSortKey}
       />
       <OpportunityTable
-        opportunities={paged}
+        opportunities={visible}
         getState={getState}
         updateState={updateState}
         widths={columnWidths}
         onResize={handleResize}
       />
-      <div className="flex items-center justify-center gap-3">
-        <button
-          type="button"
-          data-testid="prev-page"
-          disabled={current === 0}
-          onClick={() => setPage((p) => Math.max(0, p - 1))}
-          className={btn}
-        >
-          Prev
-        </button>
-        <span className="text-sm text-slate-500">
-          Page {current + 1} of {pageCount} · {visible.length} results
-        </span>
-        <button
-          type="button"
-          data-testid="next-page"
-          disabled={current >= pageCount - 1}
-          onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-          className={btn}
-        >
-          Next
-        </button>
-      </div>
     </div>
   );
 }
