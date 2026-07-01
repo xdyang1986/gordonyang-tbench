@@ -19,25 +19,28 @@ stateful behaviors over the full snapshot stream, with a precise deterministic
 I/O contract:
 
 - **A running merged view** — each tick merges the lines present into a
-  `map[id]Node`; unmentioned nodes retain their last record (no expiry), and the
-  election runs against the full merged state, not just the current tick's lines.
-- **Debounced death detection** — failover fires only after `N=3` consecutive
-  ticks of the primary observed `down`, with **reset-on-up**, and the counter
-  **resets to 0 after an abort** so the still-down primary re-accumulates and
-  re-attempts on a later 3-down run.
+  `map[id]Node`; unmentioned nodes retain their last record (no expiry), and every
+  decision runs against the full merged state, not just the current tick's lines.
+- **Debounced death detection** — the spec is scenario-level ("ignore transient
+  blips, fail over only on a sustained outage"), so the exact threshold is the
+  agent's to choose; the counter resets on recovery and re-accumulates after an
+  abort. Graded by invariant (a single-tick blip must not fire; a sustained
+  outage must).
 - **Election order** — highest `pos`, then **higher** `prio`, then lowest `id`.
-- **Data-loss guardrail** — abort unless `(cluster-max pos across ALL nodes,
-  including the dead primary and lagging/down nodes) − winner pos ≤ max-loss`
-  (default `0`, overridable via `-max-loss`).
-- **Stateful cutover** — fence + demote the dead primary, promote the winner
-  (it becomes the new primary the engine then watches), reattach survivors
-  **silently on stderr** (non-graded).
-- **REJOIN semantics** — emitted only when a previously-fenced **ex-primary**
-  returns `up`, once, targeting the current primary; surviving replicas never
-  emit REJOIN. Within a tick the decision prints first, then REJOIN lines sorted
-  by node id; across ticks everything is in ascending tick order.
-- **Multi-cycle** — the engine continues after each event, so a stream can
-  produce several PROMOTE/ABORT/REJOIN lines.
+- **Quorum gate** — a promotion requires a strict majority of *all nodes ever
+  seen* to be healthy; otherwise `ABORT`, re-attempting once quorum is restored.
+- **Data-loss guardrail** — abort unless `(cluster-max pos, including the dead
+  primary and lagging nodes but EXCLUDING any diverged ex-primary) − winner pos ≤
+  max-loss` (default `0`, overridable via `-max-loss`).
+- **Divergence guard (3-way)** — a fenced ex-primary that recovers is *diverged*
+  if it is strictly ahead of the current primary. A diverged node: **counts**
+  toward quorum, is **excluded** from the cluster-max, and is **not** an election
+  candidate; it may `REJOIN` only once it is no longer ahead of the primary.
+- **Stateful cutover / multi-cycle** — fence + demote the dead primary, promote
+  the winner (which the engine then watches), reattach survivors silently on
+  stderr; the stream can produce several events.
+- **REJOIN ordering** — decision line first, then REJOIN lines sorted by node id;
+  ascending tick order across ticks.
 - **Strict validation** — any malformed line or invalid flag exits `2` with no
   decisions emitted.
 
@@ -47,61 +50,52 @@ crutch.
 
 ## Completion Rates
 
-Local Docker runs (`codimango bench run`, CLI v0.52.1), k=5. **Calibration is
-satisfied** — both calibration targets are genuine mixes (≥1 pass **and** ≥1 fail),
-so the balance check ("Avocado not trivial AND ≥1 agent solved") is met.
+Local Docker runs (`codimango bench run`, CLI v0.52.1), k=5, on the current build
+(quorum + 3-way divergence guard). **Avocado is a genuine mix**, so the balance
+check ("Avocado not trivial AND ≥1 agent solved") is met locally.
 
 | Model | Pass rate (k=5) |
 |-------|-----------------|
 | Oracle | 3/3 (deterministic; full suite verified in Docker) |
-| Opus 4.6 | **2/5** — mix |
-| Avocado | **4/5** — mix |
-| Sonnet 4.6 | not measured (informational only) |
-
-> Avocado measured 3/5 on a suite that still contained one over-strict test
-> (`test_bad_role_value_exit2`, asserting exit-2 for an unknown *role* value the
-> spec never requires). That test has been removed; recomputing over the
-> independent remaining assertions gives 4/5 (the removed-test-only failure flips
-> to a pass; the legitimate `test_debounce_two_downs` failure remains). Opus's
-> failures never involved that test, so Opus is unaffected.
+| Avocado | **2/5** — mix (validation-gate model) |
+| Opus 4.6 | 2/5 on an earlier build; not re-measured on the current build |
+| gpt-5.5 | not runnable locally (measured only by the cloud gate) |
 
 ## Model Analysis
 
-- **Opus 4.6 — 2/5.** 2 clean passes (23/23). 3 failures, all **legitimate
-  reasoning gaps** on stated behavior: (a) one fully-broken solution failing 17
-  tests including the worked example — did not build a correct merged-state
-  engine; (b) one missed `test_debounce_two_downs` (fired before N=3) plus the
-  REJOIN ordering/emission rules; (c) one missed the data-loss guardrail
-  (`default_maxloss`, `clustermax_includes_a_down_node`, `reattempt_after_abort`).
-  No failures involved the removed over-strict test.
-- **Avocado — 4/5 (3/5 as measured, pre-fix).** 3 clean passes (23/23). Its one
-  legitimate failure missed `test_debounce_two_downs` (fired on 2 consecutive
-  downs instead of waiting for N=3). Trajectories show genuine algorithm work
-  (clusterMax, debounce, fence, reattach) with **no test-file access and no
-  hardcoded test tokens** (spot-checked) — solves are real, not leakage.
+- **Avocado — 2/5 (current build).** 2 clean passes (28/28); all 5 trials ran
+  (no reward-less/infra trials). The 3 failures are on **stated/derivable**
+  behavior:
+  - `test_elect_highest_position` — missed the core election rule (1 trial).
+  - `test_diverged_node_quorum_yes_election_no_clustermax_no` — missed the 3-way
+    divergence composition: a diverged node must count toward quorum yet be
+    excluded from both the candidate set and the cluster-max (1 trial).
+  - `test_rejoin_diverged_then_recovers_when_primary_advances` — treated
+    divergence as permanent instead of re-evaluating against the current
+    primary's position, so it never re-emitted the delayed `REJOIN` (2 trials).
+  Trajectories show genuine algorithm work (quorum, diverge, fence, rejoin) with
+  **no test-file access and no hardcoded test tokens** — solves are real.
 
-**Dominant failure modes across models:** (1) the running merged-map **retention**
-rule (unmentioned nodes persist; election against full known state) — Opus's
-biggest miss; (2) **debounce timing** (N=3 with reset) — the shared Avocado/Opus
-miss; (3) the **data-loss / cluster-max guardrail** and (4) **REJOIN**
-emission/ordering. All are reasoning gaps on behavior the spec states explicitly,
-not task-setup artifacts — the difficulty is composing the full stateful engine
-correctly over the snapshot stream.
+**Dominant failure modes:** the **divergence composition** (the 3-way split and
+its dynamic re-evaluation) is the primary differentiator, followed by exact
+**election** ordering. These are reasoning gaps on behavior the spec states, not
+task-setup artifacts — the difficulty is composing the full stateful engine
+(retention + debounce + quorum + data-loss + divergence + REJOIN) correctly.
 
-**Calibration verdict:** the task discriminates across the tier (Opus 2/5,
-Avocado 4/5) with both targets a mix. Note the margin is **variance-sensitive**
-(an earlier roll of the same spec gave Opus 0/5, Avocado 5/5); a future re-roll
-could shift the balance, so a durable difficulty bump (e.g. converting a
-prescribed mechanic into a derived scenario-level guarantee) would harden it.
+**Calibration note:** this margin is **variance-sensitive** — earlier builds of
+this task rolled Avocado at 5/5 (too easy) and 0/5 (when the divergence rules
+were not yet stated). The current mix comes from the divergence composition being
+both *stated* (fair) and *subtle* (a real reasoning challenge). The cloud gate
+also evaluates gpt-5.5, which cannot be measured locally.
 
 ## Anti-Cheating Analysis
 
 - **Hardcoded outputs:** The verifier drives the agent's compiled program with
-  many distinct snapshot streams (debounce on/off boundaries, reset-on-up,
-  election tie-breaks, default/overridden data-loss aborts, cluster-max spanning
-  down nodes, re-attempt-after-abort, REJOIN, multi-failover, validation) and
-  asserts on computed decision sequences and exit codes — there is no fixed
-  output to print.
+  many distinct snapshot streams (blip vs sustained outage, election tie-breaks,
+  default/overridden data-loss aborts, cluster-max spanning down nodes, quorum
+  loss/restore, re-attempt-after-abort, REJOIN with divergence, multi-failover,
+  validation) and asserts on computed decision sequences and exit codes — there
+  is no fixed output to print.
 - **Overfitting to visible tests:** No test files ship in the container; the
   suite runs only at verify time and covers more scenarios than `instruction.md`
   enumerates by example.
@@ -111,5 +105,5 @@ prescribed mechanic into a derived scenario-level guarantee) would harden it.
   exit code from the agent's own compiled program (built from `/app`, any layout)
   on fresh inputs. No code ships in the container and no oracle is present at
   solve time, so the only way to pass is to implement the merged-state engine,
-  the debounce + election + data-loss logic, the REJOIN/exit-code contract, and
-  input validation correctly.
+  debounce, quorum, data-loss, the divergence guard, and the REJOIN/exit-code
+  contract correctly.

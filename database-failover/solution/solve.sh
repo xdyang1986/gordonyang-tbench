@@ -148,11 +148,19 @@ func main() {
 			fmt.Fprintln(out, decision)
 		}
 
-		// REJOIN: any previously-fenced ex-primary now back up, once, sorted by id.
+		// REJOIN: a previously-fenced ex-primary that is back up rejoins the current
+		// primary, once — but only if its history has NOT diverged, measured against
+		// the current primary's position: diverged means it is strictly AHEAD
+		// (nd.pos > primary.pos), holding writes the new primary never received, so it
+		// cannot cleanly rejoin. An at-or-behind node (nd.pos <= primary.pos) rejoins.
+		// A diverged node stays fenced and may rejoin later if the primary catches up.
 		var rejoin []string
-		for id := range fenced {
-			if nd := state[id]; nd != nil && nd.health == "up" {
-				rejoin = append(rejoin, id)
+		if primary != "" {
+			pp := state[primary]
+			for id := range fenced {
+				if nd := state[id]; nd != nil && nd.health == "up" && pp != nil && nd.pos <= pp.pos {
+					rejoin = append(rejoin, id)
+				}
 			}
 		}
 		sort.Strings(rejoin)
@@ -177,11 +185,35 @@ func main() {
 // decide runs the election + data-loss guardrail for a debounced-dead primary.
 // Returns the decision line; mutates state/fenced/primary on a successful promote.
 func decide(state map[string]*node, deadPrimary string, maxLoss int, fenced *map[string]bool, primary *string) string {
-	// Candidates: up nodes other than the dead primary.
+	// A fenced ex-primary is "diverged" if it is strictly ahead of the current
+	// primary (its position exceeds the current primary's). Diverged nodes get
+	// three distinct treatments:
+	//   - quorum:      they DO count (they are reachable/up);
+	//   - election:    they are NOT candidates (promoting divergent history is unsafe);
+	//   - cluster-max: they are EXCLUDED (their extra writes are written off).
+	refPos := state[deadPrimary].pos
+	diverged := func(id string) bool {
+		return (*fenced)[id] && state[id].pos > refPos
+	}
+
+	// Quorum gate: strict majority of all nodes ever seen must be healthy (up).
+	// Diverged nodes count toward this.
+	total := len(state)
+	up := 0
+	for _, nd := range state {
+		if nd.health == "up" {
+			up++
+		}
+	}
+	if up < total/2+1 {
+		return "ABORT"
+	}
+
+	// Candidates: up nodes other than the dead primary; diverged nodes excluded.
 	var winner node
 	have := false
 	for id, nd := range state {
-		if id == deadPrimary || nd.health != "up" {
+		if id == deadPrimary || nd.health != "up" || diverged(id) {
 			continue
 		}
 		if !have || better(*nd, winner) {
@@ -192,10 +224,14 @@ func decide(state map[string]*node, deadPrimary string, maxLoss int, fenced *map
 	if !have {
 		return "ABORT"
 	}
-	// Data loss = highest pos anywhere (incl. dead primary & lagging nodes) - winner pos.
+	// Data loss = highest pos among NON-diverged nodes (incl. dead primary & lagging
+	// nodes) - winner pos. Diverged ex-primaries' ahead-writes are excluded.
 	clusterMax := 0
 	first := true
-	for _, nd := range state {
+	for id, nd := range state {
+		if diverged(id) {
+			continue
+		}
 		if first || nd.pos > clusterMax {
 			clusterMax = nd.pos
 			first = false
