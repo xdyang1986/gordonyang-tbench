@@ -4,8 +4,8 @@ Let's build the program runnable via go run . in /app.
 The decision algorithm for deciding the right candidate must minimize data loss, and don't react to a single blip, any node that loses more than max-loss should not be promoted and if the previous primary recovered, you should let it rejoin the cluster if there is no diverged history (diverged should be measured against the current primary's position). Diverged nodes should not be able to be promoted.
 your monitor receives a feed from a live cluster that only reports what changed each tick, a node's last observed state persists until a newer observation replaces it, there is no timeout/expiry. Every decision is made against the latest known state of every node seen so far, not just the nodes in the current tick.
 Please ignore transient blips and fail over only on a sustained outage.
-Elect highest position; ties → priority → lowest id, higher priority win.
-Support quorum of all nodes ever seen check, if the healthy node is not quorum, let's abort, and while the nodes come back and has quorum again, we can promote then.
+Elect highest position; ties → priority → lowest id, higher priority wins.
+Support quorum of all nodes ever seen check, if the healthy node is not quorum, let's abort, and while the node comes back and has quorum again, we can promote then.
 
 stdin input — time-series of snapshots
 One observation per line; a leading tick column groups lines into per-tick snapshots, processed in ascending order:
