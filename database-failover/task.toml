@@ -1,0 +1,43 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/database-failover"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
+description = "Write a Go program from scratch that reads the status of a set of database replicas on stdin and decides which single replica to promote on primary failure (eligibility filtering, data-safety ordering, deterministic tie-breaking, and a no-safe-failover case), printing the decision to stdout; graded black-box on the output."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "failover", "replication", "distributed-systems"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "medium"
+category = "software-engineering"
+category_usecase = "compute_result"
+category_subdomain = "distributed_systems"
+reward_type = "binary"
+languages = ["go"]
+tags = ["go", "failover", "replication", "high-availability", "distributed-systems"]
+expert_time_estimate_min = 25.0
+junior_time_estimate_min = 75.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
