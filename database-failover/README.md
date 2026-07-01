@@ -50,43 +50,38 @@ crutch.
 
 ## Completion Rates
 
-Local Docker runs (`codimango bench run`, CLI v0.52.1), k=5, on the current build
-(quorum + 3-way divergence guard). **Avocado is a genuine mix**, so the balance
-check ("Avocado not trivial AND ≥1 agent solved") is met locally.
+Cloud validation (codimango), commit `c6641c0` — **Validation Passed**, k=5.
 
-| Model | Pass rate (k=5) |
-|-------|-----------------|
-| Oracle | 3/3 (deterministic; full suite verified in Docker) |
-| Avocado | **2/5** — mix (validation-gate model) |
-| Opus 4.6 | 2/5 on an earlier build; not re-measured on the current build |
-| gpt-5.5 | not runnable locally (measured only by the cloud gate) |
+| Check / Model | Result |
+|---|---|
+| Structural checks | PASS (8/8) |
+| Oracle | 3/3 |
+| Avocado (validation-gate) | **2/5** — mix |
+| gpt-5.5 | **0/5** |
+| Opus 4.6 | no trials (balance keys on Avocado) |
+| Balance check | **Passed** — "avocado not trivial and ≥1 agent solved" |
+| AI assessment | Accept (0 Critical · 0 High · 0 Medium · 1 Low) |
+| Contamination | MEDIUM |
+| Provenance | SUSPECT (non-blocking) |
 
 ## Model Analysis
 
-- **Avocado — 2/5 (current build).** 2 clean passes (28/28); all 5 trials ran
-  (no reward-less/infra trials). The 3 failures are on **stated/derivable**
+- **Avocado — 2/5** (validation-gate model; a local k=5 run matched the cloud at
+  2/5). 2 clean passes (28/28); all trials ran. Failures are on stated/derivable
   behavior:
-  - `test_elect_highest_position` — missed the core election rule (1 trial).
-  - `test_diverged_node_quorum_yes_election_no_clustermax_no` — missed the 3-way
-    divergence composition: a diverged node must count toward quorum yet be
-    excluded from both the candidate set and the cluster-max (1 trial).
-  - `test_rejoin_diverged_then_recovers_when_primary_advances` — treated
-    divergence as permanent instead of re-evaluating against the current
-    primary's position, so it never re-emitted the delayed `REJOIN` (2 trials).
-  Trajectories show genuine algorithm work (quorum, diverge, fence, rejoin) with
-  **no test-file access and no hardcoded test tokens** — solves are real.
+  - **election ordering** (`highest pos → priority → lowest id`);
+  - the **3-way divergence composition** — a diverged ex-primary counts toward
+    quorum yet is excluded from both the election candidate set and the
+    cluster-max;
+  - **dynamic re-evaluation of divergence** — a diverged node rejoins only once
+    the primary advances past it; models that treat divergence as permanent never
+    re-emit the delayed `REJOIN`.
+- **gpt-5.5 — 0/5** — the full composition (retention + debounce + quorum +
+  data-loss + divergence guard) breaks it entirely.
 
-**Dominant failure modes:** the **divergence composition** (the 3-way split and
-its dynamic re-evaluation) is the primary differentiator, followed by exact
-**election** ordering. These are reasoning gaps on behavior the spec states, not
-task-setup artifacts — the difficulty is composing the full stateful engine
-(retention + debounce + quorum + data-loss + divergence + REJOIN) correctly.
-
-**Calibration note:** this margin is **variance-sensitive** — earlier builds of
-this task rolled Avocado at 5/5 (too easy) and 0/5 (when the divergence rules
-were not yet stated). The current mix comes from the divergence composition being
-both *stated* (fair) and *subtle* (a real reasoning challenge). The cloud gate
-also evaluates gpt-5.5, which cannot be measured locally.
+**Primary differentiator:** the divergence composition (the 3-way split and its
+dynamic re-evaluation), layered on the stateful engine. All failures are
+reasoning gaps on behavior the spec states, not task-setup artifacts.
 
 ## Anti-Cheating Analysis
 
