@@ -2,6 +2,8 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/dr-buffer"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Implement a Go CLI that answers a disaster-recovery failover question: per-region worst-case peak load under capacity-capped cascading redistribution, whether the fleet survives any k-region failure, and the minimum capacity shortfall if not."
 keywords = ["go", "algorithms", "disaster-recovery", "capacity-planning", "cli"]
 
