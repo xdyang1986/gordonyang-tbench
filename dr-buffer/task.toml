@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/dr-buffer"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement a Go CLI that answers a disaster-recovery failover question: per-region worst-case peak load under capacity-capped cascading redistribution, whether the fleet survives any k-region failure, and the minimum capacity shortfall if not."
+description = "Implement a Go CLI that computes each region's disaster-recovery buffer under a capacity-capped single-region failure model. When a region fails, its demand is absorbed by survivors via capacity-proportional water-filling: no survivor may exceed 90% utilization, and any overflow re-spills to survivors that still have headroom; a failure whose demand cannot be absorbed 'overflows'. Report per-region worst-case incoming demand, utilization, threshold violation, DR buffer, and whether losing the region overflows the fleet."
 keywords = ["go", "algorithms", "disaster-recovery", "capacity-planning", "cli"]
 
 [[task.authors]]

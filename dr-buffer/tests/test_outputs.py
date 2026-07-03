@@ -1,10 +1,15 @@
-"""Verify the DR failover analysis program at /app.
+"""Verify the DR-buffer program at /app.
 
-The grader rebuilds the agent's Go module from source (so the result must be a
-real Go program), then exercises the compiled CLI as a black box: JSON in on
-stdin, JSON out on stdout, non-zero exit on invalid input.
+Capacity-capped single-region failure model: when a region fails, its demand is
+absorbed by the survivors via capacity-proportional water-filling; no survivor
+may be driven above its usable capacity (90% of installed), and any overflow
+re-spills to survivors that still have headroom. If the survivors cannot absorb
+the whole demand within usable capacity, that failure overflows. The grader
+rebuilds the agent's Go solution from source (module or loose .go files) and
+drives the compiled CLI as a black box.
 """
 
+import glob
 import json
 import os
 import shutil
@@ -19,21 +24,19 @@ TOL = 1e-6
 
 @pytest.fixture(scope="session")
 def binary():
-    assert os.path.isfile(os.path.join(APP, "go.mod")), "expected a go.mod at /app"
-    has_go = any(
-        f.endswith(".go")
-        for _, _, files in os.walk(APP)
-        for f in files
-    )
-    assert has_go, "expected Go source (*.go) under /app"
-
     go = shutil.which("go") or "/usr/local/go/bin/go"
-    build = subprocess.run(
-        [go, "build", "-o", BIN, "."],
-        cwd=APP,
-        capture_output=True,
-        text=True,
+    go_files = sorted(
+        f for f in glob.glob(os.path.join(APP, "*.go"))
+        if not os.path.basename(f).endswith("_test.go")
     )
+    assert os.path.isfile(os.path.join(APP, "go.mod")) or go_files, (
+        "expected a Go solution at /app (a go.mod module or .go source files)"
+    )
+    if os.path.isfile(os.path.join(APP, "go.mod")):
+        cmd = [go, "build", "-o", BIN, "."]
+    else:
+        cmd = [go, "build", "-o", BIN] + go_files
+    build = subprocess.run(cmd, cwd=APP, capture_output=True, text=True)
     assert build.returncode == 0, f"`go build` failed:\n{build.stderr}"
     assert os.path.isfile(BIN), "build did not produce a binary"
     return BIN
@@ -41,11 +44,7 @@ def binary():
 
 def run(binary, payload):
     return subprocess.run(
-        [binary],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        timeout=30,
+        [binary], input=json.dumps(payload), capture_output=True, text=True, timeout=30
     )
 
 
@@ -59,177 +58,123 @@ def by_name(out):
     return {r["name"]: r for r in out["regions"]}
 
 
-def check(reg, peak_load, peak_buffer):
-    assert reg["peakLoad"] == pytest.approx(peak_load, abs=TOL), reg
-    assert reg["peakBuffer"] == pytest.approx(peak_buffer, abs=TOL), reg
+def check(reg, worst_incoming, util_pct, violates, dr_buffer, overflow):
+    assert reg["worstIncoming"] == pytest.approx(worst_incoming, abs=TOL), reg
+    assert reg["utilizationPct"] == pytest.approx(util_pct, abs=TOL), reg
+    assert reg["violates"] is violates, reg
+    assert reg["drBuffer"] == pytest.approx(dr_buffer, abs=TOL), reg
+    assert reg["overflowOnFailure"] is overflow, reg
 
 
 # ---------------------------------------------------------------------------
-# Correctness — peak loads, resilience, capacity shortfall
+# Correctness
 # ---------------------------------------------------------------------------
 
-def test_symmetric_boundary(binary):
-    # Total headroom (100) exactly equals the largest capacity (100): resilient.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 50},
-        {"name": "B", "capacity": 100, "load": 50},
+def test_two_regions_borderline_90(binary):
+    # Failing B dumps its 40 onto A -> A reaches exactly 90 (90% utilization),
+    # which is NOT a violation (threshold is strict). No cap binds, so the
+    # capped model coincides with plain proportional redistribution here.
+    out = compute(binary, {"regions": [
+        {"name": "A", "capacity": 100, "demand": 50},
+        {"name": "B", "capacity": 200, "demand": 40},
     ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
+    assert out["anyViolation"] is False
+    assert out["anyOverflow"] is False
     r = by_name(out)
-    check(r["A"], 100.0, 50.0)
-    check(r["B"], 100.0, 50.0)
+    check(r["A"], 90.0, 90.0, False, 50.0, False)
+    check(r["B"], 90.0, 45.0, False, 60.0, False)
 
 
-def test_fractional_no_saturation(binary):
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 10},
-        {"name": "B", "capacity": 200, "load": 10},
-        {"name": "C", "capacity": 100, "load": 70},
+def test_uncapped_symmetric(binary):
+    # Large headroom everywhere: losing one region spreads its 100 evenly over
+    # the two survivors (+50 each); no cap ever binds.
+    out = compute(binary, {"regions": [
+        {"name": "A", "capacity": 1000, "demand": 100},
+        {"name": "B", "capacity": 1000, "demand": 100},
+        {"name": "C", "capacity": 1000, "demand": 100},
     ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
+    assert out["anyViolation"] is False
+    assert out["anyOverflow"] is False
     r = by_name(out)
-    check(r["A"], 100.0 / 3.0, 70.0 / 3.0)
-    check(r["B"], 170.0 / 3.0, 140.0 / 3.0)
-    check(r["C"], 75.0, 5.0)
+    for name in ("A", "B", "C"):
+        check(r[name], 150.0, 15.0, False, 150.0 / 0.9 - 100, False)
 
 
-def test_cascade_overflow_resilient(binary):
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 95},
-        {"name": "B", "capacity": 100, "load": 20},
-        {"name": "C", "capacity": 100, "load": 20},
+def test_respill_and_overflow(binary):
+    # A and B are nearly full (usable headroom 5 each); C is large.
+    #  - C fails (demand 100): A and B cap at +5 each (reach 90), leaving 90
+    #    that nobody can absorb -> C's failure OVERFLOWS.
+    #  - A fails (demand 85): B caps at +5 (reaches 90), the remaining 80
+    #    re-spills entirely onto C -> C reaches 180. Feasible. (B symmetric.)
+    out = compute(binary, {"regions": [
+        {"name": "A", "capacity": 100, "demand": 85},
+        {"name": "B", "capacity": 100, "demand": 85},
+        {"name": "C", "capacity": 1000, "demand": 100},
     ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
+    assert out["anyViolation"] is False
+    assert out["anyOverflow"] is True
     r = by_name(out)
-    check(r["A"], 100.0, 5.0)
-    check(r["B"], 67.5, 47.5)
-    check(r["C"], 67.5, 47.5)
+    check(r["A"], 90.0, 90.0, False, 90.0 / 0.9 - 85, False)
+    check(r["B"], 90.0, 90.0, False, 90.0 / 0.9 - 85, False)
+    check(r["C"], 180.0, 18.0, False, 180.0 / 0.9 - 100, True)
 
 
-def test_cascade_and_unsurvivable(binary):
-    # Failing C (load 150) exceeds total survivor headroom -> not resilient;
-    # shortfall = 200 (largest cap) - 150 (total headroom) = 50.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 90},
-        {"name": "B", "capacity": 100, "load": 10},
-        {"name": "C", "capacity": 200, "load": 150},
+def test_zero_demand_region_with_respill(binary):
+    # B fails (demand 80): C can only take 10 (caps at 90), the remaining 70
+    # re-spills onto the empty region A -> A reaches 70. (C symmetric.)
+    out = compute(binary, {"regions": [
+        {"name": "A", "capacity": 100, "demand": 0},
+        {"name": "B", "capacity": 100, "demand": 80},
+        {"name": "C", "capacity": 100, "demand": 80},
     ]})
-    assert out["resilient"] is False
-    assert out["capacityShortfall"] == pytest.approx(50.0, abs=TOL)
+    assert out["anyViolation"] is False
+    assert out["anyOverflow"] is False
     r = by_name(out)
-    check(r["A"], 100.0, 10.0)
-    check(r["B"], 100.0, 90.0)
-    check(r["C"], 200.0, 50.0)
+    check(r["A"], 70.0, 70.0, False, 70.0 / 0.9 - 0, False)
+    check(r["B"], 90.0, 90.0, False, 90.0 / 0.9 - 80, False)
+    check(r["C"], 90.0, 90.0, False, 90.0 / 0.9 - 80, False)
 
 
-def test_k_two_multiround_cascade(binary):
-    out = compute(binary, {"k": 2, "regions": [
-        {"name": "A", "capacity": 100, "load": 95},
-        {"name": "B", "capacity": 100, "load": 95},
-        {"name": "C", "capacity": 100, "load": 10},
-        {"name": "D", "capacity": 300, "load": 30},
+def test_baseline_over_threshold_violates(binary):
+    # A starts above 90% utilization at steady state (95/100), so it cannot
+    # absorb any load and it violates on its own baseline demand. When A fails,
+    # its 95 spreads evenly over B and C (+47.5 each); B/C stay well under 90%.
+    out = compute(binary, {"regions": [
+        {"name": "A", "capacity": 100, "demand": 95},
+        {"name": "B", "capacity": 100, "demand": 10},
+        {"name": "C", "capacity": 100, "demand": 10},
     ]})
-    assert out["resilient"] is False
-    assert out["capacityShortfall"] == pytest.approx(30.0, abs=TOL)
+    assert out["anyViolation"] is True
+    assert out["anyOverflow"] is False
     r = by_name(out)
-    check(r["A"], 100.0, 5.0)
-    check(r["B"], 100.0, 5.0)
-    check(r["C"], 100.0, 90.0)
-    check(r["D"], 172.5, 142.5)
+    check(r["A"], 95.0, 95.0, True, 95.0 / 0.9 - 95, False)
+    check(r["B"], 57.5, 57.5, False, 57.5 / 0.9 - 10, False)
+    check(r["C"], 57.5, 57.5, False, 57.5 / 0.9 - 10, False)
 
 
-def test_k_zero_no_failover(binary):
-    out = compute(binary, {"k": 0, "regions": [
-        {"name": "A", "capacity": 100, "load": 90},
-        {"name": "B", "capacity": 100, "load": 10},
-    ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
+def test_order_independent(binary):
+    # The water-filling allocation is unique; reordering the input must not
+    # change any region's result (only the output order follows the input).
+    regions = [
+        {"name": "C", "capacity": 1000, "demand": 100},
+        {"name": "A", "capacity": 100, "demand": 85},
+        {"name": "B", "capacity": 100, "demand": 85},
+    ]
+    out = compute(binary, {"regions": regions})
+    assert [r["name"] for r in out["regions"]] == ["C", "A", "B"]
     r = by_name(out)
-    check(r["A"], 90.0, 0.0)
-    check(r["B"], 10.0, 0.0)
+    check(r["A"], 90.0, 90.0, False, 90.0 / 0.9 - 85, False)
+    check(r["B"], 90.0, 90.0, False, 90.0 / 0.9 - 85, False)
+    check(r["C"], 180.0, 18.0, False, 180.0 / 0.9 - 100, True)
 
 
 def test_region_order_preserved(binary):
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "z", "capacity": 100, "load": 10},
-        {"name": "a", "capacity": 100, "load": 10},
-        {"name": "m", "capacity": 100, "load": 10},
+    out = compute(binary, {"regions": [
+        {"name": "z", "capacity": 100, "demand": 10},
+        {"name": "a", "capacity": 100, "demand": 10},
+        {"name": "m", "capacity": 100, "demand": 10},
     ]})
     assert [r["name"] for r in out["regions"]] == ["z", "a", "m"]
-    assert out["k"] == 1
-
-
-# ---------------------------------------------------------------------------
-# Corner cases
-# ---------------------------------------------------------------------------
-
-def test_full_load_survivor_gets_nothing(binary):
-    # A is already at capacity (headroom 0): it must absorb no failover.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 100},
-        {"name": "B", "capacity": 100, "load": 10},
-        {"name": "C", "capacity": 100, "load": 10},
-    ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
-    r = by_name(out)
-    check(r["A"], 100.0, 0.0)   # stays at capacity, absorbs nothing
-    check(r["B"], 60.0, 50.0)
-    check(r["C"], 60.0, 50.0)
-
-
-def test_two_survivors_saturate_same_round(binary):
-    # Failing D (load 60) is offered 20 to each of A, B, C; A and B (headroom 5)
-    # both saturate in the same round, overflow cascades to C.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 95},
-        {"name": "B", "capacity": 100, "load": 95},
-        {"name": "C", "capacity": 100, "load": 10},
-        {"name": "D", "capacity": 100, "load": 60},
-    ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
-    r = by_name(out)
-    check(r["A"], 100.0, 5.0)
-    check(r["B"], 100.0, 5.0)
-    check(r["C"], 60.0, 50.0)
-    check(r["D"], 100.0, 40.0)
-
-
-def test_resilient_multiround_sequential_cascade(binary):
-    # Failing E (load 350) saturates A (round 1), then B (round 2), then spills
-    # the remainder onto C (round 3) -> C ends at 410. Stays resilient.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 90},
-        {"name": "B", "capacity": 100, "load": 70},
-        {"name": "C", "capacity": 1000, "load": 100},
-        {"name": "E", "capacity": 450, "load": 350},
-    ]})
-    assert out["resilient"] is True
-    assert out["capacityShortfall"] == pytest.approx(0.0, abs=TOL)
-    r = by_name(out)
-    check(r["A"], 100.0, 10.0)
-    check(r["B"], 100.0, 30.0)
-    check(r["C"], 410.0, 310.0)
-    check(r["E"], 4660.0 / 11.0, 4660.0 / 11.0 - 350.0)  # 423.6363..., 73.6363...
-
-
-def test_resilience_boundary_off_by_one(binary):
-    # Total headroom (99) is one short of the largest capacity (100): not
-    # resilient, shortfall exactly 1.
-    out = compute(binary, {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 51},
-        {"name": "B", "capacity": 100, "load": 50},
-    ]})
-    assert out["resilient"] is False
-    assert out["capacityShortfall"] == pytest.approx(1.0, abs=TOL)
-    r = by_name(out)
-    check(r["A"], 100.0, 49.0)
-    check(r["B"], 100.0, 50.0)
 
 
 # ---------------------------------------------------------------------------
@@ -237,30 +182,23 @@ def test_resilience_boundary_off_by_one(binary):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("payload", [
-    {"k": 2, "regions": [
-        {"name": "A", "capacity": 100, "load": 10},
-        {"name": "B", "capacity": 100, "load": 10},
-    ]},  # k >= n
-    {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 150},
-        {"name": "B", "capacity": 100, "load": 10},
-    ]},  # load > capacity
-    {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": -5},
-        {"name": "B", "capacity": 100, "load": 10},
-    ]},  # negative load
-    {"k": 1, "regions": [
-        {"name": "A", "capacity": 0, "load": 0},
-        {"name": "B", "capacity": 100, "load": 10},
+    {"regions": [{"name": "A", "capacity": 100, "demand": 50}]},  # only one region
+    {"regions": []},  # empty
+    {"regions": [
+        {"name": "A", "capacity": 100, "demand": 150},
+        {"name": "B", "capacity": 100, "demand": 10},
+    ]},  # demand > capacity
+    {"regions": [
+        {"name": "A", "capacity": 100, "demand": -5},
+        {"name": "B", "capacity": 100, "demand": 10},
+    ]},  # negative demand
+    {"regions": [
+        {"name": "A", "capacity": 0, "demand": 0},
+        {"name": "B", "capacity": 100, "demand": 10},
     ]},  # non-positive capacity
-    {"k": -1, "regions": [
-        {"name": "A", "capacity": 100, "load": 10},
-        {"name": "B", "capacity": 100, "load": 10},
-    ]},  # negative k
-    {"k": 0, "regions": []},  # empty regions
-    {"k": 1, "regions": [
-        {"name": "A", "capacity": 100, "load": 10},
-        {"name": "A", "capacity": 100, "load": 10},
+    {"regions": [
+        {"name": "A", "capacity": 100, "demand": 10},
+        {"name": "A", "capacity": 100, "demand": 10},
     ]},  # duplicate name
 ])
 def test_invalid_input_exits_nonzero(binary, payload):

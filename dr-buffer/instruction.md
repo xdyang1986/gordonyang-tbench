@@ -1,74 +1,66 @@
-Scenario
-A distributed service spans multiple geographic regions. When regions fail, their traffic redistributes to survivors proportional to capacity — but no region can exceed its own capacity, so overflow cascades to the remaining regions.
+ A service is deployed across multiple regions, each with an installed capacity and a steady-state demand (QPS). If a single region fails, its demand is redistributed to the surviving regions. A region is safe only while its load stays at or below 90% of its installed capacity (usable capacity = 0.9 × installed).
 
-Build a tool that, given the current load profile and a simultaneous failure count k, reports the worst-case peak load each region would face and whether the system can survive every possible k-region failure, if it cannot survive, calculate the minimum capacity needed to make it so.
+A region's DR buffer is the extra capacity above its steady-state demand it must hold so that, under its worst single-region failure, it stays within the 90% threshold.
 
-Input
-JSON on stdin:
+Failure model: at most one region fails at a time.
 
-json
+  Input
+  JSON on stdin:
 
-Copy
-{
-  "k": 1,
-  "regions": [
-    {"name": "us-east", "capacity": 100, "load": 60},
-    {"name": "us-west", "capacity": 100, "load": 40}
-  ]
-}
-k — number of regions that may fail at once.
+  ```json
+  {
+    "regions": [
+      {"name": "R1", "capacity": 1000, "demand": 600},
+      {"name": "R2", "capacity": 800,  "demand": 500},
+      {"name": "R3", "capacity": 600,  "demand": 400},
+      {"name": "R4", "capacity": 400,  "demand": 300}
+    ]
+  }
+  ```
 
-regions — each with a name, positive capacity, and load (0 ≤ load ≤ capacity).
+  - `capacity` > 0, `0 ≤ demand ≤ capacity`, region names unique, at least 2 regions.
 
-Redistribution Rules
-When k regions fail, their combined load is spread across the survivors in proportion to their capacity up to its capacity. Other remaining load spills onto others until no headroom remains.
+    Redistribution
+    When a region `f` fails, its `demand` is taken up by the surviving regions. The extra load placed on each
+    survivor is whatever makes all of the following hold at once — together they determine it uniquely:
 
-Each survivor receives a share proportional to its capacity.
+    - No survivor may be driven above its usable capacity (0.9 × installed).
+    - The load is shared in proportion to installed capacity: any two survivors that are not filled to their usable
+      capacity receive extra load in the same ratio as their installed capacities (`add_i / capacity_i` is equal for all
+      such survivors). A survivor sitting at its usable capacity takes no further load.
+    - As much of the failed region's demand is placed as the survivors can hold. If their combined spare capacity below
+      the usable limit cannot hold all of it, the failure **overflows** and the demand cannot be fully absorbed.
 
-If a survivor would exceed capacity, it fills to capacity (saturates) and the excess cascades to remaining unsaturated survivors.
+  Computation
+  For each region `f` that fails,  compute the extra load each survivor absorbs by the redistribution rule above. For each region, consider the worst single failure it survives:
 
-Repeat until all load is placed or no headroom remains.
+  - `worstIncoming` = the highest total load the region reaches across all single failures (at least its own demand).
+  - `utilizationPct` = 100 × worstIncoming / capacity.
+  - `violates` = true iff utilizationPct is strictly greater than 90.
+  - `drBuffer` = worstIncoming / 0.9 − demand.
+ - `overflowOnFailure` = true iff the failure of region `i` itself overflows (the other regions' combined headroom is less than region `i`'s demand).
 
-Output
-JSON on stdout, regions in input order:
+  Output
+  JSON on stdout, regions in input order:
 
-json
+  ```json
+    {
+      "anyViolation": false,
+      "anyOverflow": true,
+      "regions": [
+        {"name": "R1", "capacity": 100, "demand": 85,
+         "worstIncoming": 90, "utilizationPct": 90, "violates": false, "drBuffer": 15, "overflowOnFailure": false}
+      ]
+    }
+  ```
 
-Copy
-{
-  "k": 1,
-  "resilient": true,
-  "capacityShortfall": 0,
-  "regions": [
-    {"name": "us-east", "capacity": 100, "peakLoad": 100, "peakBuffer": 40},
-    {"name": "us-west", "capacity": 100, "peakLoad": 100, "peakBuffer": 60}
-  ]
-}
-Field	Meaning
-peakLoad	Highest load this region reaches across all size-k failures it survives. Equals load when k=0.
-peakBuffer	peakLoad − load
-resilient	true iff every failure scenario is fully absorbed; otherwise false (peak loads still reported — unabsorbable cases fill survivors to capacity).
-Floating-point tolerance: 1e-6.
-capacityShortfall — 0 if resilient; otherwise the minimum total extra capacity that must be added so the fleet can absorb every k-region failure (equivalently, the largest amount of load left unplaced in any single worst-case failure).
+  `anyViolation` is true iff any region violates. `anyOverflow` is true iff any single-region failure overflows. Floating-point values are compared with a tolerance of 1e-6.
 
-Invalid Input
-Exit non-zero (no JSON output) for: malformed JSON, empty regions, k < 0, k ≥ N, non-positive capacity, negative load, load > capacity, duplicate names.
+  Invalid Input
+  Exit non-zero (no JSON output) for: malformed JSON, fewer than two regions, non-positive capacity, negative demand, demand greater than capacity, or
+  duplicate region names.
 
-Worked Example
-Three regions, each capacity 100, loads A=90, B=40, C=40, k=1:
-
-B fails → 40 offered to A and C proportionally. A has 10 headroom → saturates; overflow cascades to C → C ends at 70.
-
-A fails → 90 splits evenly to B and C → both end at 85.
-The fleet survives every single-region failure, so resilient is true and capacityShortfall is 0.
-
-Result: peakLoad = A:100, B:85, C:85 · peakBuffer = A:10, B:45, C:45 · resilient: true
-
-Build Contract
-Language: Go
-
-Module root: /app
-
-Build: cd /app && go build -o /app/drbuffer .
-
-Binary reads stdin, writes stdout.
+  Build Contract
+  - Language: Go
+  - Module root: /app
+  - Build: cd /app && go build -o /app/drbuffer .
