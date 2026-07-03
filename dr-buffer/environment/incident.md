@@ -1,71 +1,65 @@
 # Post-Incident Review — INC-4471
 
-**Title:** Regional loss of `ap-south` and the failover it triggered
-**Severity:** SEV2 (no customer impact; capacity held)
-**Status:** Resolved — filed as a reference example for the capacity standard.
+  **Title:** Loss of `core-1` cascaded into `core-2`
+  **Severity:** SEV2 (held on the edge tier; no customer impact)
+  **Status:** Resolved — retained as the canonical cascade example for the policy.
 
-## Summary
+  ## Summary
 
-`ap-south` dropped out for 11 minutes after a power event. Traffic failed over to
-the surviving regions and everything held, but the review board asked us to write
-up the arithmetic because two on-call engineers disagreed about how the load
-*should* have been redistributed. The numbers below are now the canonical worked
-example referenced by the capacity policy (Section 4).
+  `core-1` dropped out after a power event. Its traffic failed over, immediately
+  overwhelmed `core-2`, and `core-2` fell too before the edge tier soaked up the
+  rest. Nothing else tipped over. The board asked for the arithmetic because it is
+  the clearest example we have of a *cascade*, which the capacity policy (Section 4)
+  now defines.
 
-## Fleet at the time of the incident
+  ## Fleet at the time (maxFailures = 1)
 
-Capacity and demand were pulled straight from each team's dashboard, so — as
-usual — the units are all over the place. Normalizing everything to rps:
+  Capacity and demand were pulled from each team's dashboard, so the units are
+  mixed. Normalizing every field to rps:
 
-| Region     | Reported capacity   | Reported demand         | Capacity (rps) | Demand (rps) |
-|------------|---------------------|-------------------------|----------------|--------------|
-| `us-east`  | `capacity_rps: 100` | `"5100 rpm"`            | 100            | 85           |
-| `eu-west`  | `{value:0.3,kqps}`  | `demand_rps: 100`       | 300            | 100          |
-| `ap-south` | `"6000 rpm"`        | `{value:60, unit:rps}`  | 100            | 60           |
+  | Region   | Reported capacity      | Reported demand          | Capacity (rps) | Demand (rps) |
+  |----------|------------------------|--------------------------|----------------|--------------|
+  | `core-1` | `"12000 rpm"`          | `{value:150, unit:rps}`  | 200            | 150          |
+  | `core-2` | `capacity_rps: 200`    | `"9000 rpm"`             | 200            | 150          |
+  | `edge`   | `{value:0.4, kqps}`    | `demand_rps: 40`         | 400            | 40           |
 
-Recall `1 kqps = 1000 rps` and `rps = rpm / 60`, applied per field.
+  Recall `1 kqps = 1000 rps` and `rps = rpm / 60`, applied per field.
 
-## What happened when `ap-south` failed
+  ## The cascade
 
-`ap-south` was serving **60 rps**. That 60 had to land on the two survivors,
-`us-east` and `eu-west`.
+  `core-1` was serving **150 rps**. It failed. Its 150 was redistributed across the
+  survivors `core-2` and `edge` **in proportion to installed capacity, with no
+  ceiling**:
 
-The usable ceiling is 90% of installed capacity, so before the failover each
-survivor's headroom was:
+  - `core-2`: `150 + 150 × 200 / (200 + 400) = 150 + 50 = 200 rps`
+  - `edge`:   `40  + 150 × 400 / (200 + 400) = 40 + 100 = 140 rps`
 
-- `us-east`: usable `90`, demand `85` → **headroom 5**
-- `eu-west`: usable `270`, demand `100` → **headroom 170**
+  `core-2`'s usable capacity is `0.9 × 200 = 180`. At **200 rps it is strictly over
+  the limit**, so `core-2` is overwhelmed and fails too — that is the cascade. Its
+  demand now joins the pool. With only `edge` left, the whole `150 + 150 = 300 rps`
+  lands on it:
 
-The naive move — and what the first engineer proposed — is to split the 60 purely
-in proportion to installed capacity (100 : 300), i.e. 15 to `us-east` and 45 to
-`eu-west`. **That is wrong:** it would push `us-east` to `85 + 15 = 100 rps`, which
-is 100% of installed — well past the 90% limit.
+  - `edge`: `40 + 300 × 400 / 400 = 40 + 300 = 340 rps`
 
-The correct redistribution respects the ceiling. `us-east` can only take its 5 rps
-of headroom, so it fills to exactly `90` and stops there. The remaining
-`60 − 5 = 55` rps then spills onto `eu-west` (the only survivor with headroom
-left), taking it to `100 + 55 = 155 rps` (well under its 270 usable). Final state:
+  `edge`'s usable capacity is `360`, so `340` is within limit and the cascade
+  settles. Final tally: `core-1` and `core-2` are down; `edge` survives. Losing one
+  region collapsed two, in **one** cascade round.
 
-- `us-east`: `90 rps` (at its 90% ceiling — safe, not a violation)
-- `eu-west`: `155 rps`
+  ## How this maps to the report
 
-So across `us-east`'s worst surviving failure it peaks at `90 rps`; its DR buffer
-— the extra capacity above steady-state demand needed to stay at/under 90% — is
-`90 / 0.9 − 85 = 15 rps`.
+  - `core-2`'s worst *immediate* load (before the cascade) is `200 rps`, i.e.
+    `100%` utilization — over 90%, so `core-2` **violates**. Same for `core-1`
+    under the symmetric failure. `edge` never exceeds its limit, so it does not
+    violate.
+  - Because at least one region violates, the fleet is **not resilient**. Each core
+    would need `200 / 0.9 − 200 ≈ 22.22 rps` more installed capacity to hold at 90%
+    under its worst immediate load, so the fleet's `capacityShortfall` is about
+    `44.44 rps` (the edge needs none).
+  - The `worstScenario` here is `failed: ["core-1"]`, `collapsed:
+    ["core-1", "core-2"]`, `cascadeRounds: 1`.
 
-## The counterfactual the board cared about
+  ## Follow-ups
 
-The second engineer asked: what if `eu-west` had been the one to fail? `eu-west`
-was carrying **100 rps**, and the only survivors would have been `us-east` and
-`ap-south`, whose combined headroom was just `5 + 30 = 35 rps`. There is nowhere to
-put the other `65 rps`. That case would **overflow** — the fleet could not absorb
-the loss of `eu-west` within the 90% limit. (It didn't happen; `ap-south` failed,
-not `eu-west`.) This is exactly the "overflow" condition in the policy: a region's
-failure overflows when the other regions' combined headroom is less than that
-region's demand.
-
-## Follow-ups
-
-- [done] Add `ap-south` PDU redundancy.
-- [done] Codify this arithmetic as the reference example for the capacity tool.
-- [wontfix] Auto-normalize dashboard units at source — owning teams declined.
+  - [done] Add `core-1` PDU redundancy and rebalance core capacity.
+  - [done] Codify this cascade as the reference example for the capacity tool.
+  - [wontfix] Auto-normalize dashboard units at source — owning teams declined.

@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/dr-buffer"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement a Go CLI whose specification must be reconstructed from a reliability policy and a post-incident review shipped in the image (/app/docs). The tool reads a messy JSON capacity report whose per-region capacity/demand each use one of three encodings and mixed units (rps, kqps, rpm), normalizes everything to rps, then under a single-region failure model redistributes the failed region's demand to survivors via capacity-capped water-filling (proportional to installed capacity, capped at 90% usable, overflow re-spilled). Reports per-region worst-case load, utilization, threshold violation, DR buffer, and whether losing the region overflows the fleet."
+description = "Implement a Go CLI whose specification must be reconstructed from a reliability policy and a post-incident review shipped in the image (/app/docs). The tool reads a messy JSON capacity report ({maxFailures, regions}) whose per-region capacity/demand each use one of three encodings and mixed units (rps, kqps, rpm), normalizes to rps, then over every failing set of up to maxFailures regions applies uncapped proportional redistribution with cascading overloads. Reports each region's worst immediate load, utilization, 90%-threshold violation and DR buffer, plus the fleet's resilience, total capacity shortfall, and the worst cascade scenario (initial failures, collapsed set, cascade rounds)."
 keywords = ["go", "algorithms", "disaster-recovery", "capacity-planning", "cli"]
 
 [[task.authors]]
