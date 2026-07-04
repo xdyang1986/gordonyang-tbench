@@ -1,28 +1,51 @@
-  Implement a command-line tool, in Go, that computes each region's
-  disaster-recovery (DR) buffer for a multi-region service.
+# Fix the DR Buffer capacity planner
 
-  The rules are not given inline. The specification is split across two documents
-  shipped in this environment:
+A Go program lives in `/app` — a disaster-recovery capacity planner. It reads a
+JSON report on standard input and prints a JSON summary on standard output:
+per-region worst-case load under failures, whether each region is overwhelmed,
+each region's DR buffer, and — for the fleet — whether it is resilient, its total
+capacity shortfall, and the worst cascade scenario.
 
-  - `/app/docs/policy.md` — the reliability policy: how capacity and demand are
-    reported (units and the accepted input encodings), the safety limit, how load
-    is redistributed when a region fails, the exact output contract, and what
-    makes a report invalid.
-  - `/app/docs/incident.md` — a post-incident review whose worked numeric example
-    confirms the redistribution rule and the overflow condition.
+The program builds and runs, but **it has bugs**: some outputs are wrong. Your job
+is to find and fix the defect(s) in the Go source under `/app` so the program is
+correct for all inputs. The logic is sound apart from the defects — do **not**
+rewrite it from scratch, and keep the same input/output format.
 
-  Read both and reconcile them. The policy is authoritative; the incident review
-  illustrates it.
+## A failing case
 
-  ## Runtime contract
+Input:
 
-  - The tool reads a single JSON report from standard input and writes a single
-    JSON object to standard output, as defined by the policy's reporting contract.
-    All output quantities use the canonical unit defined by the policy.
-  - On an invalid report, exit non-zero and print no JSON.
+```json
+{"maxFailures": 1, "regions": [
+  {"name": "A", "capacity_rps": 100, "demand_rps": 80},
+  {"name": "B", "capacity_rps": 100, "demand_rps": 80},
+  {"name": "C", "capacity_rps": 100, "demand_rps": 10},
+  {"name": "D", "capacity_rps": 100, "demand_rps": 10}
+]}
+```
 
-  ## Build contract
+The program currently reports:
 
-  - Language: Go
-  - Module root: /app
-  - Build: `cd /app && go build -o /app/drbuffer .`
+```
+capacityShortfall: -81.48...
+worstScenario: {"failed": ["A"], "collapsed": ["A","B","C","D"], "cascadeRounds": 2}
+```
+
+Both are wrong. The correct result for this input is:
+
+```
+capacityShortfall: 37.037...
+worstScenario: {"failed": ["A"], "collapsed": ["A","B"], "cascadeRounds": 1}
+```
+
+## Another failing case
+
+For three regions each with capacity 1000 rps and demand 100 rps and
+`maxFailures` 1 — a fleet that comfortably survives any single failure — the
+program reports `capacityShortfall: -2500`, but the correct value is `0`.
+
+## Task
+
+Repair the program in `/app` so it is correct on these cases and in general.
+
+Build: `cd /app && go build -o /app/drbuffer .`

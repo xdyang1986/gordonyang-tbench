@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/dr-buffer"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement a Go CLI whose specification must be reconstructed from a reliability policy and a post-incident review shipped in the image (/app/docs). The tool reads a messy JSON capacity report ({maxFailures, regions}) whose per-region capacity/demand each use one of three encodings and mixed units (rps, kqps, rpm), normalizes to rps, then over every failing set of up to maxFailures regions applies uncapped proportional redistribution with cascading overloads. Reports each region's worst immediate load, utilization, 90%-threshold violation and DR buffer, plus the fleet's resilience, total capacity shortfall, and the worst cascade scenario (initial failures, collapsed set, cascade rounds)."
+description = "Debug and fix a buggy Go disaster-recovery capacity planner shipped at /app/main.go. The tool reads a JSON report ({maxFailures, regions}) with mixed-unit, multi-encoding capacity/demand, normalizes to rps, and over every failing set of up to maxFailures regions applies uncapped proportional redistribution with cascading overloads, reporting per-region worst load and the fleet's resilience, capacity shortfall, and worst cascade scenario. It builds and runs but has subtle defects (a boundary-condition error in the cascade overload test and a missing non-negativity guard in the shortfall sum); the agent must localize and fix them so the hidden test suite passes, without a written spec to rewrite from."
 keywords = ["go", "algorithms", "disaster-recovery", "capacity-planning", "cli"]
 
 [[task.authors]]

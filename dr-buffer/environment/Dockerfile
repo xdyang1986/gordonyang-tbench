@@ -22,7 +22,6 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
-# Reference material the agent must consult to derive the specification: the
-# reliability policy (units, safety limit, redistribution rule, output contract)
-# and a worked post-incident example that confirms the redistribution rule.
-COPY policy.md incident.md /app/docs/
+# Ship the (buggy) program the agent must debug and fix in place.
+COPY broken/main.go /app/main.go
+RUN printf 'module drbuffer\n\ngo 1.23\n' > /app/go.mod

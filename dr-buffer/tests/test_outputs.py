@@ -1,9 +1,6 @@
-"""Verify the DR-buffer program at /app.
+"""Verify the (repaired) DR-buffer program at /app.
 
-The specification lives in /app/docs/policy.md (units, three per-field input
-encodings, the maxFailures envelope, the 90% usable-capacity limit, uncapped
-proportional redistribution with cascading failures, the output contract, and
-validation) and /app/docs/incident.md (a worked cascade example). At runtime the
+The image ships a buggy Go program at /app/main.go; the agent must fix it. The
 tool reads {"maxFailures": K, "regions": [...]} whose per-region capacity/demand
 each use one of three encodings and mixed units (rps / kqps=1000 rps / rpm=rps/60),
 normalizes to rps, then over every failing set of size 1..K reports each region's
@@ -11,7 +8,7 @@ worst immediate (pre-cascade) load and whether it is overwhelmed, the fleet's
 resilience and capacity shortfall, and the worst cascade scenario.
 
 The grader rebuilds the agent's Go source and drives the compiled CLI as a black
-box on mixed-unit inputs.
+box. These tests are hidden from the agent at runtime.
 """
 
 import glob
