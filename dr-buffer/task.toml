@@ -12,6 +12,11 @@ name = "Gordon Yang"
 email = "gordonyang@meta.com"
 
 [metadata]
+category = "software-engineering"
+category_usecase = "compute_result"
+category_subdomain = "distributed_systems"
+difficulty = "medium"
+languages = ["go"]
 
 [verifier]
 # Isolate grading from the agent: run the verifier in a fresh container so the
