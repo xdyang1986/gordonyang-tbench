@@ -40,23 +40,27 @@ line; multi-word values; bytewise ordering).
 
 ## Completion Rates
 
-Measured by the codimango validation harness (commit `3d707bd`):
+Measured by the codimango validation harness (commit `cd4fd82`):
 
 | Runner | Pass rate |
 |---|---|
 | Oracle (reference solution) | 3/3 |
-| avocado (`avocado_dvsc_tester`) | 0/5 |
-| Opus (`claude-opus-4-6`) | 2/5 |
-| GPT-5.5 | 0/5 |
+| avocado (`avocado_dvsc_tester`) | 4/5 |
+| Opus (`claude-opus-4-6`) | 5/5 |
+| GPT-5.5 | 5/5 |
 
-Difficulty gate: **passed** ("avocado not trivial and ≥1 agent solved").
+Validation status: **passing** — structural 9/9, oracle 3/3, difficulty gate
+passed ("avocado not trivial and ≥1 agent solved"), AI assessment **Accept**
+(0 Critical / 0 High / 0 Medium / 1 Low), contamination MEDIUM, provenance clean.
 
 ## Model Analysis
 
-The weaker/mid agents (avocado, GPT-5.5) went 0/5 while Opus solved it 2/5. The
-implementation is not algorithmically hard; the failures cluster on the precise
-edge semantics a rushed implementation gets wrong — most commonly treating the
-`scan` END bound as inclusive, treating an empty-string value as a missing key,
-and applying `batch` operations incrementally so a later malformed line leaves a
-partially-mutated store. Correct handling of all of these together is what
-separates a passing solution from a plausible-but-wrong one.
+Once the edge semantics (half-open `scan` range, bytewise ordering, empty-value
+handling) are stated explicitly in the instruction, the stronger agents solve it
+reliably (Opus and GPT-5.5 at 5/5). avocado lands at 4/5: the single trial it
+misses is the remaining implicitly-specified behavior — `batch` atomicity, where
+a malformed line must leave the store completely unchanged. A rushed
+implementation applies `batch` operations incrementally and leaves a
+partially-mutated store on the failing line. That one behavior is what keeps the
+task off a trivial 5/5 for the weakest runner while remaining solvable by the
+rest.
