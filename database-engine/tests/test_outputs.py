@@ -250,6 +250,26 @@ def test_get_after_delete_rebalance(dbctl, db):
     assert proc.stdout.splitlines() == ["a\t1", "c\t3", "d\t4", "e\t5"]
 
 
+def test_get_after_deep_tree_merges(dbctl, db):
+    # Build a multi-level tree, then delete a contiguous run to force node
+    # merges that propagate up into internal nodes. Every surviving key must
+    # remain retrievable and consistent with scan.
+    keys = [f"k{n:02d}" for n in range(1, 25)]  # k01..k24
+    for k in keys:
+        run(dbctl, db, "put", k, "v" + k[1:], expect=0)
+    deleted = [f"k{n:02d}" for n in range(5, 13)]  # k05..k12
+    for k in deleted:
+        run(dbctl, db, "delete", k, expect=0)
+    survivors = [k for k in keys if k not in deleted]
+    for k in survivors:
+        proc = run(dbctl, db, "get", k, expect=0)
+        assert proc.stdout == "v" + k[1:] + "\n", f"get {k} returned {proc.stdout!r}"
+    for k in deleted:
+        run(dbctl, db, "get", k, expect=3)
+    proc = run(dbctl, db, "scan", expect=0)
+    assert proc.stdout.splitlines() == [f"{k}\tv{k[1:]}" for k in survivors]
+
+
 # --------------------------------------------------------------------------- #
 # Randomized end-to-end model check
 # --------------------------------------------------------------------------- #

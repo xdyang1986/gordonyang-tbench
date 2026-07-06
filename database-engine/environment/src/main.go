@@ -249,7 +249,6 @@ func mergeInto(parent *node, j int) {
 		left.Keys = append(left.Keys, right.Keys...)
 		left.Vals = append(left.Vals, right.Vals...)
 	} else {
-		left.Keys = append(left.Keys, parent.Keys[j])
 		left.Keys = append(left.Keys, right.Keys...)
 		left.Children = append(left.Children, right.Children...)
 	}
