@@ -1,0 +1,39 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/database-engine"
+description = "Implement a persistent, ordered key-value store in Go, exposed as a `dbctl` CLI (put/get/delete/scan) with durable, cross-process writes and standard-library-only code."
+authors = ["gordonyang"]
+keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "b-tree"]
+
+[metadata]
+
+[verifier]
+# Isolate grading from the agent: run the verifier in a fresh container so the
+# agent's code can't read the oracle under /tests at verify time. Opt-in —
+# uncomment to enable (also requires a verifier env def under tests/).
+# environment_mode = "separate"
+timeout_sec = 600.0
+# Run the grader as a non-root user so in-process agent code (Flow B) can't read
+# root-owned oracle files. Off by default because this template's test.sh uses
+# apt-get (needs root); enable it when your verifier imports/runs agent code
+# in-process and does not itself need root.
+# user = "nobody"
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
