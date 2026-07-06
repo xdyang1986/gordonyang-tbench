@@ -223,6 +223,33 @@ def test_scan_empty_range(dbctl, db):
     assert proc.stdout == ""
 
 
+def test_get_after_node_split(dbctl, db):
+    # Insert enough keys to force a node split, then every inserted key must
+    # still be retrievable — including keys that become internal separators.
+    pairs = [("k01", "a"), ("k02", "b"), ("k03", "c"), ("k04", "d"), ("k05", "e")]
+    for k, v in pairs:
+        run(dbctl, db, "put", k, v, expect=0)
+    for k, v in pairs:
+        proc = run(dbctl, db, "get", k, expect=0)
+        assert proc.stdout == v + "\n", f"get {k} returned {proc.stdout!r}, expected {v!r}"
+
+
+def test_get_after_delete_rebalance(dbctl, db):
+    # Deletions that trigger node rebalancing must not strand live keys: every
+    # key still present must be retrievable and consistent with scan.
+    for k, v in [("c", "3"), ("d", "4"), ("e", "5"), ("f", "6"), ("g", "7"), ("a", "1")]:
+        run(dbctl, db, "put", k, v, expect=0)
+    run(dbctl, db, "delete", "f", expect=0)
+    run(dbctl, db, "delete", "g", expect=0)
+    # remaining keys: a,c,d,e
+    for k, v in [("a", "1"), ("c", "3"), ("d", "4"), ("e", "5")]:
+        proc = run(dbctl, db, "get", k, expect=0)
+        assert proc.stdout == v + "\n", f"get {k} returned {proc.stdout!r}, expected {v!r}"
+    # scan and get must agree
+    proc = run(dbctl, db, "scan", expect=0)
+    assert proc.stdout.splitlines() == ["a\t1", "c\t3", "d\t4", "e\t5"]
+
+
 # --------------------------------------------------------------------------- #
 # Randomized end-to-end model check
 # --------------------------------------------------------------------------- #

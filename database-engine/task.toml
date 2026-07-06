@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/database-engine"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Debug and fix a Go `dbctl` key-value store CLI shipped at /app/src that builds and runs but has two subtle localized defects: `put` silently drops overwrites of existing keys, and `scan` treats its END bound as inclusive instead of exclusive. The agent must localize and fix both from two failing repros (no from-scratch spec to rewrite) so the hidden test suite — put/get/delete/scan behavior, ordering, range semantics, and cross-process persistence — passes."
+description = "Debug and fix a Go `dbctl` key-value store CLI shipped at /app/src, backed by an on-disk B+ tree. It builds and runs and handles small inputs, but two subtle localized defects in the B+ tree strand live keys once the tree grows past one node: the descend routing uses a strict `>` instead of `>=` so keys equal to a split separator become unreachable, and the leaf borrow-from-left rebalance path fails to update the parent separator after a delete. Both manifest as `get` returning not-found for keys that `scan` still lists. The agent must localize and fix both from two failing repros (no from-scratch spec to rewrite) so the hidden test suite — behavior, ordering, range semantics, cross-process persistence, node splits, delete rebalancing, and a randomized model check — passes."
 keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "b-tree"]
 
 [[task.authors]]
