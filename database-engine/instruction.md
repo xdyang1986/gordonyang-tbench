@@ -1,20 +1,38 @@
-Context
-A persistent, ordered key-value store (dbctl) is provided at /app/src/. It is backed by an on-disk B+ tree and builds with go build ./....
+# Context
 
-The tool works correctly for small datasets. Once enough keys are inserted to trigger node splits, stored keys become unretrievable via get — even though scan still lists them.
+  Implement a small persistent, ordered key-value store in Go, exposed as a
+  command-line tool `dbctl`. Put your Go source under `/app/src/` (with `go.mod`
+  and `package main`). It is built with `go build ./...` from `/app/src` and graded
+  by running the resulting binary.
 
-Interface
-dbctl --db <PATH> <command> [args]
+  # CLI
 
-Command	Behavior
-    put <KEY> <VALUE>	Store a key-value pair
-    get <KEY>	Retrieve value for a key (exit 3 if not found)
-    delete <KEY>	Remove a key
-    scan [START] [END]	Print all KEY\tVALUE lines in ascending order
-    Bug — Keys become unreachable after the tree grows
+      dbctl --db <PATH> <command> [args]
 
-Problem
-The store loses internal consistency as it grows. While small, everything works. After enough inserts and deletes, get and scan disagree: scan lists a key with its value, but get reports that same key as missing.
+  parent directories on first use. State must persist across separate invocations
+  against the same path. Keys and values are UTF-8 text containing no NUL, tab, or
+  newline characters.
 
-Task
-Fix the defect(s) in /app/src/ so that the store remains internally consistent: any key visible to scan must be retrievable with get, and vice versa, across arbitrary sequences of inserts and deletes. The project must continue to build with go build ./... using only the Go standard library. Do not change unrelated behavior.
+  Commands:
+
+  - `put <KEY> <VALUE>` — store `KEY` with `VALUE`, replacing any existing value. Exit 0.
+  - `get <KEY>` — print the stored value followed by a newline. Exit 0 if the key
+    exists; exit 3 if it does not exist.
+  - `delete <KEY>` — remove `KEY` if present. Exit 0.
+  - `scan [START] [END]` — print matching entries, one per line as `KEY<TAB>VALUE`,
+    in ascending key order. With no arguments, print every entry; with one
+    argument, print entries from `START` onward; with two, print entries within the
+    `START`..`END` range.
+  - `batch` — read operations from standard input, one per line, each either
+    `put <KEY> <VALUE>` or `delete <KEY>`, and apply them to the store. Blank lines
+    are ignored. If any line is not a valid operation, the batch fails.
+
+  # Constraints
+
+  - Standard library only: `go.mod` with no external `require`s, and no import path
+    whose first segment contains a dot.
+  - Builds with `go build ./...` and no network access.
+
+  # Task
+
+  Implement `dbctl` under `/app/src/` so it behaves as described.
