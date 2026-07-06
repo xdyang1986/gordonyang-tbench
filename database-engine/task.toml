@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/database-engine"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement, from scratch in Go, a persistent ordered key-value store CLI (`dbctl`) with put/get/delete/scan plus an atomic `batch` command that reads operations from stdin. The instruction states the core surface but the hidden tests enforce several implicit requirements a careful implementation must infer: scan ranges are half-open [START,END); keys sort bytewise over raw bytes; an empty string is a real value distinct from an absent key (get exits 3 only on absence); and `batch` is all-or-nothing — a single malformed line must leave the store completely unchanged. Graded by building /app/src with `go build ./...` and driving the CLI over fixed and randomized cases; standard library only."
+description = "Implement, from scratch in Go, a persistent ordered key-value store command-line tool (`dbctl`) supporting put, get, delete, ordered range scan, and a batch command that applies a stream of operations read from stdin. Values persist durably across process invocations. Graded by building /app/src with `go build ./...` and driving the CLI over fixed and randomized cases; standard library only."
 keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "b-tree"]
 
 [[task.authors]]

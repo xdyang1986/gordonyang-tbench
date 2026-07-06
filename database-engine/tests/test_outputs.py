@@ -158,6 +158,15 @@ def test_new_db_scan_is_empty(dbctl, db):
     assert run(dbctl, db, "scan", expect=0).stdout == ""
 
 
+def test_creates_missing_parent_directories(dbctl, tmp_path):
+    # The db path points into directories that do not exist yet; the first write
+    # must create them.
+    nested = str(tmp_path / "a" / "b" / "c" / "store.db")
+    run(dbctl, nested, "put", "k", "v", expect=0)
+    assert os.path.isfile(nested), "db file (and parent dirs) not created"
+    assert run(dbctl, nested, "get", "k", expect=0).stdout == "v\n"
+
+
 # --------------------------------------------------------------------------- #
 # Ordering (implicit: bytewise over raw key bytes)
 # --------------------------------------------------------------------------- #
