@@ -13,3 +13,6 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 RUN mkdir -p /app/src /app/data
+
+# Ship the existing (buggy) dbctl implementation the agent must debug.
+COPY src/ /app/src/

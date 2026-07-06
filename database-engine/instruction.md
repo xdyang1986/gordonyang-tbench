@@ -1,24 +1,34 @@
-# Context
-You are building a lightweight embedded database engine in Go.
+Context
+A command-line key-value store (dbctl) is provided at /app/src/. It supports persistent, ordered storage with the following interface:
+dbctl --db <PATH> <command> [args]
 
-Provide Go source code under /app/src/ (including go.mod with module declared and package main) that compiles via go build ./... into a dbctl binary. You do not need to commit a pre-built binary.
+Command	Behavior
+    put <KEY> <VALUE>	Store a key-value pair
+    get <KEY>	Retrieve the value for a key
+    delete <KEY>	Remove a key
+    scan [START] [END]	Print KEY\tVALUE lines in ascending key order
+The tool compiles and runs, but has two incorrect behaviors.
 
-CLI Interface
-    dbctl --db <PATH> <command> [args]
-        --db defaults to /app/data/store.db. Create the file and any parent directories automatically on first use.
-        Keys and values are UTF-8 strings containing no NUL, tab, or newline characters. Key ordering is bytewise (lexicographic over raw bytes).
+Bug 1 — Overwriting a key does not update the value
+    $ dbctl --db /tmp/t.db put color red
+    $ dbctl --db /tmp/t.db put color blue
+    $ dbctl --db /tmp/t.db get color
+    red          # wrong — should be "blue"
+Writing to an existing key must replace the stored value.
 
-Commands:
+Bug 2 — Scan includes the end bound
+    $ dbctl --db /tmp/u.db put a 1
+    $ dbctl --db /tmp/u.db put b 2
+    $ dbctl --db /tmp/u.db put c 3
+    $ dbctl --db /tmp/u.db scan a c
+    a	1       # observed — includes "c"
+    b	2
+    c	3
 
-put <KEY> <VALUE>	Insert or overwrite the entry for KEY. Return 0 on success.
-get <KEY>	        Print VALUE\n to stdout if KEY exists. Return 0 if found, 3 if missing
-delete <KEY>	    Remove KEY if present; no-op if absent (idempotent). Return 0 on success.
-scan [START] [END]	Print KEY\tVALUE\n per entry in ascending byte order. START is inclusive, END is exclusive. No args → all entries; one arg → all entries with key ≥ START.	Return 0 on success.
-Invalid usage	Print an error message to stderr.	2 (any non-zero except 3)
+    a	1       # expected — excludes "c"
+    b	2
 
-Persistence & Durability
-Each command invocation runs as a separate process. All writes must be fully persisted — visible to subsequent invocations and durable on disk (via fsync + atomic rename) — before the write command exits with status 0.
+scan START END must return keys in the half-open range [START, END) — start inclusive, end exclusive.
 
-Constraints
-    Standard library only. No external dependencies: go.mod must contain no require directives, and no import path may have a dot in its first path segment.
-    The project must build with no network access.
+Task
+Fix both defects in /app/src/ so the tool behaves as described. The project must continue to build with go build ./... using only the Go standard library. Do not alter unrelated behavior.

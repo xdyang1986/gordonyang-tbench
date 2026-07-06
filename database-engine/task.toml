@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/database-engine"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement a persistent, ordered key-value store in Go, exposed as a `dbctl` CLI (put/get/delete/scan) with durable, cross-process writes and standard-library-only code."
+description = "Debug and fix a Go `dbctl` key-value store CLI shipped at /app/src that builds and runs but has two subtle localized defects: `put` silently drops overwrites of existing keys, and `scan` treats its END bound as inclusive instead of exclusive. The agent must localize and fix both from two failing repros (no from-scratch spec to rewrite) so the hidden test suite — put/get/delete/scan behavior, ordering, range semantics, and cross-process persistence — passes."
 keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "b-tree"]
 
 [[task.authors]]
