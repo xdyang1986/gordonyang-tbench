@@ -1,10 +1,15 @@
-  Background
+ Background
   You're on call for a storage service that persists all its data in a single append-only log file. Space is pre-allocated in fixed-size blocks, so a
   freshly grown log ends with unused, zero-filled room that later writes fill in; each write appends one record, and every record carries a checksum for
-  later integrity verification. After a power failure during a write last night, the log is damaged in several places: a flipped byte here, a corrupted
-  length field there, and a partially written record at the tail. The vast majority of the data is still intact and needs to be recovered.
+  later integrity verification. After a power failure during a write last night, some logs are damaged: a flipped byte here, a corrupted length field there,
+  and a partially written record at the tail.
 
-  Build dbfsck, a command-line tool that reads one of these log files, recovers as much valid data as possible, and reports what it found.
+  The team already has a recovery tool, dbfsck, whose source is in /app/src — but it is known to be buggy. Two problems have been reported:
+    - On some damaged logs it recovers fewer records than it should.
+    - When handed a file that isn't a valid log at all, it can leave a stray or truncated output file behind.
+
+  Find and fix the defects so dbfsck conforms to the specification below. The record format parsing, CRC checking, and trailing-padding accounting are
+  believed correct; keep the tool building with `go build ./...` and using only the Go standard library.
 
   File Structure
   A log file consists of a fixed 8-byte header followed by zero or more records packed contiguously (no inter-record padding), and then any unused,
@@ -59,4 +64,4 @@
   Must build cleanly via go build ./... from /app/src/ with no network access.
 
   Deliverable
-  Implement dbfsck under /app/src/ (including go.mod and package main).
+  Fix the dbfsck implementation under /app/src/ so it behaves as specified.

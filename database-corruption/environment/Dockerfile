@@ -13,3 +13,6 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 RUN mkdir -p /app/src /app/data
+
+# Ship the existing (defective) dbfsck implementation the agent must fix.
+COPY app_src/ /app/src/
