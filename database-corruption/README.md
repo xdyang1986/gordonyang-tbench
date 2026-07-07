@@ -71,7 +71,12 @@ throughout):
 | v3 `d26488d` | maximize-record DP, nesting nuance stated explicitly | too easy — avocado 5/5, gpt 4/5 (contamination LOW) |
 | v4 `67d8128` | maximize-record DP, nesting nuance left implicit | too easy — avocado 5/5, gpt 5/5, opus 1/5 |
 | v5 `74b646e` | + trailing-zero-padding + no-clobber, three stacked implicit reqs | too easy — avocado 5/5, gpt 5/5 |
-| v6 (this) | **debug-in-place** — ship defective dbfsck, agent finds & fixes | _tbd_ |
+| v6 `1b54688` | **debug-in-place** — ship defective dbfsck, agent finds & fixes | too easy — avocado 5/5, gpt 5/5 (avocado fixed both defects) |
+
+**Status: parked.** Six calibration attempts (five from-scratch, one debug-in-place)
+all failed the difficulty gate at avocado 5/5. The task is sound on every other
+axis; avocado is simply too strong for a binary-format corruption-recovery task in
+any shape tried. See Model Analysis.
 
 ## Model Analysis
 
