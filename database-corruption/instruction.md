@@ -1,62 +1,47 @@
- Background
-  You're on call for a storage service that persists all its data in a single append-only log file. Space is pre-allocated in fixed-size blocks, so a
-  freshly grown log ends with unused, zero-filled room that later writes fill in; each write appends one record, and every record carries a checksum for
-  later integrity verification. After a power failure during a write last night, the log is damaged in several places: a flipped byte here, a corrupted
-  length field there, and a partially written record at the tail. The vast majority of the data is still intact and needs to be recovered.
+Scenario
+    The data in the database may corrupted while writing into a single append-only log file. So we need to implement a tool, let's call it dbfsck -- a command-line utility that ingests one of these log files, salvages the maximum amount of valid data, and summarizes the results.
 
-  Build dbfsck, a command-line tool that reads one of these log files, recovers as much valid data as possible, and reports what it found.
+On-Disk Format
+    A log file begins with a fixed 8-byte header, followed by zero or more records stored back-to-back without padding, and finally any remaining pre-allocated zero-filled space not yet consumed by writes. All integers are unsigned, 32-bit, little-endian.
 
-  File Structure
-  A log file consists of a fixed 8-byte header followed by zero or more records packed contiguously (no inter-record padding), and then any unused,
-  zero-filled space that was pre-allocated but not yet written. All integer fields are unsigned, 32-bit, little-endian.
+Header (8 bytes):
+    0–3	ASCII magic: DBLG
+    4–7	Format version (uint32 LE) — must equal 1
 
-  Header (8 bytes):
+Record layout (repeating):
 
-  Offset        Content
-  0–3   ASCII magic bytes: DBLG
-  4–7   Format version (uint32, little-endian) — must be 1
+    Field	Size	        Description
+    key_len	4 bytes	        Key length
+    val_len	4 bytes	        Value length
+    key	    key_len bytes	Opaque key data (may contain NUL, tabs, newlines, or bytes resembling the header magic)
+    val	    val_len bytes	Opaque value data (may be empty; may contain or end with NUL bytes)
+    crc	    4 bytes	        RC-32 using the IEEE polynomial (equivalent to Go's crc32.ChecksumIEEE), computed over every byte of the record excluding the CRC field itself—spanning from the start of key_len through the last byte of val
 
-  Record layout (repeating):
+A record is intact at a given offset if its declared total size fits within the bytes remaining in the file and its stored CRC matches a freshly computed checksum over those bytes.
 
-  Field Size    Description
-  key_len       4 bytes Length of the key (uint32 LE)
-  val_len       4 bytes Length of the value (uint32 LE)
-  key   key_len bytes   Arbitrary byte sequence (may include NUL, tabs, newlines, or bytes that resemble the header magic)
-  val   val_len bytes   Arbitrary byte sequence (may be empty, and may contain or end with NUL bytes)
-  crc   4 bytes CRC-32 (IEEE polynomial, matching Go's crc32.ChecksumIEEE), computed over every byte of the record except the CRC itself—i.e., from key_len
-  through the end of val
+CLI Interface
+    dbfsck --in <PATH> [--out <PATH>]
 
-  A record is intact at a given position if the record it describes fits entirely within the remaining file bytes and its stored CRC matches a fresh
-  checksum of those bytes.
+Recovery Logic
+    Identify all intact records throughout the file, then choose the subset that maximizes the number of recovered records subject to two constraints: (1) no byte in the file is claimed by more than one chosen record, and (2) the chosen records are ordered by their starting offset. If multiple valid subsets tie for the highest count, any one is acceptable.
 
-  CLI Interface
-  dbfsck --in <PATH> [--out <PATH>]
+    Throughout the process, treat the file as adversarial input—never read beyond the file boundary, and never trust a length field for memory allocation or pointer advancement without first verifying that the file contains at least that many remaining bytes.
 
-  Recovery
-  Recover the largest possible number of non-overlapping intact records, taken in file-offset order (no byte may belong to more than one recovered record).
-  If two different selections yield the same maximum count, either is acceptable.
+Output
+dbfsck emits a single JSON line to stdout:
+    {"recovered":<R>,"skipped":<S>}
 
-  Treat the file as untrusted input throughout: never read beyond the file's end, and never use a length field to size a buffer without first verifying that
-  many bytes actually remain.
+    R means total number of records recovered and S means total number of damaged/unrecoverable bytes
+If --out is supplied, dbfsck also writes a clean log to that path: the 8-byte header followed by the recovered records in their original file-offset order. When --out is omitted, only the JSON report is produced—no file is written.
 
-  Output
-  dbfsck prints exactly one line of JSON to stdout:
-  {"recovered":<R>,"skipped":<S>}
-  R — number of records recovered
-  S — number of damaged bytes that could not be recovered
+Exit Codes
+    0	File is clean — no bytes were skipped (S == 0)
+    1	Corruption found — at least one byte was skipped (repaired file written when --out was given)
+    2	File is unusable — unreadable, shorter than 8 bytes, or missing the correct magic/version. No output file is produced.
 
-  If --out is provided, dbfsck additionally writes a repaired log at that path: the standard 8-byte header followed by the recovered records in file-offset
-  order. If --out is omitted, no file is written—only the JSON report is produced.
+Constraints
+    Go standard library only — no external dependencies.
+    Must compile successfully via go build ./... from /app/src/ without network access.
 
-  Exit Codes
-  Code  Meaning
-  0     File is clean — nothing was skipped (S == 0)
-  1     Corruption detected — at least one byte was skipped (repaired file written if --out was supplied)
-  2     File is unusable — cannot be read, is shorter than 8 bytes, or lacks the correct magic/version. No output file is written.
-
-  Constraints
-  Go standard library only — no third-party dependencies.
-  Must build cleanly via go build ./... from /app/src/ with no network access.
-
-  Deliverable
-  Implement dbfsck under /app/src/ (including go.mod and package main).
+Deliverable
+    Implement dbfsck under /app/src/ (with go.mod and package main).
