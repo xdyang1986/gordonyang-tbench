@@ -57,35 +57,29 @@ dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`)
 - **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go
   implementation (`os.ReadFile`, `encoding/binary`, `hash/crc32`, `encoding/json`;
   right-to-left DP with `uint64` framing and bounded reads; output opened only
-  after full header validation) and builds it. Passes the full suite (37/37
+  after full header validation) and builds it. Passes the full suite (42/42
   locally); a naive implementation (greedy + counts padding + opens `--out` early)
-  fails 13/37.
+  fails 15/42.
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`;
   `/app/src` and `/app/data` created empty. No source shipped to the agent.
 
 ## Completion Rates
 
-Calibration history (difficulty gate is the only one that has failed; structural
-9/9, oracle 3/3, AI assessment Accept, contamination MEDIUM, provenance passed
-throughout):
+Latest validation run (commit `afde591`) — **passing**:
 
-| Attempt | Design | Result |
-|---|---|---|
-| v1 `bd91988` | trust-length framing, `{valid,corrupt,truncated}` | too easy — avocado 5/5, opus 5/5 |
-| v2 `a583368` | forward-resync recovery, `{recovered,skipped}` | too easy — avocado 5/5, opus 5/5, gpt 5/5 |
-| v3 `d26488d` | maximize-record DP, nesting nuance stated explicitly | too easy — avocado 5/5, gpt 4/5 (contamination LOW) |
-| v4 `67d8128` | maximize-record DP, nesting nuance left implicit | too easy — avocado 5/5, gpt 5/5, opus 1/5 |
-| v5 `74b646e` | + trailing-zero-padding + no-clobber, three stacked implicit reqs | too easy — avocado 5/5, gpt 5/5 |
-| v6 `1b54688` | debug-in-place (reverted — author prefers from-scratch) | too easy — avocado 5/5, gpt 5/5 |
-| v7 `3f3f457` | from-scratch, five stacked implicit reqs (+embedded-magic, +in-place) | **passing** — avocado 3/5, gpt 5/5 |
+| Check | Result |
+|---|---|
+| Structural | 9/9 |
+| Oracle | 3/3 |
+| Difficulty balance | passed — avocado 4/5, opus 2/5, gpt 5/5 |
+| AI assessment | Accept (0 Critical / 0 High / 2 Medium / 1 Low) |
+| Contamination | LOW |
+| Provenance | SUSPECT — review recommended (non-blocking) |
 
-**Status: passing.** After five too-easy from-scratch designs (avocado 5/5) and a
-reverted debug-in-place experiment, v7 cleared the difficulty gate by widening the
-implicit-requirement surface to five independent requirements: the weak runner
-(avocado) drops to 3/5 while gpt still solves 5/5. Full gate results: structural
-9/9, oracle 3/3, difficulty **passed**, AI assessment **Accept** (0 Critical / 0
-High / 1 Medium — "spec requires some guessing", i.e. the intended implicit
-difficulty), contamination **LOW**, provenance passed.
+The difficulty gate passes because the weak runner (avocado) is not trivial (4/5)
+while at least one stronger runner solves it (gpt 5/5). The AI-assessment Mediums
+are the intended "spec requires some guessing" implicit difficulty (see Model
+Analysis). Provenance is a non-blocking soft flag on the spec prose.
 
 ## Model Analysis
 
@@ -112,9 +106,7 @@ them right on every one of avocado's five trials. v7 stacks five:
    oversized length field must never drive a huge allocation or a crash.
 
 Locally a naive implementation (greedy + counts padding as skipped + opens `--out`
-before validating) fails 13 of 37 tests spanning these requirements; the reference
-passes all 37. The prior five from-scratch designs (v1–v5) all failed the
-difficulty gate at avocado 5/5, and v6 (a debug-in-place experiment) was reverted
-at the author's request; v7 pushes the from-scratch approach further by widening
-the implicit-requirement surface. The open risk is unchanged: avocado has cleared
-every edge so far even when only implied, so this may still land too easy.
+before validating) fails 15 of 42 tests spanning these requirements; the reference
+passes all 42. Widening the implicit-requirement surface to these five independent
+requirements is what clears the difficulty gate: the weak runner slips on at least
+one of its five trials while a stronger runner still solves the whole suite.
