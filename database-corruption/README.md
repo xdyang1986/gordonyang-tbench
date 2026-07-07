@@ -66,25 +66,35 @@ throughout):
 | v1 `bd91988` | trust-length framing, `{valid,corrupt,truncated}` | too easy — avocado 5/5, opus 5/5 |
 | v2 `a583368` | forward-resync recovery, `{recovered,skipped}` | too easy — avocado 5/5, opus 5/5, gpt 5/5 |
 | v3 `d26488d` | maximize-record DP, nesting nuance stated explicitly | too easy — avocado 5/5, gpt 4/5 (contamination LOW) |
-| v4 (this) | maximize-record DP, nesting nuance left implicit | _tbd_ |
+| v4 `67d8128` | maximize-record DP, nesting nuance left implicit | too easy — avocado 5/5, gpt 5/5, opus 1/5 |
+| v5 (this) | + trailing-zero-padding + no-clobber, three stacked implicit reqs | _tbd_ |
 
 ## Model Analysis
 
-The difficulty rests on recognizing that maximum-record recovery is a dynamic
-program, not a greedy scan. The first two designs were fully-specified
-from-scratch parsing tasks and the weak runner solved every trial (consistent
-with the `dr-buffer` finding that pure from-scratch algorithm tasks do not beat
-avocado). v3 added a real algorithmic trap — because a valid record can nest
-inside another valid record's bytes, the greedy "take the first valid record and
-jump past it" recovers fewer records than the optimum — but with the nesting
-nuance stated explicitly the weak runner implemented the DP and still went 5/5.
-v4 keeps the DP contract (the instruction states the objective: recover the
-largest possible number of non-overlapping intact records) but leaves the nesting
-consequence implicit: a rushed solver assumes a clean sequential log and writes
-greedy, missing the overlap trials, while a careful solver reasons that corruption
-can create nested valid frames and reaches for the DP. This mirrors
-`database-engine`'s implicit batch-atomicity separator. Locally, a greedy
-first-valid implementation passes every test except the overlap-separator cases;
-the DP reference passes the full suite. The open risk (flagged during design):
-without the explicit hint the stronger runners may also miss the nesting, which
-would swing the task from "too easy" to "too hard".
+Four fully-specified from-scratch designs all failed the difficulty gate as too
+easy (avocado 5/5 every time) — v4 even solved the max-record DP with the nesting
+nuance implicit, while it dropped opus to 1/5. Consistent with the `dr-buffer`
+finding, difficulty tuning on a greenfield recovery task moves the strong models,
+not avocado. v5 responds by stacking **three** requirements that are only
+implied by the prompt, so a rushed solution must get all three right on every
+trial (the `database-engine` batch-atomicity pattern, layered):
+
+1. **Maximize recovered records.** A valid record can begin inside another valid
+   record's bytes, so greedy recovery is suboptimal; the maximum needs a DP. The
+   instruction states only the objective, not that nesting is possible.
+2. **Trailing zero padding is not corruption.** The file is pre-allocated, so a
+   run of `0x00` at the end is unused free space — excluded from `skipped`, exit
+   still 0. But zeros *between* records are corruption, and a record whose value
+   legitimately ends in `0x00` must not be trimmed. A naive reader counts padding
+   as skipped (wrong exit code) or trims trailing zeros globally (destroying a
+   record that ends in `0x00`).
+3. **No-clobber output.** On an unusable input the tool writes nothing and leaves
+   a pre-existing `--out` file untouched — i.e. validate fully before opening the
+   output, rather than truncating it up front.
+
+Locally, a rushed implementation (greedy + counts padding as skipped + opens
+`--out` before validating) fails 11 of 33 tests spanning all three requirements;
+the reference passes all 33. The open risk remains symmetric — if avocado nails
+all three it stays too easy, and if the stronger runners miss them it swings to
+too hard — but stacking independent implicit requirements maximizes the chance
+avocado slips on at least one of its five trials.

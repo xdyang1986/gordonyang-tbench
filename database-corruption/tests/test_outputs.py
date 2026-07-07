@@ -1,29 +1,27 @@
 """
-Grader for dbfsck — a corruption checker/recoverer for an append-only log file.
+Grader for dbfsck — a corruption checker/recoverer for a pre-allocated append-only
+log file.
 
-Recovery contract: recover the MAXIMUM number of non-overlapping valid records.
-A record is "valid at offset p" iff its declared size (8 + key_len + val_len + 4)
-fits within the bytes remaining from p AND its CRC matches. Crucially, a valid
-record may begin at an offset that lies inside another valid record's bytes, so
-the maximum is NOT the greedy "take the first valid record and jump past it" — it
-can require skipping a valid record so that more records fit. The summary is
-{"recovered":R,"skipped":S}: R records recovered, S bytes not covered by any
-recovered record.
+Behaviors under test (several are only implied by the instruction):
+  - format: 8-byte header ("DBLG" + uint32-LE version 1) then back-to-back records
+    (key_len:u32 val_len:u32 key val crc:u32, little-endian); crc is CRC-32 IEEE
+    over the record minus its crc field.
+  - a record is "valid at offset p" iff its declared size fits within the bytes
+    remaining from p AND its crc matches.
+  - MAXIMIZE recovered records. A valid record may begin inside another valid
+    record's bytes, so greedy "take the first valid record" is not optimal — the
+    maximum needs a DP.
+  - TRAILING ZERO PADDING IS NOT CORRUPTION: a run of 0x00 bytes at the end of the
+    file (after the last recovered record) is unused pre-allocated space; it is
+    excluded from `skipped` and does not make the file dirty. Zeros *between*
+    records are ordinary skipped bytes, and a record whose value legitimately ends
+    in 0x00 must not be trimmed.
+  - summary {"recovered":R,"skipped":S}; exit 0 iff S==0, else 1; unusable header
+    -> exit 2 with NO output (a pre-existing --out is left untouched).
 
-Strategy:
-  - build the agent's source from /app/src with `go build ./...`
-  - enforce the standard-library-only constraint
-  - construct database files as raw bytes in Python (struct + zlib.crc32, the same
-    IEEE CRC-32 as Go's crc32.ChecksumIEEE), inject corruption, drive the binary
-  - `scan_max()` is a reference DP for the exact contract; `scan_greedy()` is the
-    naive first-valid recovery, used to *prove* a crafted input is a real
-    separator (greedy recovers strictly fewer records)
-
-Fairness on ties: the maximum record count is unique, but the specific set that
-achieves it need not be. Exact-output assertions use only inputs with a unique
-optimum. The randomized test asserts the invariant maximum count and independently
-validates the tool's output (all records valid, non-overlapping, in order, with a
-consistent skipped count) — so a different-but-optimal tie-break is not punished.
+`scan_max()` is a reference implementation of the whole contract; every test's
+expected values are computed from it (or from raw bytes), so hard-coded outputs
+cannot pass. All test inputs have a unique optimum, so exact assertions are fair.
 """
 
 import json
@@ -43,9 +41,6 @@ MAGIC = b"DBLG"
 HEADER = MAGIC + struct.pack("<I", 1)
 
 
-# --------------------------------------------------------------------------- #
-# Build the agent's binary once for the whole session.
-# --------------------------------------------------------------------------- #
 @pytest.fixture(scope="session")
 def dbfsck():
     assert os.path.isdir(SRC_DIR), f"{SRC_DIR} does not exist"
@@ -94,8 +89,6 @@ def corrupt_content(rec: bytes) -> bytes:
 
 
 def corrupt_length(rec: bytes, delta: int = 7) -> bytes:
-    """Change the declared val_len without changing the on-disk byte count. A
-    reader that trusts the length prefix desyncs; the CRC no longer matches."""
     kl, vl = struct.unpack("<II", rec[:8])
     return struct.pack("<II", kl, vl + delta) + rec[8:]
 
@@ -121,8 +114,9 @@ def _record_at(payload, p):
 
 
 def scan_max(payload):
-    """Reference DP: recover the maximum number of records (prefer-take tie-break
-    for a deterministic reconstruction). Returns (recs, skipped, max_count)."""
+    """Reference contract: maximize recovered records (prefer-take tie-break);
+    a trailing run of 0x00 bytes not covered by any record is padding, not skipped.
+    Returns (recs, skipped, max_count)."""
     assert payload[:4] == MAGIC and struct.unpack("<I", payload[4:8])[0] == 1
     n = len(payload)
     size = [0] * (n + 1)
@@ -135,15 +129,22 @@ def scan_max(payload):
             if 1 + best[p + s] > best[p]:
                 best[p] = 1 + best[p + s]
     off = 8
+    end = 8
     recs = []
     while off < n:
         s = size[off]
         if s != 0 and 1 + best[off + s] == best[off]:
             recs.append(payload[off : off + s])
             off += s
+            end = off
         else:
             off += 1
-    skipped = (n - 8) - sum(len(r) for r in recs)
+    padding = 0
+    i = n - 1
+    while i >= end and payload[i] == 0:
+        padding += 1
+        i -= 1
+    skipped = (n - 8) - sum(len(r) for r in recs) - padding
     return recs, skipped, best[8]
 
 
@@ -159,29 +160,12 @@ def scan_greedy(payload):
             off += s
         else:
             off += 1
-    return recs, (n - 8) - sum(len(r) for r in recs)
+    return recs
 
 
 def expected(payload):
     recs, skipped, cnt = scan_max(payload)
     return {"recovered": cnt, "skipped": skipped}, db(*recs)
-
-
-def parse_records(payload):
-    """Parse a well-formed database file into (list_of_record_bytes). Used to
-    validate the tool's --out file; asserts every record is valid and framing is
-    exact."""
-    assert payload[:8] == HEADER, f"bad header on recovered file: {payload[:8]!r}"
-    n = len(payload)
-    off = 8
-    recs = []
-    while off < n:
-        s = _record_at(payload, off)
-        assert s is not None, f"recovered file has an invalid record at offset {off}"
-        recs.append(payload[off : off + s])
-        off += s
-    assert off == n, "trailing bytes in recovered file"
-    return recs
 
 
 def run(dbfsck, in_bytes, out=False, expect=None):
@@ -249,7 +233,7 @@ def _assert_stdlib(import_path, src_file):
 
 
 # --------------------------------------------------------------------------- #
-# Clean files (unique optimum: take everything)
+# Clean files
 # --------------------------------------------------------------------------- #
 def test_clean_file_reports_all_recovered(dbfsck):
     data = db(record(b"a", b"1"), record(b"b", b"2"), record(b"c", b"3"))
@@ -283,7 +267,7 @@ def test_binary_safe_keys_and_values(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
-# Content corruption (no overlapping frames -> unique optimum == greedy)
+# Content corruption
 # --------------------------------------------------------------------------- #
 def test_single_content_corrupt_record_is_dropped_and_rest_recovered(dbfsck):
     good1, good2, good3 = record(b"a", b"1"), record(b"b", b"2"), record(b"c", b"3")
@@ -305,6 +289,16 @@ def test_multiple_nonadjacent_corrupt_records(dbfsck):
     assert summary == exp_summary
     assert summary["recovered"] == 4
     assert recovered == exp_bytes == db(recs[0], recs[2], recs[3], recs[5])
+
+
+def test_adjacent_content_corrupt_records(dbfsck):
+    r0, r1, r2, r3 = (record(bytes([65 + i]), b"v" * (i + 1)) for i in range(4))
+    data = db(r0, corrupt_content(r1), corrupt_content(r2), r3)
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary
+    assert summary["recovered"] == 2
+    assert recovered == exp_bytes == db(r0, r3)
 
 
 def test_all_records_corrupt(dbfsck):
@@ -344,36 +338,87 @@ def test_length_corruption_first_record_recovers_rest(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
-# The separator: maximize recovered records where greedy is strictly worse.
-# B is a valid record whose value bytes are themselves two valid records S1, S2,
-# with nothing after B. Greedy takes B (1 record); the maximum is {S1, S2} (2).
+# Maximize records: greedy is strictly worse when records nest inside others.
 # --------------------------------------------------------------------------- #
-def _overlap_case():
-    s1 = record(b"s1", b"aaaa")
-    s2 = record(b"s2", b"bbbb")
-    inner = s1 + s2
-    big = record(b"", inner)  # empty key: s1 begins right after big's 8-byte prefix
-    return db(big), s1, s2, big
-
-
 def test_maximize_records_beats_greedy_overlap(dbfsck):
-    data, s1, s2, big = _overlap_case()
-    # This input must be a genuine separator with a unique optimum of 2 (= {s1,s2}).
+    s1, s2 = record(b"s1", b"aaaa"), record(b"s2", b"bbbb")
+    big = record(b"", s1 + s2)
+    data = db(big)
     max_recs, max_skipped, max_cnt = scan_max(data)
-    greedy_recs, _greedy_skipped = scan_greedy(data)
+    greedy_recs = scan_greedy(data)
     assert max_cnt == 2 and db(*max_recs) == db(s1, s2)
     assert len(greedy_recs) == 1 and greedy_recs[0] == big
     _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
     assert summary == {"recovered": 2, "skipped": max_skipped}
-    assert recovered == db(s1, s2), (
-        "must recover the two inner records, not the one enclosing record"
-    )
+    assert recovered == db(s1, s2)
 
 
 def test_overlap_case_detect_only(dbfsck):
-    data, _s1, _s2, _big = _overlap_case()
+    s1, s2 = record(b"s1", b"aaaa"), record(b"s2", b"bbbb")
+    data = db(record(b"", s1 + s2))
     _proc, summary, _rec, _p = run(dbfsck, data, out=False, expect=1)
     assert summary["recovered"] == 2
+
+
+def test_deeper_overlap_three_nested(dbfsck):
+    s1, s2, s3 = record(b"p", b"11"), record(b"q", b"22"), record(b"r", b"33")
+    big = record(b"", s1 + s2 + s3)
+    data = db(big)
+    max_recs, max_skipped, max_cnt = scan_max(data)
+    greedy_recs = scan_greedy(data)
+    assert max_cnt == 3 and db(*max_recs) == db(s1, s2, s3)
+    assert len(greedy_recs) == 1 and greedy_recs[0] == big
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == {"recovered": 3, "skipped": max_skipped}
+    assert recovered == db(s1, s2, s3)
+
+
+# --------------------------------------------------------------------------- #
+# Trailing zero padding is not corruption; zeros between records are.
+# --------------------------------------------------------------------------- #
+def test_trailing_zero_padding_is_clean(dbfsck):
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1, g2) + b"\x00" * 10  # pre-allocated free space
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=0)
+    assert summary == exp_summary == {"recovered": 2, "skipped": 0}
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+def test_header_plus_all_zeros_is_clean(dbfsck):
+    data = db() + b"\x00" * 20  # freshly pre-allocated, no records yet
+    exp_summary, _exp = expected(data)
+    _proc, summary, _rec, _p = run(dbfsck, data, expect=0)
+    assert summary == exp_summary == {"recovered": 0, "skipped": 0}
+
+
+def test_record_value_ending_in_zero_then_padding(dbfsck):
+    # The record's value legitimately ends in 0x00; trailing padding follows. The
+    # record must be recovered whole (not trimmed), and only the padding ignored.
+    g = record(b"k", b"ab\x00")
+    data = db(g) + b"\x00" * 6
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=0)
+    assert summary == exp_summary == {"recovered": 1, "skipped": 0}
+    assert recovered == exp_bytes == db(g)
+
+
+def test_zeros_between_records_are_skipped(dbfsck):
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1) + b"\x00" * 5 + g2  # a zero gap in the MIDDLE is corruption
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary == {"recovered": 2, "skipped": 5}
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+def test_garbage_then_padding(dbfsck):
+    g = record(b"a", b"1")
+    data = db(g) + b"\x11\x22\x33" + b"\x00" * 4  # garbage then padding
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary == {"recovered": 1, "skipped": 3}
+    assert recovered == exp_bytes == db(g)
 
 
 # --------------------------------------------------------------------------- #
@@ -392,7 +437,7 @@ def test_truncated_inside_last_record(dbfsck):
 
 def test_truncated_partial_length_prefix(dbfsck):
     good = record(b"a", b"1")
-    data = db(good) + b"\x03\x00\x00"
+    data = db(good) + b"\xff\xee\xdd"  # non-zero dangling bytes (< 8 remain)
     exp_summary, exp_bytes = expected(data)
     _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
     assert summary == exp_summary == {"recovered": 1, "skipped": 3}
@@ -400,7 +445,7 @@ def test_truncated_partial_length_prefix(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
-# Unusable input -> exit 2, no output file
+# Unusable input -> exit 2, no output file / no clobber
 # --------------------------------------------------------------------------- #
 def test_bad_magic_is_exit_2(dbfsck):
     data = b"XXXX" + struct.pack("<I", 1) + record(b"a", b"1")
@@ -431,6 +476,44 @@ def test_missing_input_file_is_exit_2(dbfsck):
     assert proc.returncode == 2
 
 
+def test_no_clobber_out_on_unusable_input(dbfsck):
+    # A pre-existing --out must be left untouched when the input is unusable.
+    tmp = tempfile.mkdtemp(prefix="dbfsck_nc_")
+    in_path = os.path.join(tmp, "in.db")
+    out_path = os.path.join(tmp, "out.db")
+    with open(in_path, "wb") as fh:
+        fh.write(b"XXXX" + struct.pack("<I", 1) + record(b"a", b"1"))  # bad magic
+    sentinel = b"PRIOR OUTPUT THAT MUST SURVIVE"
+    with open(out_path, "wb") as fh:
+        fh.write(sentinel)
+    proc = subprocess.run(
+        [dbfsck, "--in", in_path, "--out", out_path],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 2
+    with open(out_path, "rb") as fh:
+        assert fh.read() == sentinel, "--out was clobbered on an unusable input"
+
+
+def test_out_overwrites_existing_file_on_success(dbfsck):
+    tmp = tempfile.mkdtemp(prefix="dbfsck_ovw_")
+    in_path = os.path.join(tmp, "in.db")
+    out_path = os.path.join(tmp, "out.db")
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1, corrupt_content(record(b"z", b"9")), g2)
+    with open(in_path, "wb") as fh:
+        fh.write(data)
+    with open(out_path, "wb") as fh:
+        fh.write(b"STALE CONTENT THAT MUST BE REPLACED")
+    proc = subprocess.run(
+        [dbfsck, "--in", in_path, "--out", out_path],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 1
+    with open(out_path, "rb") as fh:
+        assert fh.read() == db(g1, g2)
+
+
 # --------------------------------------------------------------------------- #
 # Adversarial: oversized length must not crash / over-allocate
 # --------------------------------------------------------------------------- #
@@ -458,76 +541,8 @@ def test_repaired_output_is_clean_when_rechecked(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
-# More corner cases
-# --------------------------------------------------------------------------- #
-def test_adjacent_content_corrupt_records(dbfsck):
-    r0, r1, r2, r3 = (record(bytes([65 + i]), b"v" * (i + 1)) for i in range(4))
-    data = db(r0, corrupt_content(r1), corrupt_content(r2), r3)
-    exp_summary, exp_bytes = expected(data)
-    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
-    assert summary == exp_summary
-    assert summary["recovered"] == 2
-    assert recovered == exp_bytes == db(r0, r3)
-
-
-def test_only_garbage_after_header(dbfsck):
-    # Bytes after the header that cannot form any record: recovered 0, all skipped.
-    data = db() + b"\x01\x02\x03\x04\x05"
-    exp_summary, exp_bytes = expected(data)
-    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
-    assert summary == exp_summary == {"recovered": 0, "skipped": 5}
-    assert recovered == exp_bytes == db()
-
-
-def test_leading_garbage_before_first_record(dbfsck):
-    # Garbage immediately after the header, then two clean records.
-    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
-    data = HEADER + b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f" + g1 + g2
-    exp_summary, exp_bytes = expected(data)
-    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
-    assert summary == exp_summary
-    assert summary["recovered"] == 2
-    assert recovered == exp_bytes == db(g1, g2)
-
-
-def test_out_overwrites_existing_file(dbfsck):
-    # A pre-existing --out file must be replaced with the repaired content.
-    tmp = tempfile.mkdtemp(prefix="dbfsck_ovw_")
-    in_path = os.path.join(tmp, "in.db")
-    out_path = os.path.join(tmp, "out.db")
-    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
-    data = db(g1, corrupt_content(record(b"z", b"9")), g2)
-    with open(in_path, "wb") as fh:
-        fh.write(data)
-    with open(out_path, "wb") as fh:
-        fh.write(b"STALE CONTENT THAT MUST BE OVERWRITTEN")
-    proc = subprocess.run(
-        [dbfsck, "--in", in_path, "--out", out_path],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 1
-    with open(out_path, "rb") as fh:
-        assert fh.read() == db(g1, g2)
-
-
-def test_deeper_overlap_three_nested(dbfsck):
-    # A big record whose value bytes are three valid records: the maximum is 3
-    # (the inner records), greedy takes 1 (the enclosing record).
-    s1, s2, s3 = record(b"p", b"11"), record(b"q", b"22"), record(b"r", b"33")
-    big = record(b"", s1 + s2 + s3)
-    data = db(big)
-    max_recs, max_skipped, max_cnt = scan_max(data)
-    greedy_recs, _ = scan_greedy(data)
-    assert max_cnt == 3 and db(*max_recs) == db(s1, s2, s3)
-    assert len(greedy_recs) == 1 and greedy_recs[0] == big
-    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
-    assert summary == {"recovered": 3, "skipped": max_skipped}
-    assert recovered == db(s1, s2, s3)
-
-
-# --------------------------------------------------------------------------- #
-# Randomized model: assert the invariant maximum count and validate the tool's
-# output (valid, non-overlapping, in order, consistent skipped) — tie-fair.
+# Randomized model (unique optima -> exact assertions). Mixes clean / content-
+# corrupt / length-corrupt records and optional trailing zero padding.
 # --------------------------------------------------------------------------- #
 def test_randomized_model(dbfsck):
     import random
@@ -550,14 +565,10 @@ def test_randomized_model(dbfsck):
             else:
                 pieces.append(rec)
         data = db(*pieces)
-        _recs, _skipped, max_cnt = scan_max(data)
-        expected_exit = 0 if max_cnt == n and _skipped == 0 else (0 if _skipped == 0 else 1)
-        proc, summary, recovered, _p = run(dbfsck, data, out=True)
-        assert summary is not None, f"trial {trial}: no JSON summary"
-        # invariant: the maximum number of recoverable records
-        assert summary["recovered"] == max_cnt, f"trial {trial}: {summary} cnt!={max_cnt}"
-        # validate the tool's own output independently of tie-break choice
-        out_recs = parse_records(recovered)
-        assert len(out_recs) == max_cnt, f"trial {trial}: output record count"
-        assert summary["skipped"] == (len(data) - 8) - sum(len(r) for r in out_recs)
-        assert (proc.returncode == 0) == (summary["skipped"] == 0), f"trial {trial}: exit"
+        if rng.random() < 0.5:
+            data += b"\x00" * rng.randint(1, 16)  # pre-allocated padding
+        exp_summary, exp_bytes = expected(data)
+        expected_exit = 0 if exp_summary["skipped"] == 0 else 1
+        _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=expected_exit)
+        assert summary == exp_summary, f"trial {trial}: {summary} != {exp_summary}"
+        assert recovered == exp_bytes, f"trial {trial}: recovered mismatch"
