@@ -458,6 +458,74 @@ def test_repaired_output_is_clean_when_rechecked(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
+# More corner cases
+# --------------------------------------------------------------------------- #
+def test_adjacent_content_corrupt_records(dbfsck):
+    r0, r1, r2, r3 = (record(bytes([65 + i]), b"v" * (i + 1)) for i in range(4))
+    data = db(r0, corrupt_content(r1), corrupt_content(r2), r3)
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary
+    assert summary["recovered"] == 2
+    assert recovered == exp_bytes == db(r0, r3)
+
+
+def test_only_garbage_after_header(dbfsck):
+    # Bytes after the header that cannot form any record: recovered 0, all skipped.
+    data = db() + b"\x01\x02\x03\x04\x05"
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary == {"recovered": 0, "skipped": 5}
+    assert recovered == exp_bytes == db()
+
+
+def test_leading_garbage_before_first_record(dbfsck):
+    # Garbage immediately after the header, then two clean records.
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = HEADER + b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f" + g1 + g2
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary
+    assert summary["recovered"] == 2
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+def test_out_overwrites_existing_file(dbfsck):
+    # A pre-existing --out file must be replaced with the repaired content.
+    tmp = tempfile.mkdtemp(prefix="dbfsck_ovw_")
+    in_path = os.path.join(tmp, "in.db")
+    out_path = os.path.join(tmp, "out.db")
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1, corrupt_content(record(b"z", b"9")), g2)
+    with open(in_path, "wb") as fh:
+        fh.write(data)
+    with open(out_path, "wb") as fh:
+        fh.write(b"STALE CONTENT THAT MUST BE OVERWRITTEN")
+    proc = subprocess.run(
+        [dbfsck, "--in", in_path, "--out", out_path],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 1
+    with open(out_path, "rb") as fh:
+        assert fh.read() == db(g1, g2)
+
+
+def test_deeper_overlap_three_nested(dbfsck):
+    # A big record whose value bytes are three valid records: the maximum is 3
+    # (the inner records), greedy takes 1 (the enclosing record).
+    s1, s2, s3 = record(b"p", b"11"), record(b"q", b"22"), record(b"r", b"33")
+    big = record(b"", s1 + s2 + s3)
+    data = db(big)
+    max_recs, max_skipped, max_cnt = scan_max(data)
+    greedy_recs, _ = scan_greedy(data)
+    assert max_cnt == 3 and db(*max_recs) == db(s1, s2, s3)
+    assert len(greedy_recs) == 1 and greedy_recs[0] == big
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == {"recovered": 3, "skipped": max_skipped}
+    assert recovered == db(s1, s2, s3)
+
+
+# --------------------------------------------------------------------------- #
 # Randomized model: assert the invariant maximum count and validate the tool's
 # output (valid, non-overlapping, in order, consistent skipped) — tie-fair.
 # --------------------------------------------------------------------------- #

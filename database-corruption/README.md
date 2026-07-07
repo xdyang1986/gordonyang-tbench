@@ -65,19 +65,26 @@ throughout):
 |---|---|---|
 | v1 `bd91988` | trust-length framing, `{valid,corrupt,truncated}` | too easy — avocado 5/5, opus 5/5 |
 | v2 `a583368` | forward-resync recovery, `{recovered,skipped}` | too easy — avocado 5/5, opus 5/5, gpt 5/5 |
-| v3 (this) | maximize-record DP (greedy is suboptimal) | _tbd_ |
+| v3 `d26488d` | maximize-record DP, nesting nuance stated explicitly | too easy — avocado 5/5, gpt 4/5 (contamination LOW) |
+| v4 (this) | maximize-record DP, nesting nuance left implicit | _tbd_ |
 
 ## Model Analysis
 
-The difficulty now rests on recognizing that maximum-record recovery is a
-dynamic program, not a greedy scan. The first two designs were fully-specified
+The difficulty rests on recognizing that maximum-record recovery is a dynamic
+program, not a greedy scan. The first two designs were fully-specified
 from-scratch parsing tasks and the weak runner solved every trial (consistent
 with the `dr-buffer` finding that pure from-scratch algorithm tasks do not beat
-avocado). v3 adds a real algorithmic trap: because a valid record can nest inside
-another valid record's bytes, the natural greedy "take the first valid record and
-jump past it" recovers fewer records than the optimum, so a correct solution
-needs the DP. Locally, a greedy first-valid implementation passes every test
-except the two overlap-separator cases; the DP reference passes all 24. The open
-risk (flagged during design) is symmetric: the separator is narrow, so the weak
-runner may still stumble onto the DP, or the stronger runners may implement
-greedy and miss it — the next validation run resolves which.
+avocado). v3 added a real algorithmic trap — because a valid record can nest
+inside another valid record's bytes, the greedy "take the first valid record and
+jump past it" recovers fewer records than the optimum — but with the nesting
+nuance stated explicitly the weak runner implemented the DP and still went 5/5.
+v4 keeps the DP contract (the instruction states the objective: recover the
+largest possible number of non-overlapping intact records) but leaves the nesting
+consequence implicit: a rushed solver assumes a clean sequential log and writes
+greedy, missing the overlap trials, while a careful solver reasons that corruption
+can create nested valid frames and reaches for the DP. This mirrors
+`database-engine`'s implicit batch-atomicity separator. Locally, a greedy
+first-valid implementation passes every test except the overlap-separator cases;
+the DP reference passes the full suite. The open risk (flagged during design):
+without the explicit hint the stronger runners may also miss the nesting, which
+would swing the task from "too easy" to "too hard".
