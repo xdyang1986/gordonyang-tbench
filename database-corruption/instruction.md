@@ -1,8 +1,10 @@
 Background
-A service persists data to an append-only log file. These files are susceptible to on-disk corruption—bit flips, garbled length fields, or incomplete trailing records from unclean shutdowns. Your job is to build dbfsck, a command-line tool that detects corruption in such files and salvages as many intact records as it can.
+You're on call for a storage service that persists all its data in a single append-only log file. Each write appends one record, and every record includes a checksum for later integrity verification. After a power failure during a write last night, the log is damaged in several places: a flipped byte here, a corrupted length field there, and a partially written record at the tail. The vast majority of the data is still intact and needs to be recovered.
+
+Build dbfsck, a command-line tool that reads one of these log files, recovers as much valid data as possible, and reports what it found.
 
 File Structure
-A database file consists of a fixed 8-byte header followed by zero or more tightly packed records (no inter-record padding). All integer fields are unsigned, 32-bit, little-endian.
+A log file consists of a fixed 8-byte header followed by zero or more records packed contiguously (no inter-record padding). All integer fields are unsigned, 32-bit, little-endian.
 
 Header (8 bytes):
 
@@ -16,49 +18,36 @@ key_len	4 bytes	Length of the key (uint32 LE)
 val_len	4 bytes	Length of the value (uint32 LE)
 key	key_len bytes	Arbitrary byte sequence (may include NUL, tabs, newlines)
 val	val_len bytes	Arbitrary byte sequence (may be empty)
-crc	4 bytes	CRC-32 (IEEE polynomial, as produced by Go's crc32.ChecksumIEEE), computed over all preceding bytes in the record—from the start of key_len through the end of val
-A record is valid at a given offset if:
-
-Its total size (8 + key_len + val_len + 4) does not exceed the remaining bytes in the file, and
-
-Its crc matches the checksum of the bytes it covers.
+crc	4 bytes	CRC-32 (IEEE polynomial, matching Go's crc32.ChecksumIEEE), computed over every byte of the record except the CRC itself—i.e., from key_len through the end of val
+A record is intact at a given position if the record it describes fits entirely within the remaining file bytes and its stored CRC matches a fresh checksum of those bytes.
 
 CLI Interface
-text
-
-Copy
 dbfsck --in <PATH> [--out <PATH>]
-Recovery Algorithm
-Starting immediately after the header, scan forward through the file:
+Recovery Strategy
+Recover the largest possible number of non-overlapping intact records, taken in file-offset order (no byte may belong to more than one recovered record).
 
-If a valid record starts at the current position, recover it and advance past it.
+Important nuance: Corruption can leave the data such that a smaller intact record sits entirely within the byte span of a larger intact record. In these cases, maximizing the recovery count may require skipping the larger record in favor of multiple smaller ones nested inside it. If two different selections yield the same maximum count, either is acceptable.
 
-Otherwise, skip forward one byte and try again. Each byte skipped this way counts toward the "skipped" total.
-
-This byte-by-byte resynchronization means a single corrupted region (even a mangled length field) does not doom the remainder of the file—subsequent valid records will still be found. Important: never read beyond the file's end, and never trust a length field without first confirming that many bytes actually remain.
+Treat the file as untrusted input throughout: never read beyond the file's end, and never use a length field to size a buffer without first verifying that many bytes actually remain.
 
 Output
 dbfsck prints exactly one line of JSON to stdout:
-
-json
-
-Copy
 {"recovered":<R>,"skipped":<S>}
-R — number of records successfully recovered
+R — number of records recovered
 
-S — total number of bytes skipped
+S — number of bytes not covered by any recovered record
 
-If --out is provided, dbfsck additionally writes a repaired file at that path: the standard 8-byte header followed by the recovered records in discovery order. If --out is omitted, no file is written.
+If --out is provided, dbfsck additionally writes a repaired log at that path: the standard 8-byte header followed by the recovered records in file-offset order. If --out is omitted, no file is written—only the JSON report is produced.
 
 Exit Codes
 Code	Meaning
-0	File is clean — zero bytes skipped
+0	File is clean — nothing was skipped (S == 0)
 1	Corruption detected — at least one byte was skipped (repaired file written if --out was supplied)
-2	Input is unusable — file is unreadable, shorter than 8 bytes, or has an invalid magic/version. No output file is written in this case.
+2	File is unusable — cannot be read, is shorter than 8 bytes, or lacks the correct magic/version. No output file is written.
 Constraints
 Go standard library only — no third-party dependencies.
 
 Must build cleanly via go build ./... from /app/src/ with no network access.
 
 Deliverable
-Implement dbfsck under /app/src/ (including go.mod and a package main) conforming to the behavior described above.
+Implement dbfsck under /app/src/ (including go.mod and package main).

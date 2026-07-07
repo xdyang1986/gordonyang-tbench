@@ -8,9 +8,9 @@ implement the full CLI:
 
 - `dbfsck --in <PATH> [--out <PATH>]`
 - Prints a one-line JSON summary `{"recovered":R,"skipped":S}` — records
-  recovered and bytes skipped.
-- With `--out`, writes a repaired file (header + the recovered records only, in
-  original order). Without `--out`, it only reports.
+  recovered and bytes not covered by any recovered record.
+- With `--out`, writes a repaired file (header + the recovered records, in
+  offset order). Without `--out`, it only reports.
 - Exit `0` clean (`skipped == 0`) · `1` corruption found (`skipped > 0`; repaired
   when `--out` is given) · `2` unusable input (unreadable, shorter than the
   header, or bad magic/version — no output file is written).
@@ -20,16 +20,14 @@ The on-disk format is fully specified in the instruction: an 8-byte header
 `key_len:u32 · val_len:u32 · key · val · crc:u32` (little-endian), where the CRC
 is CRC-32 (IEEE polynomial) over the record minus its CRC field.
 
-**Recovery is by forward resynchronization**, which is the crux of the task. A
-record is *valid at a position* iff its declared size fits within the bytes that
-remain there **and** its CRC matches. Starting after the header, `dbfsck` outputs
-a valid record and advances past it; on hitting anything else it advances **one
-byte at a time** to the next valid record (or the end of file), counting the
-bytes passed over as `skipped`. The consequence is the difficulty: a corrupt
-length field must **not** desync the rest of the file — the records after a
-corrupted region are still recovered. A naive reader that trusts the length
-prefix and advances by the declared size overshoots (or undershoots) at a bad
-length and loses everything after it.
+**Recovery maximizes the number of records, which is the crux.** A record is
+*valid at an offset* iff its declared size fits within the bytes that remain
+there **and** its CRC matches. Because a valid record may begin at an offset that
+lies **inside** another valid record's bytes, the maximum-record recovery is
+**not** the greedy "take the first valid record and advance past it": it can
+require skipping a valid record so that more records fit. A correct solution is a
+dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`).
+`skipped` is the number of bytes not covered by any recovered record.
 
 ## Test / Solution Details
 
@@ -37,50 +35,49 @@ length and loses everything after it.
   `go build ./...`, enforces the standard-library-only constraint, then constructs
   database files as raw bytes in Python (`zlib.crc32` is the same IEEE CRC-32 as
   Go's `crc32.ChecksumIEEE`), injects corruption, and drives the built binary. A
-  reference `scan()` implements the exact recovery contract, so every test's
-  expected `{recovered, skipped}` and expected repaired bytes are computed, not
-  hard-coded. Coverage: clean/empty/binary-safe files, content corruption
-  (single, multiple, adjacent-merge, all), **length corruption mid-file / first
-  record / understated length — all requiring resynchronization to recover the
-  following records**, truncated tails, the unusable-input contract (exit 2, no
-  output), detect-only mode, an oversized-length "bomb" (no crash / no
-  over-allocation), the repaired file being clean when re-checked, and a seeded
-  randomized model mixing clean / content-corrupt / length-corrupt records.
+  reference DP `scan_max()` computes the exact contract; `scan_greedy()` proves a
+  crafted input is a genuine separator (greedy recovers strictly fewer records).
+  Coverage: clean/empty/binary-safe files, content corruption, length corruption
+  (resync), truncated tails, the unusable-input contract (exit 2, no output),
+  detect-only mode, an oversized-length "bomb" (no crash / no over-allocation),
+  the repaired file being clean when re-checked, the **max-record overlap
+  separator** (a valid record whose value bytes are themselves two valid records,
+  where the maximum is the two inner records, not the one enclosing record), and
+  a seeded randomized model. **Tie-fairness:** exact-output assertions use only
+  inputs with a unique optimum; the randomized test asserts the invariant maximum
+  count and independently validates the tool's output (valid, non-overlapping, in
+  order, consistent `skipped`), so a different-but-optimal tie-break is not
+  punished.
 - **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go
   implementation (`os.ReadFile`, `encoding/binary`, `hash/crc32`, `encoding/json`;
-  greedy forward resync with `uint64` framing arithmetic and bounded reads) and
-  builds it. Passes the full suite (26/26 locally).
+  right-to-left DP with `uint64` framing arithmetic and bounded reads) and builds
+  it. Passes the full suite (24/24 locally).
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`;
   `/app/src` and `/app/data` created empty. No source shipped to the agent.
 
 ## Completion Rates
 
-First validation attempt (commit `bd91988`, pre-resync design) failed only the
-difficulty gate — **too easy: avocado 5/5, opus 5/5** (structural 9/9, oracle
-3/3, AI assessment Accept, contamination MEDIUM, provenance passed). The task was
-then redesigned to require forward resynchronization; rates below to be filled in
-from the next validation run.
+Calibration history (difficulty gate is the only one that has failed; structural
+9/9, oracle 3/3, AI assessment Accept, contamination MEDIUM, provenance passed
+throughout):
 
-| Runner | Pass rate |
-|---|---|
-| Oracle (reference solution) | _tbd_ |
-| avocado (`avocado_dvsc_tester`) | _tbd_ |
-| Opus | _tbd_ |
-| GPT | _tbd_ |
+| Attempt | Design | Result |
+|---|---|---|
+| v1 `bd91988` | trust-length framing, `{valid,corrupt,truncated}` | too easy — avocado 5/5, opus 5/5 |
+| v2 `a583368` | forward-resync recovery, `{recovered,skipped}` | too easy — avocado 5/5, opus 5/5, gpt 5/5 |
+| v3 (this) | maximize-record DP (greedy is suboptimal) | _tbd_ |
 
 ## Model Analysis
 
-Difficulty is concentrated in **forward resynchronization after a corrupt length
-field**. The first design trusted the length prefix for framing (skip a
-CRC-corrupt record by advancing its declared size, stop on a truncated tail); the
-weak runner solved all five trials, so the platform rejected it as trivial. The
-resync contract changes that: when a record's declared length is corrupt, a
-reader that advances by the declared size desyncs and loses every record after
-the bad one, whereas the required behavior is to scan forward byte by byte to the
-next CRC-valid record and keep recovering. Locally, a naive length-trusting
-implementation (the shape the weak runner produced) fails exactly the
-length-corruption and randomized-model tests while still passing the
-content-corruption and truncation cases — the intended separator between a rushed
-and a careful solution. Bounded reads (never allocate from an unchecked length)
-and the exit-code / `skipped`-byte accounting remain secondary correctness
-requirements.
+The difficulty now rests on recognizing that maximum-record recovery is a
+dynamic program, not a greedy scan. The first two designs were fully-specified
+from-scratch parsing tasks and the weak runner solved every trial (consistent
+with the `dr-buffer` finding that pure from-scratch algorithm tasks do not beat
+avocado). v3 adds a real algorithmic trap: because a valid record can nest inside
+another valid record's bytes, the natural greedy "take the first valid record and
+jump past it" recovers fewer records than the optimum, so a correct solution
+needs the DP. Locally, a greedy first-valid implementation passes every test
+except the two overlap-separator cases; the DP reference passes all 24. The open
+risk (flagged during design) is symmetric: the separator is narrow, so the weak
+runner may still stumble onto the DP, or the stronger runners may implement
+greedy and miss it — the next validation run resolves which.
