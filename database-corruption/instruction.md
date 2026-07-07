@@ -1,69 +1,64 @@
-  Scenario
-  A service stores data in an append-only log file. Files on disk occasionally get
-  corrupted — a flipped byte, or a half-written trailing record left behind after a
-  crash. Build a command-line tool, dbfsck, that checks such a file for corruption
-  and recovers the intact records.
+Background
+A service persists data to an append-only log file. These files are susceptible to on-disk corruption—bit flips, garbled length fields, or incomplete trailing records from unclean shutdowns. Your job is to build dbfsck, a command-line tool that detects corruption in such files and salvages as many intact records as it can.
 
-  File format
-  A database file is a fixed 8-byte header followed by zero or more records, stored
-  back-to-back with no padding. All integers are unsigned, 32-bit, little-endian.
+File Structure
+A database file consists of a fixed 8-byte header followed by zero or more tightly packed records (no inter-record padding). All integer fields are unsigned, 32-bit, little-endian.
 
-  Header (8 bytes):
-      bytes 0–3   the ASCII magic "DBLG"
-      bytes 4–7   format version (uint32, little-endian), equal to 1
+Header (8 bytes):
 
-  Each record, in order:
-      key_len     uint32 little-endian
-      val_len     uint32 little-endian
-      key         key_len bytes (arbitrary bytes; may contain NUL, tab, newline)
-      val         val_len bytes (arbitrary bytes; may be empty)
-      crc         uint32 little-endian — CRC-32 with the IEEE polynomial (the value
-                  produced by Go's hash/crc32 ChecksumIEEE), computed over the
-                  record's bytes from the first byte of key_len through the last
-                  byte of val, i.e. every byte of the record except the 4 crc bytes.
+Offset	Content
+0–3	ASCII magic bytes: DBLG
+4–7	Format version (uint32, little-endian) — must be 1
+Record layout (repeating):
 
-  Interface
-      dbfsck --in <PATH> [--out <PATH>]
+Field	Size	Description
+key_len	4 bytes	Length of the key (uint32 LE)
+val_len	4 bytes	Length of the value (uint32 LE)
+key	key_len bytes	Arbitrary byte sequence (may include NUL, tabs, newlines)
+val	val_len bytes	Arbitrary byte sequence (may be empty)
+crc	4 bytes	CRC-32 (IEEE polynomial, as produced by Go's crc32.ChecksumIEEE), computed over all preceding bytes in the record—from the start of key_len through the end of val
+A record is valid at a given offset if:
 
-  dbfsck reads the file at --in, scans it record by record, and prints a single line
-  of JSON to stdout:
+Its total size (8 + key_len + val_len + 4) does not exceed the remaining bytes in the file, and
 
-      {"valid":<V>,"corrupt":<C>,"truncated":<T>}
+Its crc matches the checksum of the bytes it covers.
 
-  where V is the number of records whose CRC verified, C the number of records that
-  were framed but whose CRC did not match, and T is 1 if the file ended with an
-  incomplete trailing record and 0 otherwise.
+CLI Interface
+text
 
-  If --out is given, dbfsck also writes a repaired database to that path: the 8-byte
-  header followed by exactly the valid records, in their original order (corrupt and
-  truncated records omitted). Without --out, dbfsck only reports; it writes no file.
+Copy
+dbfsck --in <PATH> [--out <PATH>]
+Recovery Algorithm
+Starting immediately after the header, scan forward through the file:
 
-  Scanning rules
-      - Records begin immediately after the 8-byte header. At each position, read
-        key_len and val_len; the whole record occupies 8 + key_len + val_len + 4
-        bytes.
-      - The length prefix defines framing: to reach the next record, advance by the
-        current record's full declared size, whether or not its CRC verified. A
-        record whose CRC does not match is counted as corrupt and omitted from the
-        output, but scanning continues at the next record.
-      - If fewer than 8 bytes remain, or the declared record size would run past the
-        end of the file, the file ends with an incomplete record: set truncated to 1
-        and stop. Never read past the end of the file, and never allocate a buffer
-        sized from a length field without first checking it against the bytes that
-        actually remain.
+If a valid record starts at the current position, recover it and advance past it.
 
-  Exit status
-      0   the file is clean: no corrupt records and not truncated
-      1   corruption was found (and, when --out was given, a repaired file was
-          written)
-      2   the input is unusable: it cannot be read, is shorter than the 8-byte
-          header, or does not begin with the correct magic and version. In this
-          case dbfsck writes no output file.
+Otherwise, skip forward one byte and try again. Each byte skipped this way counts toward the "skipped" total.
 
-  Constraints
-      Go standard library only — no external dependencies.
-      Builds with go build ./... from /app/src/ with no network access.
+This byte-by-byte resynchronization means a single corrupted region (even a mangled length field) does not doom the remainder of the file—subsequent valid records will still be found. Important: never read beyond the file's end, and never trust a length field without first confirming that many bytes actually remain.
 
-  Task
-      Implement dbfsck under /app/src/ (with go.mod and package main) so it behaves
-      as described.
+Output
+dbfsck prints exactly one line of JSON to stdout:
+
+json
+
+Copy
+{"recovered":<R>,"skipped":<S>}
+R — number of records successfully recovered
+
+S — total number of bytes skipped
+
+If --out is provided, dbfsck additionally writes a repaired file at that path: the standard 8-byte header followed by the recovered records in discovery order. If --out is omitted, no file is written.
+
+Exit Codes
+Code	Meaning
+0	File is clean — zero bytes skipped
+1	Corruption detected — at least one byte was skipped (repaired file written if --out was supplied)
+2	Input is unusable — file is unreadable, shorter than 8 bytes, or has an invalid magic/version. No output file is written in this case.
+Constraints
+Go standard library only — no third-party dependencies.
+
+Must build cleanly via go build ./... from /app/src/ with no network access.
+
+Deliverable
+Implement dbfsck under /app/src/ (including go.mod and a package main) conforming to the behavior described above.
