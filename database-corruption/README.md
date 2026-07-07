@@ -77,7 +77,15 @@ throughout):
 | v4 `67d8128` | maximize-record DP, nesting nuance left implicit | too easy — avocado 5/5, gpt 5/5, opus 1/5 |
 | v5 `74b646e` | + trailing-zero-padding + no-clobber, three stacked implicit reqs | too easy — avocado 5/5, gpt 5/5 |
 | v6 `1b54688` | debug-in-place (reverted — author prefers from-scratch) | too easy — avocado 5/5, gpt 5/5 |
-| v7 (this) | from-scratch, five stacked implicit reqs (+embedded-magic, +in-place) | _tbd_ |
+| v7 `3f3f457` | from-scratch, five stacked implicit reqs (+embedded-magic, +in-place) | **passing** — avocado 3/5, gpt 5/5 |
+
+**Status: passing.** After five too-easy from-scratch designs (avocado 5/5) and a
+reverted debug-in-place experiment, v7 cleared the difficulty gate by widening the
+implicit-requirement surface to five independent requirements: the weak runner
+(avocado) drops to 3/5 while gpt still solves 5/5. Full gate results: structural
+9/9, oracle 3/3, difficulty **passed**, AI assessment **Accept** (0 Critical / 0
+High / 1 Medium — "spec requires some guessing", i.e. the intended implicit
+difficulty), contamination **LOW**, provenance passed.
 
 ## Model Analysis
 
