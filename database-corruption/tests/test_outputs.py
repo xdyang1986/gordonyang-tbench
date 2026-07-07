@@ -541,6 +541,149 @@ def test_repaired_output_is_clean_when_rechecked(dbfsck):
 
 
 # --------------------------------------------------------------------------- #
+# The magic "DBLG" appears only in the 8-byte header; it is ordinary data
+# anywhere else. Recovery is by CRC/length framing, never by scanning for magic.
+# --------------------------------------------------------------------------- #
+def test_magic_bytes_inside_record_value_are_data(dbfsck):
+    # A record whose value literally contains "DBLG" + a version word must be
+    # recovered normally, not mistaken for a nested header.
+    g = record(b"k", b"DBLG" + struct.pack("<I", 1) + b"payload")
+    data = db(record(b"a", b"1"), g, record(b"b", b"2"))
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=0)
+    assert summary == exp_summary == {"recovered": 3, "skipped": 0}
+    assert recovered == exp_bytes == data
+
+
+def test_magic_bytes_inside_corruption_are_not_a_header(dbfsck):
+    g1, g2 = record(b"a", b"first"), record(b"b", b"second")
+    # A damaged region that happens to contain the magic (and header-looking
+    # bytes) must be skipped, not resynced-to as if a new log started there.
+    junk = b"DBLG" + struct.pack("<I", 1) + struct.pack("<II", 2, 99) + b"zz"
+    data = db(g1) + junk + g2
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+# --------------------------------------------------------------------------- #
+# Overlap topology beyond simple nesting: an overlap region followed by a normal
+# record. Max = the two inner records + the trailing record (skip the encloser).
+# --------------------------------------------------------------------------- #
+def test_overlap_region_then_normal_record(dbfsck):
+    s1, s2 = record(b"s1", b"aaaa"), record(b"s2", b"bbbb")
+    big = record(b"", s1 + s2)
+    tail = record(b"g", b"end")
+    data = db(big, tail)
+    max_recs, max_skipped, max_cnt = scan_max(data)
+    greedy_recs = scan_greedy(data)
+    assert max_cnt == 3 and db(*max_recs) == db(s1, s2, tail)
+    assert len(greedy_recs) == 2  # greedy takes big, then tail
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == {"recovered": 3, "skipped": max_skipped}
+    assert recovered == db(s1, s2, tail)
+
+
+# --------------------------------------------------------------------------- #
+# A damaged region that looks like a fresh header + record (magic + version 1 +
+# plausible lengths) must NOT be resynced-to; only genuinely CRC-valid records
+# are recovered.
+# --------------------------------------------------------------------------- #
+def test_fake_header_in_corruption_is_ignored(dbfsck):
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    fake = MAGIC + struct.pack("<I", 1) + corrupt_content(record(b"x", b"yy"))
+    data = db(g1) + fake + g2
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+# --------------------------------------------------------------------------- #
+# No alignment assumptions: a record after an odd-length damaged run must still
+# be found (records are not 4-byte aligned).
+# --------------------------------------------------------------------------- #
+def test_record_after_odd_length_garbage(dbfsck):
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1) + b"\x11\x22\x33" + g2  # 3 non-zero bytes -> g2 at an odd offset
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert summary == exp_summary == {"recovered": 2, "skipped": 3}
+    assert recovered == exp_bytes == db(g1, g2)
+
+
+# --------------------------------------------------------------------------- #
+# Bounded reads on the key side too: an oversized key_len must not crash.
+# --------------------------------------------------------------------------- #
+def test_huge_key_length_does_not_crash(dbfsck):
+    good = record(b"a", b"1")
+    bomb = struct.pack("<II", 0xFFFFFFFF, 1) + b"k"  # key claims ~4 GiB
+    data = db(good) + bomb
+    exp_summary, exp_bytes = expected(data)
+    proc, summary, recovered, _p = run(dbfsck, data, out=True, expect=1)
+    assert "panic" not in proc.stderr.lower(), proc.stderr
+    assert summary == exp_summary
+    assert recovered == exp_bytes == db(good)
+
+
+# --------------------------------------------------------------------------- #
+# In-place repair: --in and --out may be the same path (read fully before write).
+# --------------------------------------------------------------------------- #
+def test_in_place_repair_on_clean_file_is_noop(dbfsck):
+    tmp = tempfile.mkdtemp(prefix="dbfsck_ipc_")
+    path = os.path.join(tmp, "log.db")
+    data = db(record(b"a", b"1"), record(b"b", b"2"))
+    with open(path, "wb") as fh:
+        fh.write(data)
+    proc = subprocess.run(
+        [dbfsck, "--in", path, "--out", path], capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    with open(path, "rb") as fh:
+        assert fh.read() == data
+
+
+def test_in_place_repair_same_path(dbfsck):
+    tmp = tempfile.mkdtemp(prefix="dbfsck_ip_")
+    path = os.path.join(tmp, "log.db")
+    g1, g2 = record(b"a", b"1"), record(b"b", b"2")
+    data = db(g1, corrupt_content(record(b"z", b"9")), g2)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    proc = subprocess.run(
+        [dbfsck, "--in", path, "--out", path],  # same path
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 1, f"stderr={proc.stderr!r}"
+    with open(path, "rb") as fh:
+        assert fh.read() == db(g1, g2), "in-place repair corrupted the file"
+
+
+# --------------------------------------------------------------------------- #
+# Larger input: correctness (and tractable performance) at scale.
+# --------------------------------------------------------------------------- #
+def test_larger_input_with_scattered_corruption(dbfsck):
+    import random
+
+    rng = random.Random(3141592)
+    pieces = []
+    for i in range(300):
+        rec = record(f"key{i}".encode(), bytes(rng.randrange(256) for _ in range(rng.randint(0, 24))))
+        if rng.random() < 0.1 and len(rec) >= 13:
+            pieces.append(corrupt_content(rec))
+        elif rng.random() < 0.1:
+            pieces.append(corrupt_length(rec, delta=rng.choice([1, 5, 9])))
+        else:
+            pieces.append(rec)
+    data = db(*pieces) + b"\x00" * 32
+    exp_summary, exp_bytes = expected(data)
+    _proc, summary, recovered, _p = run(dbfsck, data, out=True)
+    assert summary == exp_summary
+    assert recovered == exp_bytes
+
+
+# --------------------------------------------------------------------------- #
 # Randomized model (unique optima -> exact assertions). Mixes clean / content-
 # corrupt / length-corrupt records and optional trailing zero padding.
 # --------------------------------------------------------------------------- #

@@ -2,10 +2,9 @@
 
 ## Task Overview
 
-Fix a defective Go command-line corruption checker `dbfsck` for an append-only
-log file. A near-complete but buggy implementation ships in `/app/src` (copied in
-by the Dockerfile from `environment/app_src/`); the agent must diagnose and repair
-it so it meets the full CLI contract:
+Build, from scratch in Go, a command-line corruption checker `dbfsck` for a
+pre-allocated append-only log file. The agent starts with an empty `/app/src` and
+must implement the full CLI:
 
 - `dbfsck --in <PATH> [--out <PATH>]`
 - Prints a one-line JSON summary `{"recovered":R,"skipped":S}` — records
@@ -49,14 +48,20 @@ dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`)
   count and independently validates the tool's output (valid, non-overlapping, in
   order, consistent `skipped`), so a different-but-optimal tie-break is not
   punished.
-- **Reference solution** (`solution/solve.sh`): overwrites `/app/src` with the
-  corrected stdlib-only Go implementation (`os.ReadFile`, `encoding/binary`,
-  `hash/crc32`, `encoding/json`; right-to-left DP with `uint64` framing and bounded
-  reads; output opened only after header validation) and builds it. Passes the
-  full suite (33/33 locally); the shipped defective source fails 6/33.
+  Additional implicit-requirement coverage: the magic `"DBLG"` appearing inside a
+  record value or a corrupt region must be treated as data (recovery is by
+  CRC/length framing, never by scanning for magic); in-place repair
+  (`--in == --out`) must read the whole input before writing; and a larger
+  scattered-corruption input checks correctness (and tractable DP performance) at
+  scale.
+- **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go
+  implementation (`os.ReadFile`, `encoding/binary`, `hash/crc32`, `encoding/json`;
+  right-to-left DP with `uint64` framing and bounded reads; output opened only
+  after full header validation) and builds it. Passes the full suite (37/37
+  locally); a naive implementation (greedy + counts padding + opens `--out` early)
+  fails 13/37.
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`;
-  `COPY app_src/ /app/src/` ships the **defective** implementation the agent must
-  fix. `solution/` and `tests/` are not present in the agent container.
+  `/app/src` and `/app/data` created empty. No source shipped to the agent.
 
 ## Completion Rates
 
@@ -71,35 +76,37 @@ throughout):
 | v3 `d26488d` | maximize-record DP, nesting nuance stated explicitly | too easy — avocado 5/5, gpt 4/5 (contamination LOW) |
 | v4 `67d8128` | maximize-record DP, nesting nuance left implicit | too easy — avocado 5/5, gpt 5/5, opus 1/5 |
 | v5 `74b646e` | + trailing-zero-padding + no-clobber, three stacked implicit reqs | too easy — avocado 5/5, gpt 5/5 |
-| v6 `1b54688` | **debug-in-place** — ship defective dbfsck, agent finds & fixes | too easy — avocado 5/5, gpt 5/5 (avocado fixed both defects) |
-
-**Status: parked.** Six calibration attempts (five from-scratch, one debug-in-place)
-all failed the difficulty gate at avocado 5/5. The task is sound on every other
-axis; avocado is simply too strong for a binary-format corruption-recovery task in
-any shape tried. See Model Analysis.
+| v6 `1b54688` | debug-in-place (reverted — author prefers from-scratch) | too easy — avocado 5/5, gpt 5/5 |
+| v7 (this) | from-scratch, five stacked implicit reqs (+embedded-magic, +in-place) | _tbd_ |
 
 ## Model Analysis
 
-Five fully-specified *from-scratch* designs (v1–v5) all failed the difficulty gate
-as too easy — avocado 5/5 every time, including v5's three stacked implicit
-requirements. avocado reads the spec carefully and handles every edge (DP,
-padding, no-clobber) even when only implied, so difficulty tuning on a greenfield
-recovery task moves only the stronger models. Per the `dr-buffer` finding, the one
-shape that has pushed avocado below 5/5 in this repo is **debug-in-place**, so v6
-switches to it: a near-complete, plausible-looking `dbfsck` ships in `/app/src`
-with two planted defects the agent must locate and fix (bug-finding is avocado's
-relative weakness vs. greenfield coding):
+This is a from-scratch task whose difficulty comes entirely from requirements that
+are stated only implicitly in the prompt, so a rushed solution must get all of
+them right on every one of avocado's five trials. v7 stacks five:
 
-1. **Greedy recovery.** The shipped code takes every valid record left to right,
-   which under-recovers when a valid record nests inside another's bytes; the fix
-   is to maximize the recovered count with a DP.
-2. **Output opened before validation.** The shipped code `os.Create`s `--out`
-   before checking the header, so an unusable input leaves a stray/clobbered file;
-   the fix is to validate fully before writing anything.
+1. **Maximize recovered records.** A valid record can begin inside another valid
+   record's bytes, so greedy recovery is suboptimal; the maximum needs a DP. The
+   instruction states only the objective, not that nesting is possible.
+2. **Trailing zero padding is not corruption.** The file is pre-allocated, so a
+   run of `0x00` at the end is unused free space — excluded from `skipped`. But
+   zeros *between* records are corruption, and a record whose value legitimately
+   ends in `0x00` must not be trimmed.
+3. **No-clobber / in-place safety.** On an unusable input the tool writes nothing
+   and leaves a pre-existing `--out` untouched; and `--in == --out` must work
+   (read fully before writing). Both require validating and reading before opening
+   the output for write.
+4. **Magic is data outside the header.** `"DBLG"` inside a record value or a
+   damaged region is ordinary data — recovery is by CRC/length framing, never by
+   scanning for the magic bytes.
+5. **No alignment / offset assumptions and bounded reads.** Records may start at
+   any byte offset (including inside a corrupt region's declared span), and an
+   oversized length field must never drive a huge allocation or a crash.
 
-The record framing, CRC checking, and trailing-zero-padding accounting are already
-correct, so the defects are localized. Locally the shipped source fails 6/33
-tests (3 overlap + 3 no-clobber/exit-2); the fix passes 33/33. Open risk: avocado
-is a strong enough coder that it may still diagnose both defects (or rewrite the
-recovery), in which case the task stays too easy — this is the last untried lever,
-not a guarantee.
+Locally a naive implementation (greedy + counts padding as skipped + opens `--out`
+before validating) fails 13 of 37 tests spanning these requirements; the reference
+passes all 37. The prior five from-scratch designs (v1–v5) all failed the
+difficulty gate at avocado 5/5, and v6 (a debug-in-place experiment) was reverted
+at the author's request; v7 pushes the from-scratch approach further by widening
+the implicit-requirement surface. The open risk is unchanged: avocado has cleared
+every edge so far even when only implied, so this may still land too easy.

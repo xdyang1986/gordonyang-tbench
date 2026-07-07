@@ -1,15 +1,10 @@
  Background
   You're on call for a storage service that persists all its data in a single append-only log file. Space is pre-allocated in fixed-size blocks, so a
   freshly grown log ends with unused, zero-filled room that later writes fill in; each write appends one record, and every record carries a checksum for
-  later integrity verification. After a power failure during a write last night, some logs are damaged: a flipped byte here, a corrupted length field there,
-  and a partially written record at the tail.
+  later integrity verification. After a power failure during a write last night, the log is damaged in several places: a flipped byte here, a corrupted
+  length field there, and a partially written record at the tail. The vast majority of the data is still intact and needs to be recovered.
 
-  The team already has a recovery tool, dbfsck, whose source is in /app/src — but it is known to be buggy. Two problems have been reported:
-    - On some damaged logs it recovers fewer records than it should.
-    - When handed a file that isn't a valid log at all, it can leave a stray or truncated output file behind.
-
-  Find and fix the defects so dbfsck conforms to the specification below. The record format parsing, CRC checking, and trailing-padding accounting are
-  believed correct; keep the tool building with `go build ./...` and using only the Go standard library.
+  Build dbfsck, a command-line tool that reads one of these log files, recovers as much valid data as possible, and reports what it found.
 
   File Structure
   A log file consists of a fixed 8-byte header followed by zero or more records packed contiguously (no inter-record padding), and then any unused,
@@ -26,7 +21,7 @@
   Field Size    Description
   key_len       4 bytes Length of the key (uint32 LE)
   val_len       4 bytes Length of the value (uint32 LE)
-  key   key_len bytes   Arbitrary byte sequence (may include NUL, tabs, newlines)
+  key   key_len bytes   Arbitrary byte sequence (may include NUL, tabs, newlines, or bytes that resemble the header magic)
   val   val_len bytes   Arbitrary byte sequence (may be empty, and may contain or end with NUL bytes)
   crc   4 bytes CRC-32 (IEEE polynomial, matching Go's crc32.ChecksumIEEE), computed over every byte of the record except the CRC itself—i.e., from key_len
   through the end of val
@@ -64,4 +59,4 @@
   Must build cleanly via go build ./... from /app/src/ with no network access.
 
   Deliverable
-  Fix the dbfsck implementation under /app/src/ so it behaves as specified.
+  Implement dbfsck under /app/src/ (including go.mod and package main).
