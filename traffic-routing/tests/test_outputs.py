@@ -539,6 +539,19 @@ def test_missing_zone_defaults_to_own_rack(router):
     assert routes == [route_key(ring, 2, k, None) for k in keys]
 
 
+def test_unzoned_nodes_are_distinct_zones_not_one_shared_zone(router):
+    # Mixed: two unzoned nodes + one zoned. Unzoned default to their OWN id as
+    # zone (three distinct zones), NOT a single shared "" zone. With R=3 every
+    # route must contain all three; the discriminator is that an impl treating
+    # unzoned nodes as one shared zone would order/spread them differently.
+    c = cfg(3, nd("x", 5), nd("y", 5), nd("z", 5, zone="zoneA"))
+    zoneOf = zones_of(c)
+    assert zoneOf == {"x": "x", "y": "y", "z": "zoneA"}
+    routes = check(router, c, [f"k{i}" for i in range(60)], expect_exit=0)
+    for r in routes:
+        assert len({zoneOf[n] for n in r}) == 3
+
+
 def test_all_same_zone_is_plain_walk(router):
     # Every node in one zone -> diversity can never fire; route == first-R walk.
     c = cfg(2, nd("a", 5, zone="z"), nd("b", 5, zone="z"), nd("c", 5, zone="z"))

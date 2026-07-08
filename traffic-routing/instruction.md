@@ -18,7 +18,7 @@ nodes[].id — a unique, non-empty identifier for the node.
 
 nodes[].weight — a non-negative integer controlling how many virtual nodes this node places on the ring. Greater weight yields a proportionally larger slice of the key space.
 
-nodes[].zone — an optional string representing the node's failure zone (e.g., a rack). If absent or empty, the node is considered to occupy its own unique zone equal to its id.
+nodes[].zone — an optional string naming the node's failure zone (e.g., a rack).
 
 nodes[].status — must be "up" or "down".
 
@@ -37,15 +37,9 @@ Each request key K occupies position H(K).
 When two positions on the ring are identical, ties are broken first by node ID (lexicographic order), then by virtual-node index (ascending).
 
 Zone-Aware Key Routing
-Given a key, find its ring position and walk clockwise around the ring (toward increasing positions) to produce an ordered sequence of distinct nodes as they are first encountered. From this sequence, build the route using zone-diversity selection:
-
-Traverse the sequence in order. Accept a node if its zone has not already been used by a previously accepted node. If its zone is already taken, set the node aside.
-
-Continue until replicas nodes have been accepted.
-
-If the full sequence is exhausted with fewer than replicas accepted, backfill from the set-aside nodes in the same clockwise encounter order until replicas nodes are chosen or no candidates remain.
-
-The first accepted node is the primary; the remainder are backups in selection order.
+  Given a key, find its ring position and walk clockwise around the ring to produce an ordered sequence of distinct nodes in first-encountered order. Choose the key's route from this sequence so that
+  its nodes are spread across distinct zones as much as possible, preserving clockwise order among otherwise-equivalent choices. The first node chosen is the primary; the rest are its backups, in
+  order.
 
 Output
 For every request key, in the order given, emit one line to stdout: a JSON array of the selected node IDs.

@@ -94,7 +94,8 @@ Calibration history:
 |---|---|---|---|
 | v1 (`30aec83`) | no zone rule | 4/5 · 5/5 · 0/5 | passed |
 | v2 (`646d99a`) | +zone rule, fully specified | 5/5 · 4/5 · 0/5 | **too easy** |
-| v3 (current) | zone rule kept; re-hide weight-0 + wraparound | — | re-validating |
+| v3 (`2e16dfd`) | re-hide weight-0 + wraparound | 5/5 · 5/5 · 2/5 | too easy |
+| v4 (current) | zone *semantics* left implicit (objective-only) | — | re-validating |
 
 v2 added **zone-aware replica placement** to lower algorithm-recall risk (the
 routing mechanism is no longer a stock consistent-hash `GetN` — see
@@ -102,10 +103,25 @@ routing mechanism is no longer a stock consistent-hash `GetN` — see
 zone rule precisely made the whole spec fully-specified (AI assessment
 0C/0H/0M/0L), and avocado — which aces precise specs — went 5/5 (too easy).
 
-v3 keeps the zone rule (for novelty) but restores implicit difficulty by
-re-hiding two standard, derivable, test-enforced edges: **weight-0 ⇒ no traffic**
-(derivable from "weight = virtual-node count") and **ring wraparound** (derivable
-from "clockwise around the ring"). Local signal (unchanged tests): reference
-**40/40 pass**, plausible naive impl **36/40 fail**. If avocado still lands 5/5,
-the next lever is to leave the zone *fallback* objective-only (implicit
-mechanism) or revert to the passing v1 shape.
+v3 re-hid two standard binary edges (weight-0, wraparound) — avocado still 5/5,
+confirming those are trivial for it even when implicit (this shape has a low
+avocado ceiling, cf. `database-engine`).
+
+v4 targets avocado's one demonstrated weakness — guessing genuinely 2-way edge
+*semantics* wrong. The instruction now states only the zone **objective** ("a
+key's nodes should be spread across distinct zones as much as possible") and
+leaves two behaviors implicit, both enforced by exact hidden tests:
+- **best-effort fallback vs strict.** The reference reuses a zone when needed to
+  reach `R` distinct nodes (derivable from the exit-0 contract, which requires
+  `R` distinct *nodes* whenever available); a "strict distinct-zones" reading
+  under-replicates instead.
+- **zone default.** An unset zone is the node's own id (its own rack), not a
+  single shared empty zone.
+
+Verified locally that both plausible good-faith misreads fail while the
+reference passes: reference **41/41**, a *strict* variant fails 3, a
+*shared-empty-default* variant fails 2 (plus the deliberately-naive impl fails
+36+). This is the intended implicit difficulty and is expected to draw ≤2
+AI-assessment "spec requires some guessing" Mediums (Accept). If avocado still
+lands 5/5, the conclusion is that this shape is uncalibratable for avocado —
+revert to the passing v1 or shelve.
