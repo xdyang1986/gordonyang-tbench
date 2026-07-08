@@ -75,15 +75,21 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
 
 ## Completion Rates
 
-Local development results (validation on the codimango platform pending):
+Latest validation run (commit `30aec83`) — **passing**:
 
 | Check | Result |
 |---|---|
-| Reference vs. suite | 35/35 pass |
-| Naive impl vs. suite | 31/35 fail (4 pass) |
+| Structural | 9/9 |
+| Oracle | 3/3 |
+| Difficulty balance | passed — avocado 4/5, opus 5/5, gpt 0/5 |
+| AI assessment | Accept (0 Critical / 0 High / 1 Medium / 1 Low) |
+| Contamination | MEDIUM |
+| Provenance | SUSPECT — review recommended (non-blocking) |
 
-The difficulty is designed to come from breadth: six independent, standard-but-
-implicit routing edges, so a rushed solution slips on at least one. `zone`-aware
+The difficulty gate passes because the weak runner (avocado) is not trivial
+(4/5) while at least one stronger runner solves it (opus 5/5). Difficulty comes
+from breadth: six independent, standard-but-implicit routing edges, so a rushed
+solution slips on at least one — locally the reference passes the full suite
+(35/35) while a plausible naive implementation fails 31/35. `zone`-aware
 (rack-diverse) replica placement is intentionally held back as a reserved
-difficulty lever for a follow-up iteration if calibration shows the task is too
-easy.
+difficulty lever should a future re-run show the task drifting too easy.
