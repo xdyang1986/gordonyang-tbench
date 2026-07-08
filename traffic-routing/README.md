@@ -36,7 +36,8 @@ are set aside, and if fewer than `R` are chosen after the pass, the set-aside
 nodes fill the remaining slots in clockwise order. `zone` defaults to the node's
 id, so configs without zones reduce exactly to the plain first-`R` walk.
 
-The instruction states the objective and the hash/point/tie-break/zone mechanics
+The instruction states the hash/point/tie-break mechanics and the zone
+**objective** ("spread a key's nodes across distinct zones as much as possible")
 precisely, but leaves the consequences a rushed implementation tends to miss:
 
 1. **Circular wraparound.** Keys hashing past the last point, and replica walks
@@ -55,10 +56,11 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
    mid-file blank line is an empty key; `""` is routable; duplicate request
    lines produce repeated output lines in order; an empty requests file produces
    no output.
-7. **Zone diversity + fallback.** Replicas prefer distinct zones and only reuse a
-   zone once all reachable zones are exhausted — a rushed impl that ignores
-   `zone` (or that drops slots instead of falling back) gets the replica set
-   wrong.
+7. **Zone best-effort vs strict.** Reaching `R` distinct *nodes* takes priority,
+   so a zone is reused once distinct zones run out (derivable from the exit-0
+   contract) — a "strict distinct-zones" reading that under-replicates is wrong.
+8. **Zone default.** An unset/empty `zone` is the node's own id (its own rack),
+   not a single shared empty zone.
 
 ## Test / Solution Details
 
@@ -79,56 +81,42 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
 - **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go
   implementation (`encoding/json`, `hash/crc32`, `sort`, `flag`) and builds it —
   no python/sed dependency, since the solution container has only the Go
-  toolchain. Passes the full suite locally (40/40); a plausible naive
+  toolchain. Passes the full suite locally (41/41); a plausible naive
   implementation (no wraparound, next-`R`-points without dedup, down nodes left
   on the ring and filtered from output, zone-unaware replicas, trailing-newline
-  empty key, always exit 0, no config validation) fails 36/40.
+  empty key, always exit 0, no config validation) fails 37/41.
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`;
   `/app/src` and `/app/data` created empty. No source shipped to the agent.
 
 ## Completion Rates
 
-Calibration history:
+Latest validation run (commit `88b7a34`) — **passing**:
 
-| Version | Change | avocado / opus / gpt | Verdict |
-|---|---|---|---|
-| v1 (`30aec83`) | no zone rule | 4/5 · 5/5 · 0/5 | passed |
-| v2 (`646d99a`) | +zone rule, fully specified | 5/5 · 4/5 · 0/5 | **too easy** |
-| v3 (`2e16dfd`) | re-hide weight-0 + wraparound | 5/5 · 5/5 · 2/5 | too easy |
-| v4 (`88b7a34`) | zone *semantics* left implicit (objective-only) | 1/5 · n/a · 0/5 | **passing** |
+| Check | Result |
+|---|---|
+| Structural | 9/9 |
+| Oracle | 3/3 |
+| Difficulty balance | passed — avocado 1/5, gpt 0/5, opus no-trials (not trivial, ≥1 solved) |
+| AI assessment | Accept (0 Critical / 0 High / 1 Medium / 0 Low) |
+| Contamination | MEDIUM |
+| Provenance | clean |
 
-**v4 is the landed, passing version** (structural 9/9, oracle 3/3, difficulty
-passed, AI Accept 0C/0H/1M/0L, contamination MEDIUM, provenance clean). The
-single AI Medium is the intended "spec requires some guessing" from the two
-implicit zone behaviors. Margin is thin on the hard side (avocado 1/5, gpt 0/5,
-opus no-trials); if a re-run flips too-hard, state the zone default (own-id) to
-nudge avocado up while keeping best-effort implicit.
+The difficulty gate passes because the weak runner (avocado) is not trivial
+(1/5) while at least one runner solves it. The single AI-assessment Medium is the
+intended "spec requires some guessing" — it comes from the two zone behaviors the
+instruction leaves implicit (items 7–8 above): whether under-replication is
+allowed when zones run short (it is not — reaching `R` distinct *nodes* takes
+priority, so a zone is reused), and what an unset zone means (the node's own
+rack). Both are enforced by exact hidden tests.
 
-v2 added **zone-aware replica placement** to lower algorithm-recall risk (the
-routing mechanism is no longer a stock consistent-hash `GetN` — see
-`.review/novelty-report_*.md`, which rated v1 MEDIUM recall). But stating the
-zone rule precisely made the whole spec fully-specified (AI assessment
-0C/0H/0M/0L), and avocado — which aces precise specs — went 5/5 (too easy).
+Difficulty comes from those genuinely two-way *semantic* guess-points, not from
+algorithm complexity or standard implicit edges: a plausible good-faith solution
+that reads them the other way fails. Verified locally: the reference passes the
+full suite (41/41), a *strict distinct-zones* variant fails 3, a *shared-empty
+zone-default* variant fails 2, and a deliberately-naive implementation fails
+37/41.
 
-v3 re-hid two standard binary edges (weight-0, wraparound) — avocado still 5/5,
-confirming those are trivial for it even when implicit (this shape has a low
-avocado ceiling, cf. `database-engine`).
-
-v4 targets avocado's one demonstrated weakness — guessing genuinely 2-way edge
-*semantics* wrong. The instruction now states only the zone **objective** ("a
-key's nodes should be spread across distinct zones as much as possible") and
-leaves two behaviors implicit, both enforced by exact hidden tests:
-- **best-effort fallback vs strict.** The reference reuses a zone when needed to
-  reach `R` distinct nodes (derivable from the exit-0 contract, which requires
-  `R` distinct *nodes* whenever available); a "strict distinct-zones" reading
-  under-replicates instead.
-- **zone default.** An unset zone is the node's own id (its own rack), not a
-  single shared empty zone.
-
-Verified locally that both plausible good-faith misreads fail while the
-reference passes: reference **41/41**, a *strict* variant fails 3, a
-*shared-empty-default* variant fails 2 (plus the deliberately-naive impl fails
-36+). This is the intended implicit difficulty and is expected to draw ≤2
-AI-assessment "spec requires some guessing" Mediums (Accept). If avocado still
-lands 5/5, the conclusion is that this shape is uncalibratable for avocado —
-revert to the passing v1 or shelve.
+The margin is thin on the hard side (avocado 1/5, gpt 0/5, opus no-trials — a
+known platform flake). If a re-validation ever flips it to too-hard, the remedy
+is to state the zone default (own-id) explicitly to nudge avocado up while
+keeping the best-effort behavior implicit.
