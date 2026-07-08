@@ -8,8 +8,9 @@ CLI:
 
 - `router --config <PATH> --requests <PATH>`
 - `--config` is a JSON document `{"replicas": R, "nodes": [{"id", "weight",
-  "status"} ...]}` where `weight` is the number of virtual nodes the node places
-  on the ring and `status` is `"up"` or `"down"`.
+  "zone", "status"} ...]}` where `weight` is the number of virtual nodes the node
+  places on the ring, `zone` is an optional rack/zone label (default: the node's
+  own id), and `status` is `"up"` or `"down"`.
 - `--requests` is a newline-delimited list of routing keys.
 - Prints one JSON array per request, in input order — the ordered route
   (primary first) of the distinct nodes the key maps to, or `[]`.
@@ -28,7 +29,14 @@ scanning the ring **clockwise** from the key's position, collecting **distinct**
 nodes until `R` are gathered; the ring is **circular**, so the scan wraps past
 the last point.
 
-The instruction states the objective and the hash/point/tie-break mechanics
+**Zone-aware replica placement** (a deliberately non-library routing rule):
+over the clockwise distinct-node order, a node is chosen only if its zone is not
+yet represented among the already-chosen nodes; nodes whose zone is already used
+are set aside, and if fewer than `R` are chosen after the pass, the set-aside
+nodes fill the remaining slots in clockwise order. `zone` defaults to the node's
+id, so configs without zones reduce exactly to the plain first-`R` walk.
+
+The instruction states the objective and the hash/point/tie-break/zone mechanics
 precisely, but leaves the consequences a rushed implementation tends to miss:
 
 1. **Circular wraparound.** Keys hashing past the last point, and replica walks
@@ -47,6 +55,10 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
    mid-file blank line is an empty key; `""` is routable; duplicate request
    lines produce repeated output lines in order; an empty requests file produces
    no output.
+7. **Zone diversity + fallback.** Replicas prefer distinct zones and only reuse a
+   zone once all reachable zones are exhausted — a rushed impl that ignores
+   `zone` (or that drops slots instead of falling back) gets the replica set
+   wrong.
 
 ## Test / Solution Details
 
@@ -58,38 +70,38 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
   Coverage spans basic routing, clockwise wraparound (keys past the last point
   and replica walks that wrap), full replication reaching all nodes, replication
   clamping / degraded exit, `weight = 0`, down-node exclusion and key migration,
-  request-parsing edges (trailing newline, blank lines, empty key, duplicates,
-  empty file), the exit-2 validation contract, unicode keys/ids, and a seeded
-  randomized model. Because the reference and oracle share the same hash and
-  `(pos, id, i)` tie-break, exact output comparison is fair even when ring
-  positions tie.
+  zone-diverse replica placement (prefer distinct zones; fall back when fewer
+  than `R` zones are reachable; default zone = id), request-parsing edges
+  (trailing newline, blank lines, empty key, duplicates, empty file), the exit-2
+  validation contract, unicode keys/ids, and a seeded randomized model (with
+  zones). Because the reference and oracle share the same hash and `(pos, id, i)`
+  tie-break, exact output comparison is fair even when ring positions tie.
 - **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go
   implementation (`encoding/json`, `hash/crc32`, `sort`, `flag`) and builds it —
   no python/sed dependency, since the solution container has only the Go
-  toolchain. Passes the full suite locally (35/35); a plausible naive
+  toolchain. Passes the full suite locally (40/40); a plausible naive
   implementation (no wraparound, next-`R`-points without dedup, down nodes left
-  on the ring and filtered from output, trailing-newline empty key, always exit
-  0, no config validation) fails 31/35.
+  on the ring and filtered from output, zone-unaware replicas, trailing-newline
+  empty key, always exit 0, no config validation) fails 36/40.
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`;
   `/app/src` and `/app/data` created empty. No source shipped to the agent.
 
 ## Completion Rates
 
-Latest validation run (commit `30aec83`) — **passing**:
+The first version (commit `30aec83`, no zone rule) validated **passing**
+(structural 9/9, oracle 3/3, difficulty avocado 4/5 · opus 5/5 · gpt 0/5, AI
+Accept 0C/0H/1M/1L, contamination MEDIUM, provenance SUSPECT). It was then
+revised to add **zone-aware replica placement** to lower algorithm-recall risk
+(the routing mechanism is no longer a stock consistent-hash `GetN` — see
+`.review/novelty-report_*.md`, which rated the original MEDIUM recall risk).
 
-| Check | Result |
-|---|---|
-| Structural | 9/9 |
-| Oracle | 3/3 |
-| Difficulty balance | passed — avocado 4/5, opus 5/5, gpt 0/5 |
-| AI assessment | Accept (0 Critical / 0 High / 1 Medium / 1 Low) |
-| Contamination | MEDIUM |
-| Provenance | SUSPECT — review recommended (non-blocking) |
+Local signal for the zone-aware version: reference **40/40 pass**, plausible
+naive impl **36/40 fail**. Platform re-validation is pending.
 
-The difficulty gate passes because the weak runner (avocado) is not trivial
-(4/5) while at least one stronger runner solves it (opus 5/5). Difficulty comes
-from breadth: six independent, standard-but-implicit routing edges, so a rushed
-solution slips on at least one — locally the reference passes the full suite
-(35/35) while a plausible naive implementation fails 31/35. `zone`-aware
-(rack-diverse) replica placement is intentionally held back as a reserved
-difficulty lever should a future re-run show the task drifting too easy.
+The difficulty gate needs the weak runner (avocado) to be non-trivial while at
+least one stronger runner still solves it. The margin was already thin (only
+opus solved the v1); the zone rule is stated precisely in the instruction (a
+clearly-specified non-library rule) to reduce recall without under-specifying
+into *too-hard* territory. If re-validation flips to too-hard (no runner solves),
+the fallback is to state more of the remaining implicit edges for fairness or
+drop the zone rule back to the v1 shape.

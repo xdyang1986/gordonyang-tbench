@@ -85,13 +85,20 @@ def build_ring(cfg):
     return ring, eligible
 
 
-def route_key(ring, R, key):
-    result = []
+def zones_of(cfg):
+    # A node's zone defaults to its own id when unset.
+    zoneOf = {}
+    for nd in cfg["nodes"]:
+        z = nd.get("zone") or nd["id"]
+        zoneOf[nd["id"]] = z
+    return zoneOf
+
+
+def route_key(ring, R, key, zoneOf=None):
     if not ring:
-        return result
+        return []
     pos = H(key)
     # first index with ring[idx].pos >= pos, else wrap to 0
-    idx = 0
     lo, hi = 0, len(ring)
     while lo < hi:
         mid = (lo + hi) // 2
@@ -100,14 +107,31 @@ def route_key(ring, R, key):
         else:
             lo = mid + 1
     idx = lo if lo < len(ring) else 0
+    # distinct eligible nodes in clockwise first-encounter order
     seen = set()
-    c = 0
-    while c < len(ring) and len(result) < R:
+    distinct = []
+    for c in range(len(ring)):
         e = ring[(idx + c) % len(ring)]
         if e[1] not in seen:
             seen.add(e[1])
-            result.append(e[1])
-        c += 1
+            distinct.append(e[1])
+    # zone-diverse selection (default zone = node id when unset/None)
+    used = set()
+    pending = []
+    result = []
+    for d in distinct:
+        if len(result) >= R:
+            break
+        z = (zoneOf or {}).get(d, d)
+        if z not in used:
+            used.add(z)
+            result.append(d)
+        else:
+            pending.append(d)
+    for d in pending:
+        if len(result) >= R:
+            break
+        result.append(d)
     return result
 
 
@@ -131,7 +155,8 @@ def route_all(cfg, keys):
         if nd.get("status") not in ("up", "down"):
             raise ValueError("bad status")
     ring, _elig = build_ring(cfg)
-    routes = [route_key(ring, R, k) for k in keys]
+    zoneOf = zones_of(cfg)
+    routes = [route_key(ring, R, k, zoneOf) for k in keys]
     degraded = any(len(r) < R for r in routes)
     return routes, (1 if degraded else 0)
 
@@ -468,6 +493,63 @@ def test_ids_with_hash_separator_do_not_collide(router):
 
 
 # --------------------------------------------------------------------------- #
+# Zone-aware replica placement: replicas prefer distinct zones, falling back to
+# same-zone nodes only when fewer than R zones are reachable.
+# --------------------------------------------------------------------------- #
+def test_replicas_prefer_distinct_zones(router):
+    # 3 zones available, R=3 -> every route spans 3 distinct zones.
+    c = cfg(3, nd("a", 5, zone="z1"), nd("b", 5, zone="z1"),
+            nd("c", 5, zone="z2"), nd("d", 5, zone="z3"), nd("e", 5, zone="z3"))
+    zoneOf = zones_of(c)
+    routes = check(router, c, [f"k{i}" for i in range(60)], expect_exit=0)
+    for r in routes:
+        assert len(r) == 3
+        assert len({zoneOf[n] for n in r}) == 3, f"route {r} not zone-diverse"
+
+
+def test_zone_rule_defers_same_zone_and_changes_output(router):
+    # Two nodes share z1, one is in z2. With R=2 a same-zone pick must be
+    # deferred behind the z2 node -> output differs from plain first-2-distinct.
+    c = cfg(2, nd("a", 5, zone="z1"), nd("b", 5, zone="z1"), nd("c", 5, zone="z2"))
+    zoneOf = zones_of(c)
+    ring, _ = build_ring(c)
+    keys = [f"k{i}" for i in range(80)]
+    routes = check(router, c, keys, expect_exit=0)
+    for r in routes:
+        assert len({zoneOf[n] for n in r}) == 2, f"route {r} not zone-diverse"
+    plain = [route_key(ring, 2, k, None) for k in keys]  # zone-ignoring baseline
+    assert any(routes[i] != plain[i] for i in range(len(keys))), \
+        "zone rule never changed the output (test not exercising diversity)"
+
+
+def test_zone_fallback_when_fewer_zones_than_replicas(router):
+    # Only 2 zones but R=3 -> the third replica falls back to a same-zone node.
+    c = cfg(3, nd("a", 5, zone="z1"), nd("b", 5, zone="z1"), nd("c", 5, zone="z2"))
+    routes = check(router, c, [f"k{i}" for i in range(40)], expect_exit=0)
+    for r in routes:
+        assert len(r) == 3 and set(r) == {"a", "b", "c"}, f"fallback failed: {r}"
+
+
+def test_missing_zone_defaults_to_own_rack(router):
+    # No zone field -> each node its own zone -> plain first-R-distinct behavior.
+    c = cfg(2, nd("a", 5), nd("b", 5), nd("c", 5))
+    ring, _ = build_ring(c)
+    keys = [f"k{i}" for i in range(30)]
+    routes = check(router, c, keys, expect_exit=0)
+    assert routes == [route_key(ring, 2, k, None) for k in keys]
+
+
+def test_all_same_zone_is_plain_walk(router):
+    # Every node in one zone -> diversity can never fire; route == first-R walk.
+    c = cfg(2, nd("a", 5, zone="z"), nd("b", 5, zone="z"), nd("c", 5, zone="z"))
+    ring, _ = build_ring(c)
+    keys = [f"k{i}" for i in range(30)]
+    routes = check(router, c, keys, expect_exit=0)
+    # first pass picks one node (zone z), the rest fall back in clockwise order
+    assert routes == [route_key(ring, 2, k, None) for k in keys]
+
+
+# --------------------------------------------------------------------------- #
 # Randomized model (ref and oracle share the CRC + tie-break, so exact compare)
 # --------------------------------------------------------------------------- #
 def test_randomized_model(router):
@@ -482,6 +564,7 @@ def test_randomized_model(router):
                 f"node{j}",
                 rng.choice([0, 1, 1, 2, 3, 5]),
                 status=rng.choice(["up", "up", "up", "down"]),
+                zone=rng.choice(["", "zA", "zB", "zA", "zC"]),
             ))
         c = cfg(rng.randint(1, 6), *nodes)
         keys = [f"t{trial}-req{i}" for i in range(rng.randint(0, 25))]

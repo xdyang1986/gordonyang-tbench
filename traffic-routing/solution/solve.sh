@@ -11,6 +11,9 @@
 #     a key is at H(key). Ring sorted by (pos, id, i).
 #   - a key routes to the first ring point clockwise from its position, then to
 #     further DISTINCT nodes clockwise, until R nodes; the ring is CIRCULAR.
+#   - ZONE-DIVERSE replicas: over the clockwise distinct-node order, prefer nodes
+#     whose zone is not yet used; if fewer than R are found, fall back to the
+#     skipped same-zone nodes in clockwise order. zone defaults to the node id.
 #   - down nodes and weight-0 nodes place NO points; eligible = up AND weight>0.
 #   - requests are newline-delimited; a trailing newline is not an extra empty
 #     key; a mid-file blank line IS an empty key ("" is routable).
@@ -109,6 +112,16 @@ func main() {
 		}
 	}
 
+	// A node's zone defaults to its own id when unset (its own rack).
+	zoneOf := map[string]string{}
+	for _, nd := range cfg.Nodes {
+		z := nd.Zone
+		if z == "" {
+			z = nd.ID
+		}
+		zoneOf[nd.ID] = z
+	}
+
 	// Build the ring: only eligible nodes (up AND weight > 0) place points.
 	var ring []point
 	for _, nd := range cfg.Nodes {
@@ -139,13 +152,37 @@ func main() {
 		if idx == len(ring) {
 			idx = 0
 		}
+		// Distinct eligible nodes in clockwise first-encounter order.
 		seen := map[string]bool{}
-		for c := 0; c < len(ring) && len(result) < cfg.Replicas; c++ {
+		var distinct []string
+		for c := 0; c < len(ring); c++ {
 			e := ring[(idx+c)%len(ring)]
 			if !seen[e.id] {
 				seen[e.id] = true
-				result = append(result, e.id)
+				distinct = append(distinct, e.id)
 			}
+		}
+		// Zone-diverse selection: prefer nodes in not-yet-used zones; fall back
+		// to skipped (same-zone) nodes in clockwise order to reach R.
+		usedZones := map[string]bool{}
+		var pending []string
+		for _, d := range distinct {
+			if len(result) >= cfg.Replicas {
+				break
+			}
+			z := zoneOf[d]
+			if !usedZones[z] {
+				usedZones[z] = true
+				result = append(result, d)
+			} else {
+				pending = append(pending, d)
+			}
+		}
+		for _, d := range pending {
+			if len(result) >= cfg.Replicas {
+				break
+			}
+			result = append(result, d)
 		}
 		return result
 	}
