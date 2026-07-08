@@ -88,20 +88,24 @@ precisely, but leaves the consequences a rushed implementation tends to miss:
 
 ## Completion Rates
 
-The first version (commit `30aec83`, no zone rule) validated **passing**
-(structural 9/9, oracle 3/3, difficulty avocado 4/5 · opus 5/5 · gpt 0/5, AI
-Accept 0C/0H/1M/1L, contamination MEDIUM, provenance SUSPECT). It was then
-revised to add **zone-aware replica placement** to lower algorithm-recall risk
-(the routing mechanism is no longer a stock consistent-hash `GetN` — see
-`.review/novelty-report_*.md`, which rated the original MEDIUM recall risk).
+Calibration history:
 
-Local signal for the zone-aware version: reference **40/40 pass**, plausible
-naive impl **36/40 fail**. Platform re-validation is pending.
+| Version | Change | avocado / opus / gpt | Verdict |
+|---|---|---|---|
+| v1 (`30aec83`) | no zone rule | 4/5 · 5/5 · 0/5 | passed |
+| v2 (`646d99a`) | +zone rule, fully specified | 5/5 · 4/5 · 0/5 | **too easy** |
+| v3 (current) | zone rule kept; re-hide weight-0 + wraparound | — | re-validating |
 
-The difficulty gate needs the weak runner (avocado) to be non-trivial while at
-least one stronger runner still solves it. The margin was already thin (only
-opus solved the v1); the zone rule is stated precisely in the instruction (a
-clearly-specified non-library rule) to reduce recall without under-specifying
-into *too-hard* territory. If re-validation flips to too-hard (no runner solves),
-the fallback is to state more of the remaining implicit edges for fairness or
-drop the zone rule back to the v1 shape.
+v2 added **zone-aware replica placement** to lower algorithm-recall risk (the
+routing mechanism is no longer a stock consistent-hash `GetN` — see
+`.review/novelty-report_*.md`, which rated v1 MEDIUM recall). But stating the
+zone rule precisely made the whole spec fully-specified (AI assessment
+0C/0H/0M/0L), and avocado — which aces precise specs — went 5/5 (too easy).
+
+v3 keeps the zone rule (for novelty) but restores implicit difficulty by
+re-hiding two standard, derivable, test-enforced edges: **weight-0 ⇒ no traffic**
+(derivable from "weight = virtual-node count") and **ring wraparound** (derivable
+from "clockwise around the ring"). Local signal (unchanged tests): reference
+**40/40 pass**, plausible naive impl **36/40 fail**. If avocado still lands 5/5,
+the next lever is to leave the zone *fallback* objective-only (implicit
+mechanism) or revert to the passing v1 shape.
