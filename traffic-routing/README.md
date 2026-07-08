@@ -95,7 +95,14 @@ Calibration history:
 | v1 (`30aec83`) | no zone rule | 4/5 · 5/5 · 0/5 | passed |
 | v2 (`646d99a`) | +zone rule, fully specified | 5/5 · 4/5 · 0/5 | **too easy** |
 | v3 (`2e16dfd`) | re-hide weight-0 + wraparound | 5/5 · 5/5 · 2/5 | too easy |
-| v4 (current) | zone *semantics* left implicit (objective-only) | — | re-validating |
+| v4 (`88b7a34`) | zone *semantics* left implicit (objective-only) | 1/5 · n/a · 0/5 | **passing** |
+
+**v4 is the landed, passing version** (structural 9/9, oracle 3/3, difficulty
+passed, AI Accept 0C/0H/1M/0L, contamination MEDIUM, provenance clean). The
+single AI Medium is the intended "spec requires some guessing" from the two
+implicit zone behaviors. Margin is thin on the hard side (avocado 1/5, gpt 0/5,
+opus no-trials); if a re-run flips too-hard, state the zone default (own-id) to
+nudge avocado up while keeping best-effort implicit.
 
 v2 added **zone-aware replica placement** to lower algorithm-recall risk (the
 routing mechanism is no longer a stock consistent-hash `GetN` — see
