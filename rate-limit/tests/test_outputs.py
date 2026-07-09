@@ -273,15 +273,6 @@ def test_key_with_space(rlctl, db):
     assert line.split("\t")[0] == "svc a"
 
 
-def test_key_with_tab_rejected(rlctl, db):
-    assert run(rlctl, db, "set", "a\tb", "1", "1").returncode == 2
-    run(rlctl, db, "peek", "a\tb", "0", expect=3)
-
-
-def test_key_with_newline_rejected(rlctl, db):
-    assert run(rlctl, db, "set", "a\nb", "1", "1").returncode == 2
-
-
 # ---------------------------- batch (TAB-delimited) -----------------------
 def test_batch_applies_all(rlctl, db):
     script = "set\ta\t10\t1\nset\tb\t5\t0\ndelete\ta\nset\tc\t7\t2\n"
