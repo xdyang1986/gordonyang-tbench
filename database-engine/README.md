@@ -58,16 +58,28 @@ ordering).
 
 ## Completion Rates
 
-The previous map-based version (commit `cd4fd82`) validated **passing** (avocado
-4/5, opus 5/5, gpt 5/5) but drew a novelty review of MEDIUM recall risk — a
-textbook KV-store CLI. This version adds the log-structured `stats`/`compact`
-contract to defeat that recall.
+The previous map-based version validated passing (avocado 4/5, opus 5/5, gpt 5/5)
+but drew a novelty review of MEDIUM recall risk — a textbook KV-store CLI. This
+version adds the log-structured `stats`/`compact` contract to defeat that recall.
 
-Local signal for the new version: the reference passes the full suite (**36/36**),
-while a plausible **recalled solution** — the textbook `map`+rewrite KV with
-`stats`/`compact` bolted on the obvious way (`dead` always 0, `delete` a plain
-map delete with no tombstone) — **fails 7/36**, all of them the log-structured
-tests. Platform re-validation is pending.
+Latest validation run (commit `3b6f996`) — **passing**:
+
+| Check | Result |
+|---|---|
+| Structural | 9/9 |
+| Oracle | 3/3 |
+| Difficulty balance | passed — avocado 3/5, opus 5/5, gpt 0/5 |
+| AI assessment | Accept (0 Critical / 0 High / 0 Medium / 1 Low) |
+| Contamination | MEDIUM |
+| Provenance | clean |
+
+The log-structured contract both defeated recall and improved difficulty: the
+reference passes the full suite (**36/36**), while a plausible **recalled
+solution** — the textbook `map`+rewrite KV with `stats`/`compact` bolted on the
+obvious way (`dead` always 0, `delete` a plain map delete with no tombstone) —
+**fails 7/36**, all of them the log-structured tests. avocado moved from 4/5 to
+3/5 (better-centered) and gpt now fails entirely, consistent with the task no
+longer yielding to recalled code.
 
 ## Model Analysis
 
