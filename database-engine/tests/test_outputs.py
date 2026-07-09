@@ -264,27 +264,116 @@ def test_batch_empty_value(dbctl, db):
 
 
 # --------------------------------------------------------------------------- #
-# Randomized model check (mix of single ops and batches)
+# stats / compact — the log-structured contract (dead records survive until
+# compaction). A plain map (no memory of superseded/deleted records) cannot
+# report `dead` correctly. `stats` prints exactly "live=<L>\tdead=<D>".
+# --------------------------------------------------------------------------- #
+def stats(dbctl, db):
+    out = run(dbctl, db, "stats", expect=0).stdout.strip()
+    m = re.fullmatch(r"live=(\d+)\tdead=(\d+)", out)
+    assert m, f"stats output not 'live=<L>\\tdead=<D>': {out!r}"
+    return int(m.group(1)), int(m.group(2))
+
+
+def test_stats_empty_db(dbctl, db):
+    assert stats(dbctl, db) == (0, 0)
+
+
+def test_stats_counts_live_keys(dbctl, db):
+    for k in ["a", "b", "c"]:
+        run(dbctl, db, "put", k, "v", expect=0)
+    assert stats(dbctl, db) == (3, 0)
+
+
+def test_overwrites_create_dead_records(dbctl, db):
+    run(dbctl, db, "put", "k", "v1", expect=0)
+    run(dbctl, db, "put", "k", "v2", expect=0)
+    run(dbctl, db, "put", "k", "v3", expect=0)
+    assert stats(dbctl, db) == (1, 2)  # 3 records, 1 live
+    assert run(dbctl, db, "get", "k", expect=0).stdout == "v3\n"
+
+
+def test_delete_present_leaves_two_dead(dbctl, db):
+    run(dbctl, db, "put", "k", "v", expect=0)
+    run(dbctl, db, "delete", "k", expect=0)
+    assert stats(dbctl, db) == (0, 2)  # the put and the tombstone are both dead
+
+
+def test_delete_absent_still_writes_a_tombstone(dbctl, db):
+    # A delete always records a tombstone, even for an absent key: exit 0, and
+    # the store gains one dead record (a plain map-delete records nothing).
+    run(dbctl, db, "delete", "ghost", expect=0)
+    assert stats(dbctl, db) == (0, 1)
+
+
+def test_batch_records_count_toward_dead(dbctl, db):
+    run(dbctl, db, "batch", stdin="put k 1\nput k 2\n", expect=0)  # 2 records
+    assert stats(dbctl, db) == (1, 1)
+
+
+def test_compact_reclaims_dead_and_preserves_data(dbctl, db):
+    run(dbctl, db, "put", "k", "v1", expect=0)
+    run(dbctl, db, "put", "k", "v2", expect=0)
+    run(dbctl, db, "put", "gone", "x", expect=0)
+    run(dbctl, db, "delete", "gone", expect=0)
+    run(dbctl, db, "put", "keep", "y", expect=0)
+    assert stats(dbctl, db)[1] > 0  # dead records exist
+    run(dbctl, db, "compact", expect=0)
+    assert stats(dbctl, db) == (2, 0)  # only live keys remain, no dead
+    assert run(dbctl, db, "get", "k", expect=0).stdout == "v2\n"
+    assert run(dbctl, db, "get", "keep", expect=0).stdout == "y\n"
+    run(dbctl, db, "get", "gone", expect=3)
+    assert run(dbctl, db, "scan", expect=0).stdout.splitlines() == ["k\tv2", "keep\ty"]
+
+
+def test_compact_empty_db_is_clean(dbctl, db):
+    run(dbctl, db, "compact", expect=0)
+    assert stats(dbctl, db) == (0, 0)
+
+
+def test_compact_is_durable_across_processes(dbctl, db):
+    for i in range(5):
+        run(dbctl, db, "put", "k", f"v{i}", expect=0)
+    run(dbctl, db, "compact", expect=0)
+    # a fresh process still sees compacted state
+    assert stats(dbctl, db) == (1, 0)
+    assert run(dbctl, db, "get", "k", expect=0).stdout == "v4\n"
+
+
+def test_writes_after_compact_accumulate_dead_again(dbctl, db):
+    run(dbctl, db, "put", "k", "v1", expect=0)
+    run(dbctl, db, "compact", expect=0)
+    assert stats(dbctl, db) == (1, 0)
+    run(dbctl, db, "put", "k", "v2", expect=0)  # supersedes -> 1 dead
+    assert stats(dbctl, db) == (1, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Randomized model check (mix of single ops, batches, stats, compact). The
+# model tracks both current state and the log-structured dead-record count.
 # --------------------------------------------------------------------------- #
 def test_randomized_model(dbctl, db):
     rng = random.Random(20260706)
     model = {}
+    total = 0  # total records currently in the log (across processes)
     pool = [rand_str(rng) for _ in range(50)]
 
     for _ in range(400):
         r = rng.random()
         key = rng.choice(pool)
-        if r < 0.45:
+        if r < 0.4:
             val = rng.choice(["", rand_str(rng, 1, 15)])
             run(dbctl, db, "put", key, val, expect=0)
             model[key] = val
-        elif r < 0.6:
+            total += 1
+        elif r < 0.55:
             run(dbctl, db, "delete", key, expect=0)
             model.pop(key, None)
-        elif r < 0.75:
-            # a valid batch of a few ops
+            total += 1  # tombstone always recorded
+        elif r < 0.7:
             lines, pending = [], {}
-            for _ in range(rng.randint(1, 4)):
+            n = rng.randint(1, 4)
+            for _ in range(n):
                 k = rng.choice(pool)
                 if rng.random() < 0.7:
                     v = rng.choice(["", rand_str(rng, 1, 8)])
@@ -294,11 +383,17 @@ def test_randomized_model(dbctl, db):
                     lines.append(f"delete {k}")
                     pending[k] = ("delete", None)
             run(dbctl, db, "batch", stdin="\n".join(lines) + "\n", expect=0)
+            total += n  # every op is a record
             for k, (kind, v) in pending.items():
                 if kind == "put":
                     model[k] = v
                 else:
                     model.pop(k, None)
+        elif r < 0.85:
+            assert stats(dbctl, db) == (len(model), total - len(model))
+        elif r < 0.92:
+            run(dbctl, db, "compact", expect=0)
+            total = len(model)  # dead reclaimed
         else:
             proc = run(dbctl, db, "get", key)
             if key in model:
@@ -306,6 +401,12 @@ def test_randomized_model(dbctl, db):
             else:
                 assert proc.returncode == 3 and proc.stdout == ""
 
+    assert stats(dbctl, db) == (len(model), total - len(model))
+    proc = run(dbctl, db, "scan", expect=0)
+    assert proc.stdout.splitlines() == [f"{k}\t{model[k]}" for k in sorted(model)]
+    # after a final compact, state is unchanged and dead is zero
+    run(dbctl, db, "compact", expect=0)
+    assert stats(dbctl, db) == (len(model), 0)
     proc = run(dbctl, db, "scan", expect=0)
     assert proc.stdout.splitlines() == [f"{k}\t{model[k]}" for k in sorted(model)]
 

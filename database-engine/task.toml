@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/database-engine"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement, from scratch in Go, a persistent ordered key-value store command-line tool (`dbctl`) supporting put, get, delete, ordered range scan, and a batch command that applies a stream of operations read from stdin. Values persist durably across process invocations. Graded by building /app/src with `go build ./...` and driving the CLI over fixed and randomized cases; standard library only."
-keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "b-tree"]
+description = "Implement, from scratch in Go, a persistent, ordered, log-structured key-value store command-line tool (`dbctl`) supporting put, get, delete, ordered range scan, an all-or-nothing batch command read from stdin, and — the parts that make it a real storage engine — a `stats` command reporting live keys versus dead (superseded and tombstoned) records and a `compact` command that reclaims dead records. Because put/delete append to a log and a delete always writes a tombstone, correct `stats`/`compact` output cannot be produced by a plain in-memory map that only tracks current state. Values persist durably across process invocations. Graded by building /app/src with `go build ./...` and driving the CLI over fixed and randomized cases; standard library only."
+keywords = ["go", "storage-engine", "key-value-store", "persistence", "cli", "log-structured", "compaction"]
 
 [[task.authors]]
 name = "Gordon Yang"
