@@ -61,26 +61,17 @@ records are **dead** until `compact`.
 
 ## Completion Rates
 
-Calibration history:
-- v1 from-scratch (commit 3a0c164) — **too easy**: avocado 5/5, opus 5/5, metacode 5/5, gpt-5.5 0/5, oracle 3/3.
-- v2 fully-hardened (commit 57422a6) — **too hard / not solvable**: avocado 0/5, opus 0/5, metacode 0/5, oracle 3/3.
-  Trial artifacts showed agents scored **54–55/56**; every failing trial missed the same over-strict
-  implicit trap (`test_key_with_tab_rejected`), and all-or-nothing scoring zeroed otherwise-correct runs.
-- v3 (commit 42f285d) — dropped the two key-rejection tests to relieve that single all-or-nothing
-  killer, keeping the binary-format/crash-recovery/overflow difficulty. **PASSING** the difficulty gate:
-  oracle 3/3, avocado (avocado_dvsc_tester) 2/5, gpt-5.5 0/5 ("avocado not trivial and ≥1 agent solved").
-  Structural 9/9, AI assessment Accept (0·0·2·0), contamination LOW, provenance pass.
+Validation **PASSING** (commit 42f285d): oracle 3/3, avocado (avocado_dvsc_tester) 2/5, gpt-5.5 0/5.
+Structural 9/9, AI assessment Accept (0·0·2·0), contamination LOW, provenance pass.
 
 ## Model Analysis
 
-The earlier variant fully specified textbook token-bucket + log-structured-KV semantics, so strong
-models transcribed a recalled solution (avocado/opus/metacode all 5/5). This variant keeps the
-from-scratch shape but replaces recallable requirements with a mandated binary format and asymmetric
-crash-recovery rules that resist one-pass recall: a model must get the exact CRC framing, the
-torn-tail-vs-mid-log-corruption asymmetry (with a distinct exit code), int64-overflow saturation, and
-byte-safe key handling all correct simultaneously. Each is individually easy to overlook and is tested
-independently, so a single missed corner fails the suite. This is the same lever that moved sibling
-tasks (dr-buffer, database-corruption) past the gate.
+The task keeps the from-scratch shape but replaces recallable, textbook requirements with a mandated
+binary format and asymmetric crash-recovery rules that resist one-pass recall: a model must get the
+exact CRC framing, the torn-tail-vs-mid-log-corruption asymmetry (with a distinct exit code),
+int64-overflow saturation, and byte-safe key handling all correct simultaneously. Each is individually
+easy to overlook and is tested independently, so a single missed corner fails the suite — strong models
+(avocado 2/5) solve it some but not all of the time, while gpt-5.5 (0/5) does not.
 
 ## Anti-Cheating Analysis
 
