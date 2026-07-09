@@ -2,59 +2,88 @@
 
 ## Task Overview
 
-Build, from scratch in Go, a persistent log-structured token-bucket rate limiter exposed as a
-command-line tool `rlctl`. The agent starts with an empty `/app/src` and must
-implement the full CLI:
+Build, from scratch in Go, a **crash-consistent**, log-structured token-bucket rate limiter exposed
+as a command-line tool `rlctl`. The agent starts with an empty `/app/src` and must implement the full
+CLI:
 
 - `set <KEY> <CAPACITY> <REFILL>` / `peek <KEY> <TS>` / `delete <KEY>`
 - `allow <KEY> <TOKENS> <TIMESTAMP_MS>` — consumes tokens or denies, deterministic refill math
-- `scan [START] [END]` — buckets in ascending key order (range half-open `[START, END)`)
-- `batch` — apply stream of `set`/`delete`/`allow` from stdin as single all-or-nothing unit
-- `stats` — print `live=<L>\tdead=<D>`: live buckets vs dead (superseded/tombstoned) records
+- `scan [START] [END]` — buckets in ascending raw-byte key order (range half-open `[START, END)`)
+- `batch` — apply a **TAB-delimited** stream of `set`/`delete`/`allow` from stdin, all-or-nothing
+- `stats` — print `live=<L>\tdead=<D>`
 - `compact` — reclaim dead records (`dead → 0`) without changing peek/scan
 
 State persists durably across separate process invocations. Standard library only.
 
-**This is a log-structured store, not a map dump.** `set`/`delete`/`allow` append a record to a log,
-and a `delete` always writes a tombstone even for absent key — exit 0 but adds dead record.
-Current state is replay of log last record per key wins. Superseded sets and successful allows and
-tombstones remain as **dead** records until `compact` rewrites log down to one live record per present bucket.
+### What makes this harder than a textbook token bucket
 
-This log-structured contract is the point: `stats` dead count and `compact` **cannot be produced by
-plain in-memory map** that only tracks current state, so solution recalling textbook rate limiter fails.
-It mirrors database-engine shape but reframed to rate limiting domain.
+This is not a from-a-tutorial rate limiter or a Bitcask clone. The difficulty comes from a **mandated
+binary log format plus asymmetric crash-recovery semantics** that a recalled solution gets wrong:
 
-Token bucket uses integer arithmetic: available = min(capacity, tokens + refill * delta_ms / 1000).
-On set tokens reset to capacity last=0. On allow success tokens decrease and last advances; on deny
-no record appended and state unchanged. Peek computes available without mutation. Batch aborts whole
-unit on malformed line or denied allow.
+1. **Mandated on-disk framing.** The log is binary, not text lines. Every record is
+   `uint32be(len) | payload | uint32be(crc32ieee(payload))`. `set`/`allow` payloads are
+   `'S' | uint32be(keylen) | key | int64be(cap,refill,tokens,last)`; `delete` is `'D' | uint32be(keylen) | key`.
+   Tests assert the bytes on disk exactly.
+2. **Asymmetric crash recovery.** A truncated or CRC-bad record **at end-of-file** is a torn write:
+   drop it, and truncate it away on the next append. A CRC-bad, truncated-in-the-middle, or
+   unknown-type record **before** EOF is fatal corruption → exit code **4**. Getting only one side of
+   this right fails half the recovery tests.
+3. **Overflow-safe refill math.** `available = min(capacity, tokens + floor(refill * delta_ms / 1000))`
+   must use saturating arithmetic — `refill * delta` overflows int64 at large timestamps; a naive
+   64-bit multiply yields a negative/garbage value.
+4. **Byte-safe keys.** Keys may contain any byte except NUL, TAB, and LF (spaces and other bytes are
+   legal). This forces byte-safe framing, TAB-delimited `batch` input (not whitespace-split), and
+   explicit key validation (a key containing NUL/TAB/LF is rejected with exit 2).
+5. **Crash-safe compaction.** `compact` rewrites via temp+rename+fsync; a stale `<db>.compact.tmp`
+   left by a crash mid-compaction must be ignored.
+
+The log-structured contract is still the backbone: `set`/`delete`/successful-`allow` append; `delete`
+always writes a tombstone; current state is the replay with last-record-per-key wins; superseded
+records are **dead** until `compact`.
 
 ## Test / Solution Details
 
-- **Tests** (`tests/test_outputs.py`): builds agent source with `go build ./...`, drives binary over
-subprocess with fresh per-test databases. Coverage includes core set/peek/allow/delete/scan,
-exit-code contract (missing peek → exit 3, deny → exit 3), bytewise ordering, half-open scan,
-refill math, batch success / blank handling / atomic rollback on malformed or denied allow,
-parent-directory creation, cross-process persistence, stdlib-only check, log-structured
-`stats`/`compact` contract (overwrites, allows, tombstones accumulate dead; delete absent still
-adds dead; compact reclaims and durable), and seeded randomized model tracking both state and dead count.
-Negative tests paired with positive state checks.
+- **Tests** (`tests/test_outputs.py`): build agent source with `go build ./...`, drive the binary over
+  subprocess with fresh per-test databases, and — using a Python codec that mirrors the mandated
+  format — assert on-disk bytes, inject torn/corrupt/stale-temp files, and check recovery + exit codes.
+  Coverage: core set/peek/allow/delete/scan, exit contract (missing peek → 3, deny → 3, corruption → 4),
+  raw-byte ordering, half-open scan, refill math **including int64 overflow saturation**, byte-safe keys
+  (spaces accepted, TAB/LF rejected), TAB-delimited batch (space-delimited rejected, blank = empty line
+  only), log-structured `stats`/`compact`, crash recovery (torn tail dropped, mid-log corruption fatal,
+  next write truncates torn bytes, stale `.compact.tmp` ignored), and a seeded randomized model.
 
-- **Reference solution** (`solution/solve.sh`): writes complete stdlib-only Go implementation —
-append-only record log `S` for set/allow state and `D` for tombstone with replay, append+fsync writes,
-temp+rename+fsync compact — and builds it.
+- **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go implementation —
+  binary CRC-framed record log with recovery-aware replay, saturating refill arithmetic
+  (`math/bits.Mul64`), append+truncate+fsync writes, temp+rename+fsync compaction — and builds it.
 
 - **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`; `/app/src` and `/app/data`
-created empty. No source shipped.
+  created empty. No source shipped.
 
 ## Completion Rates
 
-TBD — new task awaiting first validation run.
+Prior from-scratch variant (commit 3a0c164) **FAILED the difficulty gate as "too easy"**: avocado 5/5,
+opus 5/5, metacode 5/5, gpt-5.5 0/5, oracle 3/3.
+
+Harder variant (this commit): **pending re-validation.**
 
 ## Model Analysis
 
-Difficulty comes from log-structured contract plus deterministic token bucket arithmetic across
-explicit timestamps. `stats` must report dead superseded records, `compact` must reclaim them while
-preserving peek output for any timestamp, which requires retaining more than current bucket map.
-A solution recalling standard in-memory rate limiter cannot produce dead count or correct compact.
-Batch all-or-nothing with allow-deny abort adds further state-machine complexity beyond textbook KV.
+The earlier variant fully specified textbook token-bucket + log-structured-KV semantics, so strong
+models transcribed a recalled solution (avocado/opus/metacode all 5/5). This variant keeps the
+from-scratch shape but replaces recallable requirements with a mandated binary format and asymmetric
+crash-recovery rules that resist one-pass recall: a model must get the exact CRC framing, the
+torn-tail-vs-mid-log-corruption asymmetry (with a distinct exit code), int64-overflow saturation, and
+byte-safe key handling all correct simultaneously. Each is individually easy to overlook and is tested
+independently, so a single missed corner fails the suite. This is the same lever that moved sibling
+tasks (dr-buffer, database-corruption) past the gate.
+
+## Anti-Cheating Analysis
+
+- **Hardcoded outputs:** tests use randomized values and a 300-step seeded model; the on-disk-format
+  tests assert exact bytes computed from inputs, not fixed literals.
+- **Overfitting to visible tests:** the grader tests are not shipped in the container; the agent only
+  sees `instruction.md` and an empty `/app/src`.
+- **Modifying test files:** grading builds `/app/src` and runs the harness's own `tests/`; the agent
+  cannot alter the verifier.
+- **Bypassing the solution path:** tests drive the compiled binary end-to-end and decode the real log
+  file, so a stub that only prints expected strings fails the format/recovery/stats assertions.
