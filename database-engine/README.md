@@ -73,13 +73,27 @@ Latest validation run (commit `3b6f996`) — **passing**:
 | Contamination | MEDIUM |
 | Provenance | clean |
 
-The log-structured contract both defeated recall and improved difficulty: the
-reference passes the full suite (**36/36**), while a plausible **recalled
-solution** — the textbook `map`+rewrite KV with `stats`/`compact` bolted on the
-obvious way (`dead` always 0, `delete` a plain map delete with no tombstone) —
-**fails 7/36**, all of them the log-structured tests. avocado moved from 4/5 to
-3/5 (better-centered) and gpt now fails entirely, consistent with the task no
-longer yielding to recalled code.
+The log-structured contract improved difficulty: the reference passes the full
+suite (**36/36**), while a plausible textbook `map`+rewrite KV with
+`stats`/`compact` bolted on the obvious way (`dead` always 0, `delete` a plain
+map delete with no tombstone) **fails 7/36**. avocado moved from 4/5 to 3/5
+(better-centered) and gpt now fails entirely.
+
+### Human novelty review — **HIGH** (algorithm memorization risk)
+
+A subsequent human novelty review rated the log-structured version **HIGH**
+recall risk: append-only log + replay-last-wins + tombstones + compaction is a
+canonical, one-pass-memorizable storage-engine pattern (Bitcask/LSM), and the
+scan/batch/stats surface is minor derivable framing; the Component Composition
+and Language Rarity modifiers were evaluated and do not downgrade it. The prior
+map-based version was rated MEDIUM for the same reason (a textbook KV CLI).
+
+Root cause: the storage engine is the *named goal*, and every reasonable design
+(map, B-tree, LSM, log-structured) is a documented pattern — so this task family
+has a low novelty ceiling regardless of which design or edge framing is chosen.
+The task passes the automated codimango gate but does not clear the human novelty
+axis. Status: flagged for a shape decision (shelve as low-novelty-ceiling, or
+reframe so the store is a building block under a non-canonical goal).
 
 ## Model Analysis
 
