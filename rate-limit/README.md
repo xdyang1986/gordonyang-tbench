@@ -66,9 +66,10 @@ Calibration history:
 - v2 fully-hardened (commit 57422a6) — **too hard / not solvable**: avocado 0/5, opus 0/5, metacode 0/5, oracle 3/3.
   Trial artifacts showed agents scored **54–55/56**; every failing trial missed the same over-strict
   implicit trap (`test_key_with_tab_rejected`), and all-or-nothing scoring zeroed otherwise-correct runs.
-- v3 (this commit) — dropped the two key-rejection tests to relieve that single all-or-nothing killer,
-  keeping the binary-format/crash-recovery/overflow difficulty. **Pending re-validation** (target: strong
-  models mostly-but-not-always pass, e.g. ~4/5).
+- v3 (commit 42f285d) — dropped the two key-rejection tests to relieve that single all-or-nothing
+  killer, keeping the binary-format/crash-recovery/overflow difficulty. **PASSING** the difficulty gate:
+  oracle 3/3, avocado (avocado_dvsc_tester) 2/5, gpt-5.5 0/5 ("avocado not trivial and ≥1 agent solved").
+  Structural 9/9, AI assessment Accept (0·0·2·0), contamination LOW, provenance pass.
 
 ## Model Analysis
 
