@@ -1,0 +1,49 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/rate-limit"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
+description = "Implement, from scratch in Go, a persistent, log-structured token-bucket rate limiter CLI (`rlctl`) supporting set, allow, peek, delete, scan, batch, stats, and compact. Each bucket has capacity and refill rate; allow consumes tokens at an explicit timestamp with deterministic refill math, printing allow or deny. Because set/delete/allow append to a log and delete always writes a tombstone, correct stats/compact output cannot be produced by a plain in-memory map that only tracks current state. State persists durably across process invocations. Graded by building /app/src with `go build ./...` and driving the CLI over fixed and randomized cases; standard library only."
+keywords = ["go", "rate-limit", "token-bucket", "persistence", "cli", "log-structured", "compaction"]
+
+[[task.authors]]
+name = "Gordon Yang"
+email = "gordonyang@meta.com"
+
+[metadata]
+category = "software-engineering"
+category_usecase = "compute_result"
+category_subdomain = "distributed_systems"
+difficulty = "medium"
+languages = ["go"]
+
+[verifier]
+# Isolate grading from the agent: run the verifier in a fresh container so the
+# agent's code can't read the oracle under /tests at verify time. Opt-in —
+# uncomment to enable (also requires a verifier env def under tests/).
+# environment_mode = "separate"
+timeout_sec = 600.0
+# Run the grader as a non-root user so in-process agent code (Flow B) can't read
+# root-owned oracle files. Off by default because this template's test.sh uses
+# apt-get (needs root); enable it when your verifier imports/runs agent code
+# in-process and does not itself need root.
+# user = "nobody"
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
