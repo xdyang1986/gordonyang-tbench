@@ -21,11 +21,6 @@ class UnifiedRouter:
         "normal": (1.0, 1.0),
         "low":    (0.5, 2.0),
     }
-    CONTINENT = {
-        "us-east":"americas","us-west":"americas","us-central":"americas","us-south":"americas","ca-central":"americas","sa-east":"americas",
-        "eu-west":"europe","eu-central":"europe","eu-north":"europe","eu-south":"europe","uk-south":"europe",
-        "ap-south":"asia","ap-east":"asia","ap-northeast":"asia","ap-southeast":"asia","ap-north":"asia","me-central":"asia","af-south":"asia",
-    }
 
     def __init__(self, config_path):
         with open(config_path) as f:
@@ -63,8 +58,8 @@ class UnifiedRouter:
 
     def _region_mult(self, prov_region, user_region):
         if prov_region==user_region: return 0.5
-        pc=self.CONTINENT.get(prov_region); uc=self.CONTINENT.get(user_region)
-        if pc and pc==uc: return 0.8
+        pc=prov_region.split("-",1)[0]; uc=user_region.split("-",1)[0]
+        if pc==uc: return 0.8
         return 1.0
 
     def _weights(self, priority):

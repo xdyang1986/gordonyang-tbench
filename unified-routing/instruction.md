@@ -65,7 +65,7 @@ For each request:
    latency:  w_lat=1.0, w_cost=100.0, w_err=10000.0
    cost:     w_lat=0.1, w_cost=1000.0, w_err=10000.0
    balanced: w_lat=1.0, w_cost=500.0, w_err=10000.0
-   Apply priority multiplier: high increases the latency weight and decreases the cost weight, low does the opposite, normal unchanged.
+   Apply the priority multiplier: high multiplies w_lat by 2.0 and w_cost by 0.5; low multiplies w_lat by 0.5 and w_cost by 2.0; normal leaves both unchanged.
 5. Apply a region affinity bonus to effective latency based on provider region relative to user region. An exact region match receives the strongest bonus, the same continent a moderate bonus, otherwise no bonus. Continent grouping is implied by region naming conventions.
 6. Compute score = ( effective_latency * w_lat + cost_per_1k * w_cost + error_rate * w_err ) / health . Lower is better.
 7. Sort eligible providers by score ascending, with deterministic tie-breaking for reproducible output. Tie-breaking considers health, cost, latency, and identifier in a stable order.
