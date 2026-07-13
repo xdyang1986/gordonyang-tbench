@@ -2,11 +2,21 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/unified-routing"
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 description = "Stateful provider-routing CLI: per-file capacity exhaustion, tenant budgets, priority-weighted strategy scoring, region affinity, static-health scoring, multi-level tie-breaking, and region-diverse failover chains."
-authors = []
 keywords = ["routing","cloud","api","load-balancing","failover","capacity","tenant","budget","sla"]
 
+[[task.authors]]
+name = "Gordon Yang"
+email = "gordonyang@meta.com"
+
 [metadata]
+category = "software-engineering"
+category_usecase = "compute_result"
+category_subdomain = "distributed_systems"
+difficulty = "medium"
+languages = ["python"]
 
 [verifier]
 # Isolate grading from the agent: run the verifier in a fresh container so the
