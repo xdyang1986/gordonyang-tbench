@@ -66,7 +66,7 @@ For each request:
    cost:     w_lat=0.1, w_cost=1000.0, w_err=10000.0
    balanced: w_lat=1.0, w_cost=500.0, w_err=10000.0
    Apply the priority multiplier: high multiplies w_lat by 2.0 and w_cost by 0.5; low multiplies w_lat by 0.5 and w_cost by 2.0; normal leaves both unchanged.
-5. Apply a region affinity bonus to effective latency based on provider region relative to user region. An exact region match receives the strongest bonus, the same continent a moderate bonus, otherwise no bonus. Continent grouping is implied by region naming conventions.
+5. Apply a region affinity multiplier M to effective latency: effective_latency = latency_ms * M, where M = 0.5 if provider.region equals user_region exactly, else 0.8 if the two regions are on the same continent, else 1.0. Two regions are on the same continent when the text before the first hyphen is equal (a value with no hyphen uses the whole string): e.g. us-east and us-west share a continent, but us-east and eu-west do not.
 6. Compute score = ( effective_latency * w_lat + cost_per_1k * w_cost + error_rate * w_err ) / health . Lower is better.
 7. Sort eligible providers by score ascending, with deterministic tie-breaking for reproducible output. Tie-breaking considers health, cost, latency, and identifier in a stable order.
 8. Region-diverse selection up to max_replicas: first pass in sorted order picks providers whose region has not yet been chosen to maximize spread; second pass fills remaining slots with the next best providers regardless of region, preserving sorted order within each pass. The result is an ordered list of distinct provider ids, length <= max_replicas.

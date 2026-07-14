@@ -331,6 +331,49 @@ def test_config_validation_exit2_variants():
         assert code == 2, f"expected exit 2 for {cfg}"
 
 
+def test_invalid_requests_line_exit2():
+    # A malformed JSON line in the requests file must produce exit 2 (no output).
+    cfg = {
+        "strategy": "latency",
+        "max_replicas": 1,
+        "providers": [
+            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
+             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
+        ],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        cp = os.path.join(td, "c.json")
+        rp = os.path.join(td, "r.jsonl")
+        with open(cp, "w") as f:
+            json.dump(cfg, f)
+        with open(rp, "w") as f:
+            f.write('{"id":"1","user_region":"us"}\n')
+            f.write("this is not json\n")
+        proc = subprocess.run(
+            ["router", "--config", cp, "--requests", rp], capture_output=True, text=True
+        )
+        assert proc.returncode == 2
+        assert proc.stdout.strip() == ""
+
+
+def test_error_rate_weight_decisive():
+    # Providers identical except error_rate; w_err (10000) makes the lower-error
+    # provider win decisively (no tie), exercising the error_rate scoring term.
+    cfg = {
+        "strategy": "latency",
+        "max_replicas": 1,
+        "providers": [
+            {"id": "err-high", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
+             "error_rate": 0.1, "capacity_rps": 10, "status": "up", "health": 1},
+            {"id": "err-low", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
+             "error_rate": 0.001, "capacity_rps": 10, "status": "up", "health": 1},
+        ],
+    }
+    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
+    assert out == [["err-low"]]
+    assert code == 0
+
+
 def test_multiple_tenants_independent_budgets():
     # Each tenant has its own budget; one exhausting its budget must not affect
     # the other. Per-request cost = 0.01/1000 = 0.00001; each budget affords one.
