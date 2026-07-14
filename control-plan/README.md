@@ -19,12 +19,15 @@ See `instruction.md` for the full specification.
 
 ## Validation
 
-Latest local calibration run (`codimango bench run`, k=5, daytona):
+Latest online validation — all gates passing:
 
-| Agent | Model | Result |
-|-------|-------|--------|
-| oracle | oracle | 1/1 |
-| claude-code | claude-opus-4-6 | 5/5 |
-| metacode | meta/avocado_dvsc_tester | 3/5 |
+| Gate | Result |
+|------|--------|
+| Structural | PASS (9/9) |
+| Oracle | 3/3 |
+| Metacode/Opus pass-fail balance | PASSED (avocado 4/5, opus [claude-opus-4-6] 5/5, gpt [gpt-5.5] 5/5) |
+| AI assessment | Accept (0 Critical / 0 High / 0 Medium / 0 Low) |
+| Contamination | MEDIUM (passing) |
+| Provenance | Clean |
 
-Difficulty comes from a prior-violating leadership rule (sticky election) combined with a large cumulative correctness surface (persistence + election + routing + zone replicas + stable routing) under all-or-nothing scoring: the strong model solves it reliably while the weaker model degrades (edge misses and occasional failure to complete a buildable solution).
+Difficulty comes from a prior-violating leadership rule (sticky election) combined with a large cumulative correctness surface (persistence + election + routing + zone replicas + stable routing) under all-or-nothing scoring: the strong models solve it reliably while the weaker model degrades (edge misses and occasional failure to complete a buildable solution).
