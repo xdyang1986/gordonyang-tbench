@@ -2,107 +2,81 @@
 
 ## Task Overview
 
-Build, from scratch in Python (standard library only), a command-line provider-routing layer
-`router`. The agent starts with an empty `/app/src` and must implement the full CLI:
+Build, from scratch in Go (standard library only), a command-line provider-routing tool `router` that
+selects a provider per request **and** durably records every decision to a **crash-consistent binary
+journal**, so an interrupted run can be restarted with `--resume` and continue exactly where it stopped
+— without losing, duplicating, or corrupting decisions. The agent starts with an empty `/app/src`.
 
-- `router --config <PATH> --requests <PATH>`
-- `--config` is a JSON document `{"strategy", "max_replicas", "tenant_budgets", "providers": [...]}`
-  where each provider has `id`, `region`, `latency_ms`, `cost_per_1k`, `error_rate`, `capacity_rps`,
-  `status` (`up`/`down`), and `health` (a float in `(0,1]`).
-- `--requests` is newline-delimited JSON, one request per line with `id`, `user_region`, optional
-  `sla_ms`, optional `priority` (`high`/`normal`/`low`), and optional `tenant`.
-- Prints one JSON array per request, in input order — the ordered, region-diverse failover chain of up
-  to `max_replicas` distinct provider ids, or `[]`.
-- Exit `0` when every request received exactly `max_replicas` providers · `1` when at least one request
-  is degraded (fewer than `max_replicas`, including empty) · `2` on invalid input (bad config/requests,
-  unknown strategy, `max_replicas < 1`, duplicate/empty id, out-of-range numeric fields, unrecognized
-  status/priority) — no output on exit 2.
+- `router --config <PATH> --requests <PATH> --journal <PATH> [--resume]`
+- `--config` is JSON `{"strategy", "providers": [{"id","region","latency_ms","cost_per_1k","error_rate","capacity_rps","status"} ...]}`.
+- `--requests` is newline-delimited JSON, one object per line with `id`, `user_region`, optional `sla_ms`.
+- Prints one JSON value per request in order — the chosen provider id, or `null` when degraded.
+- Exit `0` when every request routed · `1` when at least one decision is `null` · `2` on invalid input
+  (bad config/requests, missing args, or a non-empty journal without `--resume`) · `3` on an
+  unrecoverable corrupt journal. No stdout on exit 2/3.
 
 ## Routing model
 
-State is maintained **per request file, in order**: each provider has a remaining capacity initialized
-from `capacity_rps`, and each tenant a remaining budget from `tenant_budgets` (infinite if unlisted).
-For each request in turn:
+For each request, in order: eligible providers are `status == up` and `capacity_rps > 0`; if `sla_ms` is
+present keep those with `latency_ms <= sla_ms`. If none remain the decision is `null` (degraded).
+Otherwise `effective_latency = latency_ms * 0.5` when `provider.region == user_region` else `latency_ms`,
+and `score = effective_latency*w_lat + cost_per_1k*w_cost + error_rate*w_err` with weights by strategy
+(`latency` 1/100/10000, `cost` 0.1/1000/10000, `balanced` 1/500/10000). The lowest score wins, ties
+broken by lexicographically smallest id. The routing math is fully specified — the difficulty is the
+durable log.
 
-1. **Eligibility** — `status == up`, remaining capacity `> 0`, `health > 0`, and the tenant can afford
-   the provider's per-request cost (`cost_per_1k / 1000`); then, if `sla_ms` is present,
-   `latency_ms <= sla_ms`.
-2. **Scoring** — base weights come from `strategy` (`latency` / `cost` / `balanced`), adjusted by a
-   `priority` multiplier (`high`: w_lat×2.0, w_cost×0.5; `low`: the inverse; `normal`: unchanged). A
-   region-affinity multiplier is applied to latency (strongest for an exact `region == user_region`
-   match, moderate for the same continent, none otherwise), and the final score is
-   `(effective_latency*w_lat + cost_per_1k*w_cost + error_rate*w_err) / health` (lower is better).
-3. **Selection** — sort ascending by score with a deterministic multi-level tie-break, then choose a
-   region-diverse chain up to `max_replicas` (first pass: one provider per not-yet-used region; second
-   pass: fill remaining slots by score).
-4. **Consumption** — decrement the primary (first-chosen) provider's capacity by 1 and deduct its
-   per-request cost from the tenant's budget.
+### What makes this hard
 
-The instruction states the strategy weights, priority multipliers, eligibility rules, region-diverse
-selection, and exit contract precisely, but deliberately leaves two things qualitative:
+Difficulty comes from a **mandated binary journal format plus crash-recovery semantics** implemented in
+Go's byte-level APIs — individually easy to get subtly wrong, each tested independently:
 
-1. **Region-affinity magnitudes / application.** The instruction says an exact match gets the
-   strongest bonus, same-continent a moderate one, else none — without pinning the exact multipliers or
-   whether the bonus is multiplicative. A solution that applies affinity inconsistently computes
-   different scores and breaks score-ties the wrong way.
-2. **Multi-level tie-break order.** The instruction names the tie-break keys (health, cost, latency, id)
-   but not their direction, so an implementation must reason out the stable ordering that reproduces the
-   intended winner.
+1. **Mandated on-disk framing.** 8-byte ASCII header `URJRNL01`, then one record per decision:
+   `seq uint32 | id_len uint16 | id | status uint8 (0 routed / 1 null) | prov_len uint16 | prov |
+   crc32 uint32`, all big-endian, CRC-32 (IEEE) over every preceding byte of the record. Tests assert
+   the bytes on disk exactly. Each record is `fsync`'d before the next.
+2. **Torn-tail recovery.** On `--resume`, a trailing record that is truncated or has a bad CRC is a
+   crash mid-write: drop it and `Truncate` the file to the last valid record, then continue.
+3. **Fatal-corruption distinction.** A bad header, a sequence gap, or a record whose id does not match
+   the corresponding request is unrecoverable → exit `3` (not a recoverable tail).
+4. **Idempotent resume.** Re-running `--resume` on a complete, consistent journal appends nothing and
+   reprints the full decision list; resume from a partial journal appends only the missing records.
+5. **Overwrite guard.** Running without `--resume` against a non-empty journal exits `2` untouched.
 
 ## Test / Solution Details
 
-- **Tests** (`tests/test_outputs.py`): drive the `router` binary over `subprocess` with configs and
-  request streams built in Python, asserting exact provider chains and exit codes. Coverage spans
-  region affinity (exact / same-continent / none), cost strategy, priority high-vs-low trade-off,
-  tenant-budget enforcement, **multi-tenant budget independence**, stateful capacity exhaustion and
-  spillover across providers, region-diverse `max_replicas` chains, the multi-level tie-break,
-  SLA filtering and degraded exit, `status: down` exclusion, blank/whitespace line handling,
-  `payload_kb` being ignored, default-tenant unlimited budget, the exit-0 fully-routed path, and the
-  exit-2 validation contract (duplicate/empty id, negative latency/capacity, out-of-range
-  error_rate/health, `max_replicas < 1`, unrecognized status/priority).
-- **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Python implementation —
-  strategy/priority weighting, prefix-based continent affinity, health-divided scoring, multi-level
-  tie-break, stateful capacity/budget consumption, and region-diverse failover selection — installed as
-  `/usr/local/bin/router`.
-- **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `python3`; `/app` created empty. No
-  source shipped to the agent.
+- **Tests** (`tests/test_outputs.py`): build the agent source with `go build ./...`, enforce
+  stdlib-only (`go.mod` + import scan), then drive the built binary over `subprocess`. Using a Python
+  codec that mirrors the mandated format, they assert on-disk bytes, inject torn/bad-CRC/corrupt
+  journals to exercise recovery and exit codes, and cover fresh routing (region affinity, cost strategy,
+  error-rate weight, status/capacity filtering, SLA degraded), blank-line handling, idempotent and
+  partial resume, torn-tail and bad-CRC recovery, corruption (bad header / seq gap / id mismatch → 3),
+  overwrite guard (→ 2), and the config/requests validation contract (→ 2).
+- **Reference solution** (`solution/solve.sh`): writes a complete stdlib-only Go implementation
+  (`encoding/json`, `encoding/binary`, `hash/crc32`, `os`, `flag`) — strategy-weighted routing, binary
+  CRC-framed journal with fsync-per-record, recovery-aware replay with torn-tail truncation, and the
+  0/1/2/3 exit contract — plus `go.mod`.
+- **Environment** (`environment/Dockerfile`): `ubuntu:24.04` + `golang-go`; `/app/src` and `/app/data`
+  created empty. No source shipped to the agent.
 
 ## Completion Rates
 
-Latest validation run (commit `0febedf`) — **passing**:
-
-| Check | Result |
-|---|---|
-| Structural | 9/9 |
-| Oracle | 3/3 |
-| Difficulty balance | passed — avocado (avocado_dvsc_tester) 2/5, opus 5/5 |
-| AI assessment | Revise (0 Critical / 0 High) — non-blocking |
-| Contamination | LOW |
-
-The difficulty gate passes because the weak runner (avocado) is not trivial (2/5) while a strong runner
-(opus 5/5) solves it, so the task is hard but fair. Across avocado's failing trials the *only* failing
-test is the multi-level tie-break, whose outcome depends on how region affinity is applied — the two
-qualitative points above.
+Latest validation run — **pending** (Go rewrite). Local: `go build` clean, reference passes 19/19 tests.
 
 ## Model Analysis
 
-The routing logic is otherwise fully specified and easily implemented, so the difficulty concentrates
-in the two deliberately-qualitative behaviors: the region-affinity application (which determines whether
-a score-tie actually occurs) and the multi-level tie-break order (which resolves it). A good-faith
-implementation that applies affinity additively or with a different magnitude, or orders the tie-break
-differently, computes a different winner on the tie case and fails — while an implementation that
-reasons out the intended, reproducible ordering passes. Strong models (opus 5/5) get it right
-consistently; avocado (2/5) gets it right only some of the time.
+The routing logic is fully specified and easily implemented, so the difficulty concentrates in the
+durable journal: exact big-endian CRC framing, the torn-tail-vs-fatal-corruption distinction with a
+separate exit code, fsync durability, atomic truncation, and idempotent resume — expressed in Go's
+manual byte-level APIs. Each corner is individually easy to overlook and is tested independently, so a
+single missed corner fails the suite, which is what separates strong models from weaker ones.
 
 ## Anti-Cheating Analysis
 
-- **Hardcoded outputs:** tests construct configs/requests programmatically and assert provider chains
-  derived from the inputs, not fixed literals; multiple tests share providers with different
-  strategies/priorities/tenants so a constant answer cannot satisfy them.
-- **Overfitting to visible tests:** the grader tests are not shipped in the container; the agent sees
-  only `instruction.md` and an empty `/app/src`.
-- **Modifying test files:** grading runs the harness's own `tests/` against `/app/src`; the agent
+- **Hardcoded outputs:** tests build and drive the real binary and assert on-disk bytes computed from
+  inputs plus exit codes; no fixed literals to overfit.
+- **Overfitting to visible tests:** grader tests are not shipped in the container; the agent sees only
+  `instruction.md` and an empty `/app/src`.
+- **Modifying test files:** grading builds `/app/src` and runs the harness's own `tests/`; the agent
   cannot alter the verifier.
-- **Bypassing the solution path:** tests invoke the real `router` binary end-to-end and check exit
-  codes and full failover chains, so a stub that prints fixed strings fails the scoring, stateful
-  capacity/budget, and validation assertions.
+- **Bypassing the solution path:** tests decode the real journal file and drive `--resume` recovery, so
+  a stub that only prints strings fails the format, recovery, and exit-code assertions.

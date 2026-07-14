@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/unified-routing"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Stateful provider-routing CLI: per-file capacity exhaustion, tenant budgets, priority-weighted strategy scoring, region affinity, static-health scoring, multi-level tie-breaking, and region-diverse failover chains."
-keywords = ["routing","cloud","api","load-balancing","failover","capacity","tenant","budget","sla"]
+description = "Go provider-routing CLI that persists each routing decision to a crash-consistent, byte-exact binary journal (CRC32-framed records, fsync per record) and recovers a torn trailing record on --resume; strategy-weighted scoring with region affinity and lexicographic tie-break."
+keywords = ["go","routing","crash-consistency","journal","wal","recovery","binary-format","crc32"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -16,7 +16,7 @@ category = "software-engineering"
 category_usecase = "compute_result"
 category_subdomain = "distributed_systems"
 difficulty = "medium"
-languages = ["python"]
+languages = ["go"]
 
 [verifier]
 # Isolate grading from the agent: run the verifier in a fresh container so the

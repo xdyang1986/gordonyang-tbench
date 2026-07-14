@@ -1,397 +1,404 @@
 """
-Verify the outputs of the router tool.
+Grader for the Go region-diverse provider-routing CLI with a crash-consistent journal.
+
+Strategy:
+  - build agent source from /app/src with `go build ./...`
+  - enforce stdlib-only
+  - drive the built binary; assert region-diverse failover chains + exit codes
+  - verify the byte-exact journal format; inject torn/corrupt journals for recovery
+  - exercise IMPLICIT routing edges (best-effort-not-strict diversity, second-pass
+    order, primary-only capacity, spillover) with corner-case configs
 """
 
-import json, subprocess, tempfile, os
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import tempfile
+import zlib
+
+import pytest
+
+SRC_DIR = "/app/src"
+HEADER = b"URJRNL01"
 
 
-def run_router(cfg, requests):
+# ------------------------- byte-exact journal codec -------------------------
+def encode_record(seq, req_id, chain):
+    idb = req_id.encode("utf-8")
+    body = struct.pack(">I", seq) + struct.pack(">H", len(idb)) + idb + struct.pack(">H", len(chain))
+    for pid in chain:
+        pb = pid.encode("utf-8")
+        body += struct.pack(">H", len(pb)) + pb
+    return body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def decode_journal(data):
+    assert data[:8] == HEADER, "bad header"
+    off, n = 8, len(data)
+    recs, ends = [], []
+    while off < n:
+        start = off
+        seq = struct.unpack_from(">I", data, off)[0]; off += 4
+        id_len = struct.unpack_from(">H", data, off)[0]; off += 2
+        idb = data[off:off + id_len]; off += id_len
+        nprov = struct.unpack_from(">H", data, off)[0]; off += 2
+        chain = []
+        for _ in range(nprov):
+            plen = struct.unpack_from(">H", data, off)[0]; off += 2
+            chain.append(data[off:off + plen].decode("utf-8")); off += plen
+        crc = struct.unpack_from(">I", data, off)[0]; off += 4
+        assert (zlib.crc32(data[start:off - 4]) & 0xFFFFFFFF) == crc, "bad crc"
+        recs.append((seq, idb.decode("utf-8"), chain))
+        ends.append(off)
+    return recs, ends
+
+
+# ------------------------------- build ------------------------------------
+def _walk_go(root):
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".go"):
+                yield os.path.join(dirpath, f)
+
+
+@pytest.fixture(scope="session")
+def router_bin():
+    assert os.path.isdir(SRC_DIR), "/app/src missing"
+    assert list(_walk_go(SRC_DIR)), "no .go sources"
+    assert os.path.isfile(os.path.join(SRC_DIR, "go.mod")), "go.mod missing"
+    go = shutil.which("go")
+    assert go, "go toolchain not found"
+    out_dir = tempfile.mkdtemp(prefix="router_build_")
+    binary = os.path.join(out_dir, "router")
+    proc = subprocess.run([go, "build", "-o", binary, "./..."], cwd=SRC_DIR,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"go build failed:\n{proc.stdout}\n{proc.stderr}"
+    return binary
+
+
+def run(router_bin, cfg, reqs, journal, resume=False, td=None):
+    cfg_path = os.path.join(td, "cfg.json")
+    req_path = os.path.join(td, "req.jsonl")
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f)
+    with open(req_path, "w") as f:
+        for r in reqs:
+            f.write(json.dumps(r) + "\n")
+    args = [router_bin, "--config", cfg_path, "--requests", req_path, "--journal", journal]
+    if resume:
+        args.append("--resume")
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    out = proc.stdout.strip().splitlines() if proc.stdout.strip() else []
+    return proc.returncode, [json.loads(x) for x in out], proc.stderr
+
+
+def prov(pid, region, latency, cap=10, cost=0.01, err=0.0, status="up"):
+    return {"id": pid, "region": region, "latency_ms": latency, "cost_per_1k": cost,
+            "error_rate": err, "capacity_rps": cap, "status": status}
+
+
+# ------------------------------ stdlib-only -------------------------------
+def test_go_mod_no_external_requires():
+    with open(os.path.join(SRC_DIR, "go.mod")) as fh:
+        for line in fh:
+            m = re.match(r"^(require\s+)?([^\s]+)\s+v[0-9]", line.strip())
+            if m and "." in m.group(2).split("/")[0]:
+                raise AssertionError(f"external dependency {m.group(2)}")
+
+
+def test_imports_stdlib_only():
+    ext = re.compile(r'"([a-z0-9.\-]+\.[a-z]{2,}/[^"]+)"')
+    for path in _walk_go(SRC_DIR):
+        with open(path) as fh:
+            for line in fh:
+                if ext.search(line):
+                    raise AssertionError(f"non-stdlib import in {path}: {line.strip()}")
+
+
+# ------------------------------ basic routing -----------------------------
+def test_single_replica_routing_and_journal(router_bin):
+    cfg = {"strategy": "latency", "providers": [
+        prov("aws-us", "us-east", 40), prov("aws-eu", "eu-west", 40)]}
+    reqs = [{"id": "r1", "user_region": "us-east"},
+            {"id": "r2", "user_region": "eu-west"},
+            {"id": "r3", "user_region": "asia"}]
     with tempfile.TemporaryDirectory() as td:
-        cfg_path = os.path.join(td, "cfg.json")
-        req_path = os.path.join(td, "req.jsonl")
-        with open(cfg_path, "w") as f:
-            json.dump(cfg, f)
-        with open(req_path, "w") as f:
-            for r in requests:
-                f.write(json.dumps(r) + "\n")
-        proc = subprocess.run(
-            ["router", "--config", cfg_path, "--requests", req_path],
-            capture_output=True,
-            text=True,
-        )
-        out = proc.stdout.strip().splitlines() if proc.stdout.strip() else []
-        parsed = [json.loads(l) for l in out]
-        return proc.returncode, parsed, proc.stderr
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
+        assert code == 0
+        assert out == [["aws-us"], ["aws-eu"], ["aws-eu"]]  # r3 tie -> lexicographic aws-eu
+        with open(j, "rb") as f:
+            data = f.read()
+        assert data == (HEADER + encode_record(0, "r1", ["aws-us"])
+                        + encode_record(1, "r2", ["aws-eu"]) + encode_record(2, "r3", ["aws-eu"]))
 
 
-def test_region_affinity_exact_vs_continent_vs_none():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "exact", "region": "us-east", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "continent", "region": "us-west", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "far", "region": "eu-west", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    req = [{"id": "r", "user_region": "us-east"}]
-    code, out, _ = run_router(cfg, req)
-    assert out == [["exact"]]
-    cfg2 = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "continent", "region": "us-west", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "far", "region": "eu-west", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code2, out2, _ = run_router(cfg2, [{"id": "r", "user_region": "us-east"}])
-    assert out2 == [["continent"]]
-
-
-def test_tenant_budget_enforcement():
-    cfg = {
-        "strategy": "cost",
-        "max_replicas": 1,
-        "tenant_budgets": {"acme": 0.00002},
-        "providers": [
-            {"id": "expensive", "region": "us", "latency_ms": 10, "cost_per_1k": 0.05,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "cheap", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    # per-request cost: expensive 0.00005, cheap 0.00001. Budget 0.00002 -> two cheap, then exhausted.
-    req = [
-        {"id": "1", "user_region": "us", "tenant": "acme"},
-        {"id": "2", "user_region": "us", "tenant": "acme"},
-        {"id": "3", "user_region": "us", "tenant": "acme"},
-    ]
-    code, out, _ = run_router(cfg, req)
-    assert out[0] == ["cheap"]
-    assert out[1] == ["cheap"]
-    assert out[2] == []
-    assert code == 1
-
-
-def test_tie_breaking_health_cost_latency_id():
-    cfg2 = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "lowhealth", "region": "us", "latency_ms": 45, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 0.9},
-            {"id": "highhealth", "region": "us", "latency_ms": 50, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1.0},
-        ],
-    }
-    # scores: lowhealth 45*0.5/0.9 = 25 ; highhealth 50*0.5/1.0 = 25 -> tie -> higher health wins
-    code, out, _ = run_router(cfg2, [{"id": "r", "user_region": "us"}])
-    assert out == [["highhealth"]]
-
-
-def test_region_diverse_max_replicas_with_capacity_consumption():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 2,
-        "providers": [
-            {"id": "us1", "region": "us-east", "latency_ms": 30, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 1, "status": "up", "health": 1},
-            {"id": "us2", "region": "us-east", "latency_ms": 31, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "eu1", "region": "eu-west", "latency_ms": 32, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    req = [{"id": "1", "user_region": "us-east"}, {"id": "2", "user_region": "us-east"}]
-    code, out, _ = run_router(cfg, req)
-    # first request picks us1+eu1 (region-diverse), consumes us1 primary capacity to 0;
-    # second request us1 gone -> us2+eu1
-    assert out[0] == ["us1", "eu1"]
-    assert out[1] == ["us2", "eu1"]
-
-
-def test_priority_high_vs_low_cost_latency_tradeoff():
-    cfg = {
-        "strategy": "balanced",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "fast", "region": "us", "latency_ms": 10, "cost_per_1k": 0.1,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "cheap", "region": "us", "latency_ms": 80, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    _, out_low, _ = run_router(cfg, [{"id": "r", "user_region": "us", "priority": "low"}])
-    _, out_high, _ = run_router(cfg, [{"id": "r", "user_region": "us", "priority": "high"}])
-    assert out_low == [["cheap"]]
-    assert out_high == [["fast"]]
-
-
-def test_sla_and_invalid_priority():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 200, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us", "sla_ms": 100}])
-    assert out == [[]] and code == 1
-    code2, _, _ = run_router(cfg, [{"id": "r", "user_region": "us", "priority": "urgent"}])
-    assert code2 == 2
-
-
-def test_blank_and_whitespace_lines_ignored():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
+def test_cost_and_error_rate_scoring(router_bin):
+    cfg = {"strategy": "cost", "providers": [
+        prov("fast-exp", "us", 10, cost=0.1), prov("slow-cheap", "us", 100, cost=0.01)]}
     with tempfile.TemporaryDirectory() as td:
-        cp = os.path.join(td, "c.json")
-        rp = os.path.join(td, "r.jsonl")
+        j = os.path.join(td, "j.bin")
+        assert run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["slow-cheap"]]
+    cfg2 = {"strategy": "latency", "providers": [
+        prov("err-high", "us", 10, err=0.1), prov("err-low", "us", 10, err=0.001)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        assert run(router_bin, cfg2, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["err-low"]]
+
+
+# ---------------------- IMPLICIT region-diversity edges --------------------
+def test_best_effort_diversity_not_strict(router_bin):
+    # max_replicas=3, three providers across only TWO regions. A strict distinct-region
+    # reading returns 2 (under-replicated); the correct best-effort reading reuses a
+    # region in the second pass to reach 3 distinct providers -> exit 0.
+    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
+        prov("us1", "us", 30), prov("us2", "us", 31), prov("eu1", "eu", 32)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, [{"id": "1", "user_region": "us"}], j, td=td)
+        assert out == [["us1", "eu1", "us2"]]  # pass1: us1,eu1 ; pass2 fills us2
+        assert code == 0
+
+
+def test_second_pass_preserves_score_order(router_bin):
+    # Single region, so first pass picks only the best; second pass fills the rest in
+    # ascending score order (us2 before us3), NOT arbitrary order.
+    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
+        prov("us1", "us", 30), prov("us2", "us", 31), prov("us3", "us", 32)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, [{"id": "1", "user_region": "us"}], j, td=td)
+        assert out == [["us1", "us2", "us3"]]
+        assert code == 0
+
+
+def test_primary_only_capacity_consumption(router_bin):
+    # Only the PRIMARY (first) provider in a chain consumes capacity. a,b each cap 1.
+    # req1 -> [a,b] consumes a only; req2 -> [b,c] consumes b only (b still had capacity).
+    # If a naive impl consumed every replica, req2 would be just [c] (degraded).
+    cfg = {"strategy": "latency", "max_replicas": 2, "providers": [
+        prov("a", "ra", 10, cap=1), prov("b", "rb", 20, cap=1), prov("c", "rc", 30, cap=10)]}
+    reqs = [{"id": "1", "user_region": "x"}, {"id": "2", "user_region": "x"}]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
+        assert out == [["a", "b"], ["b", "c"]]
+        assert code == 0
+
+
+def test_spillover_when_primary_exhausted(router_bin):
+    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
+        prov("a", "r", 10, cap=1), prov("b", "r", 50, cap=10)]}
+    reqs = [{"id": str(i), "user_region": "r"} for i in range(3)]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
+        assert out == [["a"], ["b"], ["b"]]
+        assert code == 0
+
+
+def test_degraded_when_fewer_than_max_replicas(router_bin):
+    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
+        prov("a", "us", 10), prov("b", "eu", 10)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)
+        assert out == [["a", "b"]] and code == 1
+        with open(j, "rb") as f:
+            recs, _ = decode_journal(f.read())
+        assert recs == [(0, "r", ["a", "b"])]
+
+
+def test_all_ineligible_empty_chain_exit1(router_bin):
+    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
+        prov("slow", "us", 200)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, [{"id": "r", "user_region": "us", "sla_ms": 100}], j, td=td)
+        assert out == [[]] and code == 1
+        with open(j, "rb") as f:
+            recs, _ = decode_journal(f.read())
+        assert recs == [(0, "r", [])]
+
+
+def test_status_down_and_capacity_zero_filtered(router_bin):
+    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
+        prov("down", "us", 5, status="down"), prov("zero", "us", 6, cap=0), prov("up", "us", 50)]}
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        assert run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["up"]]
+
+
+def test_blank_lines_ignored(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    with tempfile.TemporaryDirectory() as td:
+        cp, rp, j = (os.path.join(td, x) for x in ("c.json", "r.jsonl", "j.bin"))
         with open(cp, "w") as f:
             json.dump(cfg, f)
         with open(rp, "w") as f:
-            f.write('{"id":"1","user_region":"us"}\n')
-            f.write("\n")
-            f.write("   \n")
-            f.write('{"id":"2","user_region":"us"}\n')
-        proc = subprocess.run(
-            ["router", "--config", cp, "--requests", rp], capture_output=True, text=True
-        )
-        out = proc.stdout.strip().splitlines()
-        assert len(out) == 2
+            f.write('{"id":"1","user_region":"us"}\n\n   \n{"id":"2","user_region":"us"}\n')
+        proc = subprocess.run([router_bin, "--config", cp, "--requests", rp, "--journal", j],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.stdout.strip().splitlines() == ['["p"]', '["p"]']
 
 
-def test_invalid_config_missing_field():
-    cfg = {
-        "strategy": "latency",
-        "providers": [
-            {"id": "", "region": "us", "latency_ms": -1, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 1, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert code == 2
+# ------------------------------ recovery ----------------------------------
+CFG_CAP = {"strategy": "latency", "max_replicas": 1, "providers": [
+    prov("a", "r", 10, cap=1), prov("b", "r", 50, cap=10)]}
+REQS_CAP = [{"id": "1", "user_region": "r"}, {"id": "2", "user_region": "r"}]
 
 
-def test_degraded_partial_replicas():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 3,
-        "providers": [
-            {"id": "a", "region": "us-east", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "b", "region": "eu-west", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert len(out[0]) == 2
-    assert code == 1
-
-
-def test_exit_code_0_fully_routed():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert out == [["p"]]
-    assert code == 0
-
-
-def test_cost_strategy_picks_cheaper():
-    cfg = {
-        "strategy": "cost",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "fast-exp", "region": "us", "latency_ms": 10, "cost_per_1k": 0.1,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "slow-cheap", "region": "us", "latency_ms": 100, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    # cost strategy: w_cost dominates -> cheaper wins decisively (not a tie)
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert out == [["slow-cheap"]]
-    assert code == 0
-
-
-def test_status_down_filtered():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "down-best", "region": "us", "latency_ms": 5, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "down", "health": 1},
-            {"id": "up-worse", "region": "us", "latency_ms": 50, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert out == [["up-worse"]]
-
-
-def test_default_tenant_unlimited_budget():
-    # A budget exists for "acme" but the request has no tenant -> uses "default",
-    # which is unlimited, so an otherwise-unaffordable provider still routes.
-    cfg = {
-        "strategy": "cost",
-        "max_replicas": 1,
-        "tenant_budgets": {"acme": 0.0000001},
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.05,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert out == [["p"]]
-    assert code == 0
-
-
-def test_payload_kb_ignored():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    a = run_router(cfg, [{"id": "r", "user_region": "us"}])[1]
-    b = run_router(cfg, [{"id": "r", "user_region": "us", "payload_kb": 999}])[1]
-    assert a == b == [["p"]]
-
-
-def test_capacity_spillover_across_providers():
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "a", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 1, "status": "up", "health": 1},
-            {"id": "b", "region": "us", "latency_ms": 50, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    req = [
-        {"id": "1", "user_region": "us"},
-        {"id": "2", "user_region": "us"},
-        {"id": "3", "user_region": "us"},
-    ]
-    code, out, _ = run_router(cfg, req)
-    # a is best (lower latency) but only 1 capacity -> spills to b afterwards
-    assert out == [["a"], ["b"], ["b"]]
-    assert code == 0
-
-
-def _cfg_with(provider_over=None, top_over=None):
-    p = {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-         "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1}
-    if provider_over:
-        p.update(provider_over)
-    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [p]}
-    if top_over:
-        cfg.update(top_over)
-    return cfg
-
-
-def test_config_validation_exit2_variants():
-    req = [{"id": "r", "user_region": "us"}]
-    bad_cfgs = [
-        {"strategy": "latency", "max_replicas": 1, "providers": [
-            {"id": "dup", "region": "us", "latency_ms": 1, "cost_per_1k": 0.01, "error_rate": 0, "capacity_rps": 1, "status": "up", "health": 1},
-            {"id": "dup", "region": "us", "latency_ms": 1, "cost_per_1k": 0.01, "error_rate": 0, "capacity_rps": 1, "status": "up", "health": 1},
-        ]},                                                   # duplicate id
-        _cfg_with({"status": "maybe"}),                       # unrecognized status
-        _cfg_with({"error_rate": 1.5}),                       # error_rate > 1
-        _cfg_with({"capacity_rps": -1}),                      # negative capacity
-        _cfg_with({"health": 0}),                             # health not in (0,1]
-        _cfg_with({"health": 1.5}),                           # health > 1
-        _cfg_with(top_over={"max_replicas": 0}),             # max_replicas < 1
-    ]
-    for cfg in bad_cfgs:
-        code, _, _ = run_router(cfg, req)
-        assert code == 2, f"expected exit 2 for {cfg}"
-
-
-def test_invalid_requests_line_exit2():
-    # A malformed JSON line in the requests file must produce exit 2 (no output).
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
+def test_resume_idempotent_complete(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}]
     with tempfile.TemporaryDirectory() as td:
-        cp = os.path.join(td, "c.json")
-        rp = os.path.join(td, "r.jsonl")
+        j = os.path.join(td, "j.bin")
+        c1, o1, _ = run(router_bin, cfg, reqs, j, td=td)
+        with open(j, "rb") as f:
+            b1 = f.read()
+        c2, o2, _ = run(router_bin, cfg, reqs, j, resume=True, td=td)
+        with open(j, "rb") as f:
+            b2 = f.read()
+        assert (c1, o1, b1) == (c2, o2, b2)
+
+
+def test_resume_reconstructs_capacity(router_bin):
+    # The crux: resume must rebuild remaining capacity by replaying recorded PRIMARY
+    # consumption. After truncating to request 1's record, request 2 must go to 'b'.
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
+        assert out_full == [["a"], ["b"]]
+        with open(j, "rb") as f:
+            full = f.read()
+        _, ends = decode_journal(full)
+        with open(j, "wb") as f:
+            f.write(full[:ends[0]])
+        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
+        assert code == 0 and out == [["a"], ["b"]]  # naive resume gives [["a"],["a"]]
+        with open(j, "rb") as f:
+            assert f.read() == full
+
+
+def test_resume_torn_tail(router_bin):
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
+        with open(j, "rb") as f:
+            full = f.read()
+        _, ends = decode_journal(full)
+        with open(j, "wb") as f:
+            f.write(full[:ends[0]] + full[ends[0]:ends[1]][:4])  # partial 2nd record
+        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
+        assert code == 0 and out == out_full
+        with open(j, "rb") as f:
+            assert f.read() == full
+
+
+def test_resume_bad_crc_tail_recovered(router_bin):
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
+        with open(j, "rb") as f:
+            full = f.read()
+        _, ends = decode_journal(full)
+        corrupt = bytearray(full)
+        corrupt[ends[1] - 1] ^= 0xFF
+        with open(j, "wb") as f:
+            f.write(bytes(corrupt))
+        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
+        assert code == 0 and out == out_full
+        with open(j, "rb") as f:
+            assert f.read() == full
+
+
+def test_corrupt_midfile_bad_crc_exit3(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}, {"id": "3", "user_region": "us"}]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        r1 = bytearray(encode_record(1, "2", ["p"]))
+        r1[-1] ^= 0xFF
+        with open(j, "wb") as f:
+            f.write(HEADER + encode_record(0, "1", ["p"]) + bytes(r1) + encode_record(2, "3", ["p"]))
+        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
+
+
+def test_corrupt_header_seqgap_idmismatch_exit3(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        with open(j, "wb") as f:
+            f.write(b"XXXXXXXX" + encode_record(0, "1", ["p"]))
+        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
+        with open(j, "wb") as f:
+            f.write(HEADER + encode_record(0, "1", ["p"]) + encode_record(2, "2", ["p"]))  # seq gap
+        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
+        with open(j, "wb") as f:
+            f.write(HEADER + encode_record(0, "WRONG", ["p"]))  # id mismatch
+        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
+
+
+def test_journal_exists_without_resume_exit2(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    reqs = [{"id": "1", "user_region": "us"}]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        run(router_bin, cfg, reqs, j, td=td)
+        with open(j, "rb") as f:
+            before = f.read()
+        assert run(router_bin, cfg, reqs, j, resume=False, td=td)[0] == 2
+        with open(j, "rb") as f:
+            assert f.read() == before
+
+
+def test_unicode_id_byte_length(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("aws-us", "us-east", 40)]}
+    reqs = [{"id": "café-日本", "user_region": "us-east"}]
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
+        assert code == 0 and out == [["aws-us"]]
+        with open(j, "rb") as f:
+            assert f.read() == HEADER + encode_record(0, "café-日本", ["aws-us"])
+
+
+# --------------------------- validation exit 2 ----------------------------
+def test_invalid_config_exit2_variants(router_bin):
+    reqs = [{"id": "r", "user_region": "us"}]
+    def base():
+        return {"strategy": "latency", "max_replicas": 1, "providers": [prov("p", "us", 10)]}
+    bad = []
+    b = base(); b["strategy"] = "bogus"; bad.append(b)
+    b = base(); del b["providers"]; bad.append(b)
+    b = base(); b["max_replicas"] = 0; bad.append(b)
+    b = base(); b["providers"][0]["id"] = ""; bad.append(b)
+    b = base(); b["providers"].append(dict(b["providers"][0])); bad.append(b)
+    b = base(); b["providers"][0]["latency_ms"] = -1; bad.append(b)
+    b = base(); b["providers"][0]["latency_ms"] = 1.5; bad.append(b)
+    b = base(); b["providers"][0]["error_rate"] = 1.5; bad.append(b)
+    b = base(); b["providers"][0]["capacity_rps"] = -3; bad.append(b)
+    b = base(); b["providers"][0]["status"] = "maybe"; bad.append(b)
+    with tempfile.TemporaryDirectory() as td:
+        j = os.path.join(td, "j.bin")
+        for cfg in bad:
+            code, _, _ = run(router_bin, cfg, reqs, j, td=td)
+            assert code == 2, f"expected 2 for {cfg}"
+            assert not os.path.exists(j)
+
+
+def test_invalid_requests_line_exit2(router_bin):
+    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
+    with tempfile.TemporaryDirectory() as td:
+        cp, rp, j = (os.path.join(td, x) for x in ("c.json", "r.jsonl", "j.bin"))
         with open(cp, "w") as f:
             json.dump(cfg, f)
         with open(rp, "w") as f:
-            f.write('{"id":"1","user_region":"us"}\n')
-            f.write("this is not json\n")
-        proc = subprocess.run(
-            ["router", "--config", cp, "--requests", rp], capture_output=True, text=True
-        )
-        assert proc.returncode == 2
-        assert proc.stdout.strip() == ""
-
-
-def test_error_rate_weight_decisive():
-    # Providers identical except error_rate; w_err (10000) makes the lower-error
-    # provider win decisively (no tie), exercising the error_rate scoring term.
-    cfg = {
-        "strategy": "latency",
-        "max_replicas": 1,
-        "providers": [
-            {"id": "err-high", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0.1, "capacity_rps": 10, "status": "up", "health": 1},
-            {"id": "err-low", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0.001, "capacity_rps": 10, "status": "up", "health": 1},
-        ],
-    }
-    code, out, _ = run_router(cfg, [{"id": "r", "user_region": "us"}])
-    assert out == [["err-low"]]
-    assert code == 0
-
-
-def test_multiple_tenants_independent_budgets():
-    # Each tenant has its own budget; one exhausting its budget must not affect
-    # the other. Per-request cost = 0.01/1000 = 0.00001; each budget affords one.
-    cfg = {
-        "strategy": "cost",
-        "max_replicas": 1,
-        "tenant_budgets": {"A": 0.00001, "B": 0.00001},
-        "providers": [
-            {"id": "p", "region": "us", "latency_ms": 10, "cost_per_1k": 0.01,
-             "error_rate": 0, "capacity_rps": 100, "status": "up", "health": 1},
-        ],
-    }
-    req = [
-        {"id": "1", "user_region": "us", "tenant": "A"},
-        {"id": "2", "user_region": "us", "tenant": "B"},
-        {"id": "3", "user_region": "us", "tenant": "A"},
-        {"id": "4", "user_region": "us", "tenant": "B"},
-    ]
-    code, out, _ = run_router(cfg, req)
-    assert out == [["p"], ["p"], [], []]
-    assert code == 1
+            f.write('{"id":"1","user_region":"us"}\nnot json\n')
+        proc = subprocess.run([router_bin, "--config", cp, "--requests", rp, "--journal", j],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 2 and proc.stdout.strip() == ""
