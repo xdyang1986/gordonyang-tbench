@@ -31,3 +31,37 @@ Latest online validation — all gates passing:
 | Provenance | Clean |
 
 Difficulty comes from a prior-violating leadership rule (sticky election) combined with a large cumulative correctness surface (persistence + election + routing + zone replicas + stable routing) under all-or-nothing scoring: the strong models solve it reliably while the weaker model degrades (edge misses and occasional failure to complete a buildable solution).
+
+## Why the weaker model fails (difficulty analysis)
+
+Scoring is all-or-nothing (reward 1 only if every test passes), so a single missed
+behavior sinks the whole trial. The failure modes observed in the weaker model's
+losing trials:
+
+1. **Prior-violating sticky leadership.** The natural implementation re-computes the
+   "best" alive node on every `QUERY_PRIMARY`. The spec instead requires the primary
+   to be *sticky*: set on the first REGISTER, never preempted by a later higher-weight
+   or fresher node, unaffected by heartbeat expiration, and unseated only by an
+   explicit `FAIL` of the incumbent. A recompute-best-alive implementation fails ~9
+   leadership tests. This is the primary discriminator — it fights the model's default
+   instinct rather than testing a spec it can transcribe.
+
+2. **Minimal-disruption stable routing.** `QUERY_ROUTE` is specified as a *property*
+   (changing one node must not reshuffle clients among the others), not an algorithm.
+   The tempting move is to reuse the `QUERY_CONNECT` modulo scheme, which reshuffles
+   almost every client when the node count changes and fails the stability tests. A
+   correct solution must recognize the property demands consistent/rendezvous hashing.
+
+3. **Crash-recovery edges.** The durable log must tolerate a torn/corrupt trailing
+   record (partial write, bad CRC) on recovery, truncate it, and keep appending
+   cleanly; compaction must be atomic (temp-file + rename) and must preserve the
+   order-dependent sticky incumbent. Weaker solutions pass the happy path but miss an
+   edge such as torn-tail-then-append.
+
+4. **Cumulative surface + interactions.** Membership, expiration, sticky election,
+   two distinct routing schemes, zone-aware replica selection, and crash-consistent
+   persistence must all be correct simultaneously and interact correctly (e.g. the
+   primary can be absent from `QUERY_NODES` yet still be primary; `timeout` is
+   per-session config and is not persisted). The sheer volume of interacting,
+   individually-subtle requirements means the weaker model sometimes fails to produce
+   a fully correct — or even buildable — solution at all.
