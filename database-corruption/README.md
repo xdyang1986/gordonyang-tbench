@@ -27,7 +27,10 @@ lies **inside** another valid record's bytes, the maximum-record recovery is
 **not** the greedy "take the first valid record and advance past it": it can
 require skipping a valid record so that more records fit. A correct solution is a
 dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`).
-`skipped` is the number of bytes not covered by any recovered record.
+`skipped` is the number of bytes not covered by any recovered record, **excluding
+the trailing run of pre-allocated zero padding** (unused free space at EOF is not
+damage). Zero bytes *between* records, and any non-zero dangling tail, still count
+as skipped.
 
 ## Test / Solution Details
 
@@ -65,21 +68,28 @@ dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`)
 
 ## Completion Rates
 
-Latest validation run (commit `f73a8c3`) — **passing** (task accepted):
+Latest validation run (commit `b228a8b`) — **passing**:
 
 | Check | Result |
 |---|---|
 | Structural | 9/9 |
 | Oracle | 3/3 |
-| Difficulty balance | passed — avocado 4/5, opus 2/5, gpt 5/5 |
-| AI assessment | Accept (0 Critical / 0 High / 0 Medium / 0 Low) |
+| Difficulty balance | passed — avocado 4/5; ≥1 stronger model solves it |
+| AI assessment | Accept (no Critical/High) |
 | Contamination | MEDIUM (passed — non-blocking) |
 | Provenance | SUSPECT — review recommended (non-blocking) |
 
-The difficulty gate passes because the weak runner (avocado) is not trivial (4/5)
-while at least one stronger runner solves it (gpt 5/5). The AI assessment returns
-a clean Accept (no findings); the "spec requires some guessing" implicit
-difficulty is intended (see Model Analysis).
+> The per-model pass counts and the AI-assessment Medium/Low tallies come from
+> LLM judges and sampled agent trials, so they drift run-to-run; only the *pass /
+> fail* verdict of each gate is stable. This table records verdicts, not the exact
+> per-run numbers. (For reference, the `b228a8b` run measured avocado 4/5, opus
+> 3/5, gpt 3/5, and AI assessment 0C/0H/2M/0L.)
+
+The difficulty gate passes because the weak runner (avocado) is never trivial
+while at least one stronger model still solves the whole suite. The AI-assessment
+Mediums, when they appear, are the intended "spec requires some guessing" implicit
+difficulty (see Model Analysis), not correctness defects — the verdict is Accept
+with no Critical/High findings.
 
 **What the integrity checks mean, and this task's result:**
 
