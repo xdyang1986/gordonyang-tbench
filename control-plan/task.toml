@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/control-plan"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Debug and fix a buggy Go ZooKeeper-like control-plane coordinator shipped at /app/main.go. It handles membership (REGISTER/HEARTBEAT/FAIL), sticky weighted leader election with a leadership epoch, hash + minimal-disruption stable routing, zone-aware replica selection, and a crash-consistent durable log with recovery and compaction. It builds and runs but has subtle defects (a missing epoch bump on failover re-election, a zone-constraint leak in replica fill, and an off-by-one in durable-log recovery that drops the last record); the agent must localize and fix them in place so the hidden test suite passes, without rewriting from scratch."
-keywords = ["go", "distributed", "zookeeper", "service-discovery", "leader-election", "consistent-hashing", "crash-consistency", "debugging"]
+description = "Implement a ZooKeeper-like control plane coordinator in Go: membership via REGISTER/HEARTBEAT/FAIL, sticky weighted leader election with an explicit leadership state machine (DEMOTE step-down/re-election and TRANSFER forced handoff, each starting a new term), hash + minimal-disruption stable routing, zone-aware replica selection, and a crash-consistent durable log with recovery and compaction that preserves the incumbent and term."
+keywords = ["go", "distributed", "zookeeper", "service-discovery", "leader-election", "consistent-hashing", "crash-consistency"]
 
 [[task.authors]]
 name = "Gordon Yang"

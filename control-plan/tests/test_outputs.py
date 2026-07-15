@@ -200,6 +200,81 @@ def test_register_revives_after_fail():
     assert lines(r.stdout) == ["NONE", "n1 2", "a1new"]
 
 
+def test_demote_reelects_same_node_but_bumps_epoch():
+    # Sole node: DEMOTE steps it down then re-elects it (still the best) -> the
+    # primary is unchanged but the term MUST advance.
+    stdin = "timeout=0\nREGISTER a aA z1 5 0\nQUERY_PRIMARY 1\nDEMOTE 2\nQUERY_PRIMARY 3\n"
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "a 2"]
+
+
+def test_demote_lets_blocked_higher_weight_take_over():
+    # 'a' is sticky primary; 'b' (weight 9) was blocked by stickiness. DEMOTE
+    # re-elects best non-failed -> b now wins WITHOUT any FAIL. Term advances.
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 1 0\nREGISTER b bB z1 9 0\nQUERY_PRIMARY 1\n"
+        "DEMOTE 2\nQUERY_PRIMARY 3\n"
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "b 2"]
+
+
+def test_demote_no_primary_is_noop():
+    stdin = "timeout=0\nDEMOTE 0\nQUERY_PRIMARY 1\n"
+    r = run(stdin)
+    assert r.returncode == 0
+    assert lines(r.stdout) == ["NONE"]
+
+
+def test_demote_then_sticky_resumes():
+    # After DEMOTE hands leadership to b, a later higher-weight REGISTER must NOT
+    # preempt b -- stickiness resumes for the new incumbent.
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 1 0\nDEMOTE 1\nQUERY_PRIMARY 2\n"  # re-elect a, term 2
+        "REGISTER b bB z1 9 3\nQUERY_PRIMARY 4\n"                        # sticky: still a
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 2", "a 2"]
+
+
+def test_transfer_forces_named_node_ignoring_rank():
+    # 'a' is sticky primary. TRANSFER to 'b' hands leadership to b even though b
+    # has *lower* weight than a -- ranking is ignored on an explicit handoff.
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 9 0\nREGISTER b bB z1 1 0\nQUERY_PRIMARY 1\n"
+        "TRANSFER b 2\nQUERY_PRIMARY 3\n"
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "b 2"]
+
+
+def test_transfer_to_self_bumps_epoch():
+    # A handoff to the current primary is still a valid handoff: same primary, new term.
+    stdin = "timeout=0\nREGISTER a aA z1 5 0\nQUERY_PRIMARY 1\nTRANSFER a 2\nQUERY_PRIMARY 3\n"
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "a 2"]
+
+
+def test_transfer_to_unknown_or_failed_is_noop():
+    # Unknown target -> ignored; failed target -> ignored. Term unchanged either way.
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 5 0\nTRANSFER ghost 1\nQUERY_PRIMARY 2\n"  # a 1
+        "REGISTER b bB z1 5 3\nFAIL b 4\nTRANSFER b 5\nQUERY_PRIMARY 6\n"       # a 1
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "a 1"]
+
+
+def test_transfer_then_sticky_resumes():
+    # After TRANSFER to b, a later higher-weight REGISTER must not preempt b.
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 5 0\nREGISTER b bB z1 1 0\nTRANSFER b 1\n"
+        "QUERY_PRIMARY 2\nREGISTER c cC z1 9 3\nQUERY_PRIMARY 4\n"
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["b 2", "b 2"]
+
+
 def test_connect_hash_selection():
     stdin = (
         "timeout=0\nREGISTER a addrA z1 1 0\nREGISTER b addrB z1 1 0\nREGISTER c addrC z1 1 0\n"
@@ -237,6 +312,10 @@ def test_invalid_command_exits_nonzero():
     assert run("timeout=0\nQUERY_PRIMARY notint\n").returncode != 0
     assert run("timeout=0\nQUERY_REPLICAS 0 0\n").returncode != 0
     assert run("timeout=0\nQUERY_REPLICAS -1 0\n").returncode != 0
+    assert run("timeout=0\nDEMOTE\n").returncode != 0
+    assert run("timeout=0\nDEMOTE notint\n").returncode != 0
+    assert run("timeout=0\nTRANSFER onlyone\n").returncode != 0
+    assert run("timeout=0\nTRANSFER n1 notint\n").returncode != 0
 
 
 def test_heartbeat_unknown_ignored_not_error():
@@ -452,6 +531,40 @@ def test_epoch_survives_compaction(tmp_path):
     run("timeout=0\nCOMPACT 3\n", state_dir=d)
     # compacted log replays to a single election; the term must be persisted (=2)
     r = run("timeout=0\nQUERY_PRIMARY 4\n", state_dir=d)
+    assert lines(r.stdout) == ["b 2"]
+
+
+def test_demote_survives_restart(tmp_path):
+    d = str(tmp_path)
+    # a sticky primary; b(w9) blocked. DEMOTE hands leadership to b at term 2.
+    run("timeout=0\nREGISTER a aA z1 1 0\nREGISTER b bB z1 9 0\nDEMOTE 2\n", state_dir=d)
+    r = run("timeout=0\nQUERY_PRIMARY 3\n", state_dir=d)
+    assert lines(r.stdout) == ["b 2"]  # DEMOTE logged & replayed
+
+
+def test_demote_survives_compaction(tmp_path):
+    d = str(tmp_path)
+    run("timeout=0\nREGISTER a aA z1 1 0\nREGISTER b bB z1 9 0\nDEMOTE 2\n", state_dir=d)
+    run("timeout=0\nCOMPACT 5\n", state_dir=d)
+    r = run("timeout=0\nQUERY_PRIMARY 6\n", state_dir=d)
+    assert lines(r.stdout) == ["b 2"]  # post-DEMOTE incumbent + term preserved
+
+
+def test_transfer_survives_restart(tmp_path):
+    d = str(tmp_path)
+    # a is best (w9) but leadership is TRANSFERred to lower-weight b.
+    run("timeout=0\nREGISTER a aA z1 9 0\nREGISTER b bB z1 1 0\nTRANSFER b 2\n", state_dir=d)
+    r = run("timeout=0\nQUERY_PRIMARY 3\n", state_dir=d)
+    assert lines(r.stdout) == ["b 2"]  # TRANSFER logged & replayed
+
+
+def test_transfer_survives_compaction(tmp_path):
+    d = str(tmp_path)
+    run("timeout=0\nREGISTER a aA z1 9 0\nREGISTER b bB z1 1 0\nTRANSFER b 2\n", state_dir=d)
+    run("timeout=0\nCOMPACT 5\n", state_dir=d)
+    # compaction must emit b (the incumbent) first so replay keeps b primary even
+    # though a outranks it, and persist the term (=2).
+    r = run("timeout=0\nQUERY_PRIMARY 6\n", state_dir=d)
     assert lines(r.stdout) == ["b 2"]
 
 
