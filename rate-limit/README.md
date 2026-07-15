@@ -46,7 +46,7 @@ records are **dead** until `compact`.
 - **Tests** (`tests/test_outputs.py`): build agent source with `go build ./...`, drive the binary over
   subprocess with fresh per-test databases, and — using a Python codec that mirrors the mandated
   format — assert on-disk bytes, inject torn/corrupt/stale-temp files, and check recovery + exit codes.
-  Coverage: core set/peek/allow/delete/scan, exit contract (missing peek → 3, deny → 3, corruption → 4),
+  Coverage: core set/peek/allow/delete/scan, exit contract (usage/forbidden-key → 2, missing peek → 3, deny → 3, corruption → 4),
   raw-byte ordering, half-open scan, refill math **including int64 overflow saturation**, byte-safe keys
   (spaces accepted, TAB/LF rejected), TAB-delimited batch (space-delimited rejected, blank = empty line
   only), log-structured `stats`/`compact`, crash recovery (torn tail dropped, mid-log corruption fatal,
@@ -61,8 +61,14 @@ records are **dead** until `compact`.
 
 ## Completion Rates
 
-Validation **PASSING** (commit 42f285d): oracle 3/3, avocado (avocado_dvsc_tester) 2/5, gpt-5.5 0/5.
-Structural 9/9, AI assessment Accept (0·0·2·0), contamination LOW, provenance pass.
+Validation **PASSING** (commit 0295965): oracle 3/3, avocado (avocado_dvsc_tester) 2/5,
+claude-opus-4-6 4/5, gpt-5.5 2/5. All validation gates passing (structural, oracle, agent-mix,
+AI assessment Accept, contamination LOW, provenance pass).
+
+This run followed a test-rigor fix that closed two spec⇄test gaps: the mandated forbidden-byte
+key rejection (NUL/TAB/LF → exit 2) is now exercised directly, and the usage-error tests assert the
+mandated exit code 2 exactly (previously `not in (0,3)`). Re-introducing these exit-2 discriminators
+kept the task in the passing band (avocado held at 2/5) rather than tipping it too-hard.
 
 ## Model Analysis
 
@@ -70,8 +76,9 @@ The task keeps the from-scratch shape but replaces recallable, textbook requirem
 binary format and asymmetric crash-recovery rules that resist one-pass recall: a model must get the
 exact CRC framing, the torn-tail-vs-mid-log-corruption asymmetry (with a distinct exit code),
 int64-overflow saturation, and byte-safe key handling all correct simultaneously. Each is individually
-easy to overlook and is tested independently, so a single missed corner fails the suite — strong models
-(avocado 2/5) solve it some but not all of the time, while gpt-5.5 (0/5) does not.
+easy to overlook and is tested independently, so a single missed corner fails the suite — models land
+in a spread (avocado 2/5, opus 4/5, gpt-5.5 2/5) rather than all-pass or all-fail, confirming the task
+discriminates on getting every corner right at once.
 
 ## Anti-Cheating Analysis
 
