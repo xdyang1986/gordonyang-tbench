@@ -1,188 +1,69 @@
-# Control Plane Coordinator
+# Fix the control-plane coordinator
 
-Build a ZooKeeper-style control-plane coordinator in Go at `/app`. It tracks cluster membership, elects a sticky primary, serves service-discovery queries, and optionally persists all state to disk so it survives restarts.
+A Go program lives in `/app` — a ZooKeeper-like control-plane coordinator. It reads a
+config line then a stream of commands on stdin (`REGISTER`, `HEARTBEAT`, `FAIL`,
+`COMPACT`, and `QUERY_*`) and writes one line of output per query to stdout. When the
+environment variable `COORD_STATE_DIR` is set it also persists state to a durable
+append-only log in that directory and recovers it on startup.
 
-You will implement a single `package main` binary. It reads commands from stdin, updates in-memory state, optionally appends to a durable log, and writes one line of output per query to stdout.
+The program builds and runs, but **it has bugs**: some outputs are wrong. Your job is to
+find and fix the defect(s) in the Go source under `/app` so the program is correct for all
+inputs. The logic is sound apart from the defects — do **not** rewrite it from scratch, and
+keep the same commands, input parsing, and output format.
 
----
+Note: the coordinator's leadership is intentionally *sticky* — the first-registered node
+stays primary even when a later node has higher weight, and heartbeat expiration never
+unseats it. That behavior is **correct and deliberate**; do not "fix" it.
 
-## Configuration
+## Failing cases
 
-The first non-empty line of stdin is:
-
-```
-timeout=<seconds>
-```
-
-* `timeout` — integer ≥0. A node is considered alive for discovery queries only if `timestamp - last_heartbeat ≤ timeout`. `0` disables expiration. Expiration never affects primary election.
-
-The coordinator also reads environment variable `COORD_STATE_DIR`:
-
-* unset or empty → **in-memory mode**: no disk writes, `COMPACT` is a no-op.
-* set to a directory path → **durable mode**: append-only log at `$COORD_STATE_DIR/coordinator.log`, recovered on startup, compacted on demand.
-
----
-
-## Command Stream
-
-After the config line, each non-blank line is one command. Tokens are space-separated, no quoted strings. Timestamps are non-negative integers and non-decreasing in valid inputs. Commands are processed strictly in order.
-
-### State-changing commands — no output
-
-**`REGISTER <node_id> <address> <zone> <weight> <timestamp>`**
-Create or update a node. Store address, zone, weight (integer ≥0). Mark not failed, set last_heartbeat to timestamp. Revives a previously failed node. Always logged in durable mode.
-
-**`HEARTBEAT <node_id> <timestamp>`**
-Refresh last_heartbeat if the node exists and is not failed. Ignored otherwise. Logged only when it updates state.
-
-**`FAIL <node_id> <timestamp>`**
-Mark node failed immediately. Future heartbeats are ignored until a new REGISTER. Logged only if node exists.
-
-**`COMPACT <timestamp>`**
-In durable mode, rewrite the log to the minimal record set that reconstructs the current state and current primary exactly. Atomic via temp file + rename. In-memory mode: no-op. No output.
-
-### Query commands — one output line each
-
-All queries take a timestamp used for aliveness evaluation. Aliveness for discovery queries means: node is registered, not failed, and `timeout==0 or timestamp-last_heartbeat ≤ timeout`.
-
-**`QUERY_PRIMARY <timestamp>`**
-Output <primary_node_id> <epoch> (two tokens, one space), or NONE if there is no primary.
-
-Leadership is sticky and independent of aliveness. The coordinator maintains an integer leadership epoch (term), starting at 0:
-- When there is no primary, elect the best non-failed node by: highest weight → most recent last_heartbeat → smallest address → smallest node_id, and increment the epoch by 1.
-- Once elected, the primary stays primary through new REGISTERs, heartbeats, and expirations. A higher-weight node does not preempt, and the epoch does not change.
-- Only an explicit FAIL of the current primary unseats it. On unseat, immediately re-elect the best remaining non-failed node by the same ordering and increment the epoch by 1; if none remain, there is no primary and the epoch is left unchanged (the next election increments it).
-
-**`QUERY_CONNECT <client_id> <timestamp>`**
-Output address for simple hash routing, or `NONE` if no alive nodes.
-
-Take alive node_ids sorted ascending. Compute `h = sum of byte values of client_id`. Pick index `h % len(alive)`. Output that node's address.
-
-**`QUERY_ROUTE <client_id> <timestamp>`**
-Output address for stable routing, or `NONE`.
-
-Must satisfy three properties: (1) deterministic for a given client and alive set; (2) minimal-disruption — when the alive set changes, only clients whose old node left or whose new node joined may change assignment, with no reshuffle among unchanged nodes; (3) balanced — with multiple alive nodes and many distinct clients, assignments are spread across the alive set, not collapsed onto a single node. Any scheme meeting all three is acceptable.
-
-**`QUERY_REPLICAS <k> <timestamp>`**
-Output comma-separated node_id list of size `min(k, alive_count)`, or `NONE` if no alive nodes. `k ≥1`.
-
-Order alive nodes by preference: highest weight → most recent heartbeat → smallest address → smallest id.
-
-Phase 1 — zone diversity: scan preference order, pick each node whose zone has not yet been selected, until k picked or scan ends.
-Phase 2 — fill: scan preference order again, pick highest-preference not-yet-picked nodes ignoring zone, until k picked.
-
-Output selected ids in selection order, no spaces.
-
-**`QUERY_NODES <timestamp>`**
-Output comma-separated alive node_ids sorted ascending, or `NONE`.
-
----
-
-## Output Format
-
-For each query in input order, write exactly one line: `NONE`, a node_id, an address, or a comma list. No header, no extra spaces, no trailing blank lines required beyond newline. Flush and exit 0 on valid input. On invalid input, exit non-zero; output is unspecified.
-
-Invalid input includes: malformed config, unknown command name, wrong arity, non-integer or negative numeric field, empty required string. `HEARTBEAT` for unknown node is silently ignored, not an error.
-
----
-
-## Durable Persistence
-
-Only active when `COORD_STATE_DIR` is set.
-
-**Startup recovery:** create directory if needed. Before reading stdin, replay `$COORD_STATE_DIR/coordinator.log` record by record in order. Each record must reconstruct REGISTER, HEARTBEAT, or FAIL exactly as originally processed, so primary election order is preserved. Stop at first incomplete or corrupt record; discard it and all following bytes. Truncate the log to the valid prefix so later appends are clean. Never fail startup due to a torn tail. An EPOCH record (produced by compaction) sets the current epoch on replay.
-
-**Log format — `coordinator.log`:**
-Sequence of records, each:
-```
-uint32 little-endian  payload_len
-uint32 little-endian  crc32 IEEE of payload
-payload_len bytes     UTF-8 payload
-```
-Payload is the command text exactly as logged: e.g. `REGISTER n1 10.0.0.1:8080 east 5 7`, no newline. A record is valid only if 8 header bytes plus payload_len bytes are present and CRC matches.
-
-**What is logged, in order:**
-* `REGISTER` — always.
-* `HEARTBEAT` — only when it updates an existing non-failed node.
-* `FAIL` — only when node exists.
-Queries and COMPACT are never appended as payloads; COMPACT rewrites the whole file instead.
-- EPOCH <n> — written only by compaction, never by live appends; on replay it sets the current epoch to n.
-
-Each append must be durable before process exit.
-
-**Compaction:** `COMPACT` writes a new temporary file `$COORD_STATE_DIR/coordinator.log.tmp` containing for each known node a REGISTER with its current address zone weight last_heartbeat, followed by FAIL if currently failed, in an order that replays to the same primary as before, and finally a single EPOCH <n> record carrying the current epoch (the election count cannot be recomputed from a minimized log, so it is persisted explicitly). Then atomically rename over coordinator.log. Recovery ignores `.tmp` files.
-
----
-
-## Functional Requirements Summary
-
-1. REGISTER creates/updates and revives; HEARTBEAT refreshes; FAIL kills.
-2. Aliveness for discovery queries uses timeout lazily at query time.
-3. Primary election is sticky (weight → freshness → address → id), unseated only by FAIL; a leadership epoch increments on each election, is reported by QUERY_PRIMARY, and is preserved across restart and compaction.
-4. QUERY_CONNECT uses sorted-id modulo hash.
-5. QUERY_ROUTE is deterministic and stable under membership change.
-6. QUERY_REPLICAS is preference-ordered zone-diverse then fill.
-7. Deterministic output for same stdin and same starting disk state. No randomness, no time.Now, sort all map keys.
-8. Durable mode survives restarts with crash-consistent recovery and atomic compaction preserving primary.
-9. Go standard library only.
-10. Invalid config or command → non-zero exit.
-
----
-
-## Examples
-
-### In-memory example
+**1) Leadership term after a failover.**
 
 Input:
 ```
 timeout=0
-REGISTER edge 10.0.0.9:9 west 1 0
-REGISTER core1 10.0.0.1:1 east 5 3
-REGISTER core2 10.0.0.2:2 east 5 8
-REGISTER mid 10.0.0.3:3 west 5 8
-QUERY_PRIMARY 10
-FAIL edge 11
-QUERY_PRIMARY 12
-QUERY_REPLICAS 2 12
-QUERY_NODES 12
+REGISTER n1 a1 z1 5 0
+REGISTER n2 a2 z1 5 0
+QUERY_PRIMARY 0
+FAIL n1 1
+QUERY_PRIMARY 2
 ```
+Currently prints `n1 1` then `n2 1`. The second line is wrong — re-electing after the
+primary is `FAIL`ed begins a new leadership term, so the correct output is `n1 1` then
+`n2 2`.
 
-Output:
-```
-edge 1
-core2 2
-core2,mid
-core1,core2,mid
-```
+**2) Replica selection when zones are exhausted.**
 
-`edge` registers first and becomes sticky primary despite lower weight. After explicit FAIL, re-elect among remaining: weight 5 tie, freshest heartbeat 8 tie between core2 and mid, core2 address sorts first. Replicas pick one per zone in preference order, then nodes list sorted.
-
-### Durable example
-
-With `COORD_STATE_DIR=/var/coord`, first run stdin:
+Input:
 ```
 timeout=0
-REGISTER low la west 1 0
-REGISTER high ha east 9 0
+REGISTER a aa Z1 5 0
+REGISTER b bb Z1 5 0
+QUERY_REPLICAS 2 0
 ```
-Second run with same directory, stdin:
+Currently prints `a`. `QUERY_REPLICAS 2` must return `min(k, alive) = 2` nodes — after one
+per distinct zone, the rest are filled by rank regardless of zone — so the correct output
+is `a,b`.
+
+**3) Durability across a restart.**
+
+Run once with `COORD_STATE_DIR=/tmp/coord` on stdin:
 ```
 timeout=0
-QUERY_PRIMARY 5
+REGISTER n1 a1 z1 5 0
+REGISTER n2 a2 z1 5 0
 ```
-Output must be:
+Then run again with the same `COORD_STATE_DIR` on stdin:
 ```
-low 1
+timeout=0
+QUERY_NODES 5
 ```
-`low` was first registered and remains sticky primary after recovery, even though `high` has higher weight.
+Currently prints `n1` — the most recent registration was lost on recovery. The correct
+output is `n1,n2`.
 
----
+## Task
 
-## Non-Functional
+Repair the program in `/app` so it is correct on these cases and in general, keeping the
+existing behavior and I/O format intact.
 
-* Go, `package main`, builds with `go build -o <binary> .`.
-* Reads stdin, writes stdout, exit codes as above.
-* Single-threaded sequential processing.
-* Deterministic sorting for all map iteration.
-
-Implement at `/app`. The test harness builds your binary, feeds stdin, checks stdout exactly, and restarts processes with a shared `COORD_STATE_DIR` to verify durability and crash-consistent recovery.
+Build: `cd /app && go build -o /app/coordinator .`
