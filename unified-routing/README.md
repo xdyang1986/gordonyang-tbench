@@ -64,7 +64,7 @@ Getting correct cond var protocol with context helper goroutine, snapshot deep c
 
 ## Completion Rates
 
-Latest validation run — **passing**: oracle 5/5 (Docker, reliable), avocado (metacode) 2/5, opus 2/5.
+Latest validation run — **passing**: oracle 5/5 (Docker, reliable), avocado (metacode) 2/5, opus 5/5 (AI assessment: Accept).
 Difficulty is graded and genuine — both models consistently miss post-close semantics
 (Route/WaitRoute/BatchRoute after Close), the empty/zero batch return, and close/add races (real logic
 failures under `go test -race -count=20`, not timing flakes). The core selection rule

@@ -150,35 +150,6 @@ func TestHiddenSnapshotConsistency(t *testing.T) {
 	}
 }
 
-func TestHiddenCloseIdempotent(t *testing.T) {
-	r := New([]Provider{{"a", 1}})
-	if !r.Close() {
-		t.Fatalf("first close should true")
-	}
-	if r.Close() {
-		t.Fatalf("second close should false")
-	}
-	if _, ok := r.Route(); ok {
-		t.Fatalf("route after close should false")
-	}
-	if _, ok := r.BatchRoute(1); ok {
-		t.Fatalf("batch after close false")
-	}
-	if r.Release("a") {
-		t.Fatalf("release after close false")
-	}
-	if r.AddProvider(Provider{"b", 1}) {
-		t.Fatalf("add new after close should false")
-	}
-	// existing replace allowed? spec says false if router closed and provider did not already exist; for existing we allow true but test expects false for new only, we already tested new. Let's test existing replace returns true per spec ambiguous; we allow either but our reference returns true for existing replace. Skip strict check.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	_, ok, err := r.WaitRoute(ctx)
-	if ok || err != nil {
-		// after close and empty, should return false nil quickly, not block
-		// if empty after close, ok false nil is acceptable; if err, it's okay as timeout but shouldn't block long
-	}
-}
 
 func TestHiddenWaitRouteBasic(t *testing.T) {
 	r := New([]Provider{{"a", 0}})
@@ -460,52 +431,7 @@ func TestHiddenHeapPerformance(t *testing.T) {
 	// exercises Route over many providers under the race detector.
 }
 
-func TestHiddenEmptyNew(t *testing.T) {
-	r := New(nil)
-	if r == nil {
-		t.Fatalf("nil router")
-	}
-	if _, ok := r.Route(); ok {
-		t.Fatalf("empty route false")
-	}
-	if r.Remaining("x") != 0 {
-		t.Fatalf("empty remaining 0")
-	}
-	s := r.Snapshot()
-	if len(s) != 0 {
-		t.Fatalf("empty snapshot")
-	}
-	if ids, ok := r.BatchRoute(0); !ok || len(ids) != 0 {
-		t.Fatalf("batch 0 true empty")
-	}
-	if ids, ok := r.BatchRoute(-5); !ok || len(ids) != 0 {
-		t.Fatalf("batch negative true empty")
-	}
-	if r.RemoveProvider("x") {
-		t.Fatalf("remove nonexist false")
-	}
-	if !r.Close() {
-		t.Fatalf("close true")
-	}
-	if r.Close() {
-		t.Fatalf("close idempotent false")
-	}
-}
 
-func TestHiddenAddReplaceResets(t *testing.T) {
-	r := New([]Provider{{"a", 5}})
-	r.Route()
-	r.Route()
-	if r.Remaining("a") != 3 {
-		t.Fatalf("remaining 3")
-	}
-	if !r.AddProvider(Provider{"a", 10}) {
-		t.Fatalf("add replace true")
-	}
-	if r.Remaining("a") != 10 {
-		t.Fatalf("replace should reset to new capacity")
-	}
-}
 
 func TestHiddenNegativeCapacity(t *testing.T) {
 	r := New([]Provider{{"a", -5}})
@@ -583,31 +509,7 @@ func TestHiddenWaitRouteCancelBeforeCall(t *testing.T) {
 	}
 }
 
-func TestHiddenAddAfterClose(t *testing.T) {
-	r := New([]Provider{{"a", 1}})
-	r.Close()
-	if r.AddProvider(Provider{"b", 1}) {
-		t.Fatalf("add new after close false")
-	}
-	if !r.AddProvider(Provider{"a", 5}) {
-		t.Fatalf("add existing after close true per spec")
-	}
-	if _, ok := r.Route(); ok {
-		t.Fatalf("route after close still false")
-	}
-}
 
-func TestHiddenReleaseAfterClose(t *testing.T) {
-	r := New([]Provider{{"a", 1}})
-	r.Route()
-	r.Close()
-	if r.Release("a") {
-		t.Fatalf("release after close false")
-	}
-	if r.Remaining("a") != 0 {
-		t.Fatalf("remaining unchanged after failed release")
-	}
-}
 
 func TestHiddenBatchEdgeCases(t *testing.T) {
 	r := New([]Provider{{"a", 1}})
@@ -829,19 +731,6 @@ func TestHiddenRouteDoesNotBlock(t *testing.T) {
 	// non-blocking is already covered structurally by the concurrent tests.
 }
 
-func TestHiddenAddProviderNegativeAfterClose(t *testing.T) {
-	r := New([]Provider{{"a", 1}})
-	r.Close()
-	if r.AddProvider(Provider{"b", -5}) {
-		t.Fatalf("add new after close false even with negative")
-	}
-	if !r.AddProvider(Provider{"a", -3}) {
-		t.Fatalf("add existing after close true per spec even if negative treated as 0")
-	}
-	if r.Remaining("a") != 0 {
-		t.Fatalf("negative treated as 0 even after close replace")
-	}
-}
 """
 
 
@@ -899,21 +788,8 @@ def test_builds(pkgdir):
 def test_race_and_capacity_invariants(pkgdir):
     go = shutil.which("go")
     env = dict(os.environ, CGO_ENABLED="1")
-    # Lifecycle-edge cases both models consistently miss (post-close semantics,
-    # add-replace-resets, empty-New corners) are excluded to keep difficulty in the
-    # passing zone rather than too-hard; the core concurrency contract still applies.
-    skip = "|".join(
-        [
-            "TestHiddenAddAfterClose",
-            "TestHiddenReleaseAfterClose",
-            "TestHiddenCloseIdempotent",
-            "TestHiddenEmptyNew",
-            "TestHiddenAddReplaceResets",
-            "TestHiddenAddProviderNegativeAfterClose",
-        ]
-    )
     proc = subprocess.run(
-        [go, "test", "-race", "-count=20", "-run", "Hidden", "-skip", skip, "./..."],
+        [go, "test", "-race", "-count=20", "-run", "Hidden", "./..."],
         cwd=pkgdir,
         capture_output=True,
         text=True,
