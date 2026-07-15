@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/unified-routing"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Go provider-routing CLI that persists each routing decision to a crash-consistent, byte-exact binary journal (CRC32-framed records, fsync per record) and recovers a torn trailing record on --resume; strategy-weighted scoring with region affinity and lexicographic tie-break."
-keywords = ["go","routing","crash-consistency","journal","wal","recovery","binary-format","crc32"]
+description = "Extreme concurrency Go router with dynamic membership, Release, AddProvider bool, RemoveProvider, atomic BatchRoute, blocking WaitRoute with context and cond var, Snapshot consistent copy, Close lifecycle idempotent wakeup. Largest-remaining policy. Must be race-free deadlock-free no lost wakeup snapshot-consistent performant RWMutex under mixed workload. Graded go test -race -count=20."
+keywords = ["go","concurrency","race-detector","mutex","rwmutex","condvar","synchronization","routing","capacity","atomic-batch","dynamic-membership","blocking","snapshot","close-lifecycle","context-cancellation"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -15,7 +15,7 @@ email = "gordonyang@meta.com"
 category = "software-engineering"
 category_usecase = "compute_result"
 category_subdomain = "distributed_systems"
-difficulty = "medium"
+difficulty = "hard"
 languages = ["go"]
 
 [verifier]

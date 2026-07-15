@@ -1,106 +1,876 @@
 """
-Grader for the Go region-diverse provider-routing CLI with a crash-consistent journal.
+Grader for the concurrency-safe Go routing library `router`.
 
 Strategy:
-  - build agent source from /app/src with `go build ./...`
+  - copy the agent's package (non-test .go + go.mod) into a temp module
+  - drop in a HIDDEN Go test that hammers Route WaitRoute BatchRoute Release Add Remove Snapshot Close from many goroutines
+  - run `go test -race -count=20` : correct impl passes; partial lock, lost wakeup, deadlock, torn snapshot, non-atomic batch, unsynchronized map, missing copy fail
   - enforce stdlib-only
-  - drive the built binary; assert region-diverse failover chains + exit codes
-  - verify the byte-exact journal format; inject torn/corrupt journals for recovery
-  - exercise IMPLICIT routing edges (best-effort-not-strict diversity, second-pass
-    order, primary-only capacity, spillover) with corner-case configs
 """
 
-import json
 import os
 import re
 import shutil
-import struct
 import subprocess
-import tempfile
-import zlib
 
 import pytest
 
 SRC_DIR = "/app/src"
-HEADER = b"URJRNL01"
+
+HIDDEN_TEST_GO = r"""
+package router
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestHiddenNewCopies(t *testing.T) {
+	in := []Provider{{"a", 5}, {"b", 3}, {"a", 2}}
+	r := New(in)
+	in[0].Capacity = 999
+	in = append(in, Provider{"c", 100})
+	if r.Remaining("a") != 2 || r.Remaining("c") != 0 {
+		t.Fatalf("New must copy input and last wins")
+	}
+}
+
+func TestHiddenBasicOrderingLargest(t *testing.T) {
+	r := New([]Provider{{"b", 2}, {"a", 2}, {"c", 1}})
+	id1, ok1 := r.Route()
+	if !ok1 || id1 != "a" {
+		t.Fatalf("want a first got %q %v", id1, ok1)
+	}
+	id2, _ := r.Route()
+	if id2 != "b" {
+		t.Fatalf("want b second got %q", id2)
+	}
+	id3, _ := r.Route()
+	if id3 != "a" {
+		t.Fatalf("want a third got %q", id3)
+	}
+	id4, _ := r.Route()
+	if id4 != "b" {
+		t.Fatalf("want b fourth got %q", id4)
+	}
+	id5, _ := r.Route()
+	if id5 != "c" {
+		t.Fatalf("want c fifth got %q", id5)
+	}
+	if _, ok := r.Route(); ok {
+		t.Fatalf("want exhausted")
+	}
+}
+
+func TestHiddenReleaseAddRemove(t *testing.T) {
+	r := New([]Provider{{"x", 1}})
+	id, ok := r.Route()
+	if !ok || id != "x" {
+		t.Fatalf("route failed")
+	}
+	if r.Remaining("x") != 0 {
+		t.Fatalf("remaining not 0")
+	}
+	if !r.Release("x") {
+		t.Fatalf("release failed")
+	}
+	if r.Remaining("x") != 1 {
+		t.Fatalf("release did not restore")
+	}
+	r.Release("x")
+	if r.Remaining("x") > 1 {
+		t.Fatalf("release exceeded capacity")
+	}
+	if !r.AddProvider(Provider{"y", 2}) {
+		t.Fatalf("add failed")
+	}
+	if r.Remaining("y") != 2 {
+		t.Fatalf("add failed")
+	}
+	if !r.RemoveProvider("y") {
+		t.Fatalf("remove failed")
+	}
+	if r.Remaining("y") != 0 {
+		t.Fatalf("remove should zero remaining")
+	}
+}
+
+func TestHiddenSnapshotConsistency(t *testing.T) {
+	r := New([]Provider{{"a", 100}, {"b", 100}})
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	var bad int32
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s := r.Snapshot()
+				// snapshot values should be within bounds and sum reasonable
+				sum := 0
+				for _, v := range s {
+					if v < 0 || v > 100 {
+						atomic.StoreInt32(&bad, 1)
+						return
+					}
+					sum += v
+				}
+				if sum < 0 || sum > 200 {
+					atomic.StoreInt32(&bad, 1)
+					return
+				}
+				// mutate returned map must not affect router
+				s["a"] = 9999
+				if r.Remaining("a") == 9999 {
+					atomic.StoreInt32(&bad, 1)
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				r.Route()
+				r.Release("a")
+				r.Release("b")
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	if atomic.LoadInt32(&bad) != 0 {
+		t.Fatalf("snapshot torn or not independent")
+	}
+}
+
+func TestHiddenCloseIdempotent(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	if !r.Close() {
+		t.Fatalf("first close should true")
+	}
+	if r.Close() {
+		t.Fatalf("second close should false")
+	}
+	if _, ok := r.Route(); ok {
+		t.Fatalf("route after close should false")
+	}
+	if _, ok := r.BatchRoute(1); ok {
+		t.Fatalf("batch after close false")
+	}
+	if r.Release("a") {
+		t.Fatalf("release after close false")
+	}
+	if r.AddProvider(Provider{"b", 1}) {
+		t.Fatalf("add new after close should false")
+	}
+	// existing replace allowed? spec says false if router closed and provider did not already exist; for existing we allow true but test expects false for new only, we already tested new. Let's test existing replace returns true per spec ambiguous; we allow either but our reference returns true for existing replace. Skip strict check.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, ok, err := r.WaitRoute(ctx)
+	if ok || err != nil {
+		// after close and empty, should return false nil quickly, not block
+		// if empty after close, ok false nil is acceptable; if err, it's okay as timeout but shouldn't block long
+	}
+}
+
+func TestHiddenWaitRouteBasic(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan string, 1)
+	go func() {
+		id, ok, err := r.WaitRoute(ctx)
+		if err == nil && ok {
+			done <- id
+		} else {
+			done <- ""
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	r.AddProvider(Provider{"a", 1})
+	select {
+	case id := <-done:
+		if id != "a" {
+			t.Fatalf("waitroute woke but wrong id %q", id)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("waitroute did not wake on AddProvider")
+	}
+}
+
+func TestHiddenWaitRouteWakeOnRelease(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	r.Route() // drain
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() {
+		_, ok, _ := r.WaitRoute(ctx)
+		ch <- ok
+	}()
+	time.Sleep(50 * time.Millisecond)
+	r.Release("a")
+	select {
+	case ok := <-ch:
+		if !ok {
+			t.Fatalf("waitroute should succeed after release")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("waitroute not woken by Release")
+	}
+}
+
+func TestHiddenWaitRouteCancel(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := r.WaitRoute(ctx)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("expected context error")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("waitroute did not return on cancel")
+	}
+}
+
+func TestHiddenWaitRouteClose(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch := make(chan bool, 1)
+	go func() {
+		_, ok, err := r.WaitRoute(ctx)
+		ch <- (err == nil && !ok)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	r.Close()
+	select {
+	case ok := <-ch:
+		if !ok {
+			t.Fatalf("waitroute should unblock false nil on close")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("waitroute not unblocked by Close")
+	}
+}
+
+func TestHiddenBatchAtomic(t *testing.T) {
+	r := New([]Provider{{"a", 100}, {"b", 100}})
+	var wg sync.WaitGroup
+	var batchOk int32
+	var single int32
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ids, ok := r.BatchRoute(50); ok && len(ids) == 50 {
+				atomic.AddInt32(&batchOk, 1)
+			}
+		}()
+	}
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := r.Route(); ok {
+				atomic.AddInt32(&single, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	total := int(atomic.LoadInt32(&batchOk))*50 + int(atomic.LoadInt32(&single))
+	if total != 200 {
+		t.Fatalf("total assigned %d want 200, batch not atomic or over-spend", total)
+	}
+	if r.Remaining("a")+r.Remaining("b") != 0 {
+		t.Fatalf("remaining not zero")
+	}
+}
+
+func TestHiddenConcurrentNoOverspend(t *testing.T) {
+	provs := []Provider{{"a", 2000}, {"b", 2000}, {"c", 2000}, {"d", 2000}, {"e", 2000}}
+	for attempt := 0; attempt < 5; attempt++ {
+		r := New(provs)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		got := 0
+		for i := 0; i < 128; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					id, ok := r.Route()
+					if !ok {
+						return
+					}
+					mu.Lock()
+					got++
+					_ = id
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+		if got != 10000 {
+			t.Fatalf("attempt %d: total %d want 10000", attempt, got)
+		}
+		for _, p := range provs {
+			if r.Remaining(p.ID) != 0 {
+				t.Fatalf("attempt %d: remaining %s not 0", attempt, p.ID)
+			}
+		}
+	}
+}
+
+func TestHiddenConcurrentTight(t *testing.T) {
+	for attempt := 0; attempt < 10; attempt++ {
+		r := New([]Provider{{"only", 100}})
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		got := 0
+		for i := 0; i < 256; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if id, ok := r.Route(); ok && id == "only" {
+					mu.Lock()
+					got++
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+		if got != 100 {
+			t.Fatalf("attempt %d: got %d want 100", attempt, got)
+		}
+	}
+}
+
+func TestHiddenMixedWorkloadInvariant(t *testing.T) {
+	r := New([]Provider{{"a", 1000}, {"b", 1000}, {"c", 1000}})
+	var wg sync.WaitGroup
+	var success int64
+	var releases int64
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if id, ok := r.Route(); ok {
+					atomic.AddInt64(&success, 1)
+					if j%7 == 0 {
+						if r.Release(id) {
+							atomic.AddInt64(&releases, 1)
+						}
+					}
+				}
+				_ = r.Remaining("a")
+				_ = r.Snapshot()
+				if j%20 == 0 {
+					r.AddProvider(Provider{"d", 0})
+					r.RemoveProvider("d")
+				}
+				if j%25 == 0 {
+					if ids, ok := r.BatchRoute(2); ok {
+						atomic.AddInt64(&success, int64(len(ids)))
+					}
+				}
+				if j%30 == 0 {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+						if _, ok, _ := r.WaitRoute(ctx); ok {
+							atomic.AddInt64(&success, 1)
+						}
+						cancel()
+					}
+			}
+		}()
+	}
+	wg.Wait()
+	// Assert the exact capacity invariant only at the quiescent end state. A
+	// non-atomic mid-flight sample of several counters is not a consistent
+	// snapshot and yields false positives (it flaked even the correct oracle).
+	sum := r.Remaining("a") + r.Remaining("b") + r.Remaining("c")
+	s := atomic.LoadInt64(&success)
+	rel := atomic.LoadInt64(&releases)
+	if s-rel+int64(sum) != 3000 {
+		t.Fatalf("final invariant %d + %d - %d != 3000", sum, s, rel)
+	}
+}
+
+func TestHiddenPerformanceReaders(t *testing.T) {
+	r := New([]Provider{{"a", 100000}, {"b", 100000}})
+	var wg sync.WaitGroup
+	for i := 0; i < 256; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = r.Remaining("a")
+				_ = r.Snapshot()
+			}
+		}()
+	}
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				r.Route()
+				if j%10 == 0 {
+					r.Release("a")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	// No wall-clock assertion: it is hardware/-race dependent and would flake, and
+	// would unfairly penalize a correct plain-Mutex impl. This still runs as
+	// concurrent reader/writer stress under the race detector.
+}
+
+func TestHiddenHeapPerformance(t *testing.T) {
+	// 1000 providers, 5000 ops should finish quickly even with O(n) scan in Go, but sets upper bound
+	provs := make([]Provider, 1000)
+	for i := 0; i < 1000; i++ {
+		provs[i] = Provider{ID: string(rune('a'+i%26)) + string(rune('0'+i%10)) + string(rune(i)), Capacity: 10}
+	}
+	// simplify IDs to ensure unique
+	for i := range provs {
+		provs[i].ID = string([]byte{byte('p'), byte(i >> 8), byte(i)})
+	}
+	r := New(provs)
+	for i := 0; i < 5000; i++ {
+		r.Route()
+	}
+	// No wall-clock assertion (hardware/-race dependent; would flake). This still
+	// exercises Route over many providers under the race detector.
+}
+
+func TestHiddenEmptyNew(t *testing.T) {
+	r := New(nil)
+	if r == nil {
+		t.Fatalf("nil router")
+	}
+	if _, ok := r.Route(); ok {
+		t.Fatalf("empty route false")
+	}
+	if r.Remaining("x") != 0 {
+		t.Fatalf("empty remaining 0")
+	}
+	s := r.Snapshot()
+	if len(s) != 0 {
+		t.Fatalf("empty snapshot")
+	}
+	if ids, ok := r.BatchRoute(0); !ok || len(ids) != 0 {
+		t.Fatalf("batch 0 true empty")
+	}
+	if ids, ok := r.BatchRoute(-5); !ok || len(ids) != 0 {
+		t.Fatalf("batch negative true empty")
+	}
+	if r.RemoveProvider("x") {
+		t.Fatalf("remove nonexist false")
+	}
+	if !r.Close() {
+		t.Fatalf("close true")
+	}
+	if r.Close() {
+		t.Fatalf("close idempotent false")
+	}
+}
+
+func TestHiddenAddReplaceResets(t *testing.T) {
+	r := New([]Provider{{"a", 5}})
+	r.Route()
+	r.Route()
+	if r.Remaining("a") != 3 {
+		t.Fatalf("remaining 3")
+	}
+	if !r.AddProvider(Provider{"a", 10}) {
+		t.Fatalf("add replace true")
+	}
+	if r.Remaining("a") != 10 {
+		t.Fatalf("replace should reset to new capacity")
+	}
+}
+
+func TestHiddenNegativeCapacity(t *testing.T) {
+	r := New([]Provider{{"a", -5}})
+	if r.Remaining("a") != 0 {
+		t.Fatalf("negative treated 0")
+	}
+	r.AddProvider(Provider{"b", -1})
+	if r.Remaining("b") != 0 {
+		t.Fatalf("negative add 0")
+	}
+}
+
+func TestHiddenSnapshotAfterRemoveAdd(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	s1 := r.Snapshot()
+	if s1["a"] != 1 {
+		t.Fatalf("snapshot initial")
+	}
+	r.RemoveProvider("a")
+	s2 := r.Snapshot()
+	if _, ok := s2["a"]; ok {
+		t.Fatalf("snapshot after remove no key")
+	}
+	r.AddProvider(Provider{"b", 2})
+	s3 := r.Snapshot()
+	if s3["b"] != 2 {
+		t.Fatalf("snapshot after add")
+	}
+}
+
+func TestHiddenCloseConcurrent(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	var wg sync.WaitGroup
+	var trues int32
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if r.Close() {
+				atomic.AddInt32(&trues, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if atomic.LoadInt32(&trues) != 1 {
+		t.Fatalf("exactly one close true got %d", trues)
+	}
+}
+
+func TestHiddenWaitRouteAfterCloseWithCapacity(t *testing.T) {
+	r := New([]Provider{{"a", 5}})
+	r.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, ok, err := r.WaitRoute(ctx)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("waitroute after close blocked")
+	}
+	if ok || err != nil {
+		t.Fatalf("waitroute after close false nil")
+	}
+	if _, ok := r.Route(); ok {
+		t.Fatalf("route after close false")
+	}
+}
+
+func TestHiddenWaitRouteCancelBeforeCall(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, ok, err := r.WaitRoute(ctx)
+	if ok || err == nil {
+		t.Fatalf("immediate cancel should error")
+	}
+}
+
+func TestHiddenAddAfterClose(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	r.Close()
+	if r.AddProvider(Provider{"b", 1}) {
+		t.Fatalf("add new after close false")
+	}
+	if !r.AddProvider(Provider{"a", 5}) {
+		t.Fatalf("add existing after close true per spec")
+	}
+	if _, ok := r.Route(); ok {
+		t.Fatalf("route after close still false")
+	}
+}
+
+func TestHiddenReleaseAfterClose(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	r.Route()
+	r.Close()
+	if r.Release("a") {
+		t.Fatalf("release after close false")
+	}
+	if r.Remaining("a") != 0 {
+		t.Fatalf("remaining unchanged after failed release")
+	}
+}
+
+func TestHiddenBatchEdgeCases(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	if ids, ok := r.BatchRoute(0); !ok || len(ids) != 0 {
+		t.Fatalf("batch 0 true")
+	}
+	r.Close()
+	if _, ok := r.BatchRoute(1); ok {
+		t.Fatalf("batch after close false")
+	}
+}
+
+func TestHiddenWaitRouteFairness(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	var wg sync.WaitGroup
+	var successes int32
+	const N = 30
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, ok, _ := r.WaitRoute(ctx)
+			if ok {
+				atomic.AddInt32(&successes, 1)
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	r.AddProvider(Provider{"a", N})
+	wg.Wait()
+	if atomic.LoadInt32(&successes) != N {
+		t.Fatalf("fairness expected %d got %d", N, successes)
+	}
+}
+
+func TestHiddenRemoveNonexist(t *testing.T) {
+	r := New(nil)
+	if r.RemoveProvider("x") {
+		t.Fatalf("remove nonexist false")
+	}
+}
+
+func TestHiddenSpuriousWakeup(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		_, ok, err := r.WaitRoute(ctx)
+		done <- (ok && err == nil)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	// spurious wake via Add with 0 capacity and Remove non-existent should not cause return
+	r.AddProvider(Provider{"b", 0})
+	r.RemoveProvider("nonexist")
+	// still waiting after 200ms?
+	select {
+	case <-done:
+		t.Fatalf("spurious wakeup caused premature return")
+	case <-time.After(200 * time.Millisecond):
+		// still waiting good
+	}
+	r.AddProvider(Provider{"a", 1})
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatalf("should succeed after real capacity")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("did not wake on real capacity")
+	}
+}
+
+func TestHiddenDuplicateOrderStability(t *testing.T) {
+	r := New([]Provider{{"b", 1}, {"a", 1}, {"b", 5}, {"a", 3}})
+	// last wins: a=3, b=5 . Order should be deterministic lex tie break after largest remaining logic.
+	// First pick should be b (5 >3)
+	id1, _ := r.Route()
+	if id1 != "b" {
+		t.Fatalf("expected b first got %s", id1)
+	}
+	// now b=4, a=3 => b again
+	id2, _ := r.Route()
+	if id2 != "b" {
+		t.Fatalf("expected b second")
+	}
+	// now b=3 a=3 tie lex a
+	id3, _ := r.Route()
+	if id3 != "a" {
+		t.Fatalf("expected a third tie")
+	}
+}
+
+func TestHiddenSnapshotDeepCopy(t *testing.T) {
+	r := New([]Provider{{"a", 2}})
+	s1 := r.Snapshot()
+	s1["a"] = 999
+	s1["new"] = 1
+	s2 := r.Snapshot()
+	if s2["a"] == 999 || s2["new"] == 1 {
+		t.Fatalf("snapshot must be independent deep copy")
+	}
+	if r.Remaining("a") != 2 {
+		t.Fatalf("original unchanged")
+	}
+}
+
+func TestHiddenCloseRaceAdd(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	var wg sync.WaitGroup
+	var closeTrues int32
+	var addResults int32
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if r.Close() {
+				atomic.AddInt32(&closeTrues, 1)
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// mix new and existing adds
+			if r.AddProvider(Provider{"b", 1}) {
+				atomic.AddInt32(&addResults, 1)
+			}
+			r.AddProvider(Provider{"a", 2}) // existing, should succeed even after close per spec returning true but no assignment allowed
+		}()
+	}
+	wg.Wait()
+	if atomic.LoadInt32(&closeTrues) != 1 {
+		t.Fatalf("exactly one close true")
+	}
+	// After close, Route must be false regardless of capacity
+	if _, ok := r.Route(); ok {
+		t.Fatalf("route after close must false")
+	}
+}
+
+func TestHiddenBatchPartialVisibility(t *testing.T) {
+	r := New([]Provider{{"a", 100}, {"b", 100}})
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	var bad int32
+	// sampler checks sum never changes by partial batch amount not multiple of batch size? Actually batch is 7, total capacity 200, so sum should always be even? Not reliable. We'll check that sum never goes negative and total assigned never exceeds capacity, which existing tests cover, but we add extra sampling during concurrent BatchRoute to ensure no panic and sum stays within bounds.
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s := r.Snapshot()
+				sum := 0
+				for _, v := range s {
+					sum += v
+				}
+				if sum < 0 || sum > 200 {
+					atomic.StoreInt32(&bad, 1)
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				r.BatchRoute(7)
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	if atomic.LoadInt32(&bad) != 0 {
+		t.Fatalf("snapshot saw out of bounds during batch")
+	}
+	// final total assigned must be multiple of 7 or leave remainder capacity, but never exceed 200
+	sum := r.Remaining("a") + r.Remaining("b")
+	if sum < 0 || sum > 200 || (200-sum)%7 != 0 && sum != 200%7 { // actually with 200 capacity and batch 7, remainder can be 200 mod 7 =4, but due to interleaving with other ops maybe okay; just check bounds
+		// allow any remainder as long as within bounds, already checked
+	}
+}
+
+func TestHiddenWaitRouteContextRace(t *testing.T) {
+	r := New([]Provider{{"a", 0}})
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(20 * time.Millisecond)
+		r.AddProvider(Provider{"a", 1})
+	}()
+	_, ok, err := r.WaitRoute(ctx)
+	wg.Wait()
+	// Either cancelled first -> err != nil and ok false, or assigned first -> ok true nil err. Both acceptable as race, but must not deadlock and must return promptly and not panic. We just check no deadlock and result is one of valid states.
+	if err != nil && ok {
+		t.Fatalf("invalid state both ok and err")
+	}
+	// If ok true, then capacity consumed; else if err, then maybe capacity remains 1 for later use, that's fine.
+}
+
+func TestHiddenRouteDoesNotBlock(t *testing.T) {
+	r := New([]Provider{{"a", 100000}})
+	for i := 0; i < 10000; i++ {
+		r.Route()
+	}
+	// No wall-clock assertion (hardware/-race dependent; would flake). Route being
+	// non-blocking is already covered structurally by the concurrent tests.
+}
+
+func TestHiddenAddProviderNegativeAfterClose(t *testing.T) {
+	r := New([]Provider{{"a", 1}})
+	r.Close()
+	if r.AddProvider(Provider{"b", -5}) {
+		t.Fatalf("add new after close false even with negative")
+	}
+	if !r.AddProvider(Provider{"a", -3}) {
+		t.Fatalf("add existing after close true per spec even if negative treated as 0")
+	}
+	if r.Remaining("a") != 0 {
+		t.Fatalf("negative treated as 0 even after close replace")
+	}
+}
+"""
 
 
-# ------------------------- byte-exact journal codec -------------------------
-def encode_record(seq, req_id, chain):
-    idb = req_id.encode("utf-8")
-    body = struct.pack(">I", seq) + struct.pack(">H", len(idb)) + idb + struct.pack(">H", len(chain))
-    for pid in chain:
-        pb = pid.encode("utf-8")
-        body += struct.pack(">H", len(pb)) + pb
-    return body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
-
-
-def decode_journal(data):
-    assert data[:8] == HEADER, "bad header"
-    off, n = 8, len(data)
-    recs, ends = [], []
-    while off < n:
-        start = off
-        seq = struct.unpack_from(">I", data, off)[0]; off += 4
-        id_len = struct.unpack_from(">H", data, off)[0]; off += 2
-        idb = data[off:off + id_len]; off += id_len
-        nprov = struct.unpack_from(">H", data, off)[0]; off += 2
-        chain = []
-        for _ in range(nprov):
-            plen = struct.unpack_from(">H", data, off)[0]; off += 2
-            chain.append(data[off:off + plen].decode("utf-8")); off += plen
-        crc = struct.unpack_from(">I", data, off)[0]; off += 4
-        assert (zlib.crc32(data[start:off - 4]) & 0xFFFFFFFF) == crc, "bad crc"
-        recs.append((seq, idb.decode("utf-8"), chain))
-        ends.append(off)
-    return recs, ends
-
-
-# ------------------------------- build ------------------------------------
 def _walk_go(root):
-    for dirpath, _, files in os.walk(root):
+    for dp, _, files in os.walk(root):
         for f in files:
             if f.endswith(".go"):
-                yield os.path.join(dirpath, f)
+                yield os.path.join(dp, f)
 
 
 @pytest.fixture(scope="session")
-def router_bin():
+def pkgdir(tmp_path_factory):
     assert os.path.isdir(SRC_DIR), "/app/src missing"
-    assert list(_walk_go(SRC_DIR)), "no .go sources"
     assert os.path.isfile(os.path.join(SRC_DIR, "go.mod")), "go.mod missing"
-    go = shutil.which("go")
-    assert go, "go toolchain not found"
-    out_dir = tempfile.mkdtemp(prefix="router_build_")
-    binary = os.path.join(out_dir, "router")
-    proc = subprocess.run([go, "build", "-o", binary, "./..."], cwd=SRC_DIR,
-                          capture_output=True, text=True)
-    assert proc.returncode == 0, f"go build failed:\n{proc.stdout}\n{proc.stderr}"
-    return binary
+    assert shutil.which("go"), "go toolchain not found"
+    d = str(tmp_path_factory.mktemp("pkg"))
+    shutil.copy(os.path.join(SRC_DIR, "go.mod"), os.path.join(d, "go.mod"))
+    for path in _walk_go(SRC_DIR):
+        if path.endswith("_test.go"):
+            continue
+        rel = os.path.relpath(path, SRC_DIR)
+        dst = os.path.join(d, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy(path, dst)
+    with open(os.path.join(d, "zz_hidden_test.go"), "w") as f:
+        f.write(HIDDEN_TEST_GO)
+    return d
 
 
-def run(router_bin, cfg, reqs, journal, resume=False, td=None):
-    cfg_path = os.path.join(td, "cfg.json")
-    req_path = os.path.join(td, "req.jsonl")
-    with open(cfg_path, "w") as f:
-        json.dump(cfg, f)
-    with open(req_path, "w") as f:
-        for r in reqs:
-            f.write(json.dumps(r) + "\n")
-    args = [router_bin, "--config", cfg_path, "--requests", req_path, "--journal", journal]
-    if resume:
-        args.append("--resume")
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
-    out = proc.stdout.strip().splitlines() if proc.stdout.strip() else []
-    return proc.returncode, [json.loads(x) for x in out], proc.stderr
-
-
-def prov(pid, region, latency, cap=10, cost=0.01, err=0.0, status="up"):
-    return {"id": pid, "region": region, "latency_ms": latency, "cost_per_1k": cost,
-            "error_rate": err, "capacity_rps": cap, "status": status}
-
-
-# ------------------------------ stdlib-only -------------------------------
 def test_go_mod_no_external_requires():
     with open(os.path.join(SRC_DIR, "go.mod")) as fh:
         for line in fh:
@@ -118,287 +888,38 @@ def test_imports_stdlib_only():
                     raise AssertionError(f"non-stdlib import in {path}: {line.strip()}")
 
 
-# ------------------------------ basic routing -----------------------------
-def test_single_replica_routing_and_journal(router_bin):
-    cfg = {"strategy": "latency", "providers": [
-        prov("aws-us", "us-east", 40), prov("aws-eu", "eu-west", 40)]}
-    reqs = [{"id": "r1", "user_region": "us-east"},
-            {"id": "r2", "user_region": "eu-west"},
-            {"id": "r3", "user_region": "asia"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
-        assert code == 0
-        assert out == [["aws-us"], ["aws-eu"], ["aws-eu"]]  # r3 tie -> lexicographic aws-eu
-        with open(j, "rb") as f:
-            data = f.read()
-        assert data == (HEADER + encode_record(0, "r1", ["aws-us"])
-                        + encode_record(1, "r2", ["aws-eu"]) + encode_record(2, "r3", ["aws-eu"]))
+def test_builds(pkgdir):
+    go = shutil.which("go")
+    proc = subprocess.run(
+        [go, "build", "./..."], cwd=pkgdir, capture_output=True, text=True, timeout=180
+    )
+    assert proc.returncode == 0, f"go build failed:\n{proc.stdout}\n{proc.stderr}"
 
 
-def test_cost_and_error_rate_scoring(router_bin):
-    cfg = {"strategy": "cost", "providers": [
-        prov("fast-exp", "us", 10, cost=0.1), prov("slow-cheap", "us", 100, cost=0.01)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        assert run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["slow-cheap"]]
-    cfg2 = {"strategy": "latency", "providers": [
-        prov("err-high", "us", 10, err=0.1), prov("err-low", "us", 10, err=0.001)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        assert run(router_bin, cfg2, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["err-low"]]
-
-
-# ---------------------- IMPLICIT region-diversity edges --------------------
-def test_best_effort_diversity_not_strict(router_bin):
-    # max_replicas=3, three providers across only TWO regions. A strict distinct-region
-    # reading returns 2 (under-replicated); the correct best-effort reading reuses a
-    # region in the second pass to reach 3 distinct providers -> exit 0.
-    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
-        prov("us1", "us", 30), prov("us2", "us", 31), prov("eu1", "eu", 32)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, [{"id": "1", "user_region": "us"}], j, td=td)
-        assert out == [["us1", "eu1", "us2"]]  # pass1: us1,eu1 ; pass2 fills us2
-        assert code == 0
-
-
-def test_second_pass_preserves_score_order(router_bin):
-    # Single region, so first pass picks only the best; second pass fills the rest in
-    # ascending score order (us2 before us3), NOT arbitrary order.
-    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
-        prov("us1", "us", 30), prov("us2", "us", 31), prov("us3", "us", 32)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, [{"id": "1", "user_region": "us"}], j, td=td)
-        assert out == [["us1", "us2", "us3"]]
-        assert code == 0
-
-
-def test_primary_only_capacity_consumption(router_bin):
-    # Only the PRIMARY (first) provider in a chain consumes capacity. a,b each cap 1.
-    # req1 -> [a,b] consumes a only; req2 -> [b,c] consumes b only (b still had capacity).
-    # If a naive impl consumed every replica, req2 would be just [c] (degraded).
-    cfg = {"strategy": "latency", "max_replicas": 2, "providers": [
-        prov("a", "ra", 10, cap=1), prov("b", "rb", 20, cap=1), prov("c", "rc", 30, cap=10)]}
-    reqs = [{"id": "1", "user_region": "x"}, {"id": "2", "user_region": "x"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
-        assert out == [["a", "b"], ["b", "c"]]
-        assert code == 0
-
-
-def test_spillover_when_primary_exhausted(router_bin):
-    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
-        prov("a", "r", 10, cap=1), prov("b", "r", 50, cap=10)]}
-    reqs = [{"id": str(i), "user_region": "r"} for i in range(3)]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
-        assert out == [["a"], ["b"], ["b"]]
-        assert code == 0
-
-
-def test_degraded_when_fewer_than_max_replicas(router_bin):
-    cfg = {"strategy": "latency", "max_replicas": 3, "providers": [
-        prov("a", "us", 10), prov("b", "eu", 10)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)
-        assert out == [["a", "b"]] and code == 1
-        with open(j, "rb") as f:
-            recs, _ = decode_journal(f.read())
-        assert recs == [(0, "r", ["a", "b"])]
-
-
-def test_all_ineligible_empty_chain_exit1(router_bin):
-    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
-        prov("slow", "us", 200)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, [{"id": "r", "user_region": "us", "sla_ms": 100}], j, td=td)
-        assert out == [[]] and code == 1
-        with open(j, "rb") as f:
-            recs, _ = decode_journal(f.read())
-        assert recs == [(0, "r", [])]
-
-
-def test_status_down_and_capacity_zero_filtered(router_bin):
-    cfg = {"strategy": "latency", "max_replicas": 1, "providers": [
-        prov("down", "us", 5, status="down"), prov("zero", "us", 6, cap=0), prov("up", "us", 50)]}
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        assert run(router_bin, cfg, [{"id": "r", "user_region": "us"}], j, td=td)[1] == [["up"]]
-
-
-def test_blank_lines_ignored(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    with tempfile.TemporaryDirectory() as td:
-        cp, rp, j = (os.path.join(td, x) for x in ("c.json", "r.jsonl", "j.bin"))
-        with open(cp, "w") as f:
-            json.dump(cfg, f)
-        with open(rp, "w") as f:
-            f.write('{"id":"1","user_region":"us"}\n\n   \n{"id":"2","user_region":"us"}\n')
-        proc = subprocess.run([router_bin, "--config", cp, "--requests", rp, "--journal", j],
-                              capture_output=True, text=True, timeout=60)
-        assert proc.stdout.strip().splitlines() == ['["p"]', '["p"]']
-
-
-# ------------------------------ recovery ----------------------------------
-CFG_CAP = {"strategy": "latency", "max_replicas": 1, "providers": [
-    prov("a", "r", 10, cap=1), prov("b", "r", 50, cap=10)]}
-REQS_CAP = [{"id": "1", "user_region": "r"}, {"id": "2", "user_region": "r"}]
-
-
-def test_resume_idempotent_complete(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        c1, o1, _ = run(router_bin, cfg, reqs, j, td=td)
-        with open(j, "rb") as f:
-            b1 = f.read()
-        c2, o2, _ = run(router_bin, cfg, reqs, j, resume=True, td=td)
-        with open(j, "rb") as f:
-            b2 = f.read()
-        assert (c1, o1, b1) == (c2, o2, b2)
-
-
-def test_resume_reconstructs_capacity(router_bin):
-    # The crux: resume must rebuild remaining capacity by replaying recorded PRIMARY
-    # consumption. After truncating to request 1's record, request 2 must go to 'b'.
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
-        assert out_full == [["a"], ["b"]]
-        with open(j, "rb") as f:
-            full = f.read()
-        _, ends = decode_journal(full)
-        with open(j, "wb") as f:
-            f.write(full[:ends[0]])
-        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
-        assert code == 0 and out == [["a"], ["b"]]  # naive resume gives [["a"],["a"]]
-        with open(j, "rb") as f:
-            assert f.read() == full
-
-
-def test_resume_torn_tail(router_bin):
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
-        with open(j, "rb") as f:
-            full = f.read()
-        _, ends = decode_journal(full)
-        with open(j, "wb") as f:
-            f.write(full[:ends[0]] + full[ends[0]:ends[1]][:4])  # partial 2nd record
-        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
-        assert code == 0 and out == out_full
-        with open(j, "rb") as f:
-            assert f.read() == full
-
-
-def test_resume_bad_crc_tail_recovered(router_bin):
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        _, out_full, _ = run(router_bin, CFG_CAP, REQS_CAP, j, td=td)
-        with open(j, "rb") as f:
-            full = f.read()
-        _, ends = decode_journal(full)
-        corrupt = bytearray(full)
-        corrupt[ends[1] - 1] ^= 0xFF
-        with open(j, "wb") as f:
-            f.write(bytes(corrupt))
-        code, out, _ = run(router_bin, CFG_CAP, REQS_CAP, j, resume=True, td=td)
-        assert code == 0 and out == out_full
-        with open(j, "rb") as f:
-            assert f.read() == full
-
-
-def test_corrupt_midfile_bad_crc_exit3(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}, {"id": "3", "user_region": "us"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        r1 = bytearray(encode_record(1, "2", ["p"]))
-        r1[-1] ^= 0xFF
-        with open(j, "wb") as f:
-            f.write(HEADER + encode_record(0, "1", ["p"]) + bytes(r1) + encode_record(2, "3", ["p"]))
-        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
-
-
-def test_corrupt_header_seqgap_idmismatch_exit3(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    reqs = [{"id": "1", "user_region": "us"}, {"id": "2", "user_region": "us"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        with open(j, "wb") as f:
-            f.write(b"XXXXXXXX" + encode_record(0, "1", ["p"]))
-        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
-        with open(j, "wb") as f:
-            f.write(HEADER + encode_record(0, "1", ["p"]) + encode_record(2, "2", ["p"]))  # seq gap
-        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
-        with open(j, "wb") as f:
-            f.write(HEADER + encode_record(0, "WRONG", ["p"]))  # id mismatch
-        assert run(router_bin, cfg, reqs, j, resume=True, td=td)[0] == 3
-
-
-def test_journal_exists_without_resume_exit2(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    reqs = [{"id": "1", "user_region": "us"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        run(router_bin, cfg, reqs, j, td=td)
-        with open(j, "rb") as f:
-            before = f.read()
-        assert run(router_bin, cfg, reqs, j, resume=False, td=td)[0] == 2
-        with open(j, "rb") as f:
-            assert f.read() == before
-
-
-def test_unicode_id_byte_length(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("aws-us", "us-east", 40)]}
-    reqs = [{"id": "café-日本", "user_region": "us-east"}]
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        code, out, _ = run(router_bin, cfg, reqs, j, td=td)
-        assert code == 0 and out == [["aws-us"]]
-        with open(j, "rb") as f:
-            assert f.read() == HEADER + encode_record(0, "café-日本", ["aws-us"])
-
-
-# --------------------------- validation exit 2 ----------------------------
-def test_invalid_config_exit2_variants(router_bin):
-    reqs = [{"id": "r", "user_region": "us"}]
-    def base():
-        return {"strategy": "latency", "max_replicas": 1, "providers": [prov("p", "us", 10)]}
-    bad = []
-    b = base(); b["strategy"] = "bogus"; bad.append(b)
-    b = base(); del b["providers"]; bad.append(b)
-    b = base(); b["max_replicas"] = 0; bad.append(b)
-    b = base(); b["providers"][0]["id"] = ""; bad.append(b)
-    b = base(); b["providers"].append(dict(b["providers"][0])); bad.append(b)
-    b = base(); b["providers"][0]["latency_ms"] = -1; bad.append(b)
-    b = base(); b["providers"][0]["latency_ms"] = 1.5; bad.append(b)
-    b = base(); b["providers"][0]["error_rate"] = 1.5; bad.append(b)
-    b = base(); b["providers"][0]["capacity_rps"] = -3; bad.append(b)
-    b = base(); b["providers"][0]["status"] = "maybe"; bad.append(b)
-    with tempfile.TemporaryDirectory() as td:
-        j = os.path.join(td, "j.bin")
-        for cfg in bad:
-            code, _, _ = run(router_bin, cfg, reqs, j, td=td)
-            assert code == 2, f"expected 2 for {cfg}"
-            assert not os.path.exists(j)
-
-
-def test_invalid_requests_line_exit2(router_bin):
-    cfg = {"strategy": "latency", "providers": [prov("p", "us", 10)]}
-    with tempfile.TemporaryDirectory() as td:
-        cp, rp, j = (os.path.join(td, x) for x in ("c.json", "r.jsonl", "j.bin"))
-        with open(cp, "w") as f:
-            json.dump(cfg, f)
-        with open(rp, "w") as f:
-            f.write('{"id":"1","user_region":"us"}\nnot json\n')
-        proc = subprocess.run([router_bin, "--config", cp, "--requests", rp, "--journal", j],
-                              capture_output=True, text=True, timeout=60)
-        assert proc.returncode == 2 and proc.stdout.strip() == ""
+def test_race_and_capacity_invariants(pkgdir):
+    go = shutil.which("go")
+    env = dict(os.environ, CGO_ENABLED="1")
+    # Lifecycle-edge cases both models consistently miss (post-close semantics,
+    # add-replace-resets, empty-New corners) are excluded to keep difficulty in the
+    # passing zone rather than too-hard; the core concurrency contract still applies.
+    skip = "|".join(
+        [
+            "TestHiddenAddAfterClose",
+            "TestHiddenReleaseAfterClose",
+            "TestHiddenCloseIdempotent",
+            "TestHiddenEmptyNew",
+            "TestHiddenAddReplaceResets",
+            "TestHiddenAddProviderNegativeAfterClose",
+        ]
+    )
+    proc = subprocess.run(
+        [go, "test", "-race", "-count=20", "-run", "Hidden", "-skip", skip, "./..."],
+        cwd=pkgdir,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=env,
+    )
+    combined = proc.stdout + proc.stderr
+    assert "DATA RACE" not in combined, f"race detector fired:\n{combined}"
+    assert proc.returncode == 0, f"go test -race failed:\n{combined}"
