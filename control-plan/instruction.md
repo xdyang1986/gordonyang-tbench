@@ -46,13 +46,12 @@ In durable mode, rewrite the log to the minimal record set that reconstructs the
 All queries take a timestamp used for aliveness evaluation. Aliveness for discovery queries means: node is registered, not failed, and `timeout==0 or timestamp-last_heartbeat ≤ timeout`.
 
 **`QUERY_PRIMARY <timestamp>`**
-Output current primary node_id or `NONE`.
+Output <primary_node_id> <epoch> (two tokens, one space), or NONE if there is no primary.
 
-Leadership is sticky and independent of aliveness:
-
-* When there is no primary, elect the best non-failed node by: highest weight → most recent last_heartbeat → lexicographically smallest address → lexicographically smallest node_id.
-* Once elected, the primary stays primary through new REGISTERs, heartbeats, and expirations. A new node with higher weight does not preempt.
-* Only an explicit `FAIL` of the current primary unseats it. On unseat, immediately re-elect best remaining non-failed node by the same ordering, or `NONE` if none remain.
+Leadership is sticky and independent of aliveness. The coordinator maintains an integer leadership epoch (term), starting at 0:
+- When there is no primary, elect the best non-failed node by: highest weight → most recent last_heartbeat → smallest address → smallest node_id, and increment the epoch by 1.
+- Once elected, the primary stays primary through new REGISTERs, heartbeats, and expirations. A higher-weight node does not preempt, and the epoch does not change.
+- Only an explicit FAIL of the current primary unseats it. On unseat, immediately re-elect the best remaining non-failed node by the same ordering and increment the epoch by 1; if none remain, there is no primary and the epoch is left unchanged (the next election increments it).
 
 **`QUERY_CONNECT <client_id> <timestamp>`**
 Output address for simple hash routing, or `NONE` if no alive nodes.
@@ -62,7 +61,7 @@ Take alive node_ids sorted ascending. Compute `h = sum of byte values of client_
 **`QUERY_ROUTE <client_id> <timestamp>`**
 Output address for stable routing, or `NONE`.
 
-Must be deterministic for a given client and alive set, and minimal-disruption: when the alive set changes, only clients whose old node left or whose new node joined may change assignment. No reshuffle among unchanged nodes. Any scheme meeting those two properties is acceptable.
+Must satisfy three properties: (1) deterministic for a given client and alive set; (2) minimal-disruption — when the alive set changes, only clients whose old node left or whose new node joined may change assignment, with no reshuffle among unchanged nodes; (3) balanced — with multiple alive nodes and many distinct clients, assignments are spread across the alive set, not collapsed onto a single node. Any scheme meeting all three is acceptable.
 
 **`QUERY_REPLICAS <k> <timestamp>`**
 Output comma-separated node_id list of size `min(k, alive_count)`, or `NONE` if no alive nodes. `k ≥1`.
@@ -91,7 +90,7 @@ Invalid input includes: malformed config, unknown command name, wrong arity, non
 
 Only active when `COORD_STATE_DIR` is set.
 
-**Startup recovery:** create directory if needed. Before reading stdin, replay `$COORD_STATE_DIR/coordinator.log` record by record in order. Each record must reconstruct REGISTER, HEARTBEAT, or FAIL exactly as originally processed, so primary election order is preserved. Stop at first incomplete or corrupt record; discard it and all following bytes. Truncate the log to the valid prefix so later appends are clean. Never fail startup due to a torn tail.
+**Startup recovery:** create directory if needed. Before reading stdin, replay `$COORD_STATE_DIR/coordinator.log` record by record in order. Each record must reconstruct REGISTER, HEARTBEAT, or FAIL exactly as originally processed, so primary election order is preserved. Stop at first incomplete or corrupt record; discard it and all following bytes. Truncate the log to the valid prefix so later appends are clean. Never fail startup due to a torn tail. An EPOCH record (produced by compaction) sets the current epoch on replay.
 
 **Log format — `coordinator.log`:**
 Sequence of records, each:
@@ -107,10 +106,11 @@ Payload is the command text exactly as logged: e.g. `REGISTER n1 10.0.0.1:8080 e
 * `HEARTBEAT` — only when it updates an existing non-failed node.
 * `FAIL` — only when node exists.
 Queries and COMPACT are never appended as payloads; COMPACT rewrites the whole file instead.
+- EPOCH <n> — written only by compaction, never by live appends; on replay it sets the current epoch to n.
 
 Each append must be durable before process exit.
 
-**Compaction:** `COMPACT` writes a new temporary file `$COORD_STATE_DIR/coordinator.log.tmp` containing for each known node a REGISTER with its current address zone weight last_heartbeat, followed by FAIL if currently failed, in an order that replays to the same primary as before. Then atomically rename over coordinator.log. Recovery ignores `.tmp` files.
+**Compaction:** `COMPACT` writes a new temporary file `$COORD_STATE_DIR/coordinator.log.tmp` containing for each known node a REGISTER with its current address zone weight last_heartbeat, followed by FAIL if currently failed, in an order that replays to the same primary as before, and finally a single EPOCH <n> record carrying the current epoch (the election count cannot be recomputed from a minimized log, so it is persisted explicitly). Then atomically rename over coordinator.log. Recovery ignores `.tmp` files.
 
 ---
 
@@ -118,7 +118,7 @@ Each append must be durable before process exit.
 
 1. REGISTER creates/updates and revives; HEARTBEAT refreshes; FAIL kills.
 2. Aliveness for discovery queries uses timeout lazily at query time.
-3. Primary election is sticky, weight then freshness then address then id tie-break, unseated only by FAIL.
+3. Primary election is sticky (weight → freshness → address → id), unseated only by FAIL; a leadership epoch increments on each election, is reported by QUERY_PRIMARY, and is preserved across restart and compaction.
 4. QUERY_CONNECT uses sorted-id modulo hash.
 5. QUERY_ROUTE is deterministic and stable under membership change.
 6. QUERY_REPLICAS is preference-ordered zone-diverse then fill.
@@ -149,8 +149,8 @@ QUERY_NODES 12
 
 Output:
 ```
-edge
-core2
+edge 1
+core2 2
 core2,mid
 core1,core2,mid
 ```
@@ -172,7 +172,7 @@ QUERY_PRIMARY 5
 ```
 Output must be:
 ```
-low
+low 1
 ```
 `low` was first registered and remains sticky primary after recovery, even though `high` has higher weight.
 

@@ -39,6 +39,7 @@ var (
     stateDir       string
     logPath        string
     currentPrimary string // "" means no primary
+    epoch          int64  // leadership term; +1 each time a new node is elected
 )
 
 func die(msg string) {
@@ -210,7 +211,10 @@ func doRegister(nodeID, addr, zone string, weight, ts int64) {
     // Leadership is sticky: only elect when there is currently no primary. A
     // higher-weight/fresher node registering does NOT preempt the incumbent.
     if currentPrimary == "" {
-        currentPrimary = electNonFailedID()
+        if p := electNonFailedID(); p != "" {
+            currentPrimary = p
+            epoch++
+        }
     }
 }
 
@@ -229,7 +233,12 @@ func doFail(nodeID string, ts int64) bool {
         n.failed = true
         // Only an explicit FAIL of the current primary triggers re-election.
         if currentPrimary == nodeID {
-            currentPrimary = electNonFailedID()
+            if p := electNonFailedID(); p != "" {
+                currentPrimary = p
+                epoch++
+            } else {
+                currentPrimary = ""
+            }
         }
         return true
     }
@@ -301,6 +310,15 @@ func replay(payload string) {
             return
         }
         doFail(parts[1], ts)
+    case "EPOCH":
+        if len(parts) != 2 {
+            return
+        }
+        n, err := strconv.ParseInt(parts[1], 10, 64)
+        if err != nil {
+            return
+        }
+        epoch = n
     }
 }
 
@@ -363,6 +381,9 @@ func compact(ts int64) {
             writeRecord(&buf, fmt.Sprintf("FAIL %s %d", id, ts))
         }
     }
+    // The election count cannot be recomputed from a reordered/minimized log, so
+    // persist the current term explicitly; replay applies it last and it wins.
+    writeRecord(&buf, fmt.Sprintf("EPOCH %d", epoch))
     tmp := logPath + ".tmp"
     f, err := os.Create(tmp)
     if err != nil {
@@ -471,7 +492,7 @@ func main() {
             if currentPrimary == "" {
                 fmt.Fprintln(out, "NONE")
             } else {
-                fmt.Fprintln(out, currentPrimary)
+                fmt.Fprintf(out, "%s %d\n", currentPrimary, epoch)
             }
         case "QUERY_CONNECT":
             if len(parts) != 3 {

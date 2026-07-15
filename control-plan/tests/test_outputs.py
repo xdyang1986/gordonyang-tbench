@@ -122,13 +122,13 @@ QUERY_PRIMARY 140
     # FAIL n1 is not the primary, so primary stays n2. At t=140 n2's heartbeat has
     # expired for aliveness, but leadership is sticky -> still n2.
     assert lines(r.stdout) == [
-        "n2",
+        "n2 1",
         "10.0.0.1:8080",
         "n1,n2",
-        "n2",
+        "n2 1",
         "10.0.0.2:8080",
-        "n2",
-        "n2",
+        "n2 1",
+        "n2 1",
     ]
 
 
@@ -137,7 +137,7 @@ def test_primary_is_sticky_first_registered():
     stdin = "timeout=0\nREGISTER low aaa z1 1 0\nREGISTER high zzz z2 9 0\nQUERY_PRIMARY 0\n"
     r = run(stdin)
     assert r.returncode == 0
-    assert lines(r.stdout) == ["low"]
+    assert lines(r.stdout) == ["low 1"]
 
 
 def test_primary_sticky_survives_later_higher_weight_register():
@@ -146,14 +146,14 @@ def test_primary_sticky_survives_later_higher_weight_register():
         "REGISTER b b_addr z1 9 5\nQUERY_PRIMARY 6\n"
     )
     r = run(stdin)
-    assert lines(r.stdout) == ["a", "a"]
+    assert lines(r.stdout) == ["a 1", "a 1"]
 
 
 def test_primary_ignores_heartbeat_expiration():
     # Under sticky leadership the primary never expires; only QUERY_NODES expires it.
     stdin = "timeout=10\nREGISTER n1 a1 z1 5 0\nQUERY_PRIMARY 1000\nQUERY_NODES 1000\n"
     r = run(stdin)
-    assert lines(r.stdout) == ["n1", "NONE"]
+    assert lines(r.stdout) == ["n1 1", "NONE"]
 
 
 def test_primary_stays_even_when_expired_and_another_is_alive():
@@ -161,7 +161,7 @@ def test_primary_stays_even_when_expired_and_another_is_alive():
     # Primary stays a (sticky); QUERY_NODES shows only b.
     stdin = "timeout=10\nREGISTER a aA z1 5 0\nREGISTER b bB z1 5 50\nQUERY_PRIMARY 55\nQUERY_NODES 55\n"
     r = run(stdin)
-    assert lines(r.stdout) == ["a", "b"]
+    assert lines(r.stdout) == ["a 1", "b"]
 
 
 def test_fail_primary_reelects_best_non_failed():
@@ -172,13 +172,13 @@ def test_fail_primary_reelects_best_non_failed():
         "QUERY_PRIMARY 1\nFAIL a 2\nQUERY_PRIMARY 3\n"
     )
     r = run(stdin)
-    assert lines(r.stdout) == ["a", "b"]
+    assert lines(r.stdout) == ["a 1", "b 2"]
 
 
 def test_fail_non_primary_keeps_primary():
     stdin = "timeout=0\nREGISTER a aA z1 5 0\nREGISTER b bB z1 9 0\nFAIL b 1\nQUERY_PRIMARY 2\n"
     r = run(stdin)
-    assert lines(r.stdout) == ["a"]
+    assert lines(r.stdout) == ["a 1"]
 
 
 def test_primary_none_before_any_register():
@@ -189,14 +189,15 @@ def test_primary_none_before_any_register():
 def test_failover_changes_primary():
     stdin = "timeout=0\nREGISTER n1 a1 z1 5 0\nREGISTER n2 a2 z1 5 0\nQUERY_PRIMARY 0\nFAIL n1 1\nQUERY_PRIMARY 2\n"
     r = run(stdin)
-    # n1 first -> primary; FAIL n1 -> re-elect n2
-    assert lines(r.stdout) == ["n1", "n2"]
+    # n1 first -> primary (term 1); FAIL n1 -> re-elect n2 (term 2)
+    assert lines(r.stdout) == ["n1 1", "n2 2"]
 
 
 def test_register_revives_after_fail():
     stdin = "timeout=0\nREGISTER n1 a1 z1 5 0\nFAIL n1 1\nQUERY_PRIMARY 2\nREGISTER n1 a1new z1 5 3\nQUERY_PRIMARY 4\nQUERY_CONNECT x 4\n"
     r = run(stdin)
-    assert lines(r.stdout) == ["NONE", "n1", "a1new"]
+    # term 1 (elect n1) -> NONE after FAIL -> term 2 (re-elect n1 on revive)
+    assert lines(r.stdout) == ["NONE", "n1 2", "a1new"]
 
 
 def test_connect_hash_selection():
@@ -397,15 +398,15 @@ def test_persist_across_restart(tmp_path):
     assert r1.returncode == 0
     r2 = run("timeout=0\nQUERY_NODES 5\nQUERY_PRIMARY 5\nQUERY_CONNECT c 5\n", state_dir=d)
     assert r2.returncode == 0
-    # n2 registered first -> sticky primary recovered as n2; connect 'c'=99%2=1 -> n2 -> a2
-    assert lines(r2.stdout) == ["n1,n2", "n2", "a2"]
+    # n2 registered first -> sticky primary recovered as n2 (term 1); connect 'c'=99%2=1 -> n2 -> a2
+    assert lines(r2.stdout) == ["n1,n2", "n2 1", "a2"]
 
 
 def test_sticky_primary_survives_restart(tmp_path):
     d = str(tmp_path)
     run("timeout=0\nREGISTER low la z1 1 0\nREGISTER high ha z2 9 0\n", state_dir=d)
     r = run("timeout=0\nQUERY_PRIMARY 5\n", state_dir=d)
-    assert lines(r.stdout) == ["low"]  # sticky incumbent, not the higher-weight node
+    assert lines(r.stdout) == ["low 1"]  # sticky incumbent + term recovered
 
 
 def test_sticky_primary_survives_compaction(tmp_path):
@@ -413,7 +414,45 @@ def test_sticky_primary_survives_compaction(tmp_path):
     run("timeout=0\nREGISTER low la z1 1 0\nREGISTER high ha z2 9 0\n", state_dir=d)
     run("timeout=0\nCOMPACT 10\n", state_dir=d)
     r = run("timeout=0\nQUERY_PRIMARY 11\n", state_dir=d)
-    assert lines(r.stdout) == ["low"]  # compaction must preserve the sticky incumbent
+    assert lines(r.stdout) == ["low 1"]  # compaction must preserve incumbent + term
+
+
+def test_epoch_increments_only_on_new_election():
+    # term bumps on first election and each re-election; sticky/none do not bump.
+    stdin = (
+        "timeout=0\n"
+        "REGISTER a aA z1 5 0\n"       # elect a -> term 1
+        "REGISTER b bB z1 9 0\n"       # sticky, no bump
+        "QUERY_PRIMARY 1\n"           # a 1
+        "FAIL a 2\n"                   # re-elect b -> term 2
+        "QUERY_PRIMARY 3\n"           # b 2
+        "FAIL b 4\n"                   # no non-failed left -> NONE, term unchanged
+        "QUERY_PRIMARY 5\n"           # NONE
+        "REGISTER c cC z1 1 6\n"       # elect c -> term 3
+        "QUERY_PRIMARY 7\n"           # c 3
+    )
+    r = run(stdin)
+    assert lines(r.stdout) == ["a 1", "b 2", "NONE", "c 3"]
+
+
+def test_epoch_unchanged_by_sticky_register():
+    stdin = (
+        "timeout=0\nREGISTER a aA z1 1 0\nQUERY_PRIMARY 1\n"
+        "REGISTER b bB z1 9 2\nREGISTER c cC z1 9 3\nQUERY_PRIMARY 4\n"
+    )
+    r = run(stdin)
+    # later higher-weight registers are sticky no-ops: term stays 1
+    assert lines(r.stdout) == ["a 1", "a 1"]
+
+
+def test_epoch_survives_compaction(tmp_path):
+    d = str(tmp_path)
+    # elect a (term 1) -> fail a (none) -> elect b (term 2)
+    run("timeout=0\nREGISTER a aA z1 5 0\nFAIL a 1\nREGISTER b bB z1 5 2\n", state_dir=d)
+    run("timeout=0\nCOMPACT 3\n", state_dir=d)
+    # compacted log replays to a single election; the term must be persisted (=2)
+    r = run("timeout=0\nQUERY_PRIMARY 4\n", state_dir=d)
+    assert lines(r.stdout) == ["b 2"]
 
 
 def test_replicas_survive_restart(tmp_path):
@@ -437,7 +476,7 @@ def test_persist_fail_and_revive(tmp_path):
     assert lines(r2.stdout) == ["NONE"]
     run("timeout=0\nREGISTER n1 a1new z1 5 3\n", state_dir=d)
     r3 = run("timeout=0\nQUERY_PRIMARY 4\nQUERY_CONNECT x 4\n", state_dir=d)
-    assert lines(r3.stdout) == ["n1", "a1new"]
+    assert lines(r3.stdout) == ["n1 2", "a1new"]  # term 2 after fail+revive, recovered
 
 
 def test_recover_ignores_torn_tail(tmp_path):
@@ -499,7 +538,7 @@ def test_compact_preserves_state_and_shrinks_log(tmp_path):
     assert after <= before
     # a is primary (registered first); a alive (addr 3), b failed
     r = run("timeout=0\nQUERY_NODES 11\nQUERY_PRIMARY 11\nQUERY_CONNECT z 11\n", state_dir=d)
-    assert lines(r.stdout) == ["a", "a", "3"]
+    assert lines(r.stdout) == ["a", "a 1", "3"]
 
 
 def test_compact_ignores_stray_tmp(tmp_path):
@@ -516,7 +555,7 @@ def test_replay_fail_then_revive_sequence(tmp_path):
     d = str(tmp_path)
     run("timeout=0\nREGISTER n1 old z1 5 0\nFAIL n1 1\nREGISTER n1 new z1 7 2\n", state_dir=d)
     r = run("timeout=0\nQUERY_PRIMARY 3\nQUERY_CONNECT z 3\n", state_dir=d)
-    assert lines(r.stdout) == ["n1", "new"]
+    assert lines(r.stdout) == ["n1 2", "new"]  # elect(1) -> none -> re-elect(2), replayed
 
 
 # --------------------------------------------------------------------------
@@ -553,7 +592,7 @@ def test_config_is_first_nonempty_line():
     stdin = "\n\n   \ntimeout=0\nREGISTER n1 a1 z1 5 0\nQUERY_PRIMARY 0\n"
     r = run(stdin)
     assert r.returncode == 0
-    assert lines(r.stdout) == ["n1"]
+    assert lines(r.stdout) == ["n1 1"]
 
 
 def test_per_session_timeout_not_persisted(tmp_path):
