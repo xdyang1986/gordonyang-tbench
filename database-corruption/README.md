@@ -65,21 +65,44 @@ dynamic program over byte offsets (`best[p] = max(best[p+1], 1 + best[p+size])`)
 
 ## Completion Rates
 
-Latest validation run (commit `afde591`) — **passing**:
+Latest validation run (commit `f73a8c3`) — **passing** (task accepted):
 
 | Check | Result |
 |---|---|
 | Structural | 9/9 |
 | Oracle | 3/3 |
 | Difficulty balance | passed — avocado 4/5, opus 2/5, gpt 5/5 |
-| AI assessment | Accept (0 Critical / 0 High / 2 Medium / 1 Low) |
-| Contamination | LOW |
+| AI assessment | Accept (0 Critical / 0 High / 0 Medium / 0 Low) |
+| Contamination | MEDIUM (passed — non-blocking) |
 | Provenance | SUSPECT — review recommended (non-blocking) |
 
 The difficulty gate passes because the weak runner (avocado) is not trivial (4/5)
-while at least one stronger runner solves it (gpt 5/5). The AI-assessment Mediums
-are the intended "spec requires some guessing" implicit difficulty (see Model
-Analysis). Provenance is a non-blocking soft flag on the spec prose.
+while at least one stronger runner solves it (gpt 5/5). The AI assessment returns
+a clean Accept (no findings); the "spec requires some guessing" implicit
+difficulty is intended (see Model Analysis).
+
+**What the integrity checks mean, and this task's result:**
+
+- **Contamination** — scans the task (spec, tests, solution) for overlap with
+  public benchmarks and likely training data. This task scores **MEDIUM**, a
+  passing, non-blocking risk band: the surface vocabulary (CRC-32, append-only
+  log, fsck-style recovery) is common, which lifts it above LOW, but the concrete
+  artifact — the bespoke `DBLG` on-disk format and the exact
+  `{"recovered","skipped"}` contract — has no public counterpart to copy.
+
+- **Novelty** (recall risk) — asks whether a model could solve the task by
+  recalling a memorized solution rather than by reasoning. Low here: the crux is
+  a maximum-record dynamic program over byte offsets (a valid record may begin
+  *inside* another valid record's bytes, so greedy recovery is wrong), driven by
+  a custom binary format. That pairing is not a standard, searchable textbook
+  problem, so the MEDIUM contamination surface does not translate into
+  answer-recall — the empirical spread (avocado 4/5, opus 2/5) confirms the
+  solution must be reasoned out.
+
+- **Provenance** — an LLM classifier estimates whether the spec prose reads as
+  machine-generated. It returns **SUSPECT** on the instruction wording; this is a
+  non-blocking soft flag on writing style, not a correctness or fairness issue
+  (the spec was hand-reworded in the author's own voice at commit `afde591`).
 
 ## Model Analysis
 
