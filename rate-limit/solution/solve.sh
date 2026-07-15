@@ -344,6 +344,9 @@ func main() {
 			die("peek requires KEY TIMESTAMP_MS")
 		}
 		key := args[1]
+		if !validKey(key) {
+			die("invalid key")
+		}
 		ts, ok := parseInt(args[2])
 		if !ok {
 			die("invalid ts")
@@ -359,6 +362,9 @@ func main() {
 			die("allow requires KEY TOKENS TIMESTAMP_MS")
 		}
 		key := args[1]
+		if !validKey(key) {
+			die("invalid key")
+		}
 		need, ok1 := parseInt(args[2])
 		ts, ok2 := parseInt(args[3])
 		if !ok1 || !ok2 {

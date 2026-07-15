@@ -273,6 +273,29 @@ def test_key_with_space(rlctl, db):
     assert line.split("\t")[0] == "svc a"
 
 
+def test_key_with_forbidden_byte_rejected(rlctl, db):
+    # A key containing a forbidden byte (TAB or LF) must exit 2 for every command
+    # that takes a key, without touching the store. (NUL cannot pass through argv,
+    # so it is not exercised here; TAB/LF are the framing-relevant bytes.)
+    for bad in ["svc\tx", "svc\nx"]:
+        run(rlctl, db, "set", bad, "10", "5", expect=2)
+        run(rlctl, db, "delete", bad, expect=2)
+        run(rlctl, db, "peek", bad, "0", expect=2)
+        run(rlctl, db, "allow", bad, "1", "0", expect=2)
+    # nothing was written
+    assert run(rlctl, db, "scan", expect=0).stdout == ""
+
+
+def test_batch_forbidden_key_byte_aborts(rlctl, db):
+    # An LF inside a key can only reach batch by escaping the line grammar, but a
+    # TAB in a key collides with the field delimiter, so a bare CR (still a legal
+    # key byte) stays intact while a genuinely forbidden byte must abort the unit.
+    run(rlctl, db, "set", "keep", "5", "1", expect=0)
+    proc = run(rlctl, db, "batch", stdin="set\tbad\x00key\t3\t0\n")
+    assert proc.returncode == 2
+    assert run(rlctl, db, "peek", "keep", "0", expect=0).stdout.strip() == "5"
+
+
 # ---------------------------- batch (TAB-delimited) -----------------------
 def test_batch_applies_all(rlctl, db):
     script = "set\ta\t10\t1\nset\tb\t5\t0\ndelete\ta\nset\tc\t7\t2\n"
@@ -558,8 +581,9 @@ def test_randomized_model(rlctl, db):
 
 # ---------------------------- usage errors --------------------------------
 def test_unknown_command(rlctl, db):
-    assert run(rlctl, db, "frobnicate").returncode not in (0, 3)
+    # Spec: usage errors exit exactly 2 (see the exit-code table in instruction.md).
+    assert run(rlctl, db, "frobnicate").returncode == 2
 
 
 def test_wrong_arg_count(rlctl, db):
-    assert run(rlctl, db, "set", "onlykey").returncode not in (0, 3)
+    assert run(rlctl, db, "set", "onlykey").returncode == 2
