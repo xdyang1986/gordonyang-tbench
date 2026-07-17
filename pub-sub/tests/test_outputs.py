@@ -1188,3 +1188,307 @@ def test_publish_batch_validation():
     bus = _load_pubsub()()
     with pytest.raises(ValueError):
         bus.publish_batch("nope")
+
+
+# --------------------------------------------------------------------------- #
+# capacity-weighted distribution (integer water-filling)
+# --------------------------------------------------------------------------- #
+
+
+def test_distribute_even_split():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=10)
+    b = bus.subscribe("t", lambda d: None, capacity=10)
+    c = bus.subscribe("t", lambda d: None, capacity=10)
+    res = bus.distribute("t", 9)
+    assert res["allocations"] == {a: 3, b: 3, c: 3}
+    assert res["overflow"] == 0
+
+
+def test_distribute_remainder_to_smallest_ids():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=10)
+    b = bus.subscribe("t", lambda d: None, capacity=10)
+    c = bus.subscribe("t", lambda d: None, capacity=10)
+    res = bus.distribute("t", 10)
+    # 3 each, remaining 1 goes to the smallest id
+    assert res["allocations"] == {a: 4, b: 3, c: 3}
+    assert res["overflow"] == 0
+
+
+def test_distribute_saturation_cascade():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=1)
+    b = bus.subscribe("t", lambda d: None, capacity=10)
+    c = bus.subscribe("t", lambda d: None, capacity=10)
+    # a saturates at 1; its excess cascades to b and c
+    res = bus.distribute("t", 12)
+    assert res["allocations"] == {a: 1, b: 6, c: 5}
+    assert res["overflow"] == 0
+    assert sum(res["allocations"].values()) == 12
+
+
+def test_distribute_overflow_when_load_exceeds_capacity():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=2)
+    b = bus.subscribe("t", lambda d: None, capacity=3)
+    res = bus.distribute("t", 10)
+    assert res["allocations"] == {a: 2, b: 3}
+    assert res["overflow"] == 5
+
+
+def test_distribute_zero_capacity_excluded():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=0)
+    b = bus.subscribe("t", lambda d: None, capacity=5)
+    res = bus.distribute("t", 3)
+    assert res["allocations"] == {a: 0, b: 3}
+    assert res["overflow"] == 0
+
+
+def test_distribute_uses_specificity_tier():
+    bus = _load_pubsub()()
+    exact = bus.subscribe("t", lambda d: None, capacity=5)
+    bus.subscribe("*", lambda d: None, capacity=5)  # different tier, excluded
+    res = bus.distribute("t", 4)
+    assert res["allocations"] == {exact: 4}
+    assert res["overflow"] == 0
+
+
+def test_distribute_no_recipients_all_overflow():
+    bus = _load_pubsub()()
+    res = bus.distribute("none", 5)
+    assert res["allocations"] == {}
+    assert res["overflow"] == 5
+
+
+def test_distribute_validation():
+    bus = _load_pubsub()()
+    for bad in (-1, True, 1.5, "3"):
+        with pytest.raises(ValueError):
+            bus.distribute("t", bad)
+    with pytest.raises(ValueError):
+        bus.distribute("*", 1)
+
+
+def test_capacity_validation():
+    bus = _load_pubsub()()
+    for bad in (-1, True, 1.5):
+        with pytest.raises(ValueError):
+            bus.subscribe("t", lambda d: None, capacity=bad)
+    assert isinstance(bus.subscribe("t", lambda d: None, capacity=0), int)
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: clarified ambiguities (group A)
+# --------------------------------------------------------------------------- #
+
+
+def test_filter_malformed_return_raises():
+    bus = _load_pubsub()()
+    bus.add_filter(lambda t, d: "not a pair")
+    bus.subscribe("t", lambda d: None)
+    with pytest.raises(ValueError):
+        bus.publish("t", 1)
+
+
+def test_publish_ordered_duplicate_id_raises():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.publish_ordered([
+            {"id": "A", "topic": "t"},
+            {"id": "A", "topic": "t"},
+        ])
+
+
+def test_subscribe_many_is_atomic_on_invalid_pattern():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.subscribe_many(["a", "bad*pattern", "b"], lambda d: None)
+    assert bus.get_subscriber_count() == 0  # nothing registered
+
+
+def test_resume_when_not_paused_is_noop():
+    bus = _load_pubsub()()
+    assert bus.resume() == 0
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: publish_ordered thresholds (group B)
+# --------------------------------------------------------------------------- #
+
+
+def test_ordered_threshold_zero_ready_immediately():
+    bus = _load_pubsub()()
+    res = bus.publish_ordered([
+        {"id": "X", "topic": "t", "deps": ["A"], "threshold": 0},
+        {"id": "A", "topic": "t"},
+    ])
+    # X needs 0 of its deps -> ready immediately, delivered before A (arrival order)
+    assert res["delivered"] == ["X", "A"]
+    assert res["undeliverable"] == []
+
+
+def test_ordered_threshold_exceeds_deps_undeliverable():
+    bus = _load_pubsub()()
+    res = bus.publish_ordered([
+        {"id": "A", "topic": "t"},
+        {"id": "X", "topic": "t", "deps": ["A"], "threshold": 2},
+    ])
+    assert res["delivered"] == ["A"]
+    assert res["undeliverable"] == ["X"]
+
+
+def test_ordered_self_dependency_undeliverable():
+    bus = _load_pubsub()()
+    res = bus.publish_ordered([{"id": "A", "topic": "t", "deps": ["A"]}])
+    assert res["delivered"] == []
+    assert res["undeliverable"] == ["A"]
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: distribute boundaries (group B)
+# --------------------------------------------------------------------------- #
+
+
+def test_distribute_load_zero():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=5)
+    res = bus.distribute("t", 0)
+    assert res["allocations"] == {a: 0}
+    assert res["overflow"] == 0
+
+
+def test_distribute_load_equals_total_capacity():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=2)
+    b = bus.subscribe("t", lambda d: None, capacity=3)
+    res = bus.distribute("t", 5)
+    assert res["allocations"] == {a: 2, b: 3}
+    assert res["overflow"] == 0
+
+
+def test_distribute_all_zero_capacity_is_all_overflow():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=0)
+    b = bus.subscribe("t", lambda d: None, capacity=0)
+    res = bus.distribute("t", 3)
+    assert res["allocations"] == {a: 0, b: 0}
+    assert res["overflow"] == 3
+
+
+def test_distribute_deep_cascade():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=1)
+    b = bus.subscribe("t", lambda d: None, capacity=1)
+    c = bus.subscribe("t", lambda d: None, capacity=1)
+    d = bus.subscribe("t", lambda d: None, capacity=100)
+    res = bus.distribute("t", 10)
+    assert res["allocations"] == {a: 1, b: 1, c: 1, d: 7}
+    assert res["overflow"] == 0
+
+
+def test_distribute_over_prefix_tier():
+    bus = _load_pubsub()()
+    p = bus.subscribe("order.*", lambda d: None, capacity=5)
+    res = bus.distribute("order.created", 3)
+    assert res["allocations"] == {p: 3}
+    assert res["overflow"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: max_calls / delivered_count accounting (group B)
+# --------------------------------------------------------------------------- #
+
+
+def test_max_calls_transform_raise_not_counted():
+    bus = _load_pubsub()()
+
+    def boom(d):
+        raise ValueError("x")
+
+    bus.subscribe("t", lambda d: None, max_calls=2, transform=boom)
+    bus.publish("t", 1)
+    bus.publish("t", 2)
+    # transform always raises -> never counts toward max_calls -> still subscribed
+    assert bus.get_subscriber_count() == 1
+    assert bus.delivered_count() == 2  # both invocations count as delivered
+
+
+def test_delivered_count_excludes_muted_and_paused_includes_raised():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d))
+    bus.publish("t", 1)
+    assert bus.delivered_count() == 1
+    bus.mute("t")
+    bus.publish("t", 2)
+    assert bus.delivered_count() == 1  # muted -> not counted
+    bus.unmute("t")
+    bus.pause()
+    bus.publish("t", 3)
+    assert bus.delivered_count() == 1  # paused -> queued, not counted
+    assert bus.resume() == 1
+    assert bus.delivered_count() == 2  # replayed now counts
+
+    def boom(d):
+        raise RuntimeError("x")
+
+    bus.subscribe("t", boom)
+    bus.publish("t", 4)
+    assert bus.delivered_count() == 4  # good + raising callback both invoked
+    assert rec == [1, 3, 4]
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: cross-feature interactions (group C)
+# --------------------------------------------------------------------------- #
+
+
+def test_ordered_muted_event_still_delivered_zero_count():
+    bus = _load_pubsub()()
+    rec = []
+    bus.mute("m")
+    bus.subscribe("t", lambda d: rec.append(d))
+    res = bus.publish_ordered([
+        {"id": "A", "topic": "m", "data": 1},
+        {"id": "B", "topic": "t", "data": 2, "deps": ["A"]},
+    ])
+    # A is dispatched (unblocks B) but muted -> 0 callbacks; B delivers to the sub
+    assert res["delivered"] == ["A", "B"]
+    assert res["undeliverable"] == []
+    assert res["count"] == 1
+    assert rec == [2]
+
+
+def test_resume_applies_filter_added_during_pause():
+    bus = _load_pubsub()()
+    rec = []
+    bus.pause()
+    bus.publish("a", 1)
+    bus.add_filter(lambda t, d: ("b", d))
+    bus.subscribe("b", lambda d: rec.append(d))
+    assert bus.resume() == 1  # replay applies the now-registered filter -> routes to "b"
+    assert rec == [1]
+
+
+def test_publish_batch_while_paused_then_resume():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d))
+    bus.pause()
+    assert bus.publish_batch([("t", 1), ("t", 2)]) == [0, 0]
+    assert rec == []
+    assert bus.resume() == 2
+    assert rec == [1, 2]
+
+
+def test_retained_replay_max_calls_exhausts_midway():
+    bus = _load_pubsub()()
+    rec = []
+    bus.publish("a", 1, retain=True)
+    bus.publish("b", 2, retain=True)
+    bus.subscribe("*", lambda d: rec.append(d), max_calls=1)
+    # matches both retained topics (insertion order); budget exhausts after "a"
+    assert rec == [1]
+    assert bus.get_subscriber_count() == 0

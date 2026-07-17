@@ -69,6 +69,11 @@ class PubSub:
         if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls < 1:
             raise ValueError("max_calls must be a positive int or None")
 
+    @staticmethod
+    def _validate_capacity(capacity: Any) -> None:
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
+            raise ValueError("capacity must be a non-negative int")
+
     # ---- matching -----------------------------------------------------------
 
     def _matches(self, pattern: str, topic: str) -> bool:
@@ -109,12 +114,13 @@ class PubSub:
 
     # ---- subscription -------------------------------------------------------
 
-    def _add(self, topic, callback, max_calls, priority, transform) -> int:
+    def _add(self, topic, callback, max_calls, priority, transform, capacity) -> int:
         self._validate_pattern(topic)
         if not callable(callback):
             raise ValueError("callback must be callable")
         self._validate_priority(priority)
         self._validate_max_calls(max_calls)
+        self._validate_capacity(capacity)
         if transform is not None and not callable(transform):
             raise ValueError("transform must be callable or None")
         with self._lock:
@@ -123,6 +129,7 @@ class PubSub:
             self._subs[sid] = {
                 "topic": topic, "cb": callback, "priority": priority,
                 "max_calls": max_calls, "calls": 0, "transform": transform,
+                "capacity": capacity,
             }
             replay = [(rt, self._retained[rt]) for rt in self._retained
                       if self._matches(topic, rt)]
@@ -134,17 +141,32 @@ class PubSub:
         return sid
 
     def subscribe(self, topic, callback, priority: int = 0,
-                  max_calls: Optional[int] = None, transform=None) -> int:
-        return self._add(topic, callback, max_calls, priority, transform)
+                  max_calls: Optional[int] = None, transform=None,
+                  capacity: int = 1) -> int:
+        return self._add(topic, callback, max_calls, priority, transform, capacity)
 
-    def subscribe_once(self, topic, callback, priority: int = 0, transform=None) -> int:
-        return self._add(topic, callback, 1, priority, transform)
+    def subscribe_once(self, topic, callback, priority: int = 0, transform=None,
+                       capacity: int = 1) -> int:
+        return self._add(topic, callback, 1, priority, transform, capacity)
 
     def subscribe_many(self, patterns, callback, priority: int = 0,
-                       max_calls: Optional[int] = None, transform=None) -> List[int]:
+                       max_calls: Optional[int] = None, transform=None,
+                       capacity: int = 1) -> List[int]:
         if not isinstance(patterns, (list, tuple)):
             raise ValueError("patterns must be a list")
-        return [self._add(p, callback, max_calls, priority, transform) for p in patterns]
+        # Validate everything up front so the call is atomic: on any invalid
+        # argument nothing is registered.
+        for p in patterns:
+            self._validate_pattern(p)
+        if not callable(callback):
+            raise ValueError("callback must be callable")
+        self._validate_priority(priority)
+        self._validate_max_calls(max_calls)
+        self._validate_capacity(capacity)
+        if transform is not None and not callable(transform):
+            raise ValueError("transform must be callable or None")
+        return [self._add(p, callback, max_calls, priority, transform, capacity)
+                for p in patterns]
 
     def unsubscribe(self, sub_id: int) -> bool:
         with self._lock:
@@ -279,7 +301,10 @@ class PubSub:
             result = fn(topic, data)
             if result is None:
                 return 0
-            topic, data = result
+            try:
+                topic, data = result
+            except (TypeError, ValueError):
+                raise ValueError("filter must return a (topic, data) pair or None")
         self._validate_publish_topic(topic)
         with self._lock:
             if retain:
@@ -389,6 +414,37 @@ class PubSub:
         undeliverable = sorted(remaining, key=lambda eid: index[eid])
         return delivered, undeliverable
 
+    # ---- capacity-weighted distribution (integer water-filling) -------------
+
+    def distribute(self, topic: str, load: int) -> dict:
+        self._validate_publish_topic(topic)
+        if isinstance(load, bool) or not isinstance(load, int) or load < 0:
+            raise ValueError("load must be a non-negative int")
+        with self._lock:
+            ids = self._winning_tier_ids(topic)
+            cap = {sid: self._subs[sid]["capacity"] for sid in ids}
+        alloc = {sid: 0 for sid in ids}
+        remaining = load
+        while remaining > 0:
+            active = sorted(sid for sid in ids if alloc[sid] < cap[sid])
+            if not active:
+                break
+            n = len(active)
+            if remaining < n:
+                for sid in active[:remaining]:
+                    alloc[sid] += 1
+                remaining = 0
+                break
+            share = remaining // n
+            used = 0
+            for sid in active:
+                give = min(share, cap[sid] - alloc[sid])
+                alloc[sid] += give
+                used += give
+            remaining -= used
+        overflow = load - sum(alloc.values())
+        return {"allocations": alloc, "overflow": overflow}
+
     def publish_ordered(self, events) -> dict:
         if not isinstance(events, list):
             raise ValueError("events must be a list")
@@ -397,6 +453,8 @@ class PubSub:
             if not isinstance(e, dict) or "id" not in e or "topic" not in e:
                 raise ValueError("each event needs 'id' and 'topic'")
             self._validate_publish_topic(e["topic"])
+            if e["id"] in by_id:
+                raise ValueError(f"duplicate event id: {e['id']!r}")
             by_id[e["id"]] = e
         delivered, undeliverable = self._compute_delivery_order(events)
         count = 0
