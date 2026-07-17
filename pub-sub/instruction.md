@@ -1,84 +1,209 @@
-# Pub-Sub Broker
+Pub-Sub Broker
+Build a thread-safe, in-memory publish-subscribe message broker as a single file /app/pubsub.py. Export a class PubSub importable via from pubsub import PubSub. Use only the Python standard library. All tests import directly from this file.
 
-Implement a thread-safe, in-memory publish-subscribe broker in `/app/pubsub.py`, in a class `PubSub` importable as `from pubsub import PubSub`. Pure Python, standard library only. Put the solution only in `pubsub.py` (tests import from it).
+This is not a standard fan-out pub-sub system. Where this specification differs from typical pub-sub semantics, this document is the source of truth.
 
-This is **not** a textbook fan-out pub-sub; where the contract departs from common pub-sub behavior, the contract below is authoritative.
+Topics and Validation
+Pattern (for subscribe*, mute)
+A valid pattern is a non-empty string matching one of:
 
-## Topics & validation
+An exact topic — contains no * character.
 
-- **Pattern** (used by `subscribe*`, `mute`): non-empty string that is either an exact topic (no `*`), the global `"*"`, or a prefix wildcard `"<prefix>.*"` (prefix non-empty, no `*`). Anything else is invalid.
-- **Publish topic** (used by `publish*`, `get_matching_count`, `get_history`): non-empty string with no `*`.
-- A pattern **matches** a topic when: pattern equals topic; or pattern is `"*"`; or pattern is `"<p>.*"` and the topic equals `<p>` or starts with `<p>.` (the dot boundary matters: `"order.*"` matches `"order"` and `"order.x"` but not `"order123"`).
-- `ValueError` on: invalid pattern/topic; non-callable `callback`, `filter`, or error `handler`; `transform` that is neither callable nor `None`; `priority` that is not an int (bool is not an int); `max_calls` that is neither `None` nor a positive int (bool excluded).
+The global wildcard — literally "*".
 
-Subscriber **callbacks** are always invoked with exactly one positional argument: the delivered value (the event `data` after any per-subscription `transform`) — the topic is not passed. (This differs from filters, which receive `(topic, data)`.)
+A prefix wildcard — the form "<prefix>.*" where <prefix> is non-empty and itself contains no *.
 
-## Subscriptions
+Anything else is invalid.
 
-- `subscribe(topic, callback, priority=0, max_calls=None, transform=None) -> int`: register and return a unique id, incremental from 1 in call order. Same callback may be registered many times (each independent). `max_calls` (see Delivery) bounds how many times it fires; `transform`, if given, is applied to `data` before the callback receives it. Immediately upon registering, the new subscriber receives any retained messages whose topics its own pattern matches (see Retained), subject to the same transform / max_calls / once rules.
-- `subscribe_once(topic, callback, priority=0, transform=None) -> int`: equivalent to `subscribe(..., max_calls=1)`.
-- `subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None) -> list[int]`: subscribe the same callback to each pattern; return the ids in order. `patterns` must be a list/tuple.
-- `unsubscribe(sub_id) -> bool`: remove by id.
-- `unsubscribe_callback(callback) -> int`: remove every subscription whose callback is that object (identity); return the number removed.
+Publish topic (for publish*, get_matching_count, get_history)
+A valid publish topic is a non-empty string containing no *.
 
-## Delivery (used by `publish`, `publish_all`, and retained replay)
+Pattern matching rules
+A pattern matches a topic when any of the following hold:
 
-- **Order**: within the set to notify, invoke by priority descending, then by id descending (newest first).
-- Each callback is invoked with one argument: `transform(data)` if the subscription has a transform, else `data`.
-- Compute and snapshot the ordered set under the lock, then invoke callbacks with the lock released. Subscriptions created during delivery are not part of the in-progress delivery.
-- Before invoking each callback, if its subscription no longer exists (removed during this delivery), skip it and do not count it.
-- If a callback (or its transform) raises, swallow it, invoke the error handler if one is set (see below), and continue; it still counts as delivered but does **not** count toward that subscription's `max_calls`.
-- **max_calls**: a subscription with `max_calls=N` is removed after it has been delivered `N` times without raising. `max_calls=None` means unlimited. (`subscribe_once` is `max_calls=1`.)
-- The return value is the number of callbacks actually invoked.
+The pattern is identical to the topic.
 
-## Publish pipeline
+The pattern is "*".
 
-`publish(topic, data=None, retain=False)` and `publish_all(topic, data=None, retain=False)` process an event in this order:
+The pattern is "<p>.*" and the topic either equals <p> or begins with <p>. (dot-boundary matching — e.g., "order.*" matches "order" and "order.placed" but not "order123").
 
-1. Validate the publish topic.
-2. If paused, enqueue the event (preserving its publish vs publish_all mode, topic, data, retain) and return 0.
-3. Apply filters in ascending filter-id order. Each filter is called as `fn(topic, data)` and returns either a replacement `(topic, data)` or `None`. `None` aborts the event (return 0). Otherwise the returned values replace `topic`/`data` for the rest of the pipeline. After filters, re-validate the (possibly rewritten) publish topic.
-4. If `retain`, store `data` as the retained value for the (final) topic, replacing any prior retained value.
-5. If the final topic matches any muted pattern, return 0.
-6. Append `data` to the (final) topic's history log.
-7. Route and deliver:
-   - `publish`: notify only the most-specific matching tier — exact-topic subscribers if any exist, else the subscribers of the single longest matching prefix pattern, else the `"*"` subscribers. A more specific tier suppresses the rest.
-   - `publish_all`: notify every subscription whose pattern matches the topic, across all tiers.
+Validation errors
+Raise ValueError for any of:
 
-Order matters: a muted publish still updates the retained value (step 4 before 5) but is not recorded in history and delivers to nobody (steps 6–7 skipped). A paused or filter-aborted event does none of steps 4–7.
+Invalid pattern or publish topic.
 
-- `publish_batch(events) -> list[int]`: publish each event sequentially and return the per-event delivered counts. Each event is either a `(topic, data)` pair or a dict with `topic`, optional `data`, optional `retain`. `events` must be a list/tuple.
+A callback, filter, or error handler that is not callable.
 
-## Filters, error handler, mute, pause
+A transform that is neither callable nor None.
 
-- `add_filter(fn) -> int` / `remove_filter(filter_id) -> bool`: register/remove pipeline interceptors (step 3).
-- `set_error_handler(handler) -> None`: `handler` is called as `handler(exception, sub_id, data)` (with the original, pre-transform `data`) whenever a callback/transform raises; if the handler itself raises, swallow it. `None` clears the handler.
-- `mute(pattern) -> None`, `unmute(pattern) -> bool`, `muted_patterns() -> set`: muting suppresses delivery and history for matching publishes but still retains.
-- `pause() -> None`, `is_paused() -> bool`, `resume() -> int`: while paused, publishes are queued (step 2). `resume` clears the paused state, replays queued events in FIFO order through the full pipeline (using the state at replay time), and returns the total callbacks invoked across the replay.
+A priority that is not an int (booleans excluded).
 
-## Retained & history
+A max_calls that is neither None nor a positive integer (booleans excluded).
 
-- Retained messages are replayed to a subscription when it is created (in the insertion order of the retained topics), following the same ordering / transform / exception / max_calls rules as normal delivery. `clear_retained(topic=None)`: clear all (None) or one exact topic. `retained_topics() -> set`.
-- `get_history(topic) -> list`: the data values recorded for that topic (pipeline step 6), in order; empty list if none. `clear_history(topic=None)`: clear all (None) or one exact topic.
+Callback signature
+Subscriber callbacks always receive exactly one positional argument: the delivered value (i.e., data after any per-subscription transform has been applied). The topic is not passed to callbacks. (Note: filters receive (topic, data) — this is different.)
 
-## Introspection
+Subscriptions
+subscribe(pattern, callback, priority=0, max_calls=None, transform=None) -> int
+Register a subscription and return a unique integer ID, assigned incrementally from 1 in call order. The same callback object may be registered multiple times — each registration is independent.
 
-- `clear(topic=None)`: remove all subscriptions (None) or those whose topic exactly equals the string (exact comparison, never wildcard).
-- `get_subscriber_count(topic=None)`: total (None) or count of subscriptions whose topic exactly equals the string.
-- `get_matching_count(topic)`: size of the tier `publish(topic)` would notify, without invoking anything.
-- `topics() -> set`: distinct subscribed topic strings.
-- `delivered_count() -> int`: total callbacks ever invoked by this broker (normal deliveries, retained replays, resume replays); skipped/muted/paused events contribute nothing.
+max_calls: limits how many successful deliveries fire this subscription (see Delivery).
 
-## Ordered delivery (`publish_ordered`)
+transform: if provided, applied to data before the callback receives it.
 
-`publish_ordered(events) -> dict` delivers a batch of inter-dependent events in dependency order. `events` is a list of dicts; each has `id` (unique string), `topic` (a publish topic), optionally `data`, `deps` (list of event ids, default `[]`), `threshold` (int, default `len(deps)`), and `priority` (int, default `0`). Validate that `events` is a list and each event has an `id` and a valid `topic`, else `ValueError`.
+Upon registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
 
-- An event is **ready** once at least `threshold` of its `deps` have already been delivered — counting only deps that actually get delivered in this batch (an id never delivered — missing, or itself undeliverable — never counts). Default threshold means all deps; a smaller threshold is k-of-n.
-- Repeatedly: among undelivered events, deliver the ready one with highest `priority`, ties broken by smallest arrival index; then re-evaluate readiness (delivering may unblock others — a cascade). Stop when nothing is ready.
-- Remaining events are **undeliverable** (missing deps, cycles, unreachable threshold), reported by arrival index.
+subscribe_once(pattern, callback, priority=0, transform=None) -> int
+Equivalent to subscribe(..., max_calls=1).
 
-Each delivered event is dispatched via `publish(topic, data)` in the computed order. Return `{"delivered": [...], "undeliverable": [...], "count": total callbacks invoked}`.
+subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None) -> list[int]
+Subscribe the same callback to each pattern in the list. Return the IDs in order. patterns must be a list or tuple.
 
-## Thread-safety
+unsubscribe(sub_id) -> bool
+Remove a subscription by ID. Return whether it existed.
 
-Use `threading.RLock`. All public methods are thread-safe. Never hold the lock while invoking a callback, filter, transform, or error handler. Reentrant calls from these must not deadlock.
+unsubscribe_callback(callback) -> int
+Remove every subscription whose callback is the given object (identity comparison). Return the count removed.
+
+Delivery Semantics
+These rules govern publish, publish_all, and retained-message replay.
+
+Ordering
+Among the set of subscribers to notify, invoke callbacks in this order:
+
+Descending priority (highest first).
+
+Descending ID (newest first) as tiebreaker.
+
+Invocation
+Each callback receives one argument: transform(data) if the subscription has a transform, otherwise data.
+
+Lock discipline
+Compute and snapshot the ordered subscriber set while holding the lock. Then release the lock before invoking any callbacks. Subscriptions created during delivery are excluded from the in-progress delivery.
+
+Skipping removed subscriptions
+Before invoking each callback, check whether its subscription still exists. If it was removed during this delivery cycle, skip it (do not count it).
+
+Exception handling
+If a callback or its transform raises an exception:
+
+Swallow it.
+
+Invoke the error handler (if one is set).
+
+Continue with the next callback.
+
+The invocation counts toward total delivered but does not count toward that subscription's max_calls.
+
+max_calls behavior
+A subscription with max_calls=N is automatically removed after N successful (non-raising) deliveries. max_calls=None means unlimited.
+
+Return value
+All publish methods return the number of callbacks actually invoked (including those that raised).
+
+Publish Pipeline
+Both publish(topic, data=None, retain=False) and publish_all(topic, data=None, retain=False) process an event through these steps in order:
+
+Validate the publish topic.
+
+Pause check — if the broker is paused, enqueue the event (preserving its mode, topic, data, and retain flag) and return 0.
+
+Apply filters — in ascending filter-ID order, call each filter as fn(topic, data). A filter returns either a replacement (topic, data) tuple or None. If None, the event is aborted (return 0). Otherwise the returned values replace topic and data for subsequent steps. After all filters, re-validate the (possibly rewritten) topic.
+
+Retain — if retain is true, store data as the retained value for the final topic (replacing any prior value).
+
+Mute check — if the final topic matches any muted pattern, return 0.
+
+Record history — append data to the final topic's history log.
+
+Route and deliver:
+
+publish (most-specific tier only): notify exact-topic subscribers if any exist; otherwise the subscribers of the single longest matching prefix pattern; otherwise "*" subscribers. A more specific tier suppresses all less-specific tiers.
+
+publish_all (all tiers): notify every subscription whose pattern matches the topic.
+
+Important ordering note
+A muted event still updates retained data (step 4 happens before step 5) but is not recorded in history and delivers to nobody. A paused or filter-aborted event skips steps 4–7 entirely.
+
+publish_batch(events) -> list[int]
+Publish each event sequentially; return per-event delivered counts. Each element of events is either a (topic, data) tuple or a dict with keys topic, optional data, optional retain. The events argument must be a list or tuple.
+
+Filters, Error Handling, Muting, and Pausing
+Filters
+add_filter(fn) -> int: Register a pipeline filter (invoked at step 3). Returns a filter ID.
+
+remove_filter(filter_id) -> bool: Remove a filter by ID.
+
+Error handler
+set_error_handler(handler) -> None: Set a handler called as handler(exception, sub_id, data) (with the original pre-transform data) whenever a callback or transform raises. If the handler itself raises, swallow it. Pass None to clear.
+
+Muting
+mute(pattern) -> None: Suppress delivery and history recording for publishes matching this pattern.
+
+unmute(pattern) -> bool: Remove a mute; return whether it existed.
+
+muted_patterns() -> set: Return all currently muted patterns.
+
+Pausing
+pause() -> None: Enter paused state; subsequent publishes are queued.
+
+is_paused() -> bool: Check whether the broker is paused.
+
+resume() -> int: Unpause, replay all queued events in FIFO order through the full pipeline (using state at replay time), and return the total callbacks invoked across the entire replay.
+
+Retained Messages and History
+Retained messages
+When a subscription is created, it immediately receives retained messages for all topics its pattern matches (in the insertion order of retained topics). The same ordering, transform, exception handling, and max_calls rules apply as for normal delivery.
+
+clear_retained(topic=None): Clear retained data for one exact topic, or all topics if None.
+
+retained_topics() -> set: Return the set of topics that currently have a retained value.
+
+History
+get_history(topic) -> list: Return the list of data values recorded for that topic (from pipeline step 6), in chronological order. Empty list if none.
+
+clear_history(topic=None): Clear history for one exact topic, or all topics if None.
+
+Introspection
+clear(topic=None): Remove all subscriptions (if None) or only those whose pattern exactly equals the given string (literal comparison, never wildcard-expanded).
+
+get_subscriber_count(topic=None): Total subscription count (if None) or the count whose pattern exactly equals the given string.
+
+get_matching_count(topic): The number of subscribers that publish(topic) would notify (i.e., the size of the most-specific matching tier), without actually invoking anything.
+
+topics() -> set: The set of distinct pattern strings currently subscribed.
+
+delivered_count() -> int: The lifetime total of callbacks invoked by this broker (includes normal deliveries, retained replays, and resume replays). Skipped, muted, and paused events contribute nothing.
+
+Ordered Delivery (publish_ordered)
+publish_ordered(events) -> dict delivers a batch of interdependent events respecting declared dependencies.
+
+Event format
+events is a list of dicts. Each dict has:
+
+Key	Required	Default	Description
+id	Yes	—	Unique string identifier for this event
+topic	Yes	—	A valid publish topic
+data	No	None	Payload
+deps	No	[]	List of event IDs this event depends on
+threshold	No	len(deps)	Minimum number of deps that must be delivered before this event is ready
+priority	No	0	Scheduling priority
+Raise ValueError if events is not a list or any event lacks id or a valid topic.
+
+Execution rules
+An event becomes ready once at least threshold of its deps have been delivered within this batch. An ID that is never delivered (missing from the batch, or itself undeliverable) never counts toward any dependent's threshold.
+
+Repeatedly select the ready event with the highest priority (ties broken by smallest original index in the input list), deliver it via publish(topic, data), then re-evaluate readiness (delivering one event may unblock others — cascading).
+
+Stop when no undelivered event is ready.
+
+Remaining events are undeliverable (due to missing deps, cycles, or unreachable thresholds).
+
+Return value
+{
+    "delivered": [...],      # event IDs in delivery order
+    "undeliverable": [...],  # event IDs by original index
+    "count": int             # total callbacks invoked across all delivered events
+}
+Thread Safety
+Use threading.RLock. All public methods must be thread-safe. Never hold the lock while invoking a callback, filter, transform, or error handler. Reentrant calls from user code must not deadlock.
