@@ -13,23 +13,23 @@ This is **not** a standard fan-out pub-sub system. Where this specification diff
 
 Anything else is an invalid pattern.
 
-**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`) — a non-empty string containing no `*`.
+**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`, `publish_metered`, `refill`) — a non-empty string containing no `*`.
 
 **A pattern matches a topic** when any of: the pattern equals the topic; the pattern is `"*"`; or the pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (dot-boundary matching — `"order.*"` matches `"order"` and `"order.placed"` but not `"order123"`).
 
-Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
+Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load`, `cost`, or `amount` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
 
 Subscriber **callbacks** always receive exactly one positional argument: the delivered value (the `data` after any per-subscription transform). The topic is not passed to callbacks. (Filters receive `(topic, data)` — this is different.)
 
 ## Subscriptions
 
-- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute` and `publish_fair` (see below). On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
+- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute`, `publish_fair`, and `publish_metered` (see below), and is also the subscription's initial token balance. On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
 - `subscribe_once(pattern, callback, priority=0, transform=None, capacity=1) -> int` — equivalent to `subscribe(..., max_calls=1)`.
 - `subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None, capacity=1) -> list[int]` — subscribe the same callback to each pattern; return the ids in order. `patterns` must be a list or tuple. Validation is up front: if any pattern or other argument is invalid, raise `ValueError` **before registering any** subscription (the call is atomic — no partial registration).
 - `unsubscribe(sub_id) -> bool` — remove by id; return whether it existed.
 - `unsubscribe_callback(callback) -> int` — remove every subscription whose callback is that object (identity comparison); return the count removed.
 
-## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, and `publish_fair`)
+## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, `publish_fair`, and `publish_metered`)
 
 - **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` and `publish_fair` use their own selection order — see below.)
 - **Invocation**: each callback receives `transform(data)` if the subscription has a transform, else `data`.
@@ -73,7 +73,7 @@ Ordering note: a muted event still updates retained data (step 4 before 5) but i
 - `get_subscriber_count(topic=None)` — total (None) or count whose pattern exactly equals the string.
 - `get_matching_count(topic)` — the number of subscribers `publish(topic)` would notify (size of the most-specific matching tier), without invoking anything.
 - `topics() -> set` — distinct pattern strings currently subscribed.
-- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded deliveries, and fair deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
+- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded, fair, and metered deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
 
 ## Ordered delivery (`publish_ordered`)
 
@@ -120,6 +120,14 @@ The broker keeps a persistent integer `pass` value per subscription (shared acro
 - Select the eligible subscriber with the smallest `pass`, breaking ties by smallest `sub_id`.
 - Increase that subscriber's `pass` by its **stride** = `(2**32) // capacity` (so higher capacity → smaller stride → selected more often).
 - Deliver `data` to the selected subscriber (normal Delivery semantics: transform, exceptions/error handler, `max_calls`, `delivered_count`) and return its `sub_id`.
+
+## Token-bucket rate limiting (`publish_metered`, `refill`, `get_tokens`)
+
+Each subscription owns a token bucket whose maximum size is its `capacity`; the balance starts full (equal to `capacity`).
+
+- `publish_metered(topic, data=None, cost=1) -> list[int]` — among the tier `publish(topic)` would notify, taken in normal delivery order (priority descending, id descending), deliver `data` to every subscriber whose current token balance is at least `cost`, deducting `cost` from each such subscriber's balance; subscribers with fewer than `cost` tokens are skipped (not delivered, balance unchanged). Return the ids that were delivered, in delivery order. `cost` is a non-negative int.
+- `refill(topic, amount) -> None` — add `amount` tokens to every subscriber in the tier `publish(topic)` would notify, capping each balance at its `capacity`. `amount` is a non-negative int.
+- `get_tokens(sub_id) -> int | None` — the current token balance for a subscription, or `None` if the id is unknown.
 
 ## Thread safety
 

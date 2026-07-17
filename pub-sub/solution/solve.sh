@@ -133,7 +133,7 @@ class PubSub:
             self._subs[sid] = {
                 "topic": topic, "cb": callback, "priority": priority,
                 "max_calls": max_calls, "calls": 0, "transform": transform,
-                "capacity": capacity,
+                "capacity": capacity, "tokens": capacity,
             }
             replay = [(rt, self._retained[rt]) for rt in self._retained
                       if self._matches(topic, rt)]
@@ -472,6 +472,37 @@ class PubSub:
         for sid in chosen:
             self._invoke(sid, data)
         return chosen
+
+    # ---- token-bucket rate limiting (logical time) --------------------------
+
+    def publish_metered(self, topic: str, data: Any = None, cost: int = 1) -> List[int]:
+        self._validate_publish_topic(topic)
+        if isinstance(cost, bool) or not isinstance(cost, int) or cost < 0:
+            raise ValueError("cost must be a non-negative int")
+        with self._lock:
+            ordered = self._order(self._winning_tier_ids(topic))
+            eligible = []
+            for sid in ordered:
+                if self._subs[sid]["tokens"] >= cost:
+                    self._subs[sid]["tokens"] -= cost
+                    eligible.append(sid)
+        for sid in eligible:
+            self._invoke(sid, data)
+        return eligible
+
+    def refill(self, topic: str, amount: int) -> None:
+        self._validate_publish_topic(topic)
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise ValueError("amount must be a non-negative int")
+        with self._lock:
+            for sid in self._winning_tier_ids(topic):
+                sub = self._subs[sid]
+                sub["tokens"] = min(sub["capacity"], sub["tokens"] + amount)
+
+    def get_tokens(self, sub_id: int) -> Optional[int]:
+        with self._lock:
+            sub = self._subs.get(sub_id)
+            return None if sub is None else sub["tokens"]
 
     # ---- weighted fair scheduling (stride scheduling) -----------------------
 

@@ -1610,3 +1610,69 @@ def test_fair_validation():
     bus = _load_pubsub()()
     with pytest.raises(ValueError):
         bus.publish_fair("*", None)
+
+
+# --------------------------------------------------------------------------- #
+# token-bucket rate limiting (publish_metered / refill / get_tokens)
+# --------------------------------------------------------------------------- #
+
+
+def test_metered_initial_tokens_equal_capacity():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=3)
+    assert bus.get_tokens(a) == 3
+    assert bus.get_tokens(9999) is None
+
+
+def test_metered_delivers_until_empty():
+    bus = _load_pubsub()()
+    rec = []
+    a = bus.subscribe("t", lambda d: rec.append(d), capacity=2)
+    assert bus.publish_metered("t", "x") == [a]
+    assert bus.publish_metered("t", "y") == [a]
+    assert bus.get_tokens(a) == 0
+    assert bus.publish_metered("t", "z") == []  # bucket empty -> skipped
+    assert rec == ["x", "y"]
+
+
+def test_metered_refill_caps_at_capacity():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=2)
+    bus.publish_metered("t", None)
+    bus.publish_metered("t", None)
+    assert bus.get_tokens(a) == 0
+    bus.refill("t", 5)  # capped at capacity=2
+    assert bus.get_tokens(a) == 2
+    assert bus.publish_metered("t", None) == [a]
+
+
+def test_metered_cost_greater_than_one():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=3)
+    assert bus.publish_metered("t", None, cost=2) == [a]
+    assert bus.get_tokens(a) == 1
+    assert bus.publish_metered("t", None, cost=2) == []  # only 1 token left
+    assert bus.get_tokens(a) == 1
+
+
+def test_metered_partial_tier():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=1)
+    b = bus.subscribe("t", lambda d: None, capacity=3)
+    # first metered: both have tokens -> both (order: same priority, id DESC -> b, a)
+    assert bus.publish_metered("t", None) == [b, a]
+    # a now empty; second metered: only b
+    assert bus.publish_metered("t", None) == [b]
+
+
+def test_metered_validation():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.publish_metered("*", None)
+    for bad in (-1, True):
+        with pytest.raises(ValueError):
+            bus.publish_metered("t", None, cost=bad)
+    with pytest.raises(ValueError):
+        bus.refill("*", 1)
+    with pytest.raises(ValueError):
+        bus.refill("t", -1)
