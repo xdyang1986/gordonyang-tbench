@@ -15,7 +15,8 @@ Non-textbook behaviors (a naive "notify everyone who matches, in subscribe order
 8. **Per-subscription call budgets** (`max_calls`, generalizing `subscribe_once`) and **data transforms**; a global **error handler** (`set_error_handler`); per-topic **history** logs (`get_history`/`clear_history`); and batch ops (`subscribe_many`, `publish_batch`).
 9. **Capacity-weighted distribution** — `distribute(topic, load)` splits an integer `load` across the winning tier by `capacity` using integer **water-filling with a saturation cascade** (surplus from capped recipients redistributes to those with spare capacity, iterated to a fixpoint; leftover beyond total capacity is overflow).
 10. **Rendezvous-hash sharded delivery** — `publish_sharded(topic, key, data, n)` delivers to the `n` winning-tier subscribers with the highest HRW score of `sha256("{key}:{sub_id}")[:8]`, ranked descending (tie by larger id). Stable per key, evenly spread across keys.
-11. Plus filters, mute patterns, pause/resume queueing, and introspection (`get_matching_count`, `topics`, `delivered_count`, …). The water-fill, rendezvous-hashing, and dependency-cascade algorithms are the primary algorithmic difficulty.
+11. **Weighted fair scheduling** — `publish_fair(topic, data)` delivers to exactly one eligible (capacity≥1) winning-tier subscriber via **stride scheduling** (persistent per-sub `pass`, stride `(2**32)//capacity`, min-pass wins, tie by id), so selection frequency is proportional to capacity over repeated calls.
+12. Plus filters, mute patterns, pause/resume queueing, and introspection (`get_matching_count`, `topics`, `delivered_count`, …). The water-fill, rendezvous-hashing, stride-scheduling, and dependency-cascade algorithms are the primary algorithmic difficulty.
 
 Thread-safety uses `threading.RLock`; delivery snapshots under the lock and releases before invoking callbacks/filters so reentrant calls do not deadlock.
 
@@ -24,7 +25,7 @@ Thread-safety uses `threading.RLock`; delivery snapshots under the lock and rele
 - `claude-code` / `claude-opus-4-6`: expected to pass with careful reading of the pipeline, routing, and dependency-ordering contract.
 - `metacode` / `meta/avocado_dvsc_tester` (validation gate): expected to struggle — the spec is terse (no worked examples), the surface is broad, and scoring is binary, so mis-inferring any behavior fails.
 
-Empirical: reference solution passes 135/135 local pytest tests.
+Empirical: reference solution passes 141/141 local pytest tests.
 
 ## Model Analysis
 Expected failure modes for an implementation relying on pub-sub priors rather than the spec:

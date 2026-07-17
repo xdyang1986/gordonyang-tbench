@@ -13,7 +13,7 @@ This is **not** a standard fan-out pub-sub system. Where this specification diff
 
 Anything else is an invalid pattern.
 
-**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`) — a non-empty string containing no `*`.
+**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`) — a non-empty string containing no `*`.
 
 **A pattern matches a topic** when any of: the pattern equals the topic; the pattern is `"*"`; or the pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (dot-boundary matching — `"order.*"` matches `"order"` and `"order.placed"` but not `"order123"`).
 
@@ -23,15 +23,15 @@ Subscriber **callbacks** always receive exactly one positional argument: the del
 
 ## Subscriptions
 
-- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute` (see below). On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
+- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute` and `publish_fair` (see below). On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
 - `subscribe_once(pattern, callback, priority=0, transform=None, capacity=1) -> int` — equivalent to `subscribe(..., max_calls=1)`.
 - `subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None, capacity=1) -> list[int]` — subscribe the same callback to each pattern; return the ids in order. `patterns` must be a list or tuple. Validation is up front: if any pattern or other argument is invalid, raise `ValueError` **before registering any** subscription (the call is atomic — no partial registration).
 - `unsubscribe(sub_id) -> bool` — remove by id; return whether it existed.
 - `unsubscribe_callback(callback) -> int` — remove every subscription whose callback is that object (identity comparison); return the count removed.
 
-## Delivery semantics (apply to `publish`, `publish_all`, retained replay, and `publish_sharded`)
+## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, and `publish_fair`)
 
-- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` uses its own selection order — see below.)
+- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` and `publish_fair` use their own selection order — see below.)
 - **Invocation**: each callback receives `transform(data)` if the subscription has a transform, else `data`.
 - **Lock discipline**: compute and snapshot the ordered recipient set while holding the lock, then release the lock before invoking any callbacks. Subscriptions created during delivery are excluded from the in-progress delivery.
 - **Skipping removed subscriptions**: before invoking each callback, if its subscription was removed during this delivery, skip it and do not count it.
@@ -73,7 +73,7 @@ Ordering note: a muted event still updates retained data (step 4 before 5) but i
 - `get_subscriber_count(topic=None)` — total (None) or count whose pattern exactly equals the string.
 - `get_matching_count(topic)` — the number of subscribers `publish(topic)` would notify (size of the most-specific matching tier), without invoking anything.
 - `topics() -> set` — distinct pattern strings currently subscribed.
-- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, and sharded deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
+- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded deliveries, and fair deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
 
 ## Ordered delivery (`publish_ordered`)
 
@@ -108,6 +108,18 @@ Worked example: three subscribers on `"t"` with capacities 1, 10, 10 (ids 1, 2, 
 - Rank candidates by score **descending**; break ties by **larger** `sub_id`. Select the first `n` (all of them if the tier has fewer than `n`).
 - Deliver `data` to the selected subscribers in that ranked order, following the normal Delivery semantics (transform, exceptions/error handler, `max_calls`, `delivered_count`).
 - Return the selected subscriber ids in delivery (ranked) order. If `n` is 0 or the tier is empty, deliver to nobody and return `[]`.
+
+## Weighted fair scheduling (`publish_fair`)
+
+`publish_fair(topic, data=None) -> int | None` delivers `data` to exactly **one** subscriber from the tier `publish(topic)` would notify, chosen by **stride scheduling** so that, over repeated calls, each eligible subscriber is selected in proportion to its `capacity`. Only subscribers with `capacity >= 1` are eligible.
+
+The broker keeps a persistent integer `pass` value per subscription (shared across all `publish_fair` calls, independent of topic). On each call:
+
+- Consider the eligible subscribers in the winning tier. If none, deliver to nobody and return `None`.
+- Any eligible subscriber not yet seen by `publish_fair` starts with `pass = 0`.
+- Select the eligible subscriber with the smallest `pass`, breaking ties by smallest `sub_id`.
+- Increase that subscriber's `pass` by its **stride** = `(2**32) // capacity` (so higher capacity → smaller stride → selected more often).
+- Deliver `data` to the selected subscriber (normal Delivery semantics: transform, exceptions/error handler, `max_calls`, `delivered_count`) and return its `sub_id`.
 
 ## Thread safety
 

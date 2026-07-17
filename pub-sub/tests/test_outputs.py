@@ -1560,3 +1560,53 @@ def test_sharded_validation():
     for bad in (-1, True):
         with pytest.raises(ValueError):
             bus.publish_sharded("t", "k", None, n=bad)
+
+
+# --------------------------------------------------------------------------- #
+# weighted fair scheduling (publish_fair / stride scheduling)
+# --------------------------------------------------------------------------- #
+
+
+def test_fair_weighted_selection_sequence():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=1)
+    b = bus.subscribe("t", lambda d: None, capacity=2)
+    picks = [bus.publish_fair("t", None) for _ in range(6)]
+    # stride scheduling by capacity 1:2 -> b picked twice as often; ties to smaller id
+    assert picks == [a, b, b, a, b, b]
+
+
+def test_fair_single_recipient_always_selected():
+    bus = _load_pubsub()()
+    a = bus.subscribe("t", lambda d: None, capacity=3)
+    assert [bus.publish_fair("t", None) for _ in range(4)] == [a, a, a, a]
+
+
+def test_fair_no_eligible_returns_none():
+    bus = _load_pubsub()()
+    assert bus.publish_fair("t", None) is None
+    bus.subscribe("t", lambda d: None, capacity=0)
+    assert bus.publish_fair("t", None) is None
+
+
+def test_fair_excludes_zero_capacity():
+    bus = _load_pubsub()()
+    bus.subscribe("t", lambda d: None, capacity=0)
+    b = bus.subscribe("t", lambda d: None, capacity=1)
+    assert [bus.publish_fair("t", None) for _ in range(3)] == [b, b, b]
+
+
+def test_fair_delivers_and_counts():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d), capacity=1)
+    before = bus.delivered_count()
+    bus.publish_fair("t", "x")
+    assert rec == ["x"]
+    assert bus.delivered_count() - before == 1
+
+
+def test_fair_validation():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.publish_fair("*", None)

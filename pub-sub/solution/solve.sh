@@ -23,10 +23,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 class PubSub:
+    _STRIDE_CONST = 1 << 32
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._next_id = 1
         self._next_filter_id = 1
+        self._pass: Dict[int, int] = {}
         # sub_id -> {topic, cb, priority, max_calls, calls, transform}
         self._subs: Dict[int, dict] = {}
         self._filters: Dict[int, Callable] = {}
@@ -469,6 +472,22 @@ class PubSub:
         for sid in chosen:
             self._invoke(sid, data)
         return chosen
+
+    # ---- weighted fair scheduling (stride scheduling) -----------------------
+
+    def publish_fair(self, topic: str, data: Any = None) -> Optional[int]:
+        self._validate_publish_topic(topic)
+        with self._lock:
+            tier = self._winning_tier_ids(topic)
+            eligible = [sid for sid in tier if self._subs[sid]["capacity"] >= 1]
+            if not eligible:
+                return None
+            for sid in eligible:
+                self._pass.setdefault(sid, 0)
+            selected = min(eligible, key=lambda sid: (self._pass[sid], sid))
+            self._pass[selected] += self._STRIDE_CONST // self._subs[selected]["capacity"]
+        self._invoke(selected, data)
+        return selected
 
     def publish_ordered(self, events) -> dict:
         if not isinstance(events, list):
