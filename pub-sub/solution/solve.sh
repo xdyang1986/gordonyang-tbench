@@ -17,6 +17,7 @@ These semantics deliberately differ from a textbook fan-out pub-sub; see the
 task specification for the exact contract.
 """
 
+import hashlib
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -444,6 +445,30 @@ class PubSub:
             remaining -= used
         overflow = load - sum(alloc.values())
         return {"allocations": alloc, "overflow": overflow}
+
+    # ---- rendezvous-hash sharded delivery -----------------------------------
+
+    @staticmethod
+    def _rendezvous_score(key: str, sub_id: int) -> int:
+        digest = hashlib.sha256(f"{key}:{sub_id}".encode()).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def publish_sharded(self, topic: str, key: str, data: Any = None,
+                        n: int = 1) -> List[int]:
+        self._validate_publish_topic(topic)
+        if not isinstance(key, str) or key == "":
+            raise ValueError("key must be a non-empty string")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError("n must be a non-negative int")
+        with self._lock:
+            ids = self._winning_tier_ids(topic)
+        # highest rendezvous score wins; tie-break by larger sub id
+        ranked = sorted(ids, key=lambda sid: (self._rendezvous_score(key, sid), sid),
+                        reverse=True)
+        chosen = ranked[:n]
+        for sid in chosen:
+            self._invoke(sid, data)
+        return chosen
 
     def publish_ordered(self, events) -> dict:
         if not isinstance(events, list):

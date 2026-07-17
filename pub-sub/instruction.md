@@ -13,31 +13,31 @@ This is **not** a standard fan-out pub-sub system. Where this specification diff
 
 Anything else is an invalid pattern.
 
-**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`) — a non-empty string containing no `*`.
+**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`) — a non-empty string containing no `*`.
 
 **A pattern matches a topic** when any of: the pattern equals the topic; the pattern is `"*"`; or the pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (dot-boundary matching — `"order.*"` matches `"order"` and `"order.placed"` but not `"order123"`).
 
-Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load` that is not a non-negative int (booleans excluded); and a filter that returns a value which is neither a `(topic, data)` pair nor `None`.
+Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
 
 Subscriber **callbacks** always receive exactly one positional argument: the delivered value (the `data` after any per-subscription transform). The topic is not passed to callbacks. (Filters receive `(topic, data)` — this is different.)
 
 ## Subscriptions
 
-- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used only by `distribute` (see below). On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
+- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute` (see below). On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
 - `subscribe_once(pattern, callback, priority=0, transform=None, capacity=1) -> int` — equivalent to `subscribe(..., max_calls=1)`.
 - `subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None, capacity=1) -> list[int]` — subscribe the same callback to each pattern; return the ids in order. `patterns` must be a list or tuple. Validation is up front: if any pattern or other argument is invalid, raise `ValueError` **before registering any** subscription (the call is atomic — no partial registration).
 - `unsubscribe(sub_id) -> bool` — remove by id; return whether it existed.
 - `unsubscribe_callback(callback) -> int` — remove every subscription whose callback is that object (identity comparison); return the count removed.
 
-## Delivery semantics (apply to `publish`, `publish_all`, and retained replay)
+## Delivery semantics (apply to `publish`, `publish_all`, retained replay, and `publish_sharded`)
 
-- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker.
+- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` uses its own selection order — see below.)
 - **Invocation**: each callback receives `transform(data)` if the subscription has a transform, else `data`.
 - **Lock discipline**: compute and snapshot the ordered recipient set while holding the lock, then release the lock before invoking any callbacks. Subscriptions created during delivery are excluded from the in-progress delivery.
 - **Skipping removed subscriptions**: before invoking each callback, if its subscription was removed during this delivery, skip it and do not count it.
 - **Exceptions**: if a callback or its transform raises, swallow it, invoke the error handler if one is set, and continue. The invocation still counts as delivered but does **not** count toward that subscription's `max_calls`.
 - **max_calls**: a subscription with `max_calls=N` is removed after `N` successful (non-raising) deliveries. `None` means unlimited. (`subscribe_once` is `max_calls=1`.)
-- **Return value**: the number of callbacks actually invoked (including any that raised).
+- **Return value**: `publish`/`publish_all` return the number of callbacks actually invoked (including any that raised).
 
 ## Publish pipeline
 
@@ -73,7 +73,7 @@ Ordering note: a muted event still updates retained data (step 4 before 5) but i
 - `get_subscriber_count(topic=None)` — total (None) or count whose pattern exactly equals the string.
 - `get_matching_count(topic)` — the number of subscribers `publish(topic)` would notify (size of the most-specific matching tier), without invoking anything.
 - `topics() -> set` — distinct pattern strings currently subscribed.
-- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
+- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, and sharded deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
 
 ## Ordered delivery (`publish_ordered`)
 
@@ -99,6 +99,15 @@ Allocation rules (integer, deterministic):
 Return `{"allocations": {sub_id: amount, ...}, "overflow": leftover}` where `allocations` covers every recipient in the tier (including those allocated 0) and `overflow` is the load that could not be placed (0 unless `load` exceeded total tier capacity).
 
 Worked example: three subscribers on `"t"` with capacities 1, 10, 10 (ids 1, 2, 3) and `load=12`. Subscriber 1 fills to 1; the remaining 11 spreads over subscribers 2 and 3; the even split plus the leftover unit (to the smaller id) yields allocations `{1: 1, 2: 6, 3: 5}` with overflow 0.
+
+## Sharded delivery (`publish_sharded`)
+
+`publish_sharded(topic, key, data=None, n=1) -> list[int]` delivers `data` to `n` of the subscribers that `publish(topic)` would notify (the most-specific matching tier), selected by **rendezvous (highest-random-weight) hashing** on `key` so that the choice is stable for a given key and evenly spread across keys. `key` must be a non-empty string; `n` a non-negative int.
+
+- For each candidate subscriber, compute a score: take the SHA-256 digest of the UTF-8 bytes of the string `"{key}:{sub_id}"`, and interpret the **first 8 bytes** as a big-endian unsigned integer.
+- Rank candidates by score **descending**; break ties by **larger** `sub_id`. Select the first `n` (all of them if the tier has fewer than `n`).
+- Deliver `data` to the selected subscribers in that ranked order, following the normal Delivery semantics (transform, exceptions/error handler, `max_calls`, `delivered_count`).
+- Return the selected subscriber ids in delivery (ranked) order. If `n` is 0 or the tier is empty, deliver to nobody and return `[]`.
 
 ## Thread safety
 

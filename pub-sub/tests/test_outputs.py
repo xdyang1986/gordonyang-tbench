@@ -11,9 +11,16 @@ fan-out pub-sub.
 
 import sys
 import os
+import hashlib
 import threading
 import importlib
 import pytest
+
+
+def _rendezvous_rank(key, ids):
+    def score(sid):
+        return int.from_bytes(hashlib.sha256(f"{key}:{sid}".encode()).digest()[:8], "big")
+    return sorted(ids, key=lambda sid: (score(sid), sid), reverse=True)
 
 sys.path.insert(0, "/app")
 
@@ -1492,3 +1499,64 @@ def test_retained_replay_max_calls_exhausts_midway():
     # matches both retained topics (insertion order); budget exhausts after "a"
     assert rec == [1]
     assert bus.get_subscriber_count() == 0
+
+
+# --------------------------------------------------------------------------- #
+# rendezvous-hash sharded delivery (publish_sharded)
+# --------------------------------------------------------------------------- #
+
+
+def test_sharded_selects_top_n_by_rendezvous():
+    bus = _load_pubsub()()
+    ids = [bus.subscribe("t", lambda d: None) for _ in range(6)]
+    key = "user-42"
+    expected = _rendezvous_rank(key, ids)[:3]
+    before = bus.delivered_count()
+    chosen = bus.publish_sharded("t", key, "payload", n=3)
+    assert chosen == expected
+    assert bus.delivered_count() - before == 3
+
+
+def test_sharded_is_deterministic_for_same_key():
+    bus = _load_pubsub()()
+    for _ in range(5):
+        bus.subscribe("t", lambda d: None)
+    a = bus.publish_sharded("t", "k", None, n=2)
+    b = bus.publish_sharded("t", "k", None, n=2)
+    assert a == b
+
+
+def test_sharded_n_zero_delivers_nothing():
+    bus = _load_pubsub()()
+    bus.subscribe("t", lambda d: None)
+    before = bus.delivered_count()
+    assert bus.publish_sharded("t", "k", None, n=0) == []
+    assert bus.delivered_count() == before
+
+
+def test_sharded_n_exceeds_recipients():
+    bus = _load_pubsub()()
+    ids = [bus.subscribe("t", lambda d: None) for _ in range(3)]
+    chosen = bus.publish_sharded("t", "k", None, n=10)
+    assert sorted(chosen) == sorted(ids)
+    assert chosen == _rendezvous_rank("k", ids)
+
+
+def test_sharded_uses_specificity_tier():
+    bus = _load_pubsub()()
+    exact = [bus.subscribe("t", lambda d: None) for _ in range(3)]
+    bus.subscribe("*", lambda d: None)  # different tier, excluded
+    chosen = bus.publish_sharded("t", "k", None, n=2)
+    assert set(chosen).issubset(set(exact))
+    assert chosen == _rendezvous_rank("k", exact)[:2]
+
+
+def test_sharded_validation():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.publish_sharded("*", "k", None, n=1)
+    with pytest.raises(ValueError):
+        bus.publish_sharded("t", "", None, n=1)
+    for bad in (-1, True):
+        with pytest.raises(ValueError):
+            bus.publish_sharded("t", "k", None, n=bad)

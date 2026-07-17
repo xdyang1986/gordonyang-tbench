@@ -13,8 +13,9 @@ Non-textbook behaviors (a naive "notify everyone who matches, in subscribe order
 6. **Retained replay** — retained messages are delivered to a subscriber at subscribe time (its own pattern, insertion order, honoring the once rule).
 7. **k-of-n dependency-ordered delivery** — `publish_ordered(events)` delivers a batch in dependency order: an event is ready once ≥ `threshold` of its `deps` are delivered, delivering cascades to unblock others, ties break by `(priority DESC, arrival ASC)`, and events with missing deps / cycles / unreachable thresholds are undeliverable.
 8. **Per-subscription call budgets** (`max_calls`, generalizing `subscribe_once`) and **data transforms**; a global **error handler** (`set_error_handler`); per-topic **history** logs (`get_history`/`clear_history`); and batch ops (`subscribe_many`, `publish_batch`).
-9. **Capacity-weighted distribution** — `distribute(topic, load)` splits an integer `load` across the winning tier by `capacity` using integer **water-filling with a saturation cascade** (surplus from capped recipients redistributes to those with spare capacity, iterated to a fixpoint; leftover beyond total capacity is overflow). This and the `publish_ordered` dependency cascade are the primary algorithmic difficulty — subtle to implement correctly even from a clear spec.
-10. Plus filters, mute patterns, pause/resume queueing, and introspection (`get_matching_count`, `topics`, `delivered_count`, …).
+9. **Capacity-weighted distribution** — `distribute(topic, load)` splits an integer `load` across the winning tier by `capacity` using integer **water-filling with a saturation cascade** (surplus from capped recipients redistributes to those with spare capacity, iterated to a fixpoint; leftover beyond total capacity is overflow).
+10. **Rendezvous-hash sharded delivery** — `publish_sharded(topic, key, data, n)` delivers to the `n` winning-tier subscribers with the highest HRW score of `sha256("{key}:{sub_id}")[:8]`, ranked descending (tie by larger id). Stable per key, evenly spread across keys.
+11. Plus filters, mute patterns, pause/resume queueing, and introspection (`get_matching_count`, `topics`, `delivered_count`, …). The water-fill, rendezvous-hashing, and dependency-cascade algorithms are the primary algorithmic difficulty.
 
 Thread-safety uses `threading.RLock`; delivery snapshots under the lock and releases before invoking callbacks/filters so reentrant calls do not deadlock.
 
@@ -23,7 +24,7 @@ Thread-safety uses `threading.RLock`; delivery snapshots under the lock and rele
 - `claude-code` / `claude-opus-4-6`: expected to pass with careful reading of the pipeline, routing, and dependency-ordering contract.
 - `metacode` / `meta/avocado_dvsc_tester` (validation gate): expected to struggle — the spec is terse (no worked examples), the surface is broad, and scoring is binary, so mis-inferring any behavior fails.
 
-Empirical: reference solution passes 129/129 local pytest tests.
+Empirical: reference solution passes 135/135 local pytest tests.
 
 ## Model Analysis
 Expected failure modes for an implementation relying on pub-sub priors rather than the spec:
