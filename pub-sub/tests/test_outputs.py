@@ -1676,3 +1676,65 @@ def test_metered_validation():
         bus.refill("*", 1)
     with pytest.raises(ValueError):
         bus.refill("t", -1)
+
+
+# --------------------------------------------------------------------------- #
+# in-order sequence delivery with reorder buffer (publish_seq)
+# --------------------------------------------------------------------------- #
+
+
+def test_seq_in_order_delivery():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d))
+    assert bus.publish_seq("t", 0, "a") == [0]
+    assert bus.publish_seq("t", 1, "b") == [1]
+    assert rec == ["a", "b"]
+    assert bus.next_expected("t") == 2
+
+
+def test_seq_buffers_and_flushes_contiguous_run():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d))
+    assert bus.publish_seq("t", 0, "a") == [0]
+    assert bus.publish_seq("t", 2, "c") == []   # future -> buffered
+    assert bus.publish_seq("t", 3, "d") == []   # future -> buffered
+    assert bus.pending_seqs("t") == [2, 3]
+    assert rec == ["a"]
+    # arrival of 1 flushes 1,2,3 in order
+    assert bus.publish_seq("t", 1, "b") == [1, 2, 3]
+    assert rec == ["a", "b", "c", "d"]
+    assert bus.next_expected("t") == 4
+    assert bus.pending_seqs("t") == []
+
+
+def test_seq_drops_stale():
+    bus = _load_pubsub()()
+    rec = []
+    bus.subscribe("t", lambda d: rec.append(d))
+    bus.publish_seq("t", 0, "a")
+    bus.publish_seq("t", 1, "b")
+    assert bus.publish_seq("t", 0, "old") == []  # < expected -> dropped
+    assert rec == ["a", "b"]
+    assert bus.next_expected("t") == 2
+
+
+def test_seq_independent_per_topic():
+    bus = _load_pubsub()()
+    bus.publish_seq("a", 0, None)
+    assert bus.next_expected("a") == 1
+    assert bus.next_expected("b") == 0
+
+
+def test_seq_validation():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.publish_seq("*", 0, None)
+    for bad in (-1, True, 1.5):
+        with pytest.raises(ValueError):
+            bus.publish_seq("t", bad, None)
+    with pytest.raises(ValueError):
+        bus.next_expected("*")
+    with pytest.raises(ValueError):
+        bus.pending_seqs("*")

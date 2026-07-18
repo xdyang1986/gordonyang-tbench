@@ -40,6 +40,8 @@ class PubSub:
         self._queue: List[tuple] = []
         self._delivered = 0
         self._error_handler: Optional[Callable] = None
+        self._seq_expected: Dict[str, int] = {}
+        self._seq_buffer: Dict[str, Dict[int, Any]] = {}
 
     # ---- validation ---------------------------------------------------------
 
@@ -472,6 +474,42 @@ class PubSub:
         for sid in chosen:
             self._invoke(sid, data)
         return chosen
+
+    # ---- in-order sequence delivery with reorder buffer ---------------------
+
+    def publish_seq(self, topic: str, seq: int, data: Any = None) -> List[int]:
+        self._validate_publish_topic(topic)
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+            raise ValueError("seq must be a non-negative int")
+        with self._lock:
+            exp = self._seq_expected.get(topic, 0)
+            buf = self._seq_buffer.setdefault(topic, {})
+            if seq < exp:
+                return []
+            if seq > exp:
+                buf[seq] = data
+                return []
+            to_deliver = [(exp, data)]
+            nxt = exp + 1
+            while nxt in buf:
+                to_deliver.append((nxt, buf.pop(nxt)))
+                nxt += 1
+            self._seq_expected[topic] = nxt
+        delivered = []
+        for s, d in to_deliver:
+            self.publish(topic, d)
+            delivered.append(s)
+        return delivered
+
+    def next_expected(self, topic: str) -> int:
+        self._validate_publish_topic(topic)
+        with self._lock:
+            return self._seq_expected.get(topic, 0)
+
+    def pending_seqs(self, topic: str) -> List[int]:
+        self._validate_publish_topic(topic)
+        with self._lock:
+            return sorted(self._seq_buffer.get(topic, {}))
 
     # ---- token-bucket rate limiting (logical time) --------------------------
 

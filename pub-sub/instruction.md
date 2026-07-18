@@ -13,11 +13,11 @@ This is **not** a standard fan-out pub-sub system. Where this specification diff
 
 Anything else is an invalid pattern.
 
-**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`, `publish_metered`, `refill`) — a non-empty string containing no `*`.
+**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`, `publish_metered`, `refill`, `publish_seq`, `next_expected`, `pending_seqs`) — a non-empty string containing no `*`.
 
 **A pattern matches a topic** when any of: the pattern equals the topic; the pattern is `"*"`; or the pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (dot-boundary matching — `"order.*"` matches `"order"` and `"order.placed"` but not `"order123"`).
 
-Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load`, `cost`, or `amount` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
+Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load`, `cost`, `amount`, or `seq` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
 
 Subscriber **callbacks** always receive exactly one positional argument: the delivered value (the `data` after any per-subscription transform). The topic is not passed to callbacks. (Filters receive `(topic, data)` — this is different.)
 
@@ -29,7 +29,7 @@ Subscriber **callbacks** always receive exactly one positional argument: the del
 - `unsubscribe(sub_id) -> bool` — remove by id; return whether it existed.
 - `unsubscribe_callback(callback) -> int` — remove every subscription whose callback is that object (identity comparison); return the count removed.
 
-## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, `publish_fair`, and `publish_metered`)
+## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, `publish_fair`, `publish_metered`, and each `publish_seq` dispatch)
 
 - **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` and `publish_fair` use their own selection order — see below.)
 - **Invocation**: each callback receives `transform(data)` if the subscription has a transform, else `data`.
@@ -73,7 +73,7 @@ Ordering note: a muted event still updates retained data (step 4 before 5) but i
 - `get_subscriber_count(topic=None)` — total (None) or count whose pattern exactly equals the string.
 - `get_matching_count(topic)` — the number of subscribers `publish(topic)` would notify (size of the most-specific matching tier), without invoking anything.
 - `topics() -> set` — distinct pattern strings currently subscribed.
-- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded, fair, and metered deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
+- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded, fair, metered, and sequence deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
 
 ## Ordered delivery (`publish_ordered`)
 
@@ -128,6 +128,17 @@ Each subscription owns a token bucket whose maximum size is its `capacity`; the 
 - `publish_metered(topic, data=None, cost=1) -> list[int]` — among the tier `publish(topic)` would notify, taken in normal delivery order (priority descending, id descending), deliver `data` to every subscriber whose current token balance is at least `cost`, deducting `cost` from each such subscriber's balance; subscribers with fewer than `cost` tokens are skipped (not delivered, balance unchanged). Return the ids that were delivered, in delivery order. `cost` is a non-negative int.
 - `refill(topic, amount) -> None` — add `amount` tokens to every subscriber in the tier `publish(topic)` would notify, capping each balance at its `capacity`. `amount` is a non-negative int.
 - `get_tokens(sub_id) -> int | None` — the current token balance for a subscription, or `None` if the id is unknown.
+
+## In-order sequence delivery (`publish_seq`, `next_expected`, `pending_seqs`)
+
+Each topic has an independent expected sequence counter starting at `0` and a reorder buffer. `publish_seq(topic, seq, data=None) -> list[int]` delivers strictly in sequence order:
+
+- `seq` is a non-negative int. Let `expected` be the topic's current counter.
+- If `seq < expected`, the message is stale: drop it (deliver nothing) and return `[]`.
+- If `seq > expected`, it is early: buffer `data` under `seq` (replacing any prior buffered value for that seq) and return `[]`.
+- If `seq == expected`, deliver it, advance `expected` by 1, then repeatedly: while the new `expected` is present in the buffer, remove and deliver it and advance `expected` again (a contiguous-run flush). Each delivery goes through `publish(topic, data)` (normal pipeline/Delivery semantics). Return the list of sequence numbers delivered, in ascending (delivery) order.
+
+`next_expected(topic) -> int` returns the topic's current expected counter (0 if never used). `pending_seqs(topic) -> list[int]` returns the sorted sequence numbers currently buffered for the topic.
 
 ## Thread safety
 
