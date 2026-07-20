@@ -8,4 +8,5 @@ ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
-# No starter code shipped: the agent writes the Go program at /app (stdlib only).
+# Ship the (buggy) allocator the agent must debug and fix in place.
+COPY broken/main.go /app/main.go

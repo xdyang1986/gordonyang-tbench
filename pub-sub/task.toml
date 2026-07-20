@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement from scratch, in Go, a command-driven in-memory pub-sub broker CLI (reads commands on stdin, prints one line per command). Specificity routing: PUB notifies only the single most-specific matching tier (exact > longest prefix.* > global *) in (priority DESC, id DESC) order, while PUBALL fans out. Includes a publish pipeline (pause/queue -> retain -> mute -> history -> route), per-subscription call budgets (max_calls) with retained-message replay on subscribe, mute patterns, pause/resume queueing, k-of-n dependency-ordered batch delivery (ORDERED) with cascade release, capacity-weighted distribution via integer water-filling with a saturation cascade (DISTRIBUTE), rendezvous-hash sharded delivery (SHARD), consistent-hash ring routing with virtual nodes (RING), stride-scheduled weighted-fair delivery (FAIR), token-bucket rate limiting (METER/REFILL), in-order sequence delivery with reorder buffer (SEQ), and broad introspection. The contract deliberately departs from a textbook fan-out pub-sub across a large surface (all-or-nothing scoring); the water-fill, rendezvous/ring hashing, stride scheduling, and dependency-ordering algorithms are the primary difficulty. Go stdlib only."
-keywords = ["pubsub", "event-bus", "specificity-routing", "dependency-ordering", "go"]
+description = "Debug in place: a Go program at /app implements a message broker's fan-out allocator (distribute a batch of messages across weighted, capacity-limited subscribers). It builds and mostly works but has a subtle bug — for some inputs the allocation is wrong. The agent must find and fix the defect so the output is correct in general; do not rewrite. The instruction gives only the I/O format and a few failing input/output examples, NOT the algorithm (a bespoke multi-round credit-decay weighted allocation embodied in the shipped code). The defect is a subtle off-by-one in the per-round credit decay that only manifests in multi-round allocations, so it must be found by understanding the shipped algorithm and tracing, not by reading a spec. Go stdlib only; pytest builds the program and drives it via stdin/stdout."
+keywords = ["debugging", "reverse-engineering", "allocation", "go", "broker"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -20,7 +20,7 @@ category_usecase = "handle_events"
 category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
-tags = ["pubsub", "event-bus", "specificity-routing", "dependency-ordering", "go"]
+tags = ["debugging", "reverse-engineering", "allocation", "go", "broker"]
 expert_time_estimate_min = 30.0
 junior_time_estimate_min = 60.0
 

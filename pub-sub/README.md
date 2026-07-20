@@ -1,33 +1,24 @@
 # codimango/pub-sub
 
 ## Description
-From-scratch **Go** task. The agent writes a Go program under `/app` (golang image ships an empty `/app`, stdlib only) implementing a command-driven in-memory publish-subscribe broker: it reads commands from stdin (one per line) and prints exactly one output line per command. The pytest verifier builds the program with `go build` and drives it as a subprocess, asserting on printed output. Scoring is all-or-nothing.
+**Debug-in-place, under-specified** Go task. The image ships a small Go program at `/app/main.go` — a message broker's **fan-out allocator** that distributes a batch of `load` messages across weighted, capacity-limited subscribers. It builds and mostly works, but contains **one subtle planted bug**: for some inputs the allocation is wrong. The agent must find and fix the defect so the program is correct in general, without rewriting.
 
-The broker's semantics deliberately depart from a textbook fan-out pub-sub, and the surface is large and algorithm-heavy (chosen because Go is verbose, so a broad correct implementation is substantial):
+Crucially, `instruction.md` gives **only the I/O format and a few failing input→output examples — never the algorithm.** The intended behavior (a bespoke multi-round **credit-decay weighted allocation**: each round splits the remaining load proportionally to per-subscriber credit, caps at capacity, guarantees progress with a highest-credit fallback, then decays served subscribers' credit and accumulates unserved ones) lives only in the shipped code. The agent must reverse-engineer the intended algorithm from the code + examples and locate the deviation.
 
-1. **Specificity routing** — `PUB` notifies only the most-specific matching tier (exact > longest `prefix.*` > global `*`); `PUBALL` fans out.
-2. **Ordering** — `(priority DESC, id DESC)`.
-3. **max_calls** — per-subscription delivery budget; auto-removed after N deliveries (`-1` = unlimited).
-4. **Publish pipeline** — pause/enqueue → retain → mute → history → route (a muted publish still retains).
-5. **Retained replay on subscribe** — a new subscription immediately receives retained messages its pattern matches (insertion order, honoring its budget).
-6. **k-of-n dependency-ordered delivery** — `ORDERED` delivers a batch in dependency order with cascade release, priority tie-break, and undeliverable detection (missing deps / cycles / unreachable thresholds).
-7. **Capacity-weighted distribution** — `DISTRIBUTE` integer water-filling with a saturation cascade.
-8. **Rendezvous-hash sharded delivery** — `SHARD` HRW selection of the top-n by `sha256("key:id")`.
-9. **Consistent-hash ring routing** — `RING` virtual nodes on a `sha256` ring with wraparound.
-10. **Weighted fair scheduling** — `FAIR` stride scheduling by capacity (persistent per-sub pass).
-11. **Token-bucket rate limiting** — `METER`/`REFILL`/`TOKENS`, bucket sized by capacity.
-12. **In-order sequence delivery** — `SEQ` reorder buffer with contiguous-run flush; `NEXTSEQ`/`PENDING`.
-13. Plus mute patterns, pause/resume queueing, history, and introspection (`MATCH`, `TOPICS`, `COUNT`, `DELIVERED`).
+The planted defect is a subtle off-by-one in the per-round credit decay (`credit/2` instead of `credit/2 + 1`) that only changes results in **multi-round** allocations, so it cannot be spotted by eyeballing or reading a spec — it requires understanding the algorithm and tracing.
+
+## Why this shape (calibration history)
+Extensive from-scratch calibration (Python and Go, ~16 versions) showed the online Metacode gate implements *any fully-specified* pub-sub/broker behavior correctly — fair + specified always came out too easy, and under-specifying a *validation edge* only broke the fair model. The one profile that resists the gate (and is `accepted` online, cf. dr-buffer) is **debug-in-place + under-specification**: the ground truth lives in code + examples, so there is nothing to transcribe and the instruction rephrase cannot leak the algorithm — the difficulty is *inference and localization*, not *implementation*.
 
 ## Completion Rates
-- Oracle: passes locally and via `codimango bench run` (reference `solve.sh` writes `main.go`).
-- `claude-code` / `claude-opus-4-6` and `metacode` / `meta/avocado_dvsc_tester`: calibration measured empirically online.
+- Oracle: passes (reference `solve.sh` overwrites `/app/main.go` with the corrected version).
+- `claude-code` / `claude-opus-4-6` and `metacode` / `meta/avocado_dvsc_tester`: measured online.
 
-Empirical: reference solution passes 85/85 local pytest tests (build + drive the Go CLI).
+Empirical: the shipped buggy program fails 13 of 25 local pytest cases (the multi-round divergences); the reference solution passes 25/25.
 
 ## Anti-Cheating Analysis
-- **Hardcoded outputs**: tests drive the built binary with dynamic command scripts and assert on runtime behavior (routing, ordering, allocations, hashing, sequence/dependency state); hashing expectations are computed independently in the test via sha256; nothing is statically hardcodeable.
-- **Overfitting to visible tests**: tests are hidden at solve time; the agent must implement the general protocol.
+- **Hardcoded outputs**: tests build and run the program on many `(load, subscribers)` inputs and assert exact allocations plus a conservation invariant (`sum == min(load, total_cap)`, each within cap); nothing is statically hardcodeable.
+- **Overfitting to visible tests**: tests are hidden at solve time and include multi-round divergent cases beyond the 3 examples in the instruction; a fix that only matches the examples but not the general algorithm fails.
 - **Modifying test files**: the Dockerfile does not copy tests into the image; the harness injects `/tests/` after the agent run.
-- **Bypassing the intended path**: the grade builds and runs `/app`'s Go program against the command protocol; only a correct implementation passes.
-- **Pinned toolchain**: `GOTOOLCHAIN=local` on a pinned `golang` image; no network needed to build.
+- **Bypassing the intended path**: the grade builds and runs `/app`; only a correct allocator passes. The algorithm is not stated, so it cannot be trivially regenerated from the prompt.
+- **Pinned toolchain**: `GOTOOLCHAIN=local` on a pinned `golang` image; no network to build.
