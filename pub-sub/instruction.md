@@ -17,9 +17,7 @@ Read from standard input:
 
 - `<load>` is the number of messages to allocate (a non-negative integer).
 - Each following line describes one subscriber: its integer `weight` (≥ 1) and integer `cap` (≥ 0), in order.
-
 Write to standard output a single line: the number of messages allocated to each subscriber, in input order, comma-separated. The allocation never exceeds any subscriber's cap, and the total allocated equals `min(load, sum of caps)`.
-
 Build: `cd /app && go build -o /app/allocator .`
 
 ## Failing cases
