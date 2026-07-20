@@ -1,51 +1,33 @@
 # codimango/pub-sub
 
 ## Description
-From-scratch task. The agent must create `/app/pubsub.py` containing a thread-safe, in-memory publish-subscribe broker (`class PubSub`) whose **delivery semantics deliberately depart from a textbook fan-out pub-sub**, across a broad API surface. The Dockerfile ships an empty `/app`; the agent writes the whole module. Scoring is all-or-nothing, so missing any single behavior fails the task.
+From-scratch **Go** task. The agent writes a Go program under `/app` (golang image ships an empty `/app`, stdlib only) implementing a command-driven in-memory publish-subscribe broker: it reads commands from stdin (one per line) and prints exactly one output line per command. The pytest verifier builds the program with `go build` and drives it as a subprocess, asserting on printed output. Scoring is all-or-nothing.
 
-Non-textbook behaviors (a naive "notify everyone who matches, in subscribe order" implementation fails):
+The broker's semantics deliberately depart from a textbook fan-out pub-sub, and the surface is large and algorithm-heavy (chosen because Go is verbose, so a broad correct implementation is substantial):
 
-1. **Specificity routing** — `publish` notifies only the most-specific matching tier (exact > longest `prefix.*` > global `*`); `publish_all` fans out.
-2. **Ordering** — `(priority DESC, subscription-id DESC)` (LIFO), not ascending id.
-3. **once-successful** — `subscribe_once` is removed only after a non-raising delivery.
-4. **Live removal, snapshot additions** — a subscription removed mid-delivery is skipped and not counted; additions do not join the in-progress delivery.
-5. **Publish pipeline** — pause/enqueue → filters (rewrite/abort) → retain → mute → route (order matters; a muted publish still retains).
-6. **Retained replay** — retained messages are delivered to a subscriber at subscribe time (its own pattern, insertion order, honoring the once rule).
-7. **k-of-n dependency-ordered delivery** — `publish_ordered(events)` delivers a batch in dependency order: an event is ready once ≥ `threshold` of its `deps` are delivered, delivering cascades to unblock others, ties break by `(priority DESC, arrival ASC)`, and events with missing deps / cycles / unreachable thresholds are undeliverable.
-8. **Per-subscription call budgets** (`max_calls`, generalizing `subscribe_once`) and **data transforms**; a global **error handler** (`set_error_handler`); per-topic **history** logs (`get_history`/`clear_history`); and batch ops (`subscribe_many`, `publish_batch`).
-9. **Capacity-weighted distribution** — `distribute(topic, load)` splits an integer `load` across the winning tier by `capacity` using integer **water-filling with a saturation cascade** (surplus from capped recipients redistributes to those with spare capacity, iterated to a fixpoint; leftover beyond total capacity is overflow).
-10. **Rendezvous-hash sharded delivery** — `publish_sharded(topic, key, data, n)` delivers to the `n` winning-tier subscribers with the highest HRW score of `sha256("{key}:{sub_id}")[:8]`, ranked descending (tie by larger id). Stable per key, evenly spread across keys.
-11. **Weighted fair scheduling** — `publish_fair(topic, data)` delivers to exactly one eligible (capacity≥1) winning-tier subscriber via **stride scheduling** (persistent per-sub `pass`, stride `(2**32)//capacity`, min-pass wins, tie by id), so selection frequency is proportional to capacity over repeated calls.
-12. **Token-bucket rate limiting** — each subscription has a token bucket sized by `capacity` (starts full); `publish_metered(topic, data, cost)` delivers to winning-tier subscribers with ≥`cost` tokens (deducting `cost`), `refill(topic, amount)` tops up capped at capacity, `get_tokens(sub_id)` reads the balance.
-13. **In-order sequence delivery** — `publish_seq(topic, seq, data)` delivers strictly in order per topic: deliver on the expected seq (then flush contiguous buffered runs), buffer future seqs, drop stale ones; `next_expected`/`pending_seqs` introspect.
-14. **Consistent-hash ring routing** — `route_hashring(topic, key, data)` places `capacity` virtual nodes per winning-tier subscriber on a SHA-256 ring and routes `key` to the first vnode clockwise (wraparound), returning the owner.
-15. Plus filters, mute patterns, pause/resume queueing, and introspection. The water-fill, rendezvous-hashing, consistent-hash ring, stride-scheduling, token-bucket, reorder-buffer, and dependency-cascade algorithms are the primary algorithmic difficulty.
-
-Thread-safety uses `threading.RLock`; delivery snapshots under the lock and releases before invoking callbacks/filters so reentrant calls do not deadlock.
+1. **Specificity routing** — `PUB` notifies only the most-specific matching tier (exact > longest `prefix.*` > global `*`); `PUBALL` fans out.
+2. **Ordering** — `(priority DESC, id DESC)`.
+3. **max_calls** — per-subscription delivery budget; auto-removed after N deliveries (`-1` = unlimited).
+4. **Publish pipeline** — pause/enqueue → retain → mute → history → route (a muted publish still retains).
+5. **Retained replay on subscribe** — a new subscription immediately receives retained messages its pattern matches (insertion order, honoring its budget).
+6. **k-of-n dependency-ordered delivery** — `ORDERED` delivers a batch in dependency order with cascade release, priority tie-break, and undeliverable detection (missing deps / cycles / unreachable thresholds).
+7. **Capacity-weighted distribution** — `DISTRIBUTE` integer water-filling with a saturation cascade.
+8. **Rendezvous-hash sharded delivery** — `SHARD` HRW selection of the top-n by `sha256("key:id")`.
+9. **Consistent-hash ring routing** — `RING` virtual nodes on a `sha256` ring with wraparound.
+10. **Weighted fair scheduling** — `FAIR` stride scheduling by capacity (persistent per-sub pass).
+11. **Token-bucket rate limiting** — `METER`/`REFILL`/`TOKENS`, bucket sized by capacity.
+12. **In-order sequence delivery** — `SEQ` reorder buffer with contiguous-run flush; `NEXTSEQ`/`PENDING`.
+13. Plus mute patterns, pause/resume queueing, history, and introspection (`MATCH`, `TOPICS`, `COUNT`, `DELIVERED`).
 
 ## Completion Rates
-- Oracle: 1/1 locally and via `codimango bench run` (reference solution).
-- `claude-code` / `claude-opus-4-6`: expected to pass with careful reading of the pipeline, routing, and dependency-ordering contract.
-- `metacode` / `meta/avocado_dvsc_tester` (validation gate): expected to struggle — the spec is terse (no worked examples), the surface is broad, and scoring is binary, so mis-inferring any behavior fails.
+- Oracle: passes locally and via `codimango bench run` (reference `solve.sh` writes `main.go`).
+- `claude-code` / `claude-opus-4-6` and `metacode` / `meta/avocado_dvsc_tester`: calibration measured empirically online.
 
-Empirical: reference solution passes 157/157 local pytest tests.
-
-## Model Analysis
-Expected failure modes for an implementation relying on pub-sub priors rather than the spec:
-- **Fan-out instead of specificity routing** → specificity/`get_matching_count` tests.
-- **Ascending-id / no-priority ordering** → ordering tests.
-- **Remove-once-on-any-delivery** → once-successful test.
-- **Pure-snapshot delivery** → live-removal test.
-- **Wrong pipeline order** (retaining after mute, not queueing while paused, etc.) → filter/mute/pause/retain tests.
-- **No retained replay on subscribe** → retained tests.
-- **Single-pass instead of cascade / wrong tie-break in `publish_ordered`** → dependency-ordering tests.
-- **Missing methods** → `AttributeError`.
-- **Holding the lock across callbacks / non-reentrant lock** → reentrancy deadlock timeout.
-- **Broken/absent locking** → concurrency tests.
+Empirical: reference solution passes 71/71 local pytest tests (build + drive the Go CLI).
 
 ## Anti-Cheating Analysis
-- **Hardcoded outputs**: Tests generate dynamic data and assert runtime behavior (counts, order, retained/queued state, dependency ordering); nothing is statically hardcodeable.
-- **Overfitting to visible tests**: Tests are hidden at solve time and cover many feature combinations requiring a general implementation.
-- **Modifying test files**: The Dockerfile does not copy tests into the image; the harness injects `/tests/` after the agent run.
-- **Bypassing the intended path**: The only way to pass is to implement `PubSub` with the specified contract.
-- **Pinned dependencies**: Stdlib only; pytest pinned in `tests/test.sh`; Dockerfile pins `python:3.11-slim` from the ECR mirror.
+- **Hardcoded outputs**: tests drive the built binary with dynamic command scripts and assert on runtime behavior (routing, ordering, allocations, hashing, sequence/dependency state); hashing expectations are computed independently in the test via sha256; nothing is statically hardcodeable.
+- **Overfitting to visible tests**: tests are hidden at solve time; the agent must implement the general protocol.
+- **Modifying test files**: the Dockerfile does not copy tests into the image; the harness injects `/tests/` after the agent run.
+- **Bypassing the intended path**: the grade builds and runs `/app`'s Go program against the command protocol; only a correct implementation passes.
+- **Pinned toolchain**: `GOTOOLCHAIN=local` on a pinned `golang` image; no network needed to build.

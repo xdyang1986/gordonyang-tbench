@@ -1,1748 +1,78 @@
-"""
-Tests for the specificity-routing pub-sub broker task.
+"""Black-box tests for the Go pub-sub broker CLI.
 
-Covers the publish pipeline (pause/queue -> filters -> retain -> mute -> route),
-specificity routing, (priority DESC, id DESC) ordering, once-successful
-subscriptions, live-removal delivery, retained-message replay on subscribe,
-mute patterns, pause/resume queueing, filters/interceptors, and the
-introspection surface. These semantics deliberately differ from a textbook
-fan-out pub-sub.
+Builds the Go program under /app and drives it via stdin/stdout. Each input line
+is one command; the program prints exactly one output line per command. The
+broker's semantics deliberately depart from a textbook fan-out pub-sub; see
+instruction.md.
 """
 
-import sys
-import os
 import hashlib
-import threading
-import importlib
+import os
+import subprocess
+
 import pytest
 
-
-def _rendezvous_rank(key, ids):
-    def score(sid):
-        return int.from_bytes(hashlib.sha256(f"{key}:{sid}".encode()).digest()[:8], "big")
-    return sorted(ids, key=lambda sid: (score(sid), sid), reverse=True)
-
-sys.path.insert(0, "/app")
-
-
-def _load_pubsub():
-    if "pubsub" in sys.modules:
-        importlib.reload(sys.modules["pubsub"])
-    import pubsub as m
-
-    assert hasattr(m, "PubSub"), "pubsub.py must contain class PubSub"
-    return m.PubSub
-
-
-# --------------------------------------------------------------------------- #
-# Basics
-# --------------------------------------------------------------------------- #
-
-
-def test_file_exists_and_importable():
-    assert os.path.exists("/app/pubsub.py")
-    assert _load_pubsub() is not None
-
-
-def test_basic_subscribe_and_publish():
-    bus = _load_pubsub()()
-    rec = []
-    sid = bus.subscribe("order.created", lambda d: rec.append(d))
-    assert isinstance(sid, int)
-    assert bus.publish("order.created", {"id": 1}) == 1
-    assert rec == [{"id": 1}]
-
-
-def test_callback_receives_data_and_none_default():
-    bus = _load_pubsub()()
-    got = []
-    bus.subscribe("topic", lambda d: got.append(d))
-    bus.publish("topic")
-    assert got == [None]
-    bus.publish("topic", "hello")
-    assert got == [None, "hello"]
-
-
-def test_publish_no_subscribers_returns_zero():
-    bus = _load_pubsub()()
-    assert bus.publish("nonexistent", 123) == 0
-
-
-def test_incremental_ids():
-    bus = _load_pubsub()()
-    assert bus.subscribe("t", lambda d: None) == 1
-    assert bus.subscribe("t", lambda d: None) == 2
-    assert bus.subscribe("t", lambda d: None) == 3
-
-
-def test_duplicate_callbacks_counted_separately():
-    bus = _load_pubsub()()
-    calls = []
-    cb = lambda d: calls.append(1)
-    bus.subscribe("dup", cb)
-    bus.subscribe("dup", cb)
-    assert bus.publish("dup", None) == 2
-    assert len(calls) == 2
-
-
-# --------------------------------------------------------------------------- #
-# Specificity routing
-# --------------------------------------------------------------------------- #
-
-
-def test_exact_tier_suppresses_wildcard_and_global():
-    bus = _load_pubsub()()
-    re_, rw, rg = [], [], []
-    bus.subscribe("order.created", lambda d: re_.append(d))
-    bus.subscribe("order.*", lambda d: rw.append(d))
-    bus.subscribe("*", lambda d: rg.append(d))
-    assert bus.publish("order.created", "x") == 1
-    assert re_ == ["x"] and rw == [] and rg == []
-
-
-def test_longest_prefix_tier_wins():
-    bus = _load_pubsub()()
-    rs, rl, rg = [], [], []
-    bus.subscribe("order.*", lambda d: rs.append(d))
-    bus.subscribe("order.created.*", lambda d: rl.append(d))
-    bus.subscribe("*", lambda d: rg.append(d))
-    assert bus.publish("order.created.detail", "deep") == 1
-    assert rl == ["deep"] and rs == [] and rg == []
-    assert bus.publish("order.foo", "shallow") == 1
-    assert rs == ["shallow"] and rl == ["deep"]
-
-
-def test_global_tier_only_when_nothing_more_specific():
-    bus = _load_pubsub()()
-    rp, rg = [], []
-    bus.subscribe("order.*", lambda d: rp.append(d))
-    bus.subscribe("*", lambda d: rg.append(d))
-    assert bus.publish("billing.paid", 1) == 1
-    assert rg == [1] and rp == []
-    assert bus.publish("order.created", 2) == 1
-    assert rp == [2] and rg == [1]
-
-
-def test_prefix_matches_exact_prefix_token():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("order.*", lambda d: rec.append(d))
-    assert bus.publish("order", "bare") == 1
-    assert rec == ["bare"]
-    assert bus.publish("order123", "no") == 0
-    assert bus.publish("other.order", "no") == 0
-    assert rec == ["bare"]
-
-
-def test_multiple_subs_in_winning_tier_all_fire():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append("a"))
-    bus.subscribe("t", lambda d: rec.append("b"))
-    bus.subscribe("*", lambda d: rec.append("glob"))
-    assert bus.publish("t", None) == 2
-    assert sorted(rec) == ["a", "b"]
-
-
-def test_get_matching_count_reflects_winning_tier():
-    bus = _load_pubsub()()
-    bus.subscribe("order.created", lambda d: None)
-    bus.subscribe("order.created", lambda d: None)
-    bus.subscribe("order.*", lambda d: None)
-    bus.subscribe("*", lambda d: None)
-    assert bus.get_matching_count("order.created") == 2
-    assert bus.get_matching_count("order.shipped") == 1
-    assert bus.get_matching_count("unrelated") == 1
-    assert _load_pubsub()().get_matching_count("x") == 0
-
-
-def test_get_matching_count_validates_topic():
-    bus = _load_pubsub()()
-    for bad in ("*", "", "a.*"):
-        with pytest.raises(ValueError):
-            bus.get_matching_count(bad)
-
-
-# --------------------------------------------------------------------------- #
-# Ordering
-# --------------------------------------------------------------------------- #
-
-
-def test_delivery_order_lifo_within_tier():
-    bus = _load_pubsub()()
-    order = []
-    bus.subscribe("t", lambda d: order.append(1))
-    bus.subscribe("t", lambda d: order.append(2))
-    bus.subscribe("t", lambda d: order.append(3))
-    bus.publish("t", None)
-    assert order == [3, 2, 1]
-
-
-def test_delivery_order_priority_then_lifo():
-    bus = _load_pubsub()()
-    order = []
-    bus.subscribe("t", lambda d: order.append("a"), priority=0)
-    bus.subscribe("t", lambda d: order.append("b"), priority=0)
-    bus.subscribe("t", lambda d: order.append("c"), priority=5)
-    bus.subscribe("t", lambda d: order.append("d"), priority=5)
-    bus.publish("t", None)
-    assert order == ["d", "c", "b", "a"]
-
-
-def test_negative_priority_last():
-    bus = _load_pubsub()()
-    order = []
-    bus.subscribe("t", lambda d: order.append("low"), priority=-3)
-    bus.subscribe("t", lambda d: order.append("mid"), priority=0)
-    bus.subscribe("t", lambda d: order.append("high"), priority=10)
-    bus.publish("t", None)
-    assert order == ["high", "mid", "low"]
-
-
-# --------------------------------------------------------------------------- #
-# once-successful
-# --------------------------------------------------------------------------- #
-
-
-def test_once_removed_on_success():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe_once("once.topic", lambda d: rec.append(d))
-    assert bus.get_subscriber_count() == 1
-    assert bus.publish("once.topic", "first") == 1
-    assert rec == ["first"]
-    assert bus.get_subscriber_count() == 0
-    assert bus.publish("once.topic", "second") == 0
-
-
-def test_once_stays_on_exception_then_removed_on_success():
-    bus = _load_pubsub()()
-    calls = []
-
-    def cb(d):
-        calls.append(d)
-        if len(calls) == 1:
-            raise RuntimeError("boom")
-
-    bus.subscribe_once("t", cb)
-    assert bus.publish("t", "a") == 1
-    assert bus.get_subscriber_count() == 1
-    assert bus.publish("t", "b") == 1
-    assert bus.get_subscriber_count() == 0
-    assert bus.publish("t", "c") == 0
-    assert calls == ["a", "b"]
-
-
-def test_once_with_wildcard_routing():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe_once("order.*", lambda d: rec.append(d))
-    bus.publish("order.created", "a")
-    assert rec == ["a"]
-    assert bus.publish("order.created", "b") == 0
-
-
-# --------------------------------------------------------------------------- #
-# Live removal / snapshot additions
-# --------------------------------------------------------------------------- #
-
-
-def test_live_removal_skips_and_does_not_count():
-    bus = _load_pubsub()()
-    rec = []
-    ids = []
-
-    def high(d):
-        rec.append("high")
-        bus.unsubscribe(ids[0])
-
-    ids.append(bus.subscribe("t", lambda d: rec.append("low"), priority=0))
-    ids.append(bus.subscribe("t", high, priority=10))
-    assert bus.publish("t", None) == 1
-    assert rec == ["high"]
-
-
-def test_subscribe_during_publish_not_in_current():
-    bus = _load_pubsub()()
-    rec = []
-
-    def cb(d):
-        rec.append("orig")
-        bus.subscribe("t", lambda d: rec.append("new"))
-
-    bus.subscribe("t", cb)
-    assert bus.publish("t", None) == 1
-    assert rec == ["orig"]
-    rec.clear()
-    assert bus.publish("t", None) == 2
-    assert "orig" in rec and "new" in rec
-
-
-# --------------------------------------------------------------------------- #
-# Exceptions
-# --------------------------------------------------------------------------- #
-
-
-def test_exception_does_not_break_others():
-    bus = _load_pubsub()()
-    rec = []
-
-    def bad(d):
-        raise RuntimeError("oops")
-
-    bus.subscribe("t", lambda d: rec.append(1))
-    bus.subscribe("t", bad)
-    bus.subscribe("t", lambda d: rec.append(3))
-    assert bus.publish("t", None) == 3
-    assert rec == [3, 1]
-
-
-def test_exception_counts_and_continues():
-    bus = _load_pubsub()()
-    bus.subscribe("x", lambda d: (_ for _ in ()).throw(Exception("fail")))
-    assert bus.publish("x", None) == 1
-    assert bus.publish("x", None) == 1
-
-
-# --------------------------------------------------------------------------- #
-# publish_all
-# --------------------------------------------------------------------------- #
-
-
-def test_publish_all_fans_out():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("order.created", lambda d: rec.append("exact"))
-    bus.subscribe("order.*", lambda d: rec.append("prefix"))
-    bus.subscribe("*", lambda d: rec.append("glob"))
-    assert bus.publish("order.created", None) == 1
-    assert rec == ["exact"]
-    rec.clear()
-    assert bus.publish_all("order.created", None) == 3
-    assert set(rec) == {"exact", "prefix", "glob"}
-
-
-def test_publish_all_ordering():
-    bus = _load_pubsub()()
-    order = []
-    bus.subscribe("a", lambda d: order.append("exact"), priority=0)
-    bus.subscribe("*", lambda d: order.append("glob"), priority=0)
-    bus.subscribe("a.*", lambda d: order.append("pref"), priority=9)
-    assert bus.publish_all("a", None) == 3
-    assert order == ["pref", "glob", "exact"]
-
-
-# --------------------------------------------------------------------------- #
-# unsubscribe / clear / counts / topics
-# --------------------------------------------------------------------------- #
-
-
-def test_unsubscribe_and_unknown():
-    bus = _load_pubsub()()
-    sid = bus.subscribe("t", lambda d: None)
-    assert bus.unsubscribe(sid) is True
-    assert bus.unsubscribe(sid) is False
-    assert bus.unsubscribe(999) is False
-
-
-def test_unsubscribe_callback():
-    bus = _load_pubsub()()
-    cb = lambda d: None
-    bus.subscribe("a", cb)
-    bus.subscribe("b", cb)
-    bus.subscribe("c.*", cb)
-    bus.subscribe("a", lambda d: None)
-    assert bus.unsubscribe_callback(cb) == 3
-    assert bus.get_subscriber_count() == 1
-    assert bus.unsubscribe_callback(lambda d: None) == 0
-
-
-def test_clear_all_and_exact():
-    bus = _load_pubsub()()
-    bus.subscribe("order.created", lambda d: None)
-    bus.subscribe("order.created", lambda d: None)
-    bus.subscribe("order.*", lambda d: None)
-    bus.subscribe("*", lambda d: None)
-    bus.clear("order.created")
-    assert bus.get_subscriber_count("order.created") == 0
-    assert bus.get_subscriber_count() == 2
-    bus.clear()
-    assert bus.get_subscriber_count() == 0
-
-
-def test_get_subscriber_count_exact():
-    bus = _load_pubsub()()
-    assert bus.get_subscriber_count() == 0
-    bus.subscribe("a", lambda d: None)
-    bus.subscribe("a", lambda d: None)
-    bus.subscribe("b", lambda d: None)
-    assert bus.get_subscriber_count() == 3
-    assert bus.get_subscriber_count("a") == 2
-    assert bus.get_subscriber_count("nope") == 0
-
-
-def test_topics():
-    bus = _load_pubsub()()
-    assert bus.topics() == set()
-    bus.subscribe("a", lambda d: None)
-    bus.subscribe("a", lambda d: None)
-    bus.subscribe("b.*", lambda d: None)
-    bus.subscribe("*", lambda d: None)
-    assert bus.topics() == {"a", "b.*", "*"}
-
-
-# --------------------------------------------------------------------------- #
-# Filters / interceptors
-# --------------------------------------------------------------------------- #
-
-
-def test_filter_rewrites_topic():
-    bus = _load_pubsub()()
-    rec = []
-    bus.add_filter(lambda t, d: ("routed", d))
-    bus.subscribe("routed", lambda d: rec.append(d))
-    bus.subscribe("orig", lambda d: rec.append("WRONG"))
-    assert bus.publish("orig", 5) == 1
-    assert rec == [5]
-
-
-def test_filter_none_drops():
-    bus = _load_pubsub()()
-    rec = []
-    fid = bus.add_filter(lambda t, d: None)
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert bus.publish("t", 1) == 0
-    assert rec == []
-    assert bus.remove_filter(fid) is True
-    assert bus.publish("t", 2) == 1
-    assert rec == [2]
-
-
-def test_filter_chain_ascending_id():
-    bus = _load_pubsub()()
-    order = []
-    bus.add_filter(lambda t, d: (t, d + ["f1"]))
-    bus.add_filter(lambda t, d: (t, d + ["f2"]))
-    bus.subscribe("t", lambda d: order.extend(d))
-    bus.publish("t", [])
-    assert order == ["f1", "f2"]
-
-
-def test_filter_invalid_topic_raises():
-    bus = _load_pubsub()()
-    bus.add_filter(lambda t, d: ("bad.*", d))
-    with pytest.raises(ValueError):
-        bus.publish("t", 1)
-
-
-def test_filter_applies_to_publish_all():
-    bus = _load_pubsub()()
-    rec = []
-    bus.add_filter(lambda t, d: ("x", d))
-    bus.subscribe("x", lambda d: rec.append(d))
-    assert bus.publish_all("y", 1) == 1
-    assert rec == [1]
-
-
-def test_add_filter_validates_callable():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.add_filter("not callable")
-
-
-def test_remove_filter_unknown():
-    bus = _load_pubsub()()
-    assert bus.remove_filter(123) is False
-
-
-# --------------------------------------------------------------------------- #
-# Mute
-# --------------------------------------------------------------------------- #
-
-
-def test_mute_exact():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    bus.mute("t")
-    assert bus.publish("t", 1) == 0
-    assert rec == []
-    assert bus.unmute("t") is True
-    assert bus.publish("t", 2) == 1
-
-
-def test_mute_prefix_pattern():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("order.created", lambda d: rec.append(d))
-    bus.mute("order.*")
-    assert bus.publish("order.created", 1) == 0
-    assert rec == []
-
-
-def test_mute_global():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("anything", lambda d: rec.append(d))
-    bus.mute("*")
-    assert bus.publish("anything", 1) == 0
-
-
-def test_mute_still_retains():
-    bus = _load_pubsub()()
-    bus.mute("t")
-    assert bus.publish("t", 99, retain=True) == 0
-    assert "t" in bus.retained_topics()
-
-
-def test_mute_validation_and_unmute_unknown():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.mute("a*b")
-    assert bus.unmute("never") is False
-
-
-def test_muted_patterns():
-    bus = _load_pubsub()()
-    bus.mute("a")
-    bus.mute("b.*")
-    assert bus.muted_patterns() == {"a", "b.*"}
-
-
-# --------------------------------------------------------------------------- #
-# Pause / resume
-# --------------------------------------------------------------------------- #
-
-
-def test_pause_blocks_and_resume_replays():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    bus.pause()
-    assert bus.is_paused() is True
-    assert bus.publish("t", 1) == 0
-    assert rec == []
-    assert bus.resume() == 1
-    assert rec == [1]
-    assert bus.is_paused() is False
-
-
-def test_resume_fifo_and_aggregate_with_late_subscribers():
-    bus = _load_pubsub()()
-    rec = []
-    bus.pause()
-    bus.publish("a", 1)
-    bus.subscribe("a", lambda d: rec.append(("a", d)))
-    bus.publish("b", 2)
-    bus.subscribe("b", lambda d: rec.append(("b", d)))
-    assert bus.resume() == 2
-    assert rec == [("a", 1), ("b", 2)]
-
-
-def test_pause_defers_retain():
-    bus = _load_pubsub()()
-    bus.pause()
-    bus.publish("t", 5, retain=True)
-    assert bus.retained_topics() == set()
-    bus.resume()
-    assert "t" in bus.retained_topics()
-
-
-# --------------------------------------------------------------------------- #
-# Retained messages / replay on subscribe
-# --------------------------------------------------------------------------- #
-
-
-def test_retained_replayed_on_subscribe():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("t", "v", retain=True)
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert rec == ["v"]
-
-
-def test_retained_replayed_to_wildcard_in_insertion_order():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("a", 1, retain=True)
-    bus.publish("b", 2, retain=True)
-    bus.subscribe("*", lambda d: rec.append(d))
-    assert rec == [1, 2]
-
-
-def test_retained_replayed_to_prefix_match_only():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("order.created", 1, retain=True)
-    bus.publish("user.x", 2, retain=True)
-    bus.subscribe("order.*", lambda d: rec.append(d))
-    assert rec == [1]
-
-
-def test_retain_keeps_latest_value():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("t", 1, retain=True)
-    bus.publish("t", 2, retain=True)
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert rec == [2]
-
-
-def test_once_consumes_retained_and_is_removed():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("t", "v", retain=True)
-    bus.subscribe_once("t", lambda d: rec.append(d))
-    assert rec == ["v"]
-    assert bus.get_subscriber_count() == 0
-
-
-def test_once_retained_raise_keeps_subscription():
-    bus = _load_pubsub()()
-    bus.publish("t", "v", retain=True)
-
-    def bad(d):
-        raise RuntimeError("boom")
-
-    bus.subscribe_once("t", bad)
-    assert bus.get_subscriber_count() == 1
-
-
-def test_non_retained_publish_does_not_store():
-    bus = _load_pubsub()()
-    bus.publish("t", 1)
-    assert bus.retained_topics() == set()
-
-
-def test_clear_retained():
-    bus = _load_pubsub()()
-    bus.publish("a", 1, retain=True)
-    bus.publish("b", 2, retain=True)
-    assert bus.retained_topics() == {"a", "b"}
-    bus.clear_retained("a")
-    assert bus.retained_topics() == {"b"}
-    bus.clear_retained()
-    assert bus.retained_topics() == set()
-
-
-# --------------------------------------------------------------------------- #
-# delivered_count
-# --------------------------------------------------------------------------- #
-
-
-def test_delivered_count_tracks_all_deliveries():
-    bus = _load_pubsub()()
-    bus.subscribe("t", lambda d: None)
-    bus.subscribe("t", lambda d: None)
-    assert bus.publish("t", 1) == 2
-    assert bus.delivered_count() == 2
-    assert bus.publish_all("t", 1) == 2
-    assert bus.delivered_count() == 4
-
-
-def test_delivered_count_includes_retained_replay():
-    bus = _load_pubsub()()
-    bus.publish("t", "v", retain=True)
-    bus.subscribe("t", lambda d: None)
-    assert bus.delivered_count() == 1
-
-
-# --------------------------------------------------------------------------- #
-# Validation
-# --------------------------------------------------------------------------- #
-
-
-def test_subscribe_validation_topic():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.subscribe("", lambda d: None)
-    with pytest.raises(ValueError):
-        bus.subscribe(None, lambda d: None)
-
-
-def test_subscribe_validation_callback():
-    bus = _load_pubsub()()
-    for bad in (None, "nope", 123):
-        with pytest.raises(ValueError):
-            bus.subscribe("t", bad)
-
-
-def test_subscribe_validation_wildcard_rules():
-    bus = _load_pubsub()()
-    bus.subscribe("*", lambda d: None)
-    bus.subscribe("order.*", lambda d: None)
-    bus.subscribe("order.created", lambda d: None)
-    for t in ["ord*er", "*.created", "order.*.created", "order.*.",
-              "order*", "*.*", "a*b.*", "order.**"]:
-        with pytest.raises(ValueError):
-            bus.subscribe(t, lambda d: None)
-
-
-def test_subscribe_validation_priority():
-    bus = _load_pubsub()()
-    for bad in ("high", 1.5, True):
-        with pytest.raises(ValueError):
-            bus.subscribe("t", lambda d: None, priority=bad)
-    assert isinstance(bus.subscribe("t", lambda d: None, priority=-2), int)
-
-
-def test_publish_validation():
-    bus = _load_pubsub()()
-    for bad in ("", "topic.with.*", "*", "bad*topic"):
-        with pytest.raises(ValueError):
-            bus.publish(bad, None)
-    for bad in ("", "*", "a.*"):
-        with pytest.raises(ValueError):
-            bus.publish_all(bad, None)
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases (pipeline order, routing edges, once/retained interplay)
-# --------------------------------------------------------------------------- #
-
-
-def test_exact_wins_over_prefix_equal_to_topic():
-    bus = _load_pubsub()()
-    re_, rp = [], []
-    bus.subscribe("order", lambda d: re_.append(d))
-    bus.subscribe("order.*", lambda d: rp.append(d))
-    # "order.*" matches the topic "order", but the exact tier still wins
-    assert bus.publish("order", 1) == 1
-    assert re_ == [1] and rp == []
-
-
-def test_filter_reroutes_into_prefix_tier():
-    bus = _load_pubsub()()
-    rec = []
-    bus.add_filter(lambda t, d: ("order.created", d))
-    bus.subscribe("order.*", lambda d: rec.append(d))
-    assert bus.publish("x", 7) == 1
-    assert rec == [7]
-
-
-def test_retain_stores_post_filter_topic_and_data():
-    bus = _load_pubsub()()
-    rec = []
-    bus.add_filter(lambda t, d: ("b", d * 10))
-    assert bus.publish("a", 5, retain=True) == 0  # no subscriber for "b"
-    assert bus.retained_topics() == {"b"}
-    bus.subscribe("b", lambda d: rec.append(d))
-    assert rec == [50]
-
-
-def test_mute_checked_on_post_filter_topic():
-    bus = _load_pubsub()()
-    rec = []
-    bus.add_filter(lambda t, d: ("muted", d))
-    bus.mute("muted")
-    bus.subscribe("muted", lambda d: rec.append(d))
-    assert bus.publish("a", 1) == 0
-    assert rec == []
-
-
-def test_mute_not_triggered_when_filter_rewrites_away():
-    bus = _load_pubsub()()
-    rec = []
-    bus.mute("a")
-    bus.add_filter(lambda t, d: ("clean", d))
-    bus.subscribe("clean", lambda d: rec.append(d))
-    assert bus.publish("a", 1) == 1
-    assert rec == [1]
-
-
-def test_resume_preserves_publish_all_mode():
-    bus = _load_pubsub()()
-    bus.subscribe("x", lambda d: None)
-    bus.subscribe("*", lambda d: None)
-    bus.pause()
-    bus.publish_all("x", None)
-    assert bus.resume() == 2  # fan-out mode preserved across the queue
-
-
-def test_once_removed_via_publish_all():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe_once("t", lambda d: rec.append(d))
-    assert bus.publish_all("t", 1) == 1
-    assert bus.get_subscriber_count() == 0
-    assert bus.publish_all("t", 2) == 0
-    assert rec == [1]
-
-
-def test_once_consumes_only_first_matching_retained():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("a", 1, retain=True)
-    bus.publish("b", 2, retain=True)
-    bus.subscribe_once("*", lambda d: rec.append(d))
-    assert rec == [1]
-    assert bus.get_subscriber_count() == 0
-
-
-def test_delivered_count_excludes_skipped():
-    bus = _load_pubsub()()
-    ids = []
-
-    def high(d):
-        bus.unsubscribe(ids[0])
-
-    ids.append(bus.subscribe("t", lambda d: None, priority=0))
-    ids.append(bus.subscribe("t", high, priority=10))
-    assert bus.publish("t", None) == 1
-    assert bus.delivered_count() == 1
-
-
-# --------------------------------------------------------------------------- #
-# Thread-safety & reentrancy
-# --------------------------------------------------------------------------- #
-
-
-def test_thread_safety_concurrent_publish():
-    bus = _load_pubsub()()
-    counter = []
-    lock = threading.Lock()
-
-    def cb(d):
-        with lock:
-            counter.append(1)
-
-    for _ in range(10):
-        bus.subscribe("concurrent", cb)
-
-    def publisher():
-        for _ in range(50):
-            bus.publish("concurrent", None)
-
-    threads = [threading.Thread(target=publisher) for _ in range(5)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert len(counter) == 2500
-
-
-def test_thread_safety_concurrent_mixed():
-    bus = _load_pubsub()()
-    errors = []
-
-    def sub_thread():
-        try:
-            for i in range(100):
-                bus.subscribe(f"topic.{i % 5}", lambda d: None)
-        except Exception as e:
-            errors.append(e)
-
-    def pub_thread():
-        try:
-            for _ in range(100):
-                bus.publish("topic.1", None)
-                bus.publish_all("topic.2", None)
-        except Exception as e:
-            errors.append(e)
-
-    def unsub_thread():
-        try:
-            ids = [bus.subscribe("topic.1", lambda d: None) for _ in range(20)]
-            for sid in ids:
-                bus.unsubscribe(sid)
-        except Exception as e:
-            errors.append(e)
-
-    threads = []
-    for _ in range(3):
-        threads.append(threading.Thread(target=sub_thread))
-        threads.append(threading.Thread(target=pub_thread))
-        threads.append(threading.Thread(target=unsub_thread))
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert errors == [], f"errors: {errors}"
-    assert isinstance(bus.get_subscriber_count(), int)
-
-
-def test_reentrancy_publish_inside_callback():
-    bus = _load_pubsub()()
-    rec = []
-
-    def outer(d):
-        rec.append("outer")
-        bus.publish("inner", "data")
-
-    bus.subscribe("outer", outer)
-    bus.subscribe("inner", lambda d: rec.append("inner"))
-    bus.publish("outer", None)
-    assert "outer" in rec and "inner" in rec
-
-
-def test_reentrancy_subscribe_inside_callback():
-    bus = _load_pubsub()()
-    rec = []
-
-    def cb(d):
-        rec.append("first")
-        bus.subscribe("t", lambda d: rec.append("added"))
-
-    bus.subscribe("t", cb)
-    bus.publish("t", None)
-    assert rec == ["first"]
-    rec.clear()
-    bus.publish("t", None)
-    assert "first" in rec and "added" in rec
-
-
-# --------------------------------------------------------------------------- #
-# k-of-n dependency-ordered delivery (publish_ordered)
-# --------------------------------------------------------------------------- #
-
-
-def test_ordered_cascade_reversed_chain():
-    bus = _load_pubsub()()
-    events = [
-        {"id": "C", "topic": "t", "deps": ["B"]},
-        {"id": "B", "topic": "t", "deps": ["A"]},
-        {"id": "A", "topic": "t", "deps": []},
-    ]
-    res = bus.publish_ordered(events)
-    assert res["delivered"] == ["A", "B", "C"]
-    assert res["undeliverable"] == []
-
-
-def test_ordered_priority_tiebreak():
-    bus = _load_pubsub()()
-    events = [
-        {"id": "A", "topic": "t", "priority": 1},
-        {"id": "B", "topic": "t", "priority": 5},
-        {"id": "C", "topic": "t", "priority": 3},
-    ]
-    res = bus.publish_ordered(events)
-    # all deliverable at once -> priority DESC, then arrival
-    assert res["delivered"] == ["B", "C", "A"]
-
-
-def test_ordered_k_of_n_threshold():
-    bus = _load_pubsub()()
-    events = [
-        {"id": "D1", "topic": "t", "deps": []},
-        {"id": "D2", "topic": "t", "deps": []},
-        {"id": "X", "topic": "t", "deps": ["D1", "D2", "D3"], "threshold": 2},
-        {"id": "D3", "topic": "t", "deps": []},
-    ]
-    res = bus.publish_ordered(events)
-    # X needs only 2 of its 3 deps; it fires after D1,D2 (before D3, since X's
-    # arrival index precedes D3's)
-    assert res["delivered"] == ["D1", "D2", "X", "D3"]
-    assert res["undeliverable"] == []
-
-
-def test_ordered_missing_dep_undeliverable():
-    bus = _load_pubsub()()
-    events = [
-        {"id": "X", "topic": "t", "deps": ["ghost"]},
-        {"id": "Y", "topic": "t", "deps": ["X"]},
-        {"id": "Z", "topic": "t", "deps": []},
-    ]
-    res = bus.publish_ordered(events)
-    assert res["delivered"] == ["Z"]
-    assert res["undeliverable"] == ["X", "Y"]
-
-
-def test_ordered_cycle_undeliverable():
-    bus = _load_pubsub()()
-    events = [
-        {"id": "A", "topic": "t", "deps": ["B"]},
-        {"id": "B", "topic": "t", "deps": ["A"]},
-    ]
-    res = bus.publish_ordered(events)
-    assert res["delivered"] == []
-    assert res["undeliverable"] == ["A", "B"]
-
-
-def test_ordered_integration_fires_in_order_and_counts():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("*", lambda d: rec.append(d))
-    events = [
-        {"id": "C", "topic": "t", "data": "c", "deps": ["B"]},
-        {"id": "B", "topic": "t", "data": "b", "deps": ["A"]},
-        {"id": "A", "topic": "t", "data": "a", "deps": []},
-    ]
-    res = bus.publish_ordered(events)
-    assert res["delivered"] == ["A", "B", "C"]
-    assert res["count"] == 3
-    assert rec == ["a", "b", "c"]
-
-
-def test_ordered_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_ordered("not a list")
-    with pytest.raises(ValueError):
-        bus.publish_ordered([{"id": "A"}])  # missing topic
-    with pytest.raises(ValueError):
-        bus.publish_ordered([{"id": "A", "topic": "bad*topic"}])
-
-
-# --------------------------------------------------------------------------- #
-# max_calls (generalized auto-remove)
-# --------------------------------------------------------------------------- #
-
-
-def test_max_calls_removes_after_n_successful():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d), max_calls=2)
-    assert bus.publish("t", 1) == 1
-    assert bus.publish("t", 2) == 1
-    assert bus.publish("t", 3) == 0
-    assert rec == [1, 2]
-    assert bus.get_subscriber_count() == 0
-
-
-def test_max_calls_raise_does_not_count():
-    bus = _load_pubsub()()
-    calls = []
-
-    def cb(d):
-        calls.append(d)
-        if len(calls) == 1:
-            raise RuntimeError("boom")
-
-    bus.subscribe("t", cb, max_calls=1)
-    assert bus.publish("t", "a") == 1
-    assert bus.get_subscriber_count() == 1  # raised -> not counted
-    assert bus.publish("t", "b") == 1
-    assert bus.get_subscriber_count() == 0
-    assert calls == ["a", "b"]
-
-
-def test_subscribe_once_is_max_calls_one():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe_once("t", lambda d: rec.append(d))
-    bus.publish("t", 1)
-    assert bus.publish("t", 2) == 0
-    assert rec == [1]
-
-
-def test_max_calls_validation():
-    bus = _load_pubsub()()
-    for bad in (0, -1, 1.5, True):
-        with pytest.raises(ValueError):
-            bus.subscribe("t", lambda d: None, max_calls=bad)
-    assert isinstance(bus.subscribe("t", lambda d: None, max_calls=None), int)
-    assert isinstance(bus.subscribe("t", lambda d: None, max_calls=3), int)
-
-
-# --------------------------------------------------------------------------- #
-# transform
-# --------------------------------------------------------------------------- #
-
-
-def test_transform_applied_to_callback():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d), transform=lambda d: d * 2)
-    bus.publish("t", 5)
-    assert rec == [10]
-
-
-def test_transform_applied_to_retained_replay():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("t", 5, retain=True)
-    bus.subscribe("t", lambda d: rec.append(d), transform=lambda d: d + 100)
-    assert rec == [105]
-
-
-def test_transform_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.subscribe("t", lambda d: None, transform="nope")
-
-
-# --------------------------------------------------------------------------- #
-# error handler
-# --------------------------------------------------------------------------- #
-
-
-def test_error_handler_called_on_exception():
-    bus = _load_pubsub()()
-    seen = []
-    bus.set_error_handler(lambda exc, sid, data: seen.append((type(exc), sid, data)))
-    rec = []
-
-    def bad(d):
-        raise ValueError("x")
-
-    sid = bus.subscribe("t", bad)
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert bus.publish("t", 7) == 2
-    assert rec == [7]  # other callback still ran
-    assert seen == [(ValueError, sid, 7)]
-
-
-def test_error_handler_raising_is_swallowed():
-    bus = _load_pubsub()()
-    rec = []
-    bus.set_error_handler(lambda exc, sid, data: (_ for _ in ()).throw(Exception("h")))
-    bus.subscribe("t", lambda d: (_ for _ in ()).throw(Exception("cb")))
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert bus.publish("t", 1) == 2
-    assert rec == [1]
-
-
-def test_error_handler_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.set_error_handler("nope")
-    bus.set_error_handler(None)  # ok
-
-
-# --------------------------------------------------------------------------- #
-# history
-# --------------------------------------------------------------------------- #
-
-
-def test_history_records_in_order():
-    bus = _load_pubsub()()
-    bus.publish("t", 1)
-    bus.publish("t", 2)
-    bus.publish("other", 9)
-    assert bus.get_history("t") == [1, 2]
-    assert bus.get_history("other") == [9]
-    assert bus.get_history("none") == []
-
-
-def test_history_not_recorded_when_muted_but_retained_is():
-    bus = _load_pubsub()()
-    bus.mute("t")
-    bus.publish("t", 5, retain=True)
-    assert bus.get_history("t") == []
-    assert "t" in bus.retained_topics()
-
-
-def test_history_deferred_when_paused():
-    bus = _load_pubsub()()
-    bus.pause()
-    bus.publish("t", 1)
-    assert bus.get_history("t") == []
-    bus.resume()
-    assert bus.get_history("t") == [1]
-
-
-def test_history_records_post_filter_topic():
-    bus = _load_pubsub()()
-    bus.add_filter(lambda t, d: ("b", d))
-    bus.publish("a", 3)
-    assert bus.get_history("b") == [3]
-    assert bus.get_history("a") == []
-
-
-def test_clear_history():
-    bus = _load_pubsub()()
-    bus.publish("a", 1)
-    bus.publish("b", 2)
-    bus.clear_history("a")
-    assert bus.get_history("a") == []
-    assert bus.get_history("b") == [2]
-    bus.clear_history()
-    assert bus.get_history("b") == []
-
-
-def test_get_history_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.get_history("*")
-
-
-# --------------------------------------------------------------------------- #
-# batch ops
-# --------------------------------------------------------------------------- #
-
-
-def test_subscribe_many():
-    bus = _load_pubsub()()
-    rec = []
-    ids = bus.subscribe_many(["a", "b.*"], lambda d: rec.append(d))
-    assert len(ids) == 2 and all(isinstance(i, int) for i in ids)
-    bus.publish("a", 1)
-    bus.publish("b.x", 2)
-    assert rec == [1, 2]
-
-
-def test_subscribe_many_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.subscribe_many("not a list", lambda d: None)
-
-
-def test_publish_batch_tuples():
-    bus = _load_pubsub()()
-    bus.subscribe("a", lambda d: None)
-    bus.subscribe("b", lambda d: None)
-    bus.subscribe("b", lambda d: None)
-    assert bus.publish_batch([("a", 1), ("b", 2)]) == [1, 2]
-
-
-def test_publish_batch_dicts_with_retain():
-    bus = _load_pubsub()()
-    assert bus.publish_batch([{"topic": "t", "data": 9, "retain": True}]) == [0]
-    assert "t" in bus.retained_topics()
-
-
-def test_publish_batch_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_batch("nope")
-
-
-# --------------------------------------------------------------------------- #
-# capacity-weighted distribution (integer water-filling)
-# --------------------------------------------------------------------------- #
-
-
-def test_distribute_even_split():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=10)
-    b = bus.subscribe("t", lambda d: None, capacity=10)
-    c = bus.subscribe("t", lambda d: None, capacity=10)
-    res = bus.distribute("t", 9)
-    assert res["allocations"] == {a: 3, b: 3, c: 3}
-    assert res["overflow"] == 0
-
-
-def test_distribute_remainder_to_smallest_ids():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=10)
-    b = bus.subscribe("t", lambda d: None, capacity=10)
-    c = bus.subscribe("t", lambda d: None, capacity=10)
-    res = bus.distribute("t", 10)
-    # 3 each, remaining 1 goes to the smallest id
-    assert res["allocations"] == {a: 4, b: 3, c: 3}
-    assert res["overflow"] == 0
-
-
-def test_distribute_saturation_cascade():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=1)
-    b = bus.subscribe("t", lambda d: None, capacity=10)
-    c = bus.subscribe("t", lambda d: None, capacity=10)
-    # a saturates at 1; its excess cascades to b and c
-    res = bus.distribute("t", 12)
-    assert res["allocations"] == {a: 1, b: 6, c: 5}
-    assert res["overflow"] == 0
-    assert sum(res["allocations"].values()) == 12
-
-
-def test_distribute_overflow_when_load_exceeds_capacity():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=2)
-    b = bus.subscribe("t", lambda d: None, capacity=3)
-    res = bus.distribute("t", 10)
-    assert res["allocations"] == {a: 2, b: 3}
-    assert res["overflow"] == 5
-
-
-def test_distribute_zero_capacity_excluded():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=0)
-    b = bus.subscribe("t", lambda d: None, capacity=5)
-    res = bus.distribute("t", 3)
-    assert res["allocations"] == {a: 0, b: 3}
-    assert res["overflow"] == 0
-
-
-def test_distribute_uses_specificity_tier():
-    bus = _load_pubsub()()
-    exact = bus.subscribe("t", lambda d: None, capacity=5)
-    bus.subscribe("*", lambda d: None, capacity=5)  # different tier, excluded
-    res = bus.distribute("t", 4)
-    assert res["allocations"] == {exact: 4}
-    assert res["overflow"] == 0
-
-
-def test_distribute_no_recipients_all_overflow():
-    bus = _load_pubsub()()
-    res = bus.distribute("none", 5)
-    assert res["allocations"] == {}
-    assert res["overflow"] == 5
-
-
-def test_distribute_validation():
-    bus = _load_pubsub()()
-    for bad in (-1, True, 1.5, "3"):
-        with pytest.raises(ValueError):
-            bus.distribute("t", bad)
-    with pytest.raises(ValueError):
-        bus.distribute("*", 1)
-
-
-def test_capacity_validation():
-    bus = _load_pubsub()()
-    for bad in (-1, True, 1.5):
-        with pytest.raises(ValueError):
-            bus.subscribe("t", lambda d: None, capacity=bad)
-    assert isinstance(bus.subscribe("t", lambda d: None, capacity=0), int)
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases: clarified ambiguities (group A)
-# --------------------------------------------------------------------------- #
-
-
-def test_filter_malformed_return_raises():
-    bus = _load_pubsub()()
-    bus.add_filter(lambda t, d: "not a pair")
-    bus.subscribe("t", lambda d: None)
-    with pytest.raises(ValueError):
-        bus.publish("t", 1)
-
-
-def test_publish_ordered_duplicate_id_raises():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_ordered([
-            {"id": "A", "topic": "t"},
-            {"id": "A", "topic": "t"},
-        ])
-
-
-def test_subscribe_many_is_atomic_on_invalid_pattern():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.subscribe_many(["a", "bad*pattern", "b"], lambda d: None)
-    assert bus.get_subscriber_count() == 0  # nothing registered
-
-
-def test_resume_when_not_paused_is_noop():
-    bus = _load_pubsub()()
-    assert bus.resume() == 0
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases: publish_ordered thresholds (group B)
-# --------------------------------------------------------------------------- #
-
-
-def test_ordered_threshold_zero_ready_immediately():
-    bus = _load_pubsub()()
-    res = bus.publish_ordered([
-        {"id": "X", "topic": "t", "deps": ["A"], "threshold": 0},
-        {"id": "A", "topic": "t"},
-    ])
-    # X needs 0 of its deps -> ready immediately, delivered before A (arrival order)
-    assert res["delivered"] == ["X", "A"]
-    assert res["undeliverable"] == []
-
-
-def test_ordered_threshold_exceeds_deps_undeliverable():
-    bus = _load_pubsub()()
-    res = bus.publish_ordered([
-        {"id": "A", "topic": "t"},
-        {"id": "X", "topic": "t", "deps": ["A"], "threshold": 2},
-    ])
-    assert res["delivered"] == ["A"]
-    assert res["undeliverable"] == ["X"]
-
-
-def test_ordered_self_dependency_undeliverable():
-    bus = _load_pubsub()()
-    res = bus.publish_ordered([{"id": "A", "topic": "t", "deps": ["A"]}])
-    assert res["delivered"] == []
-    assert res["undeliverable"] == ["A"]
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases: distribute boundaries (group B)
-# --------------------------------------------------------------------------- #
-
-
-def test_distribute_load_zero():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=5)
-    res = bus.distribute("t", 0)
-    assert res["allocations"] == {a: 0}
-    assert res["overflow"] == 0
-
-
-def test_distribute_load_equals_total_capacity():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=2)
-    b = bus.subscribe("t", lambda d: None, capacity=3)
-    res = bus.distribute("t", 5)
-    assert res["allocations"] == {a: 2, b: 3}
-    assert res["overflow"] == 0
-
-
-def test_distribute_all_zero_capacity_is_all_overflow():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=0)
-    b = bus.subscribe("t", lambda d: None, capacity=0)
-    res = bus.distribute("t", 3)
-    assert res["allocations"] == {a: 0, b: 0}
-    assert res["overflow"] == 3
-
-
-def test_distribute_deep_cascade():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=1)
-    b = bus.subscribe("t", lambda d: None, capacity=1)
-    c = bus.subscribe("t", lambda d: None, capacity=1)
-    d = bus.subscribe("t", lambda d: None, capacity=100)
-    res = bus.distribute("t", 10)
-    assert res["allocations"] == {a: 1, b: 1, c: 1, d: 7}
-    assert res["overflow"] == 0
-
-
-def test_distribute_over_prefix_tier():
-    bus = _load_pubsub()()
-    p = bus.subscribe("order.*", lambda d: None, capacity=5)
-    res = bus.distribute("order.created", 3)
-    assert res["allocations"] == {p: 3}
-    assert res["overflow"] == 0
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases: max_calls / delivered_count accounting (group B)
-# --------------------------------------------------------------------------- #
-
-
-def test_max_calls_transform_raise_not_counted():
-    bus = _load_pubsub()()
-
-    def boom(d):
-        raise ValueError("x")
-
-    bus.subscribe("t", lambda d: None, max_calls=2, transform=boom)
-    bus.publish("t", 1)
-    bus.publish("t", 2)
-    # transform always raises -> never counts toward max_calls -> still subscribed
-    assert bus.get_subscriber_count() == 1
-    assert bus.delivered_count() == 2  # both invocations count as delivered
-
-
-def test_delivered_count_excludes_muted_and_paused_includes_raised():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    bus.publish("t", 1)
-    assert bus.delivered_count() == 1
-    bus.mute("t")
-    bus.publish("t", 2)
-    assert bus.delivered_count() == 1  # muted -> not counted
-    bus.unmute("t")
-    bus.pause()
-    bus.publish("t", 3)
-    assert bus.delivered_count() == 1  # paused -> queued, not counted
-    assert bus.resume() == 1
-    assert bus.delivered_count() == 2  # replayed now counts
-
-    def boom(d):
-        raise RuntimeError("x")
-
-    bus.subscribe("t", boom)
-    bus.publish("t", 4)
-    assert bus.delivered_count() == 4  # good + raising callback both invoked
-    assert rec == [1, 3, 4]
-
-
-# --------------------------------------------------------------------------- #
-# Corner cases: cross-feature interactions (group C)
-# --------------------------------------------------------------------------- #
-
-
-def test_ordered_muted_event_still_delivered_zero_count():
-    bus = _load_pubsub()()
-    rec = []
-    bus.mute("m")
-    bus.subscribe("t", lambda d: rec.append(d))
-    res = bus.publish_ordered([
-        {"id": "A", "topic": "m", "data": 1},
-        {"id": "B", "topic": "t", "data": 2, "deps": ["A"]},
-    ])
-    # A is dispatched (unblocks B) but muted -> 0 callbacks; B delivers to the sub
-    assert res["delivered"] == ["A", "B"]
-    assert res["undeliverable"] == []
-    assert res["count"] == 1
-    assert rec == [2]
-
-
-def test_resume_applies_filter_added_during_pause():
-    bus = _load_pubsub()()
-    rec = []
-    bus.pause()
-    bus.publish("a", 1)
-    bus.add_filter(lambda t, d: ("b", d))
-    bus.subscribe("b", lambda d: rec.append(d))
-    assert bus.resume() == 1  # replay applies the now-registered filter -> routes to "b"
-    assert rec == [1]
-
-
-def test_publish_batch_while_paused_then_resume():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    bus.pause()
-    assert bus.publish_batch([("t", 1), ("t", 2)]) == [0, 0]
-    assert rec == []
-    assert bus.resume() == 2
-    assert rec == [1, 2]
-
-
-def test_retained_replay_max_calls_exhausts_midway():
-    bus = _load_pubsub()()
-    rec = []
-    bus.publish("a", 1, retain=True)
-    bus.publish("b", 2, retain=True)
-    bus.subscribe("*", lambda d: rec.append(d), max_calls=1)
-    # matches both retained topics (insertion order); budget exhausts after "a"
-    assert rec == [1]
-    assert bus.get_subscriber_count() == 0
-
-
-# --------------------------------------------------------------------------- #
-# rendezvous-hash sharded delivery (publish_sharded)
-# --------------------------------------------------------------------------- #
-
-
-def test_sharded_selects_top_n_by_rendezvous():
-    bus = _load_pubsub()()
-    ids = [bus.subscribe("t", lambda d: None) for _ in range(6)]
-    key = "user-42"
-    expected = _rendezvous_rank(key, ids)[:3]
-    before = bus.delivered_count()
-    chosen = bus.publish_sharded("t", key, "payload", n=3)
-    assert chosen == expected
-    assert bus.delivered_count() - before == 3
-
-
-def test_sharded_is_deterministic_for_same_key():
-    bus = _load_pubsub()()
-    for _ in range(5):
-        bus.subscribe("t", lambda d: None)
-    a = bus.publish_sharded("t", "k", None, n=2)
-    b = bus.publish_sharded("t", "k", None, n=2)
-    assert a == b
-
-
-def test_sharded_n_zero_delivers_nothing():
-    bus = _load_pubsub()()
-    bus.subscribe("t", lambda d: None)
-    before = bus.delivered_count()
-    assert bus.publish_sharded("t", "k", None, n=0) == []
-    assert bus.delivered_count() == before
-
-
-def test_sharded_n_exceeds_recipients():
-    bus = _load_pubsub()()
-    ids = [bus.subscribe("t", lambda d: None) for _ in range(3)]
-    chosen = bus.publish_sharded("t", "k", None, n=10)
-    assert sorted(chosen) == sorted(ids)
-    assert chosen == _rendezvous_rank("k", ids)
-
-
-def test_sharded_uses_specificity_tier():
-    bus = _load_pubsub()()
-    exact = [bus.subscribe("t", lambda d: None) for _ in range(3)]
-    bus.subscribe("*", lambda d: None)  # different tier, excluded
-    chosen = bus.publish_sharded("t", "k", None, n=2)
-    assert set(chosen).issubset(set(exact))
-    assert chosen == _rendezvous_rank("k", exact)[:2]
-
-
-def test_sharded_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_sharded("*", "k", None, n=1)
-    with pytest.raises(ValueError):
-        bus.publish_sharded("t", "", None, n=1)
-    for bad in (-1, True):
-        with pytest.raises(ValueError):
-            bus.publish_sharded("t", "k", None, n=bad)
-
-
-# --------------------------------------------------------------------------- #
-# weighted fair scheduling (publish_fair / stride scheduling)
-# --------------------------------------------------------------------------- #
-
-
-def test_fair_weighted_selection_sequence():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=1)
-    b = bus.subscribe("t", lambda d: None, capacity=2)
-    picks = [bus.publish_fair("t", None) for _ in range(6)]
-    # stride scheduling by capacity 1:2 -> b picked twice as often; ties to smaller id
-    assert picks == [a, b, b, a, b, b]
-
-
-def test_fair_single_recipient_always_selected():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=3)
-    assert [bus.publish_fair("t", None) for _ in range(4)] == [a, a, a, a]
-
-
-def test_fair_no_eligible_returns_none():
-    bus = _load_pubsub()()
-    assert bus.publish_fair("t", None) is None
-    bus.subscribe("t", lambda d: None, capacity=0)
-    assert bus.publish_fair("t", None) is None
-
-
-def test_fair_excludes_zero_capacity():
-    bus = _load_pubsub()()
-    bus.subscribe("t", lambda d: None, capacity=0)
-    b = bus.subscribe("t", lambda d: None, capacity=1)
-    assert [bus.publish_fair("t", None) for _ in range(3)] == [b, b, b]
-
-
-def test_fair_delivers_and_counts():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d), capacity=1)
-    before = bus.delivered_count()
-    bus.publish_fair("t", "x")
-    assert rec == ["x"]
-    assert bus.delivered_count() - before == 1
-
-
-def test_fair_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_fair("*", None)
-
-
-# --------------------------------------------------------------------------- #
-# token-bucket rate limiting (publish_metered / refill / get_tokens)
-# --------------------------------------------------------------------------- #
-
-
-def test_metered_initial_tokens_equal_capacity():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=3)
-    assert bus.get_tokens(a) == 3
-    assert bus.get_tokens(9999) is None
-
-
-def test_metered_delivers_until_empty():
-    bus = _load_pubsub()()
-    rec = []
-    a = bus.subscribe("t", lambda d: rec.append(d), capacity=2)
-    assert bus.publish_metered("t", "x") == [a]
-    assert bus.publish_metered("t", "y") == [a]
-    assert bus.get_tokens(a) == 0
-    assert bus.publish_metered("t", "z") == []  # bucket empty -> skipped
-    assert rec == ["x", "y"]
-
-
-def test_metered_refill_caps_at_capacity():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=2)
-    bus.publish_metered("t", None)
-    bus.publish_metered("t", None)
-    assert bus.get_tokens(a) == 0
-    bus.refill("t", 5)  # capped at capacity=2
-    assert bus.get_tokens(a) == 2
-    assert bus.publish_metered("t", None) == [a]
-
-
-def test_metered_cost_greater_than_one():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=3)
-    assert bus.publish_metered("t", None, cost=2) == [a]
-    assert bus.get_tokens(a) == 1
-    assert bus.publish_metered("t", None, cost=2) == []  # only 1 token left
-    assert bus.get_tokens(a) == 1
-
-
-def test_metered_partial_tier():
-    bus = _load_pubsub()()
-    a = bus.subscribe("t", lambda d: None, capacity=1)
-    b = bus.subscribe("t", lambda d: None, capacity=3)
-    # first metered: both have tokens -> both (order: same priority, id DESC -> b, a)
-    assert bus.publish_metered("t", None) == [b, a]
-    # a now empty; second metered: only b
-    assert bus.publish_metered("t", None) == [b]
-
-
-def test_metered_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_metered("*", None)
-    for bad in (-1, True):
-        with pytest.raises(ValueError):
-            bus.publish_metered("t", None, cost=bad)
-    with pytest.raises(ValueError):
-        bus.refill("*", 1)
-    with pytest.raises(ValueError):
-        bus.refill("t", -1)
-
-
-# --------------------------------------------------------------------------- #
-# in-order sequence delivery with reorder buffer (publish_seq)
-# --------------------------------------------------------------------------- #
-
-
-def test_seq_in_order_delivery():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert bus.publish_seq("t", 0, "a") == [0]
-    assert bus.publish_seq("t", 1, "b") == [1]
-    assert rec == ["a", "b"]
-    assert bus.next_expected("t") == 2
-
-
-def test_seq_buffers_and_flushes_contiguous_run():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    assert bus.publish_seq("t", 0, "a") == [0]
-    assert bus.publish_seq("t", 2, "c") == []   # future -> buffered
-    assert bus.publish_seq("t", 3, "d") == []   # future -> buffered
-    assert bus.pending_seqs("t") == [2, 3]
-    assert rec == ["a"]
-    # arrival of 1 flushes 1,2,3 in order
-    assert bus.publish_seq("t", 1, "b") == [1, 2, 3]
-    assert rec == ["a", "b", "c", "d"]
-    assert bus.next_expected("t") == 4
-    assert bus.pending_seqs("t") == []
-
-
-def test_seq_drops_stale():
-    bus = _load_pubsub()()
-    rec = []
-    bus.subscribe("t", lambda d: rec.append(d))
-    bus.publish_seq("t", 0, "a")
-    bus.publish_seq("t", 1, "b")
-    assert bus.publish_seq("t", 0, "old") == []  # < expected -> dropped
-    assert rec == ["a", "b"]
-    assert bus.next_expected("t") == 2
-
-
-def test_seq_independent_per_topic():
-    bus = _load_pubsub()()
-    bus.publish_seq("a", 0, None)
-    assert bus.next_expected("a") == 1
-    assert bus.next_expected("b") == 0
-
-
-def test_seq_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.publish_seq("*", 0, None)
-    for bad in (-1, True, 1.5):
-        with pytest.raises(ValueError):
-            bus.publish_seq("t", bad, None)
-    with pytest.raises(ValueError):
-        bus.next_expected("*")
-    with pytest.raises(ValueError):
-        bus.pending_seqs("*")
-
-
-# --------------------------------------------------------------------------- #
-# consistent-hash ring with virtual nodes (route_hashring)
-# --------------------------------------------------------------------------- #
+APP = "/app"
+BIN = "/tmp/agent_pubsub"
+
+GO_ENV = {
+    **os.environ,
+    "GOTOOLCHAIN": "local",
+    "GOFLAGS": "-mod=mod",
+    "GOCACHE": "/tmp/gocache",
+    "GOPATH": "/tmp/gopath",
+}
+
+
+def _find_main_pkg():
+    for root, _dirs, files in os.walk(APP):
+        for f in files:
+            if f.endswith(".go"):
+                try:
+                    if "func main(" in open(os.path.join(root, f)).read():
+                        rel = os.path.relpath(root, APP)
+                        return "." if rel == "." else "./" + rel
+                except OSError:
+                    pass
+    return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def built():
+    if not os.path.exists(os.path.join(APP, "go.mod")):
+        subprocess.run(["go", "mod", "init", "pubsub"], cwd=APP, env=GO_ENV,
+                       capture_output=True, text=True)
+
+    def _build(pkg):
+        return subprocess.run(["go", "build", "-o", BIN, pkg], cwd=APP, env=GO_ENV,
+                              capture_output=True, text=True, timeout=240)
+
+    r = _build(".")
+    if r.returncode != 0:
+        pkg = _find_main_pkg()
+        if pkg and pkg != ".":
+            r = _build(pkg)
+    assert r.returncode == 0, f"`go build` failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    assert os.path.exists(BIN), "build produced no binary"
+    yield
+
+
+def run(cmds):
+    """Run a list of command strings; return the list of output lines."""
+    proc = subprocess.run([BIN], input="\n".join(cmds) + "\n",
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"nonzero exit: {proc.stderr}"
+    return proc.stdout.splitlines()
+
+
+# expectation helpers mirroring the Go hashing
+
+def _score(key, sid):
+    return int.from_bytes(hashlib.sha256(f"{key}:{sid}".encode()).digest()[:8], "big")
+
+
+def _shard_rank(key, ids):
+    return sorted(ids, key=lambda s: (_score(key, s), s), reverse=True)
 
 
 def _ring_owner(key, subs_caps):
@@ -1756,51 +86,569 @@ def _ring_owner(key, subs_caps):
         return None
     ring.sort(key=lambda pv: (pv[0], pv[1]))
     kpos = pos(key)
-    for p, sid in ring:
-        if p >= kpos:
+    for pp, sid in ring:
+        if pp >= kpos:
             return sid
     return ring[0][1]
 
 
-def test_hashring_routes_to_expected_owner():
-    bus = _load_pubsub()()
-    caps = [(None, 3), (None, 3), (None, 1)]
-    ids = []
-    for _, c in caps:
-        ids.append(bus.subscribe("t", lambda d: None, capacity=c))
-    subs_caps = [(ids[i], caps[i][1]) for i in range(len(caps))]
-    for key in ("alpha", "beta", "gamma", "delta", "epsilon"):
-        before = bus.delivered_count()
-        owner = bus.route_hashring("t", key, None)
-        assert owner == _ring_owner(key, subs_caps)
-        assert bus.delivered_count() - before == 1
+# --------------------------------------------------------------------------- #
+# basics + specificity routing / ordering
+# --------------------------------------------------------------------------- #
 
 
-def test_hashring_deterministic():
-    bus = _load_pubsub()()
-    for _ in range(4):
-        bus.subscribe("t", lambda d: None, capacity=2)
-    assert bus.route_hashring("t", "k") == bus.route_hashring("t", "k")
+def test_subscribe_ids_incremental_and_basic_publish():
+    out = run(["SUB order.created 0 1 -1", "SUB t 0 1 -1", "PUB order.created x"])
+    assert out[0] == "id=1 replay="
+    assert out[1] == "id=2 replay="
+    assert out[2] == "1:1"
 
 
-def test_hashring_empty_tier_returns_none():
-    bus = _load_pubsub()()
-    assert bus.route_hashring("t", "k") is None
-    bus.subscribe("t", lambda d: None, capacity=0)  # no vnodes
-    assert bus.route_hashring("t", "k") is None
+def test_specificity_exact_suppresses_wildcards():
+    out = run([
+        "SUB order.created 0 1 -1", "SUB order.* 0 1 -1", "SUB * 0 1 -1",
+        "PUB order.created x", "PUBALL order.created x", "MATCH order.created",
+    ])
+    assert out[3] == "1:1"           # only exact tier
+    assert out[4] == "3:3,2,1"       # fan-out, priority ties -> id desc
+    assert out[5] == "1"
 
 
-def test_hashring_uses_specificity_tier():
-    bus = _load_pubsub()()
-    exact = [bus.subscribe("t", lambda d: None, capacity=2) for _ in range(2)]
-    bus.subscribe("*", lambda d: None, capacity=2)  # excluded
-    owner = bus.route_hashring("t", "k")
-    assert owner in exact
+def test_longest_prefix_tier_wins():
+    out = run([
+        "SUB order.* 0 1 -1", "SUB order.created.* 0 1 -1", "SUB * 0 1 -1",
+        "PUB order.created.detail d", "PUB order.foo d",
+    ])
+    assert out[3] == "1:2"   # order.created.* tier (id 2)
+    assert out[4] == "1:1"   # order.* tier (id 1)
 
 
-def test_hashring_validation():
-    bus = _load_pubsub()()
-    with pytest.raises(ValueError):
-        bus.route_hashring("*", "k")
-    with pytest.raises(ValueError):
-        bus.route_hashring("t", "")
+def test_prefix_dot_boundary():
+    out = run(["SUB order.* 0 1 -1", "PUB order d", "PUB order123 d", "PUB other.order d"])
+    assert out[1] == "1:1"
+    assert out[2] == "0:"
+    assert out[3] == "0:"
+
+
+def test_ordering_priority_then_id_desc():
+    out = run([
+        "SUB t 0 1 -1", "SUB t 0 1 -1", "SUB t 5 1 -1", "SUB t 5 1 -1", "PUB t d",
+    ])
+    # ids 1,2 pri0 ; ids 3,4 pri5 -> order 4,3,2,1
+    assert out[4] == "4:4,3,2,1"
+
+
+def test_global_only_when_nothing_more_specific():
+    out = run(["SUB order.* 0 1 -1", "SUB * 0 1 -1", "PUB billing.paid d", "PUB order.x d"])
+    assert out[2] == "1:2"   # global (id 2)
+    assert out[3] == "1:1"   # prefix (id 1)
+
+
+# --------------------------------------------------------------------------- #
+# max_calls / retained replay
+# --------------------------------------------------------------------------- #
+
+
+def test_max_calls_removes_after_n():
+    out = run(["SUB t 0 1 2", "PUB t a", "PUB t b", "PUB t c", "COUNT"])
+    assert out[1] == "1:1"
+    assert out[2] == "1:1"
+    assert out[3] == "0:"
+    assert out[4] == "0"
+
+
+def test_subonce_via_maxcalls_one():
+    out = run(["SUB t 0 1 1", "PUB t a", "PUB t b", "COUNT"])
+    assert out[1] == "1:1"
+    assert out[2] == "0:"
+    assert out[3] == "0"
+
+
+def test_retained_replay_on_subscribe_in_order():
+    out = run([
+        "PUB a 1 R", "PUB b 2 R", "SUB * 0 1 -1", "RETAINED",
+    ])
+    assert out[0] == "0:"   # no subscribers yet
+    assert out[1] == "0:"
+    assert out[2] == "id=1 replay=1,2"   # both retained replayed in insertion order
+    assert out[3] == "a,b"
+
+
+def test_retained_replay_respects_max_calls():
+    out = run(["PUB a 1 R", "PUB b 2 R", "SUB * 0 1 1", "COUNT"])
+    assert out[2] == "id=1 replay=1"   # budget 1 -> only first retained
+    assert out[3] == "0"               # removed after it
+
+
+def test_muted_publish_still_retains():
+    out = run(["MUTE t", "PUB t 9 R", "RETAINED", "SUB t 0 1 -1"])
+    assert out[1] == "0:"
+    assert out[2] == "t"
+    assert out[3] == "id=1 replay=9"
+
+
+# --------------------------------------------------------------------------- #
+# pipeline: mute / pause / history
+# --------------------------------------------------------------------------- #
+
+
+def test_mute_suppresses_delivery_and_history():
+    out = run(["SUB t 0 1 -1", "MUTE t", "PUB t d", "HISTORY t", "UNMUTE t", "PUB t d", "HISTORY t"])
+    assert out[2] == "0:"
+    assert out[3] == ""       # not recorded while muted
+    assert out[4] == "true"
+    assert out[5] == "1:1"
+    assert out[6] == "d"
+
+
+def test_pause_queues_then_resume_replays_fifo():
+    out = run(["SUB t 0 1 -1", "PAUSE", "PUB t a", "PUB t b", "PAUSED", "RESUME", "HISTORY t"])
+    assert out[2] == "0:"
+    assert out[3] == "0:"
+    assert out[4] == "true"
+    assert out[5] == "2"      # 2 callbacks across replay
+    assert out[6] == "a,b"
+
+
+def test_history_records_across_topics():
+    out = run(["PUB a 1", "PUB a 2", "PUB b 9", "HISTORY a", "HISTORY b", "CLEARHIST a", "HISTORY a"])
+    assert out[3] == "1,2"
+    assert out[4] == "9"
+    assert out[6] == ""
+
+
+def test_delivered_count():
+    out = run(["SUB t 0 1 -1", "SUB t 0 1 -1", "PUB t d", "PUBALL t d", "DELIVERED"])
+    assert out[4] == "4"
+
+
+# --------------------------------------------------------------------------- #
+# distribute (water-filling)
+# --------------------------------------------------------------------------- #
+
+
+def test_distribute_even_split():
+    out = run(["SUB t 0 10 -1", "SUB t 0 10 -1", "SUB t 0 10 -1", "DISTRIBUTE t 9"])
+    assert out[3] == "overflow=0 alloc=1:3,2:3,3:3"
+
+
+def test_distribute_remainder_to_smallest_ids():
+    out = run(["SUB t 0 10 -1", "SUB t 0 10 -1", "SUB t 0 10 -1", "DISTRIBUTE t 10"])
+    assert out[3] == "overflow=0 alloc=1:4,2:3,3:3"
+
+
+def test_distribute_saturation_cascade():
+    out = run(["SUB t 0 1 -1", "SUB t 0 10 -1", "SUB t 0 10 -1", "DISTRIBUTE t 12"])
+    assert out[3] == "overflow=0 alloc=1:1,2:6,3:5"
+
+
+def test_distribute_overflow():
+    out = run(["SUB t 0 2 -1", "SUB t 0 3 -1", "DISTRIBUTE t 10"])
+    assert out[2] == "overflow=5 alloc=1:2,2:3"
+
+
+def test_distribute_deep_cascade():
+    out = run(["SUB t 0 1 -1", "SUB t 0 1 -1", "SUB t 0 1 -1", "SUB t 0 100 -1", "DISTRIBUTE t 10"])
+    assert out[4] == "overflow=0 alloc=1:1,2:1,3:1,4:7"
+
+
+# --------------------------------------------------------------------------- #
+# sharded / hashring (compare against sha256 oracle)
+# --------------------------------------------------------------------------- #
+
+
+def test_shard_top_n_rendezvous():
+    cmds = ["SUB t 0 1 -1"] * 6
+    ids = list(range(1, 7))
+    key = "user-42"
+    cmds.append(f"SHARD t {key} 3")
+    out = run(cmds)
+    expected = _shard_rank(key, ids)[:3]
+    assert out[6] == ",".join(str(x) for x in expected)
+
+
+def test_shard_n_zero_and_deterministic():
+    cmds = ["SUB t 0 1 -1"] * 3 + ["SHARD t k 0", "SHARD t k 2", "SHARD t k 2"]
+    out = run(cmds)
+    assert out[3] == ""
+    assert out[4] == out[5]
+
+
+def test_hashring_owner():
+    caps = [3, 3, 1]
+    cmds = [f"SUB t 0 {c} -1" for c in caps]
+    subs_caps = [(i + 1, caps[i]) for i in range(len(caps))]
+    for key in ("alpha", "beta", "gamma", "delta"):
+        cmds.append(f"RING t {key}")
+    out = run(cmds)
+    for i, key in enumerate(("alpha", "beta", "gamma", "delta")):
+        assert out[3 + i] == str(_ring_owner(key, subs_caps))
+
+
+def test_hashring_empty_tier_none():
+    out = run(["RING t k", "SUB t 0 0 -1", "RING t k"])
+    assert out[0] == "none"
+    assert out[2] == "none"
+
+
+# --------------------------------------------------------------------------- #
+# fair (stride scheduling)
+# --------------------------------------------------------------------------- #
+
+
+def test_fair_weighted_sequence():
+    cmds = ["SUB t 0 1 -1", "SUB t 0 2 -1"] + ["FAIR t"] * 6
+    out = run(cmds)
+    assert out[2:8] == ["1", "2", "2", "1", "2", "2"]
+
+
+def test_fair_none_when_no_eligible():
+    out = run(["FAIR t", "SUB t 0 0 -1", "FAIR t"])
+    assert out[0] == "none"
+    assert out[2] == "none"
+
+
+# --------------------------------------------------------------------------- #
+# token bucket
+# --------------------------------------------------------------------------- #
+
+
+def test_meter_until_empty_then_refill():
+    out = run(["SUB t 0 2 -1", "METER t 1", "METER t 1", "METER t 1", "TOKENS 1",
+               "REFILL t 5", "TOKENS 1", "METER t 1"])
+    assert out[1] == "1"
+    assert out[2] == "1"
+    assert out[3] == ""      # empty
+    assert out[4] == "0"
+    assert out[6] == "2"     # capped at capacity
+    assert out[7] == "1"
+
+
+def test_meter_cost():
+    out = run(["SUB t 0 3 -1", "METER t 2", "TOKENS 1", "METER t 2"])
+    assert out[1] == "1"
+    assert out[2] == "1"
+    assert out[3] == ""      # only 1 token, cost 2
+
+
+# --------------------------------------------------------------------------- #
+# sequence delivery
+# --------------------------------------------------------------------------- #
+
+
+def test_seq_in_order_and_reorder_flush():
+    out = run(["SUB t 0 1 -1", "SEQ t 0", "SEQ t 2", "SEQ t 3", "PENDING t",
+               "SEQ t 1", "NEXTSEQ t", "PENDING t"])
+    assert out[1] == "0"
+    assert out[2] == ""
+    assert out[3] == ""
+    assert out[4] == "2,3"
+    assert out[5] == "1,2,3"
+    assert out[6] == "4"
+    assert out[7] == ""
+
+
+def test_seq_drops_stale():
+    out = run(["SEQ t 0", "SEQ t 1", "SEQ t 0", "NEXTSEQ t"])
+    assert out[2] == ""
+    assert out[3] == "2"
+
+
+# --------------------------------------------------------------------------- #
+# ordered (k-of-n dependency cascade)
+# --------------------------------------------------------------------------- #
+
+
+def test_ordered_cascade_reversed_chain():
+    out = run(['ORDERED [{"id":"C","topic":"t","deps":["B"]},'
+               '{"id":"B","topic":"t","deps":["A"]},{"id":"A","topic":"t"}]'])
+    assert out[0] == "delivered=A,B,C undeliverable= count=0"
+
+
+def test_ordered_priority_tiebreak():
+    out = run(['ORDERED [{"id":"A","topic":"t","priority":1},'
+               '{"id":"B","topic":"t","priority":5},{"id":"C","topic":"t","priority":3}]'])
+    assert out[0] == "delivered=B,C,A undeliverable= count=0"
+
+
+def test_ordered_threshold_k_of_n():
+    out = run(['ORDERED [{"id":"D1","topic":"t"},{"id":"D2","topic":"t"},'
+               '{"id":"X","topic":"t","deps":["D1","D2","D3"],"threshold":2},'
+               '{"id":"D3","topic":"t"}]'])
+    assert out[0] == "delivered=D1,D2,X,D3 undeliverable= count=0"
+
+
+def test_ordered_missing_dep_and_cycle_undeliverable():
+    out = run(['ORDERED [{"id":"X","topic":"t","deps":["ghost"]},'
+               '{"id":"Y","topic":"t","deps":["X"]},{"id":"Z","topic":"t"}]'])
+    assert out[0] == "delivered=Z undeliverable=X,Y count=0"
+    out2 = run(['ORDERED [{"id":"A","topic":"t","deps":["B"]},{"id":"B","topic":"t","deps":["A"]}]'])
+    assert out2[0] == "delivered= undeliverable=A,B count=0"
+
+
+def test_ordered_delivers_to_subscribers():
+    out = run(["SUB t 0 1 -1",
+               'ORDERED [{"id":"B","topic":"t","deps":["A"]},{"id":"A","topic":"t"}]',
+               "DELIVERED"])
+    assert out[1] == "delivered=A,B undeliverable= count=2"
+    assert out[2] == "2"
+
+
+def test_ordered_duplicate_id_err():
+    out = run(['ORDERED [{"id":"A","topic":"t"},{"id":"A","topic":"t"}]'])
+    assert out[0] == "ERR"
+
+
+# --------------------------------------------------------------------------- #
+# introspection + subscribe_many + validation
+# --------------------------------------------------------------------------- #
+
+
+def test_unsub_count_topics():
+    out = run(["SUB a 0 1 -1", "SUB a 0 1 -1", "SUB b.* 0 1 -1",
+               "COUNT", "COUNT a", "TOPICS", "UNSUB 1", "UNSUB 1", "COUNT"])
+    assert out[3] == "3"
+    assert out[4] == "2"
+    assert out[5] == "a,b.*"   # sorted distinct patterns
+    assert out[6] == "true"
+    assert out[7] == "false"
+    assert out[8] == "2"
+
+
+def test_submany_atomic():
+    out = run(["SUBMANY a,b.* 0 1 -1", "COUNT", "SUBMANY x,bad*,y 0 1 -1", "COUNT"])
+    assert out[0] == "ids=1,2"
+    assert out[1] == "2"
+    assert out[2] == "ERR"      # invalid pattern -> atomic failure
+    assert out[3] == "2"        # nothing added
+
+
+def test_validation_errors():
+    out = run([
+        "SUB ord*er 0 1 -1",       # bad pattern
+        "SUB a 0 -1 -1",           # bad capacity
+        "SUB a 0 1 0",             # bad max_calls
+        "PUB * d",                 # bad publish topic
+        "MATCH *",
+        "DISTRIBUTE t -1",
+        "SHARD t  1",              # empty key
+        "SEQ t -1",
+        "BOGUS",
+    ])
+    assert out == ["ERR"] * 9
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: routing / tiers
+# --------------------------------------------------------------------------- #
+
+
+def test_multiple_in_tier_all_fire_wildcard_suppressed():
+    out = run(["SUB t 0 1 -1", "SUB t 0 1 -1", "SUB * 0 1 -1", "PUB t d"])
+    assert out[3] == "2:2,1"   # both exact fire (id desc), global suppressed
+
+
+def test_exact_wins_over_prefix_equal_to_topic():
+    out = run(["SUB order 0 1 -1", "SUB order.* 0 1 -1", "PUB order d"])
+    assert out[2] == "1:1"     # exact "order" wins; "order.*" (which matches) suppressed
+
+
+def test_clear_topic_exact_only():
+    out = run(["SUB a 0 1 -1", "SUB a 0 1 -1", "SUB b 0 1 -1", "CLEAR a", "COUNT", "COUNT b"])
+    assert out[4] == "1"
+    assert out[5] == "1"
+
+
+def test_match_prefix_and_global_tiers():
+    out = run(["SUB order.* 0 1 -1", "SUB * 0 1 -1", "MATCH order.x", "MATCH billing"])
+    assert out[2] == "1"       # prefix tier
+    assert out[3] == "1"       # global tier
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: retained / pipeline ordering
+# --------------------------------------------------------------------------- #
+
+
+def test_retain_keeps_latest_value():
+    out = run(["PUB t 1 R", "PUB t 2 R", "SUB t 0 1 -1"])
+    assert out[2] == "id=1 replay=2"
+
+
+def test_retained_prefix_match_subset():
+    out = run(["PUB order.created 1 R", "PUB user.x 2 R", "SUB order.* 0 5 -1"])
+    assert out[2] == "id=1 replay=1"
+
+
+def test_pause_defers_retain():
+    out = run(["PAUSE", "PUB t 5 R", "RETAINED", "RESUME", "RETAINED"])
+    assert out[2] == ""        # retain deferred while paused
+    assert out[4] == "t"
+
+
+def test_resume_applies_pause_time_mute():
+    out = run(["SUB t 0 1 -1", "PAUSE", "PUB t d", "MUTE t", "RESUME", "HISTORY t"])
+    assert out[4] == "0"       # muted at replay time -> 0 delivered
+    assert out[5] == ""        # not recorded
+
+
+def test_clearretain_one_vs_all():
+    out = run(["PUB a 1 R", "PUB b 2 R", "CLEARRETAIN a", "RETAINED", "CLEARRETAIN", "RETAINED"])
+    assert out[3] == "b"
+    assert out[5] == ""
+
+
+def test_retained_replay_counts_delivered():
+    out = run(["PUB t v R", "SUB t 0 1 -1", "DELIVERED"])
+    assert out[2] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: distribute boundaries
+# --------------------------------------------------------------------------- #
+
+
+def test_distribute_load_zero():
+    out = run(["SUB t 0 5 -1", "DISTRIBUTE t 0"])
+    assert out[1] == "overflow=0 alloc=1:0"
+
+
+def test_distribute_load_equals_total_capacity():
+    out = run(["SUB t 0 2 -1", "SUB t 0 3 -1", "DISTRIBUTE t 5"])
+    assert out[2] == "overflow=0 alloc=1:2,2:3"
+
+
+def test_distribute_all_zero_capacity_overflow():
+    out = run(["SUB t 0 0 -1", "SUB t 0 0 -1", "DISTRIBUTE t 3"])
+    assert out[2] == "overflow=3 alloc=1:0,2:0"
+
+
+def test_distribute_over_prefix_tier():
+    out = run(["SUB order.* 0 5 -1", "DISTRIBUTE order.created 3"])
+    assert out[1] == "overflow=0 alloc=1:3"
+
+
+def test_distribute_does_not_count_delivered():
+    out = run(["SUB t 0 5 -1", "DISTRIBUTE t 3", "DELIVERED"])
+    assert out[2] == "0"
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: shard / ring / fair
+# --------------------------------------------------------------------------- #
+
+
+def test_shard_n_exceeds_and_specificity():
+    ids = [1, 2, 3]
+    cmds = ["SUB t 0 1 -1"] * 3 + ["SUB * 0 1 -1", "SHARD t k 10"]
+    out = run(cmds)
+    assert out[4] == ",".join(str(x) for x in _shard_rank("k", ids))  # only exact tier
+
+
+def test_shard_counts_delivered():
+    out = run(["SUB t 0 1 -1", "SUB t 0 1 -1", "SHARD t k 2", "DELIVERED"])
+    assert out[3] == "2"
+
+
+def test_ring_deterministic_and_specificity():
+    caps = [2, 2]
+    cmds = [f"SUB t 0 {c} -1" for c in caps] + ["SUB * 0 2 -1", "RING t k", "RING t k"]
+    out = run(cmds)
+    subs_caps = [(1, 2), (2, 2)]
+    assert out[3] == str(_ring_owner("k", subs_caps))  # exact tier only
+    assert out[3] == out[4]
+
+
+def test_fair_single_and_zero_capacity():
+    out = run(["SUB t 0 3 -1", "FAIR t", "FAIR t", "FAIR t"])
+    assert out[1:4] == ["1", "1", "1"]
+    out2 = run(["SUB t 0 0 -1", "SUB t 0 1 -1", "FAIR t", "FAIR t"])
+    assert out2[2:4] == ["2", "2"]
+
+
+def test_fair_counts_delivered():
+    out = run(["SUB t 0 1 -1", "FAIR t", "DELIVERED"])
+    assert out[2] == "1"
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: token bucket
+# --------------------------------------------------------------------------- #
+
+
+def test_meter_partial_tier_and_order():
+    out = run(["SUB t 0 1 -1", "SUB t 0 3 -1", "METER t 1", "METER t 1"])
+    assert out[2] == "2,1"     # both, priority tie -> id desc
+    assert out[3] == "2"       # id1 drained
+
+
+def test_tokens_unknown_none():
+    out = run(["TOKENS 5"])
+    assert out[0] == "none"
+
+
+def test_meter_refill_validation():
+    out = run(["METER * 1", "METER t -1", "REFILL * 1", "REFILL t -1"])
+    assert out == ["ERR"] * 4
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: sequence delivery
+# --------------------------------------------------------------------------- #
+
+
+def test_seq_independent_per_topic():
+    out = run(["SEQ a 0", "NEXTSEQ a", "NEXTSEQ b"])
+    assert out[1] == "1"
+    assert out[2] == "0"
+
+
+def test_seq_validation():
+    out = run(["SEQ * 0", "SEQ t -1", "NEXTSEQ *", "PENDING *"])
+    assert out == ["ERR"] * 4
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: ordered thresholds / validation
+# --------------------------------------------------------------------------- #
+
+
+def test_ordered_threshold_zero_ready_immediately():
+    out = run(['ORDERED [{"id":"X","topic":"t","deps":["A"],"threshold":0},{"id":"A","topic":"t"}]'])
+    assert out[0] == "delivered=X,A undeliverable= count=0"
+
+
+def test_ordered_threshold_exceeds_deps():
+    out = run(['ORDERED [{"id":"A","topic":"t"},{"id":"X","topic":"t","deps":["A"],"threshold":2}]'])
+    assert out[0] == "delivered=A undeliverable=X count=0"
+
+
+def test_ordered_self_dependency():
+    out = run(['ORDERED [{"id":"A","topic":"t","deps":["A"]}]'])
+    assert out[0] == "delivered= undeliverable=A count=0"
+
+
+def test_ordered_muted_event_still_delivered():
+    out = run(["SUB t 0 1 -1", "MUTE m",
+               'ORDERED [{"id":"A","topic":"m","data":"1"},{"id":"B","topic":"t","data":"2","deps":["A"]}]'])
+    assert out[2] == "delivered=A,B undeliverable= count=1"
+
+
+def test_ordered_not_a_list_and_missing_topic():
+    out = run(['ORDERED {"id":"A","topic":"t"}', 'ORDERED [{"id":"A"}]'])
+    assert out == ["ERR", "ERR"]
+
+
+# --------------------------------------------------------------------------- #
+# Corner cases: submany empty / unknown-topic history
+# --------------------------------------------------------------------------- #
+
+
+def test_submany_empty_is_err():
+    out = run(["SUBMANY  0 1 -1"])
+    assert out[0] == "ERR"
+
+
+def test_history_unknown_topic_empty():
+    out = run(["HISTORY nope"])
+    assert out[0] == ""

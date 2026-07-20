@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Implement from scratch a thread-safe in-memory pub-sub broker with a multi-stage publish pipeline (pause/queue -> filters -> retain -> mute -> route) and specificity routing: publish() notifies only the single most-specific matching tier (exact > longest prefix.* > global *) in (priority DESC, id DESC) order, while publish_all() fans out. Includes once-successful subscriptions, live-removal/snapshot-addition delivery, retained-message replay on subscribe, interceptor filters, mute patterns, pause/resume queueing, k-of-n dependency-ordered batch delivery (publish_ordered) with cascade release, per-subscription call budgets (max_calls) and data transforms, a global error handler, per-topic history logs, batch subscribe/publish, capacity-weighted distribution via integer water-filling with a saturation cascade (distribute), rendezvous-hash (HRW) sharded delivery (publish_sharded), stride-scheduled weighted-fair delivery (publish_fair), token-bucket rate limiting (publish_metered/refill), in-order sequence delivery with reorder buffer (publish_seq), consistent-hash ring routing (route_hashring), and broad introspection. The contract deliberately departs from a textbook fan-out pub-sub across a large surface (all-or-nothing scoring); the water-fill, rendezvous-hashing, and dependency-ordering algorithms are the primary difficulty."
-keywords = ["pubsub", "event-bus", "specificity-routing", "dependency-ordering", "thread-safety"]
+description = "Implement from scratch, in Go, a command-driven in-memory pub-sub broker CLI (reads commands on stdin, prints one line per command). Specificity routing: PUB notifies only the single most-specific matching tier (exact > longest prefix.* > global *) in (priority DESC, id DESC) order, while PUBALL fans out. Includes a publish pipeline (pause/queue -> retain -> mute -> history -> route), per-subscription call budgets (max_calls) with retained-message replay on subscribe, mute patterns, pause/resume queueing, k-of-n dependency-ordered batch delivery (ORDERED) with cascade release, capacity-weighted distribution via integer water-filling with a saturation cascade (DISTRIBUTE), rendezvous-hash sharded delivery (SHARD), consistent-hash ring routing with virtual nodes (RING), stride-scheduled weighted-fair delivery (FAIR), token-bucket rate limiting (METER/REFILL), in-order sequence delivery with reorder buffer (SEQ), and broad introspection. The contract deliberately departs from a textbook fan-out pub-sub across a large surface (all-or-nothing scoring); the water-fill, rendezvous/ring hashing, stride scheduling, and dependency-ordering algorithms are the primary difficulty. Go stdlib only."
+keywords = ["pubsub", "event-bus", "specificity-routing", "dependency-ordering", "go"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -19,8 +19,8 @@ category = "software-engineering"
 category_usecase = "handle_events"
 category_subdomain = "backend_services"
 reward_type = "binary"
-languages = ["python"]
-tags = ["pubsub", "event-bus", "observer-pattern", "thread-safety", "python"]
+languages = ["go"]
+tags = ["pubsub", "event-bus", "specificity-routing", "dependency-ordering", "go"]
 expert_time_estimate_min = 30.0
 junior_time_estimate_min = 60.0
 
