@@ -1738,3 +1738,69 @@ def test_seq_validation():
         bus.next_expected("*")
     with pytest.raises(ValueError):
         bus.pending_seqs("*")
+
+
+# --------------------------------------------------------------------------- #
+# consistent-hash ring with virtual nodes (route_hashring)
+# --------------------------------------------------------------------------- #
+
+
+def _ring_owner(key, subs_caps):
+    def pos(label):
+        return int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big")
+    ring = []
+    for sid, cap in subs_caps:
+        for v in range(cap):
+            ring.append((pos(f"{sid}#{v}"), sid))
+    if not ring:
+        return None
+    ring.sort(key=lambda pv: (pv[0], pv[1]))
+    kpos = pos(key)
+    for p, sid in ring:
+        if p >= kpos:
+            return sid
+    return ring[0][1]
+
+
+def test_hashring_routes_to_expected_owner():
+    bus = _load_pubsub()()
+    caps = [(None, 3), (None, 3), (None, 1)]
+    ids = []
+    for _, c in caps:
+        ids.append(bus.subscribe("t", lambda d: None, capacity=c))
+    subs_caps = [(ids[i], caps[i][1]) for i in range(len(caps))]
+    for key in ("alpha", "beta", "gamma", "delta", "epsilon"):
+        before = bus.delivered_count()
+        owner = bus.route_hashring("t", key, None)
+        assert owner == _ring_owner(key, subs_caps)
+        assert bus.delivered_count() - before == 1
+
+
+def test_hashring_deterministic():
+    bus = _load_pubsub()()
+    for _ in range(4):
+        bus.subscribe("t", lambda d: None, capacity=2)
+    assert bus.route_hashring("t", "k") == bus.route_hashring("t", "k")
+
+
+def test_hashring_empty_tier_returns_none():
+    bus = _load_pubsub()()
+    assert bus.route_hashring("t", "k") is None
+    bus.subscribe("t", lambda d: None, capacity=0)  # no vnodes
+    assert bus.route_hashring("t", "k") is None
+
+
+def test_hashring_uses_specificity_tier():
+    bus = _load_pubsub()()
+    exact = [bus.subscribe("t", lambda d: None, capacity=2) for _ in range(2)]
+    bus.subscribe("*", lambda d: None, capacity=2)  # excluded
+    owner = bus.route_hashring("t", "k")
+    assert owner in exact
+
+
+def test_hashring_validation():
+    bus = _load_pubsub()()
+    with pytest.raises(ValueError):
+        bus.route_hashring("*", "k")
+    with pytest.raises(ValueError):
+        bus.route_hashring("t", "")

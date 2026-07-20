@@ -558,6 +558,37 @@ class PubSub:
         self._invoke(selected, data)
         return selected
 
+    # ---- consistent-hash ring with virtual nodes ----------------------------
+
+    @staticmethod
+    def _ring_pos(label: str) -> int:
+        return int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "big")
+
+    def route_hashring(self, topic: str, key: str, data: Any = None) -> Optional[int]:
+        self._validate_publish_topic(topic)
+        if not isinstance(key, str) or key == "":
+            raise ValueError("key must be a non-empty string")
+        with self._lock:
+            ids = self._winning_tier_ids(topic)
+            ring = []  # (position, sub_id)
+            for sid in ids:
+                cap = self._subs[sid]["capacity"]
+                for v in range(cap):
+                    ring.append((self._ring_pos(f"{sid}#{v}"), sid))
+        if not ring:
+            return None
+        ring.sort(key=lambda pv: (pv[0], pv[1]))
+        kpos = self._ring_pos(key)
+        owner = None
+        for pos, sid in ring:
+            if pos >= kpos:
+                owner = sid
+                break
+        if owner is None:
+            owner = ring[0][1]  # wrap around
+        self._invoke(owner, data)
+        return owner
+
     def publish_ordered(self, events) -> dict:
         if not isinstance(events, list):
             raise ValueError("events must be a list")

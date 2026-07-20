@@ -13,25 +13,25 @@ This is **not** a standard fan-out pub-sub system. Where this specification diff
 
 Anything else is an invalid pattern.
 
-**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`, `publish_metered`, `refill`, `publish_seq`, `next_expected`, `pending_seqs`) — a non-empty string containing no `*`.
+**Publish topic** (used by `publish*`, `get_matching_count`, `get_history`, `distribute`, `publish_sharded`, `publish_fair`, `publish_metered`, `refill`, `publish_seq`, `next_expected`, `pending_seqs`, `route_hashring`) — a non-empty string containing no `*`.
 
 **A pattern matches a topic** when any of: the pattern equals the topic; the pattern is `"*"`; or the pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (dot-boundary matching — `"order.*"` matches `"order"` and `"order.placed"` but not `"order123"`).
 
-Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load`, `cost`, `amount`, or `seq` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
+Raise `ValueError` for: an invalid pattern or publish topic; a callback, filter, or error handler that is not callable; a transform that is neither callable nor `None`; a priority that is not an int (booleans excluded); a `max_calls` that is neither `None` nor a positive int (booleans excluded); a `capacity` that is not a non-negative int (booleans excluded); a `load`, `cost`, `amount`, or `seq` that is not a non-negative int (booleans excluded); a filter that returns a value which is neither a `(topic, data)` pair nor `None`; a sharding/routing `key` that is not a non-empty string; and an `n` (shard count) that is not a non-negative int (booleans excluded).
 
 Subscriber **callbacks** always receive exactly one positional argument: the delivered value (the `data` after any per-subscription transform). The topic is not passed to callbacks. (Filters receive `(topic, data)` — this is different.)
 
 ## Subscriptions
 
-- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute`, `publish_fair`, and `publish_metered` (see below), and is also the subscription's initial token balance. On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
+- `subscribe(pattern, callback, priority=0, max_calls=None, transform=None, capacity=1) -> int` — register a subscription and return a unique integer id, assigned incrementally from 1 in call order. The same callback object may be registered multiple times; each registration is independent. `max_calls` bounds successful deliveries (see Delivery); `transform`, if given, is applied to `data` before the callback receives it; `capacity` is used by `distribute`, `publish_fair`, `publish_metered`, and `route_hashring` (see below), and is also the subscription's initial token balance. On registration, the new subscriber immediately receives any retained messages whose topics its pattern matches (see Retained), subject to the same transform / max_calls rules.
 - `subscribe_once(pattern, callback, priority=0, transform=None, capacity=1) -> int` — equivalent to `subscribe(..., max_calls=1)`.
 - `subscribe_many(patterns, callback, priority=0, max_calls=None, transform=None, capacity=1) -> list[int]` — subscribe the same callback to each pattern; return the ids in order. `patterns` must be a list or tuple. Validation is up front: if any pattern or other argument is invalid, raise `ValueError` **before registering any** subscription (the call is atomic — no partial registration).
 - `unsubscribe(sub_id) -> bool` — remove by id; return whether it existed.
 - `unsubscribe_callback(callback) -> int` — remove every subscription whose callback is that object (identity comparison); return the count removed.
 
-## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, `publish_fair`, `publish_metered`, and each `publish_seq` dispatch)
+## Delivery semantics (apply to `publish`, `publish_all`, retained replay, `publish_sharded`, `publish_fair`, `publish_metered`, `route_hashring`, and each `publish_seq` dispatch)
 
-- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded` and `publish_fair` use their own selection order — see below.)
+- **Ordering**: invoke callbacks by descending priority, then descending id (newest first) as tiebreaker. (`publish_sharded`, `publish_fair`, and `route_hashring` use their own selection order — see below.)
 - **Invocation**: each callback receives `transform(data)` if the subscription has a transform, else `data`.
 - **Lock discipline**: compute and snapshot the ordered recipient set while holding the lock, then release the lock before invoking any callbacks. Subscriptions created during delivery are excluded from the in-progress delivery.
 - **Skipping removed subscriptions**: before invoking each callback, if its subscription was removed during this delivery, skip it and do not count it.
@@ -73,7 +73,7 @@ Ordering note: a muted event still updates retained data (step 4 before 5) but i
 - `get_subscriber_count(topic=None)` — total (None) or count whose pattern exactly equals the string.
 - `get_matching_count(topic)` — the number of subscribers `publish(topic)` would notify (size of the most-specific matching tier), without invoking anything.
 - `topics() -> set` — distinct pattern strings currently subscribed.
-- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded, fair, metered, and sequence deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
+- `delivered_count() -> int` — lifetime total callbacks invoked (normal deliveries, retained replays, resume replays, sharded, fair, metered, sequence, and hashring deliveries); skipped/muted/paused events contribute nothing, while callbacks that raised do count.
 
 ## Ordered delivery (`publish_ordered`)
 
@@ -139,6 +139,15 @@ Each topic has an independent expected sequence counter starting at `0` and a re
 - If `seq == expected`, deliver it, advance `expected` by 1, then repeatedly: while the new `expected` is present in the buffer, remove and deliver it and advance `expected` again (a contiguous-run flush). Each delivery goes through `publish(topic, data)` (normal pipeline/Delivery semantics). Return the list of sequence numbers delivered, in ascending (delivery) order.
 
 `next_expected(topic) -> int` returns the topic's current expected counter (0 if never used). `pending_seqs(topic) -> list[int]` returns the sorted sequence numbers currently buffered for the topic.
+
+## Consistent-hash ring routing (`route_hashring`)
+
+`route_hashring(topic, key, data=None) -> int | None` routes `key` to exactly one subscriber in the tier `publish(topic)` would notify, using a **consistent-hash ring with virtual nodes**. `key` must be a non-empty string.
+
+- Build the ring: for each candidate subscriber, place `capacity` virtual nodes on the ring. The position of virtual node `v` (for `v` in `0..capacity-1`) is the SHA-256 digest of `"{sub_id}#{v}"`, first 8 bytes as a big-endian unsigned integer. A subscriber with `capacity` 0 contributes no virtual nodes. If the ring is empty, return `None`.
+- Compute the key's position the same way from the SHA-256 of `key` (first 8 bytes, big-endian).
+- The owner is the virtual node with the **smallest position that is >= the key's position**; if the key's position exceeds every virtual node, **wrap around** to the virtual node with the smallest position overall. When two virtual nodes share a position, prefer the smaller `sub_id`.
+- Deliver `data` to the owning subscriber (normal Delivery semantics) and return its `sub_id`.
 
 ## Thread safety
 
