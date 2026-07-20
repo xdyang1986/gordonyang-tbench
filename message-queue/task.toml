@@ -1,0 +1,41 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/message-queue"
+description = "Kafka-like partitioned message queue broker with producer/consumer groups and durable WAL recovery. Agent implements Go binary reading stdin commands (CREATE_TOPIC, PRODUCE, PRODUCE_AUTO, FETCH, FETCH_RANGE, POLL, COMMIT, SEEK, etc.) and writing stdout, plus optional persistence via MQ_STATE_DIR/mq.log with CRC-framed records and atomic compaction."
+authors = []
+keywords = ["kafka", "message-queue", "broker", "partition", "consumer-group", "durability", "go"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "backend_services"
+category_subdomain = "messaging"
+reward_type = "binary"
+languages = ["go"]
+tags = ["kafka", "message-queue", "broker", "go", "persistence", "wal", "consumer-group"]
+expert_time_estimate_min = 60.0
+junior_time_estimate_min = 120.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1200.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
