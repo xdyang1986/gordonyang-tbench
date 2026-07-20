@@ -652,3 +652,121 @@ def test_submany_empty_is_err():
 def test_history_unknown_topic_empty():
     out = run(["HISTORY nope"])
     assert out[0] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Failure handling: max_calls removal across every delivery path
+# --------------------------------------------------------------------------- #
+
+
+def test_maxcalls_removed_via_shard():
+    out = run(["SUB t 0 1 1", "SUB t 0 1 1", "SHARD t k 2", "COUNT", "DELIVERED"])
+    assert out[3] == "0"       # both exhausted their 1-call budget
+    assert out[4] == "2"
+
+
+def test_maxcalls_removed_via_fair():
+    out = run(["SUB t 0 1 1", "FAIR t", "COUNT", "FAIR t"])
+    assert out[1] == "1"
+    assert out[2] == "0"
+    assert out[3] == "none"    # sub gone
+
+
+def test_maxcalls_removed_via_ring():
+    out = run(["SUB t 0 1 1", "RING t k", "COUNT"])
+    assert out[1] == "1"
+    assert out[2] == "0"
+
+
+def test_maxcalls_removed_via_meter():
+    out = run(["SUB t 0 5 1", "METER t 1", "COUNT", "METER t 1"])
+    assert out[1] == "1"
+    assert out[2] == "0"
+    assert out[3] == ""        # tier empty now
+
+
+def test_maxcalls_removed_mid_ordered_batch():
+    out = run(["SUB t 0 1 1",
+               'ORDERED [{"id":"A","topic":"t"},{"id":"B","topic":"t"}]',
+               "COUNT"])
+    # A delivers (sub removed after its 1 call); B then reaches no subscriber
+    assert out[1] == "delivered=A,B undeliverable= count=1"
+    assert out[2] == "0"
+
+
+# --------------------------------------------------------------------------- #
+# Failure handling: malformed / boundary arguments
+# --------------------------------------------------------------------------- #
+
+
+def test_malformed_args_are_err():
+    out = run([
+        "SUB t 0 1",          # missing max_calls
+        "SUB t x 1 -1",       # non-int priority
+        "SUB t 0 1 -2",       # invalid max_calls sentinel
+        "PUB",                # missing topic
+        "UNSUB xyz",          # non-int id
+        "TOKENS abc",         # non-int id
+        "DISTRIBUTE t nan",   # non-int load
+        "SEQ t x",            # non-int seq
+        "REFILL t x",         # non-int amount
+        "METER t x",          # non-int cost
+    ])
+    assert out == ["ERR"] * 10
+
+
+def test_negative_priority_ordering():
+    out = run(["SUB t -5 1 -1", "SUB t 0 1 -1", "PUB t d"])
+    assert out[2] == "2:2,1"   # higher (0) before lower (-5)
+
+
+def test_pub_missing_data_delivers_empty():
+    out = run(["SUB t 0 1 -1", "PUB t"])
+    assert out[1] == "1:1"     # data defaults to empty, still delivers
+
+
+# --------------------------------------------------------------------------- #
+# Failure handling: empty-broker / empty-tier edges
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_tier_edges():
+    out = run([
+        "DISTRIBUTE t 5", "FAIR t", "SHARD t k 2", "RING t k", "METER t 1", "MATCH t",
+    ])
+    assert out[0] == "overflow=5 alloc="
+    assert out[1] == "none"
+    assert out[2] == ""
+    assert out[3] == "none"
+    assert out[4] == ""
+    assert out[5] == "0"
+
+
+def test_ordered_empty_array():
+    out = run(["ORDERED []"])
+    assert out[0] == "delivered= undeliverable= count=0"
+
+
+def test_ordered_malformed_json_elements():
+    out = run(["ORDERED [1,2]", 'ORDERED [{"id":"A","topic":"t","threshold":"x"}]'])
+    assert out == ["ERR", "ERR"]
+
+
+# --------------------------------------------------------------------------- #
+# Failure handling: pause/resume mode + retain edges
+# --------------------------------------------------------------------------- #
+
+
+def test_resume_not_paused_is_zero():
+    out = run(["RESUME"])
+    assert out[0] == "0"
+
+
+def test_pause_preserves_psuball_mode_on_resume():
+    out = run(["SUB x 0 1 -1", "SUB * 0 1 -1", "PAUSE", "PUBALL x d", "RESUME"])
+    assert out[4] == "2"       # fan-out mode preserved -> both tiers delivered
+
+
+def test_puball_retain():
+    out = run(["PUBALL t d R", "RETAINED"])
+    assert out[1] == "t"

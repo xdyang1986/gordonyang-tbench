@@ -23,7 +23,7 @@ The broker's semantics deliberately depart from a textbook fan-out pub-sub, and 
 - Oracle: passes locally and via `codimango bench run` (reference `solve.sh` writes `main.go`).
 - `claude-code` / `claude-opus-4-6` and `metacode` / `meta/avocado_dvsc_tester`: calibration measured empirically online.
 
-Empirical: reference solution passes 71/71 local pytest tests (build + drive the Go CLI).
+Empirical: reference solution passes 85/85 local pytest tests (build + drive the Go CLI).
 
 ## Anti-Cheating Analysis
 - **Hardcoded outputs**: tests drive the built binary with dynamic command scripts and assert on runtime behavior (routing, ordering, allocations, hashing, sequence/dependency state); hashing expectations are computed independently in the test via sha256; nothing is statically hardcodeable.
