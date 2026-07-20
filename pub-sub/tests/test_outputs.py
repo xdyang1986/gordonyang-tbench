@@ -720,9 +720,9 @@ def test_negative_priority_ordering():
     assert out[2] == "2:2,1"   # higher (0) before lower (-5)
 
 
-def test_pub_missing_data_delivers_empty():
+def test_pub_missing_data_is_err():
     out = run(["SUB t 0 1 -1", "PUB t"])
-    assert out[1] == "1:1"     # data defaults to empty, still delivers
+    assert out[1] == "ERR"     # data is required
 
 
 # --------------------------------------------------------------------------- #

@@ -12,7 +12,7 @@ This is **not** a standard fan-out pub-sub. Where this specification differs fro
 - A pattern **matches** a topic when: pattern equals topic; pattern is `"*"`; or pattern is `"<p>.*"` and the topic equals `<p>` or begins with `<p>.` (`"order.*"` matches `"order"` and `"order.x"` but not `"order123"`).
 - **Winning tier** of a topic: the exact-topic subscriptions if any exist; else the subscriptions of the single longest matching prefix pattern; else the `"*"` subscriptions; else empty. A more specific tier suppresses less specific ones.
 - **Delivery order**: within a set of recipients, order by priority descending, then id descending (newest first).
-- **max_calls**: each delivery to a subscription counts against its budget; when a subscription has received `max_calls` deliveries it is removed. `-1` means never removed.
+- **max_calls**: each delivery to a subscription counts against its budget; when a subscription has received `max_calls` deliveries it is removed. `-1` means never removed. This applies to **every** command that delivers to a subscription (PUB, PUBALL, SHARD, FAIR, RING, METER, SEQ, ORDERED, and retained replay).
 - **delivered_count**: a lifetime counter incremented once per subscriber delivery across every delivering command (PUB, PUBALL, SHARD, FAIR, METER, RING, SEQ, ORDERED, and retained replay).
 - Data values are single whitespace-free tokens.
 
@@ -54,7 +54,18 @@ Algorithms (each routes over the **winning tier** of the topic unless noted):
 - `NEXTSEQ <topic>` → the topic's expected counter (0 if unused); `PENDING <topic>` → csv of buffered sequence numbers, sorted.
 - `ORDERED <json>` → the rest of the line is a JSON array of event objects, each `{"id": str, "topic": str, "deps": [ids], "threshold": int, "data": str, "priority": int}` (`deps` default `[]`, `threshold` default `len(deps)`, `data` default empty, `priority` default 0). Validate: it must be a JSON array, every event needs a non-empty `id` and a valid topic, and ids must be unique — else `ERR`. Deliver by **k-of-n dependency order**: an event is ready once at least `threshold` of its deps have already been delivered in this batch (ids never delivered never count); repeatedly deliver the ready event with the highest priority (ties: smallest original index) via a `PUB` of its topic/data, then re-evaluate (cascading); remaining events (missing deps, cycles, self-deps, unreachable thresholds) are undeliverable. Print `delivered=<csv ids in delivery order> undeliverable=<csv ids by original index> count=<total subscriber deliveries>`.
 
-## Notes
+## Error handling
 
-- Every command outputs exactly one line. Invalid arguments, invalid patterns/topics, unparseable integers, or unknown commands print `ERR`.
-- Standard library only. The program is a single process reading stdin to EOF.
+Every command prints exactly one line. A command prints `ERR` (and changes nothing) whenever any of the following holds; otherwise it prints its normal result:
+
+- The command word is unknown, or the line is empty.
+- A **required argument is missing** or a **required integer argument is not a valid integer**. Each command requires exactly the arguments shown before any `[optional]` part: `SUB`/`SUBMANY` require all four (`pattern(s)`, `priority`, `capacity`, `maxcalls`); `PUB`/`PUBALL` require `topic` and `data` (the `R` flag is optional); `SHARD` requires `topic`, `key`, `n`; `RING` requires `topic`, `key`; `METER`/`REFILL`/`DISTRIBUTE`/`SEQ` require `topic` and the trailing integer; `UNSUB`/`TOKENS` require an integer id; `MATCH`/`HISTORY`/`NEXTSEQ`/`PENDING`/`MUTE` require their one argument. (Unneeded extra trailing tokens are ignored.)
+- A `pattern` argument (for `SUB`, `SUBMANY`, `MUTE`) is not a valid pattern, or a `topic` argument (for `PUB`, `PUBALL`, `MATCH`, `HISTORY`, `DISTRIBUTE`, `SHARD`, `RING`, `FAIR`, `METER`, `REFILL`, `SEQ`, `NEXTSEQ`, `PENDING`, and each event topic in `ORDERED`) is not a valid publish topic (empty or containing `*`).
+- An out-of-range integer: `capacity` < 0; `maxcalls` neither `-1` nor `>= 1`; any of `load`, `cost`, `amount`, `seq`, `n` < 0.
+- A `key` argument (for `SHARD`, `RING`) that is empty.
+- For `SUBMANY`: an empty pattern list, or **any** invalid pattern/argument (nothing is registered).
+- For `ORDERED`: the payload is not a JSON array of objects, an event is missing `id` or has an invalid `topic`, a field has the wrong JSON type, or two events share an `id`.
+
+Commands that legitimately have an "absent" result do **not** print `ERR`: `UNSUB`/`UNMUTE` of an unknown id/pattern print `false`; `TOKENS` of an unknown id prints `none`; `FAIR`/`RING` over an empty tier print `none`; `HISTORY`/`SHARD`/`METER`/`PENDING` over nothing print an empty line; `RESUME` when not paused prints `0`.
+
+Standard library only. The program is a single process reading stdin to EOF.

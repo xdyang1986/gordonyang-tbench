@@ -661,7 +661,7 @@ func main() {
 			p("ok")
 		case "PUB", "PUBALL":
 			topic := arg(1)
-			if !validPubTopic(topic) {
+			if !validPubTopic(topic) || len(fields) < 3 {
 				p("ERR")
 				continue
 			}
