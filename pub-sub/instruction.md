@@ -1,65 +1,50 @@
-# Fix the broker message allocator
+Broker Message Fan-Out Allocator — Bug Fix
+A small Go program in /app (main.go) implements a message broker's fan-out allocator. Given a batch of pending messages and a list of subscribers (each with a weight and capacity), it determines how many messages to route to each subscriber — distributing proportionally by weight without exceeding any subscriber's capacity.
 
-A small Go program lives in `/app` (`main.go`). It is a message broker's **fan-out allocator**: given a batch of pending messages and a set of subscribers (each with a weight and a capacity), it decides how many messages each subscriber receives — sharing them out by weight while never exceeding any subscriber's capacity.
+The program compiles and runs, but contains a bug: certain inputs produce incorrect allocations. Your goal is to locate and fix the defect so the program behaves correctly for all inputs. The underlying algorithm is correct aside from this one flaw — do not rewrite from scratch, and preserve the existing input/output format.
 
-It builds and runs, but **it has a bug**: for some inputs the allocation it prints is wrong. Your job is to find and fix the defect in the Go source under `/app` so the program is correct for all inputs. The logic is sound apart from the defect — do **not** rewrite it from scratch, and keep the same input/output format.
-
-## Input / output
-
-Read from standard input:
-
-```
+Input / Output Format
+Read from stdin:
 <load>
 <weight> <cap>
 <weight> <cap>
 ...
-```
+<load> — total number of messages to distribute (non-negative integer).
 
-- `<load>` is the number of messages to allocate (a non-negative integer).
-- Each following line describes one subscriber: its integer `weight` (≥ 1) and integer `cap` (≥ 0), in order.
+Each subsequent line defines a subscriber with an integer weight (≥ 1) and integer cap (≥ 0).
 
-Write to standard output a single line: the number of messages allocated to each subscriber, in input order, comma-separated. The allocation never exceeds any subscriber's cap, and the total allocated equals `min(load, sum of caps)`.
+Write to stdout a single line: the allocation for each subscriber (in input order), comma-separated. No subscriber receives more than its cap, and the total allocated equals min(load, sum of all caps).
 
-Build: `cd /app && go build -o /app/allocator .`
+Build command: cd /app && go build -o /app/allocator .
 
-## Failing cases
+Known Failing Cases
+The program currently produces incorrect output for these inputs. Expected (correct) output is shown.
 
-The program currently produces the wrong output for these inputs. The **correct** output is shown.
-
-Input:
-
-```
+Case 1:
 16
 5 6
 3 9
 4 3
 1 12
-```
+Expected: 6,5,3,2
 
-Correct output: `6,5,3,2`  (the program currently prints something else.)
-
-Input:
-
-```
+Case 2:
 9
 5 10
 6 10
 6 1
-```
+Expected: 3,5,1
 
-Correct output: `3,5,1`
-
-Input:
-
-```
+Case 3:
 6
 4 11
 1 6
 2 5
-```
+Expected: 4,0,2
 
-Correct output: `4,0,2`
+Requirements
+Fix the bug in /app so the allocator produces correct results for the cases above and in general.
 
-## Task
+The fix should address the same weighted-capacity-sharing logic already present — just without the defect.
 
-Repair the program in `/app` so it produces the correct allocation for these cases and in general (the same weight-and-capacity sharing the existing code already implements, minus the defect). Standard library only.
+Use only the Go standard library.
