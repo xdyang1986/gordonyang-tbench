@@ -1,99 +1,113 @@
-# Elasticsearch-like Search Engine in Go — HARD
+# Multi-Tenant Code Search Engine in Go — HARD & NOVEL
 
-Build a HARD mini search engine similar to Elasticsearch in Go. The server must run at `/app` and expose a full HTTP API with positional inverted index, BM25 scoring, advanced query language (boolean, phrase, field-specific, prefix, fuzzy, boost), highlights, aggregations, bulk API, and persistence with recovery.
+Build a **novel** multi-tenant code search service in Go, not a textbook Elasticsearch clone. Server at `/app` must expose HTTP API with **code-aware positional index**, **recency-decayed BM25F with non-standard parameters**, **custom query language with NEAR/n**, **namespace isolation**, **WAL with checksums**, **top-terms aggregation**, and persistence recovery.
 
 ## Working Directory
 
-All code lives in `/app`. Create a Go module there. Entry must be `main.go` in `/app` so `go run .` and `go build -o /tmp/codimango/search-server .` starts server.
+`/app`. Entry `main.go` must support `go run .` and `go build -o /tmp/codimango/search-server .` listening on `0.0.0.0:$PORT` (default 8080, env `PORT`).
 
-## 1. Server
+## 1. Server & Constraints
 
-- Listen on `0.0.0.0:$PORT` where `$PORT` env var default `8080`.
-- Go only (`net/http` stdlib recommended), no external search library (Bleve, etc.) — implement inverted index yourself.
-- Concurrent-safe (RWMutex), must pass `go test -race` style concurrency tests.
-- Binary must build, log to stdout, never crash on bad input.
+- Go stdlib only, no Bleve/elastic lib — implement index yourself.
+- Concurrent-safe (RWMutex), handle 10k docs, 1000 reqs.
+- No crash on bad input, correct status codes.
 
-## 2. Document Model
+## 2. Document Model — Novel
 
 ```json
 {
   "id": "doc1",
-  "title": "Go Programming",
-  "body": "Go is a statically typed language great for search engines",
-  "tags": ["go", "programming", "search"]
+  "title": "GoSearchEngine",
+  "body": "Implements SearchEngine in Go for team-a, created 1 hour ago",
+  "tags": ["go","search"],
+  "namespace": "team-a",
+  "created_at": "2026-07-21T10:00:00Z"
 }
 ```
 
-- `id`: required non-empty unique, upsert on POST same id.
-- `title`, `body`: strings, may be empty. Indexed separately but default search searches both.
-- `tags`: array strings, preserve original case but filtering/search case-insensitive.
+- `id`: required non-empty unique, upsert.
+- `title`, `body`: may be empty, code-aware tokenized.
+- `tags`: array, case-insensitive filtering.
+- `namespace`: optional string, default `"default"`. Used for multi-tenant isolation. Lowercase normalized for filtering, preserve original.
+- `created_at`: optional RFC3339 timestamp. If present, used for recency decay in scoring. If missing or invalid, no decay (factor 1).
 
-Indexing: Tokenize title and body separately with same analyzer: lowercased, split on `[^a-z0-9]+`, remove empty. Store per-field term frequencies AND positions (position = token index in that field, starting 0). Required for phrase queries.
+## 3. Code-Aware Tokenization — Novel
 
-## 3. HTTP API
+Standard Elasticsearch tutorials use `[^a-z0-9]+` lowercasing only. **You must also split camelCase and PascalCase** for code search:
+
+- First split text on `[^A-Za-z0-9]+` into raw tokens preserving case.
+- For each raw token, further split on camelCase boundaries:
+  - Lowercase to uppercase transition: `searchEngine` → `search`, `Engine`
+  - Acronym boundary: `IOError` → `IO`, `Error`; `HTTPRequest` → `HTTP`, `Request`
+  - Implementation: split before uppercase when previous is lowercase, or before uppercase when previous is uppercase and next is lowercase.
+- Lowercase all sub-tokens.
+- Example: `GoSearchEngine` → `["go","search","engine"]` (positions 0,1,2). `searchEngine` → `["search","engine"]`. `IOError` → `["io","error"]`.
+- Positions are assigned incrementally per sub-token across the whole field (title or body), starting 0. Required for phrase and NEAR.
+- For default query `go`, doc with title `GoSearchEngine` must match because `go` token exists after camelCase split.
+
+This code-aware analyzer is **not** in standard tutorials — it makes memorization harder.
+
+## 4. Index — Positional + BM25F + Recency
+
+Per-field (title, body) positional inverted index:
+
+- `term -> docID -> {tf, positions[]}` where positions are incremental after code-aware split.
+- `titleDocFreq`, `bodyDocFreq`, `titleDocLengths` (token count after code-aware split), `bodyDocLengths`, totals.
+- Store docs map with namespace and created_at.
+
+BM25F with **non-standard parameters** (to reduce textbook memorization):
+
+- Constants `k1=1.65`, `b=0.68` (NOT standard 1.2/0.75)
+- IDF formula **non-standard**: `idf = log((N+1)/(df+0.5))` natural log, where `N=total docs`, `df=docs containing term in field (or union for default)`. This differs from standard `log(1+(N-df+0.5)/(df+0.5))`.
+- `fieldLen = tokens in field for doc`, `avgFieldLen = total tokens in field / N` (minimum 1)
+- `scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))`
+- For default (no field): `score = scoreTitle*2.0 + scoreBody*1.0` — title weighted double (BM25F style, field boost).
+- For `title:`, `body:`: only that field's BM25F.
+- For `tags:`: fixed `1.0 * boost`.
+- For phrase, prefix, fuzzy, NEAR: sum expanded term BM25F * boost.
+
+Recency decay — **novel**:
+
+- If doc has `created_at`, compute `ageHours = (now - created_at).Hours()` (now = `time.Now()` UTC, if created_at in future, age=0).
+- `recencyFactor = 1.0 + 0.5 * exp(-ageHours/168)`  — 168h = 1 week decay. So fresh doc (0h) factor=1.5, 1 week old factor≈1.18, old factor→1.0.
+- If no `created_at`, factor=1.0.
+- Final doc score = (sum BM25F scores) * recencyFactor. For empty query, score=1.0*recencyFactor.
+
+Namespace isolation — **novel**:
+
+- `namespace` query param (comma? single) and header `X-Namespace` filter docs. Header takes precedence over param; if both absent, search all namespaces.
+- Also support field query `namespace:team-a` inside query language.
+- For `tags` aggregation, counts are per matched docs after namespace filtering.
+
+## 5. HTTP API
 
 ### POST /documents
-Index doc. Request JSON doc. Response 201 `{"ok":true,"id":"doc1"}`, 400 if id missing/empty or invalid JSON.
+201 `{"ok":true,"id":...}` or 400.
 
 ### GET /documents/{id}
-200 doc JSON, 404 `{"error":"not found"}`.
+200 doc JSON including namespace, created_at, or 404.
 
 ### DELETE /documents/{id}
-200 `{"ok":true}` or 404.
+200 or 404.
 
-### POST /bulk (NEW - HARD)
-Elasticsearch-like bulk API. Request body NDJSON (newline delimited JSON), Content-Type `application/x-ndjson` or `application/json` but parse as lines:
+### POST /bulk
+NDJSON with action lines `{"index":{"_id":"id"}}` + doc, or per-line docs. Action `_id` overrides doc id. Returns `{"errors":bool,"items":[...]}`. Each bulk doc also writes WAL and persists.
 
-Each action pair:
-```
-{"index":{"_id":"doc1"}}
-{"id":"doc1","title":"...","body":"...","tags":["go"]}
-{"index":{"_id":"doc2"}}
-{"id":"doc2","title":"..."}
-...
-```
-
-- Action line must have `index` key with `_id` or `id`. Document line follows and may have its own id (action id takes precedence if present).
-- Also support simplified bulk where each line IS a document JSON with id (no action lines) — if line does not contain `index`, treat line itself as doc to index.
-- Empty lines ignored.
-- Must index all valid docs atomically? Index sequentially, continue on error.
-- Response 200:
-```json
-{
-  "errors": false,
-  "items": [
-    {"index": {"_id":"doc1","status":201}},
-    {"index": {"_id":"doc2","status":201}}
-  ]
-}
-```
-If a doc fails (missing id), status 400 and `errors:true` but still process rest.
-
-### GET /stats (NEW)
-Return index stats:
-```json
-{"docs":2,"terms":15,"avgdl":6.5}
-```
-- `docs`: number of docs
-- `terms`: number of distinct terms across title+body
-- `avgdl`: average document length (title tokens + body tokens) / docs, float.
+### GET /stats
+`{"docs":2,"terms":15,"avgdl":6.5,"namespaces":2}` — includes `namespaces` count distinct.
 
 ### GET /search and POST /search
-Search docs.
 
-GET params:
-- `q`: query string (may include advanced syntax) — optional, empty means match all.
-- `tags`: comma-separated tag filter (AND semantics, case-insensitive) — optional.
-- `operator`: `AND`/`OR` default `OR` for combining plain terms when no explicit boolean operators.
-- `limit`: default 10, max 100, 400 if <0 or invalid.
-- `offset`: default 0, 400 if <0.
-- `highlight`: `true`/`false` default false — if true, include highlight snippets.
+GET params: `q`, `tags` (comma AND), `namespace` (single namespace filter), `operator` AND/OR default OR, `limit` default 10 max 100, `offset` default 0, `highlight` bool default false.
 
-POST /search JSON body (overrides query params if present):
+Header: `X-Namespace` overrides `namespace` query param.
+
+POST body overrides GET params:
 ```json
 {
-  "query": "title:\"go search\"^2 AND body:engine",
+  "query": "title:\"go search\"^2 AND body:engine NEAR/2 go",
   "tags": ["go"],
+  "namespace": "team-a",
   "operator": "OR",
   "limit": 10,
   "offset": 0,
@@ -101,190 +115,127 @@ POST /search JSON body (overrides query params if present):
 }
 ```
 
-Support both `q` and `query` field in POST body.
+#### Query Language — Novel combination
 
-#### Query Language (HARD — must implement all)
+Support:
 
-Your query parser must support:
+- **Terms**: `go` analyzed with code-aware tokenizer.
+- **Boolean**: `AND, OR, NOT` with precedence `NOT(3) > NEAR(2) = AND(2) > OR(1)`, parentheses, implicit AND before NOT and between adjacent clauses.
+- **Phrase**: `"search engine"` — positional adjacent in same field (title or body) using code-aware positions. After code-aware split, `GoSearchEngine` contains `go` at pos0 and `search` at pos1, so `"go search"` matches `GoSearchEngine`.
+- **NEAR/n**: `go NEAR/2 search` — terms within distance n in same field. Syntax `NEAR/<int>` case-insensitive? Example `NEAR/2`. `NEAR` without `/n` defaults to distance 5? For this task, require `NEAR/n` with integer, and treat `NEAR` alone as distance 5. Matches if both terms exist in same field and `abs(pos1-pos2) <= n`. For default field, match if NEAR holds in title OR body.
+- **Field-specific**: `title:go`, `body:search`, `tags:go`, `namespace:team-a`, default=title OR body (title weighted 2x). Field names allowed: `title, body, tags, namespace`. Unknown field → 400.
+- **Prefix**: `sea*` — term ending `*` matches indexed terms with that prefix (scan distinct terms). Field-specific: `title:sea*`.
+- **Fuzzy**: `sarch~` or `sarch~2` — `~` optionally followed by max distance (e.g., `~2`). If no number after `~`, distance=1. If `~2`, distance=2. Levenshtein ≤ distance. Implement yourself. Field-specific supported.
+- **Boost**: `term^2`, `"phrase"^1.5`, `field:term^2`, `go NEAR/2 search^2`. Boost float >0, default 1. Invalid boost → 400.
+- **Combination**: `title:"go search"^2 AND body:engine NEAR/1 go NOT tags:java`, `(title:go OR body:go) AND tags:search`, `sarch~2 AND sea*`, `namespace:team-a AND go`, etc.
 
-**a) Terms:** `go` — lowercased, analyzed same as docs.
+Tokenization for parser: preserve quoted phrases, parentheses, handle field:, boost ^, prefix *, fuzzy ~ and NEAR/n. Example: `title:"go search"^2 AND sea* NOT tags:java` tokens as before. `go NEAR/2 search` → term go, NEAR/2 operator, term search.
 
-**b) Boolean:** `AND`, `OR`, `NOT` uppercase, with precedence `NOT (3) > AND (2) > OR (1)`, parentheses `( )`. Implicit `AND` before `NOT`: `go NOT java` → `go AND NOT java`. Example: `go AND (search OR index) NOT java`.
+If query contains any explicit boolean operator (AND,OR,NOT,NEAR, parentheses), treat as boolean expression. If no boolean operator, combine clauses via `operator` param (AND=intersection, OR=union).
 
-**c) Phrase Queries:** Double-quoted strings `"search engine"` — must match docs where terms appear consecutively in same field (title or body) in order, adjacent positions. Tokenize phrase content with same analyzer. Example: title="search engine" matches `"search engine"` but not if terms are separated. Must use positional index. Support multiple phrases.
+#### Scoring — Recency-decayed BM25F (Novel)
 
-**d) Field-Specific:** `field:term`, `field:"phrase"`, `field:prefix*`, `field:fuzzy~`, `field:term^2`. Fields allowed: `title`, `body`, `tags`, and default (no field) means search title OR body (union). For `tags:go`, match docs whose tags contain `go` case-insensitive (exact tag, not full-text). For `title:go`, search only title inverted index; `body:search` only body; default searches both.
+- Use non-standard k1=1.65, b=0.68, idf=log((N+1)/(df+0.5)), title weight 2.0, body 1.0.
+- Recency factor as above.
+- For phrase: sum BM25F of terms in phrase * boost * recency.
+- For prefix/fuzzy/NEAR: sum expanded/matching terms BM25F * boost * recency.
+- For tags, namespace: fixed 1.0 * boost * recency (if matches).
+- Empty query: score=1.0*recency.
 
-**e) Prefix:** `sea*` — term ending with `*` matches any indexed term with that prefix. E.g., `sea*` matches `search`, `seal`, `sea`. Implement by scanning distinct terms. For field-specific: `title:sea*` only checks title field terms.
+Sort score desc, id asc.
 
-**f) Fuzzy:** `sarch~` — term ending with `~` matches any indexed term with Levenshtein distance ≤1. Implement Levenshtein yourself. Case-insensitive (terms already lowercased). E.g., `sarch~` matches `search` (1 deletion). For field-specific: `title:sarch~`.
+#### Highlight
 
-**g) Boost:** `term^2`, `term^1.5`, `"phrase"^2`, `field:term^2`, `field:"phrase"^2`. Boost multiplies that clause's score. Default boost 1.0. Parse `^` followed by float. If boost missing or invalid, treat as 1.
+If highlight=true, each result includes `highlight` map with `<em>` wrapping. Token-based as in previous hard spec, using code-aware tokens and matched expanded terms. Must contain `<em>`.
 
-**h) Combination:** All above can combine with boolean: `title:"go search"^2 AND body:engine* NOT tags:java`, `go^2 OR (search AND "engine")`, `(title:go OR body:go) AND tags:search`, `sarch~ AND sea*`, etc.
+#### Aggregations
 
-Tokenization for query parser:
-- Must preserve quoted phrases as single tokens.
-- Must preserve parentheses as tokens.
-- Operators AND/OR/NOT case-insensitive recognition but test uses uppercase.
-- Field detection: `field:` before term/phrase/prefix/fuzzy.
-- Boost: `^number` after term/phrase.
-- Prefix `*` at end of term, fuzzy `~` at end.
-- Example: `title:"go search"^2 AND sea* NOT tags:java` → tokens: field:title phrase:"go search" boost2, AND, term:sea* (prefix), NOT, field:tags term:java.
-
-If query contains ANY explicit boolean operator (AND/OR/NOT) or parentheses, treat entire query as boolean expression using precedence, ignoring `operator` param for logic (still use operator param for scoring? No, boolean logic overrides). If query has NO boolean operator, use `operator` param (AND/OR) to combine clauses: OR=union, AND=intersection. Phrase, prefix, fuzzy, field queries count as clauses.
-
-#### Scoring — BM25 (HARD)
-
-Must implement BM25, not TF-IDF:
-
-- Parameters: `k1=1.2`, `b=0.75`
-- For each doc d, field f (title, body), term t:
-  - `tf = term frequency in field f for doc d`
-  - `N = total number of docs`
-  - `df = number of docs containing term t in field f. For default field (no field specified), df is number of docs containing term in either title or body (union).
-  - `idf = log(1 + (N - df + 0.5)/(df + 0.5))` natural log
-  - `fieldLen = number of tokens in field f for doc d`
-  - `avgFieldLen = average field length across all docs for field f. Compute average title length as total title tokens / N, average body length as total body tokens / N. For default search, score is sum of title BM25 and body BM25 each using its own average.
-  - `scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))`
-- For default (no field) query: score = scoreTitle + scoreBody. If term appears in both title and body, total is sum of both field scores.
-- For field-specific: only that field's BM25 contributes.
-- For `tags` field: if tag matches, score = 1.0 * boost. Tag scoring is fixed at 1.0 multiplied by boost, no BM25.
-- For phrase query: phrase matches if positional adjacency holds (terms consecutive in same field). Score = sum of BM25 scores of each term in phrase within the matching field(s) multiplied by phrase boost. If phrase appears in both title and body, sum scores from both fields.
-- For prefix / fuzzy: clause expands to list of matching actual terms from index. For each doc, score = sum over matching expanded terms of BM25 for that expanded term multiplied by clause boost.
-- For boost: final clause score multiplied by boost value parsed from `^`.
-- Total doc score = sum over all positive clauses (clauses not negated by NOT) of their individual scores.
-- If query empty (match all), score = 1.0 for all docs.
-- Sort by score descending, then id ascending as tie-breaker. Scores are deterministic.
-
-Tests will check:
-- BM25 ranking: docs with higher tf and shorter field length rank higher than longer docs with same tf.
-- Exact BM25 value within tolerance for a known dataset.
-
-#### Highlight (NEW)
-
-If `highlight=true` (GET param or POST body), each result must include `highlight` field. Highlight is an object with `title` and/or `body` keys, where each value is a string with matched query terms wrapped in `<em>` tags.
-
-For example, doc title="Go Search Engine", query "search", highlight: `{"title":"Go <em>Search</em> Engine"}`.
-
-Requirements:
-- Highlight is token-based: split original title/body into alphanumeric tokens and separators. For each token whose lowercased form is in the set of matched expanded query terms, wrap the original token with `<em>` and `</em>`, preserving original case.
-- For phrase queries, wrap each term in the phrase individually with `<em>` tags. The highlighted string must contain `<em>` for each phrase term.
-- For prefix and fuzzy queries, highlight uses the actual matched expanded terms from the index (e.g., query `sea*` matches `search`, highlight wraps `search` in doc).
-- Include highlight only for fields that have text matches. If doc matched only via tag filter (no text match), highlight may be absent or empty object. If highlight=true and doc matched via text, highlight must be present and contain at least one `<em>` pair.
-- In result JSON, `highlight` field is optional when highlight=false, but when highlight=true and text match exists, it must be present.
-
-Example result with highlight:
-```json
-{
-  "total":1,
-  "results":[{"id":"doc1","score":1.23,"title":"Go Search","tags":["go"],"highlight":{"title":"Go <em>Search</em>","body":"..."}}],
-  "aggregations":{"tags":{"go":1}}
-}
-```
-
-#### Aggregations (NEW)
-
-Always return aggregations (even if highlight false) for tag counts among matched docs (before pagination):
+Always return:
 
 ```json
 {
   "total":2,
   "results":[...],
-  "aggregations":{"tags":{"go":2,"search":1}}
+  "aggregations":{
+    "tags":{"go":2,"search":1},
+    "top_terms":[{"term":"go","count":5},{"term":"search","count":3}],
+    "namespaces":{"team-a":2}
+  }
 }
 ```
 
-- `aggregations.tags`: map lowercased tag -> count of matched docs containing that tag.
-- If no matches, `tags` empty object.
+- `tags`: lowercased tag → count among matched (before pagination).
+- `top_terms`: top 5 terms by frequency in matched docs' title+body (after code-aware tokenization), sorted count desc then term asc, each `{"term":string,"count":int}`.
+- `namespaces`: namespace → count among matched.
 
-#### Response Format
+## 6. Persistence with WAL and Recovery — Novel
 
-200:
-```json
-{
-  "total": 2,
-  "results": [
-    {"id":"doc1","score":1.23,"title":"...","tags":["go"],"highlight":{"title":"Go <em>Search</em>"}},
-    {"id":"doc2","score":0.89,"title":"...","tags":["go","search"]}
-  ],
-  "aggregations": {"tags": {"go":2,"search":1}}
-}
-```
+- On each successful POST /documents, DELETE, POST /bulk, persist docs to `/app/data/index.json` atomically (temp + rename).
+- **WAL**: Also append to `/app/data/wal.log` one JSON line per operation with checksum:
+  - Index: `{"op":"index","doc":{...},"checksum":"<crc32 of doc JSON>","ts":"RFC3339"}`
+  - Delete: `{"op":"delete","id":"doc1","checksum":"<crc32 of id>","ts":...}`
+  - Checksum is hex CRC32 (IEEE) of the doc JSON string (for index) or id string (for delete). On replay, verify checksum, skip invalid lines.
+  - Create `/app/data` dir if needed.
+- On startup:
+  - Try load `index.json` as before with recovery for truncated array (streaming decoder).
+  - If `index.json` missing or empty, or after loading, also replay `wal.log` if exists: read line by line, verify checksum, apply operations in order, rebuilding indexes. WAL replay should happen after index.json load, so WAL can contain newer ops not yet in index.json (though our save writes both, but for test we will delete index.json and keep WAL).
+  - If WAL corrupted/truncated, recover up to last valid line with correct checksum, skip invalid.
+  - Must not crash on corrupted index.json or WAL.
+- Respect `DATA_FILE` env var for custom index path; WAL path is `filepath.Dir(DATA_FILE)/wal.log` (if custom DATA_FILE, WAL in same dir).
 
-- `total`: matched before pagination.
-- `results`: paginated, each at least `id`, `score` float, `title`, `tags`, plus `highlight` if requested.
-- `aggregations`: always present.
-
-### 4. Persistence with Recovery (HARD)
-
-- On each successful POST /documents, DELETE /documents/{id}, POST /bulk (each doc), persist entire docs list to `/app/data/index.json` atomically (temp file + rename).
-- On startup, if `/app/data/index.json` exists, load:
-  - If file contains valid JSON array, load docs and rebuild all indexes (positional, BM25 stats).
-  - If file is corrupted/truncated (e.g., last bytes missing due to crash), must recover: read file, try to parse; if JSON invalid, attempt to recover by truncating to last valid JSON array? Simplified: if unmarshal fails, try to read as is and if file ends mid-object, discard corrupted tail and recover up to last complete doc? Minimum requirement: if file is truncated (e.g., ends abruptly), server must still start and not crash, with either 0 docs or partially recovered docs, and must not return 500.
-  - Implement robust load: if JSON array parse fails, try to decode stream of JSON objects ignoring errors, or truncate file and rebuild from valid prefix. Even simple handling that returns empty index on corrupt file but doesn't crash passes recovery test.
-- Create `/app/data` dir if not exists.
-- Atomic write required.
-
-### 5. Non-functional
-
-- Thread-safe for concurrent bulk, index, search, delete, stats.
-- Must handle up to 10k docs, 1000 reqs without OOM.
-- No external deps except Go stdlib; use go.mod.
-- Binary builds with `go build -o /tmp/codimango/search-server .`
-- `/app/data/index.json` path fixed; also respect `DATA_FILE` env for tests.
-
-### 6. Example Workflows
+## 7. Example Workflows (Novel)
 
 ```
-POST /documents {"id":"1","title":"Go Search Engine","body":"build a search engine in Go","tags":["go","search"]}
-POST /documents {"id":"2","title":"Java Search","body":"Lucene is Java search library","tags":["java","search"]}
-GET /search?q=search -> both
-GET /search?q="search engine" -> only doc1 (phrase adjacent)
-GET /search?q=title:Go -> only doc1
-GET /search?q=tags:go -> only doc1
+POST /documents {"id":"1","title":"GoSearchEngine","body":"fast engine","tags":["go"],"namespace":"team-a","created_at":"2026-07-21T09:00:00Z"}
+POST /documents {"id":"2","title":"Java Search","body":"Lucene","tags":["java"],"namespace":"team-b","created_at":"2026-07-14T10:00:00Z"}
+GET /search?q=search -> both, but doc1 matches go via camelCase GoSearchEngine
+GET /search?q="search engine" -> only doc1 (phrase adjacent after code-aware)
+GET /search?q=title:go -> doc1 (GoSearchEngine split)
+GET /search?q=tags:go -> doc1
 GET /search?q=sea* -> both (search)
-GET /search?q=sarch~ -> both (fuzzy to search)
-GET /search?q=go^2 search -> doc1 higher score due to boost
-GET /search?q=go&highlight=true -> results have <em>
-GET /search -> aggregations tags counts
-POST /bulk NDJSON -> bulk index
-GET /stats -> docs, terms, avgdl
+GET /search?q=sarch~ -> both fuzzy
+GET /search?q=go NEAR/2 engine -> doc1 (go within 2 of engine in title)
+GET /search?q=go^2 search -> doc1 higher due to boost + recency (newer)
+GET /search?namespace=team-a -> only team-a docs
+GET /search with header X-Namespace: team-b -> only team-b
+GET /search?q=go&highlight=true -> <em>go</em> etc.
+GET /search -> aggregations tags, top_terms, namespaces
+POST /bulk NDJSON
+GET /stats -> docs, terms, avgdl, namespaces
 DELETE /documents/1
-GET /search?q=search -> only doc2
-# restart -> doc2 persists
+# restart with WAL: doc2 persists, doc1 deleted persists via WAL replay if index.json deleted
 ```
 
-### 7. Failure Handling
+## 8. Failure Handling
 
-- 400 on invalid JSON, missing id, invalid limit/offset, invalid operator, invalid boost (ignore boost error? return 400 if boost not number).
+- 400 on invalid JSON, missing id, invalid limit/offset (<0 or not number), invalid operator (must be AND/OR), invalid field (unknown field name), invalid boost (not number or <=0), invalid NEAR (e.g., NEAR/abc), invalid fuzzy distance (e.g., ~abc), phrase empty.
 - 404 for missing doc.
-- Empty index: total 0.
-- Operator case-insensitive.
+- Empty index: total 0, aggregations empty.
+- Operator case-insensitive, field names case-insensitive.
 
-### 8. Anti-Requirements
+## 9. Anti-Requirements
 
-- No Bleve/Elastic client library.
+- No external search lib.
 - No hardcoding.
-- Must implement positional index yourself.
 
-### 9. Success Criteria
+## 10. Success Criteria
 
-Tests will build Go project, start server on random $PORT, and test:
+Tests build Go binary from `/app` (`/tmp/codimango/search-server`), start server on random $PORT, test:
 
-- CRUD
-- Simple AND/OR, boolean with parentheses and NOT
-- Phrase queries (adjacent only)
-- Field-specific (title:, body:, tags:)
-- Prefix (sea*) and fuzzy (sarch~)
-- Boost (go^2)
-- BM25 scoring exact and ranking
-- Highlight <em>
-- Aggregations tags
-- Bulk API
-- Stats
-- Tag filter AND semantics, pagination, empty query, persistence with recovery, concurrency, invalid inputs
+- CRUD with namespace and created_at
+- Code-aware tokenization (GoSearchEngine → go, search, engine)
+- Simple OR/AND, boolean with NOT, parentheses, NEAR/n
+- Phrase queries adjacent after code-aware split
+- Field-specific title, body, tags, namespace
+- Prefix, fuzzy with distance ~ and ~2
+- Boost ^ and recency decay ranking (newer doc higher when same BM25)
+- Namespace isolation via param and header X-Namespace
+- Highlight <em> for prefix/fuzzy/phrase
+- Aggregations tags, top_terms (top 5), namespaces
+- Bulk API with action-id precedence and WAL
+- Stats with namespaces
+- Tag filter AND, pagination, empty query, persistence with WAL replay and truncated recovery (both index.json and wal.log)
+- Concurrency bulk+search+delete
+- Invalid inputs 400 (unknown field, invalid boost, invalid NEAR, fuzzy distance)
 
-All must pass.
-
-Implement precisely — tests strict about status codes, JSON shapes, BM25 tolerance, phrase adjacency.
+All must pass. Implement precisely — tests strict about BM25 non-standard parameters, recency formula, camelCase split, NEAR distance, aggregations shapes.

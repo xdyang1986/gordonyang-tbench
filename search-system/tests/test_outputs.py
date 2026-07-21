@@ -606,11 +606,17 @@ def test_bm25_exact_scoring(server):
     r = search_get(base, q="go")
     assert r.status_code == 200
     results = {x["id"]: x["score"] for x in r.json()["results"]}
-    # Expected BM25 as in spec: idf=log(1+(N-df+0.5)/(df+0.5)), N=2 df=2
-    idf = math.log(1 + 0.5 / 2.5)
-    # avg title len = (3+1)/2=2
-    score1 = idf * (3 * 2.2) / (3 + 1.2 * (0.25 + 0.75 * 3 / 2))
-    score2 = idf * (1 * 2.2) / (1 + 1.2 * (0.25 + 0.75 * 1 / 2))
+    # NOVEL BM25F non-standard: k1=1.65, b=0.68, idf=log((N+1)/(df+0.5))+1, title weight 2.0
+    N = 2
+    df = 2
+    idf = math.log((N + 1) / (df + 0.5)) + 1  # log(3/2.5)+1
+    avg = 2.0  # (3+1)/2
+    # title scores
+    score_title_bm1 = idf * (3 * (1.65 + 1)) / (3 + 1.65 * (1 - 0.68 + 0.68 * 3 / avg))
+    score_title_bm2 = idf * (1 * (1.65 + 1)) / (1 + 1.65 * (1 - 0.68 + 0.68 * 1 / avg))
+    # default field = title*2 + body (body 0)
+    score1 = score_title_bm1 * 2.0
+    score2 = score_title_bm2 * 2.0
     assert abs(results["bm1"] - score1) < 0.05, (
         f"BM25 mismatch bm1 expected {score1} got {results['bm1']}"
     )
@@ -1025,7 +1031,6 @@ def test_prefix_fuzzy_highlight(server):
     post_doc(
         base, {"id": "hlp1", "title": "searching", "body": "search engine", "tags": []}
     )
-    # prefix query with highlight should highlight actual indexed term, not query prefix
     r = search_get(base, q="sea*", highlight=True)
     assert r.status_code == 200 and r.json()["total"] >= 1
     found = False
@@ -1036,10 +1041,233 @@ def test_prefix_fuzzy_highlight(server):
                 found = True
                 break
     assert found, f"prefix highlight should contain <em>, got {r.json()}"
-    # fuzzy highlight
     r = search_get(base, q="sarch~", highlight=True)
     assert r.status_code == 200
     found = any(
         "<em>" in json.dumps(x.get("highlight", {})) for x in r.json()["results"]
     )
     assert found, "fuzzy highlight should contain <em>"
+
+
+# ---------------------------------------------------------------------------
+# NOVEL tests — code-aware tokenization, namespace isolation, recency, NEAR, top_terms, WAL
+# ---------------------------------------------------------------------------
+
+
+def test_code_aware_camelcase_tokenization(server):
+    base = server
+    # GoSearchEngine should be split into go, search, engine
+    post_doc(base, {"id": "cc1", "title": "GoSearchEngine", "body": "", "tags": []})
+    post_doc(base, {"id": "cc2", "title": "Other", "body": "", "tags": []})
+    r = search_get(base, q="go")
+    assert r.status_code == 200
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "cc1" in ids, f"code-aware: GoSearchEngine should match 'go', got {ids}"
+    r = search_get(base, q="search")
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "cc1" in ids
+    r = search_get(base, q="engine")
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "cc1" in ids
+    # phrase after code-aware split
+    r = search_get(base, q='"go search"')
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "cc1" in ids, (
+        f"phrase 'go search' should match GoSearchEngine via code-aware split, got {ids}"
+    )
+
+
+def test_namespace_isolation_via_param(server):
+    base = server
+    post_doc(
+        base,
+        {"id": "ns1", "title": "go doc", "body": "", "tags": [], "namespace": "team-a"},
+    )
+    post_doc(
+        base,
+        {"id": "ns2", "title": "go doc", "body": "", "tags": [], "namespace": "team-b"},
+    )
+    r = search_get(base, q="go", tags=None)
+    # without namespace filter, both
+    assert r.json()["total"] == 2
+    # with namespace param
+    r = requests.get(
+        f"{base}/search", params={"q": "go", "namespace": "team-a"}, timeout=5
+    )
+    assert r.status_code == 200
+    ids = {x["id"] for x in r.json()["results"]}
+    assert ids == {"ns1"}
+    # via field query namespace:team-b
+    r = search_get(base, q="namespace:team-b")
+    ids = {x["id"] for x in r.json()["results"]}
+    assert ids == {"ns2"}
+
+
+def test_namespace_isolation_via_header(server):
+    base = server
+    post_doc(
+        base,
+        {"id": "hns1", "title": "go", "body": "", "tags": [], "namespace": "team-a"},
+    )
+    post_doc(
+        base,
+        {"id": "hns2", "title": "go", "body": "", "tags": [], "namespace": "team-b"},
+    )
+    r = requests.get(
+        f"{base}/search",
+        params={"q": "go"},
+        headers={"X-Namespace": "team-a"},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    ids = {x["id"] for x in r.json()["results"]}
+    assert ids == {"hns1"}
+    # header overrides query param
+    r = requests.get(
+        f"{base}/search",
+        params={"q": "go", "namespace": "team-b"},
+        headers={"X-Namespace": "team-a"},
+        timeout=5,
+    )
+    ids = {x["id"] for x in r.json()["results"]}
+    assert ids == {"hns1"}
+
+
+def test_recency_decay_ranking(server):
+    base = server
+    now = time.time()
+    recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))  # 1 hour ago
+    old = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 7 * 24 * 3600)
+    )  # 7 days ago
+    post_doc(
+        base,
+        {
+            "id": "recent",
+            "title": "go search",
+            "body": "",
+            "tags": [],
+            "created_at": recent,
+        },
+    )
+    post_doc(
+        base,
+        {"id": "old", "title": "go search", "body": "", "tags": [], "created_at": old},
+    )
+    r = search_get(base, q="go")
+    assert r.status_code == 200
+    results = r.json()["results"]
+    # same BM25 but recency should boost recent higher
+    assert results[0]["id"] == "recent", (
+        f"recency should rank recent first, got {[x['id'] for x in results]}"
+    )
+    assert results[0]["score"] > results[1]["score"]
+
+
+def test_near_operator(server):
+    base = server
+    post_doc(base, {"id": "near1", "title": "go search engine", "body": "", "tags": []})
+    post_doc(
+        base, {"id": "near2", "title": "go big big search", "body": "", "tags": []}
+    )
+    # go within 1 of search should only match near1 (adjacent? go at pos0, search pos1 => distance 1)
+    r = search_get(base, q="go NEAR/1 search")
+    assert r.status_code == 200
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "near1" in ids
+    assert "near2" not in ids, (
+        f"NEAR/1 should not match near2 with distance 3, got {ids}"
+    )
+    # NEAR/3 should match both
+    r = search_get(base, q="go NEAR/3 search")
+    ids = {x["id"] for x in r.json()["results"]}
+    assert "near1" in ids and "near2" in ids
+
+
+def test_top_terms_aggregation(server):
+    base = server
+    post_doc(base, {"id": "tt1", "title": "go go search", "body": "engine", "tags": []})
+    post_doc(base, {"id": "tt2", "title": "go search", "body": "go", "tags": []})
+    r = search_get(base, q="go")
+    assert r.status_code == 200
+    agg = r.json().get("aggregations", {})
+    assert "top_terms" in agg, f"top_terms missing, got {agg}"
+    top = agg["top_terms"]
+    assert isinstance(top, list) and len(top) > 0
+    # go should be top term
+    assert top[0]["term"] == "go"
+    assert "count" in top[0]
+
+
+def test_wal_replay():
+    # WAL: delete index.json but keep wal.log, restart should replay
+    port = find_free_port()
+    custom_dir = "/tmp/wal_test"
+    custom_file = os.path.join(custom_dir, "index.json")
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert wait_for_server(port, timeout=15)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        r = requests.post(
+            f"{base}/documents",
+            json={"id": "wal1", "title": "wal replay", "body": "test", "tags": []},
+            timeout=5,
+        )
+        assert r.status_code in (200, 201)
+        time.sleep(0.5)
+        wal_file = os.path.join(custom_dir, "wal.log")
+        assert os.path.exists(wal_file), "wal.log not created"
+        # delete index.json, keep WAL, restart
+        os.remove(custom_file)
+        assert not os.path.exists(custom_file)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        port2 = find_free_port()
+        env2 = {**os.environ, "PORT": str(port2), "DATA_FILE": custom_file}
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert wait_for_server(port2, timeout=15), "server should start and replay WAL"
+        base2 = f"http://127.0.0.1:{port2}"
+        r = requests.get(f"{base2}/documents/wal1", timeout=5)
+        assert r.status_code == 200, (
+            f"WAL replay failed, expected wal1 to be recovered, got {r.status_code} {r.text}"
+        )
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_fuzzy_with_distance(server):
+    base = server
+    post_doc(base, {"id": "fzd1", "title": "search", "body": "", "tags": []})
+    # distance 1 should match
+    r = search_get(base, q="sarch~1")
+    assert r.json()["total"] == 1
+    # distance 2 should also match (since distance 1 <=2)
+    r = search_get(base, q="sarch~2")
+    assert r.json()["total"] == 1
+    # distance 0 should NOT match (exact only, sarch != search)
+    r = search_get(base, q="sarch~0")
+    assert r.json()["total"] == 0

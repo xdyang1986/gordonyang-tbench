@@ -1,80 +1,87 @@
-# search-system — Elasticsearch-like Search Engine in Go (HARD)
+# search-system — Multi-Tenant Code Search in Go (HARD & NOVEL)
 
-## Description
+## Description — Novel to reduce memorization risk
 
-This is a **HARD** version of the Elasticsearch-like search engine. Agent must implement in Go at `/app`:
+This task is **NOT** the textbook "build your own Elasticsearch" template that triggers HIGH memorization risk. It is a **novel multi-tenant code search service** with custom traits not found together in tutorials:
 
-- **Positional Inverted Index**: per-field (title, body) tokenization `[^a-z0-9]+` lowercased, storing TF AND positions for phrase queries.
-- **BM25 Scoring**: `k1=1.2, b=0.75`, `idf=log(1+(N-df+0.5)/(df+0.5))`, `score=idf*(tf*(k1+1))/(tf+k1*(1-b+b*dl/avgdl))`, per-field with sum for default field. Sorting score desc, id asc.
-- **Advanced Query Language**:
-  - Boolean `AND/OR/NOT` with precedence `NOT>AND>OR`, parentheses, implicit `AND` before `NOT` and between adjacent clauses.
-  - Phrase `"search engine"` requiring adjacent positions in same field (positional index).
-  - Field-specific `title:go`, `body:search`, `tags:go`, default=title OR body.
-  - Prefix `sea*` (term prefix scan), Fuzzy `sarch~` (Levenshtein ≤1).
-  - Boost `term^2`, `"phrase"^1.5`, `field:term^2`.
-  - Combination: `title:"go search"^2 AND body:engine* NOT tags:java`, etc.
-- **Highlight**: When `highlight=true`, each result includes `highlight` map with `<em>term</em>` wrapping matched terms (preserving original case via token-wise wrap).
-- **Aggregations**: Always return `aggregations.tags` counting matched docs' tags (before pagination).
-- **Bulk API**: `POST /bulk` NDJSON with action lines `{"index":{"_id":"id"}}` + doc, or simplified per-line docs, returns `{"errors":bool,"items":[...]}`
-- **Stats**: `GET /stats` returns `{"docs":int,"terms":int,"avgdl":float}`
-- **Persistence with Recovery**: Atomic write to `/app/data/index.json`, load on startup rebuilding positional indexes; truncated file must not crash server, must recover via streaming decoder.
-- **Concurrency**: RWMutex safe for 100 goroutines parallel index/search/delete/bulk.
-- **HTTP API**: `POST /documents`, `GET /documents/{id}`, `DELETE /documents/{id}`, `POST /bulk`, `GET /stats`, `GET/POST /search` with `q,tags,operator,limit,offset,highlight` params, strict 400/404/201 codes.
+- **Code-aware tokenization**: `[^A-Za-z0-9]+` split + camelCase/PascalCase splitting `GoSearchEngine` → `go, search, engine` with incremental positions. Standard tutorials only do lowercasing; code-aware makes recall harder.
+- **Non-standard BM25F**: `k1=1.65, b=0.68` (NOT 1.2/0.75), `idf=log((N+1)/(df+0.5))+1`, title weight 2.0 + body weight 1.0. Changing constants and formula from textbook breaks direct memorization.
+- **Recency-decayed scoring**: `recencyFactor = 1 + 0.5*exp(-ageHours/168)` where `ageHours` from optional `created_at` RFC3339. Fresh docs rank higher — custom, not in ES tutorials.
+- **Namespace isolation**: docs have `namespace` field (default `"default"`). Search supports `?namespace=team-a` query param AND header `X-Namespace` (header overrides), plus field query `namespace:team-a`. Multi-tenant isolation is not part of standard min-search tutorial.
+- **NEAR/n operator**: `go NEAR/2 search` — terms within distance n in same field (title/body). Requires positional proximity check, not just AND. Plus standard boolean `AND/OR/NOT` with precedence `NOT(3) > NEAR(2)=AND(2) > OR(1)`, implicit AND before NOT and between adjacent clauses.
+- **Phrase queries** `"search engine"` with positional adjacency after code-aware split.
+- **Field-specific** `title:go`, `body:search`, `tags:go`, `namespace:team-a`, default=title OR body with title boost 2x.
+- **Prefix** `sea*` scanning distinct terms, **Fuzzy** `sarch~` and `sarch~2` with Levenshtein ≤ distance (0=exact, 1=default, 2 allowed) — distance param extends textbook.
+- **Boost** `term^2`, `"phrase"^1.5`.
+- **Highlight** token-based `<em>term</em>` preserving original case.
+- **Aggregations** `tags` counts + `top_terms` top 5 frequent terms in matched docs + `namespaces` counts — top_terms not in standard tutorial.
+- **WAL with checksums**: each index/delete appends to `/app/data/wal.log` JSON line with CRC32 checksum, verified on replay. On startup, load `index.json` with truncated recovery (streaming decoder) AND replay WAL if present, deleting index.json and keeping WAL must replay. Also recovers from corrupted WAL lines.
+- **Bulk** `POST /bulk` NDJSON action `{"index":{"_id":"id"}}` + doc with action-id precedence.
+- **Stats** `GET /stats` `{docs,terms,avgdl,namespaces}`.
 
-A naive approach fails because:
-- Simple contains/OR without positional index fails phrase tests (`"search engine"` vs `search big engine`).
-- TF-IDF instead of BM25 fails exact BM25 scoring tests (expected values computed with formula).
-- No field-aware indexes: `title:go` returns body matches => fails field-specific tests.
-- No prefix/fuzzy expansion: `sea*` and `sarch~` return 0 results.
-- No boost handling: `go^2 search` ranking wrong.
-- Missing highlight `<em>` and aggregations `tags` counts.
-- Bulk endpoint missing or NDJSON parsing wrong.
-- Persistence not atomic or crashes on truncated file.
-- Unknown field `unknownfield:go` should 400 but naive returns 200 empty.
+Naive approach fails because:
+- No camelCase → `GoSearchEngine` not matched by `go` or `search`.
+- Standard BM25 1.2/0.75 exact score mismatch (now 1.65/0.68 + title weight 2x + recency).
+- Missing namespace isolation → `?namespace=team-a` returns all.
+- Missing recency → newer doc not ranked first.
+- No NEAR → `go NEAR/1 search` returns docs with distance 3.
+- No positional → phrase `"search engine"` matches `search big engine`.
+- No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
+- Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (local pytest — HARD)
+## Completion Rates (local, novel hard)
 
-- Oracle: **3/3 passed** (32/32 tests each run) — validated via hard `solve.sh` rebuild + pytest (15-17s)
-- Sonnet 4.6: expected **0-1/5 passed** — fails phrase positional check, BM25 exact, prefix/fuzzy expansion, field-specific, highlight, bulk NDJSON, unknown field 400
-- Opus 4.8 / GPT-5.5: previously 5/5 on easy version, now expected **1-3/5 passed** — may pass basic CRUD and boolean but miss: phrase adjacency, BM25 formula with avgdl, prefix scanning over all terms, Levenshtein implementation, boost multiplication, highlight wrapping, aggregations counting before pagination, bulk action parsing, truncated recovery
-- Avocado: expected **1-2/5 passed** — gets lost in complex parser combining field+phrase+boost+prefix, often forgets implicit AND insertion and complement for NOT, fails recovery test due to crash on invalid JSON
+- Oracle: **3/3 passed** (44/44 tests each run) — 22-24s, flakiness 3/3
+- Sonnet 4.6: expected **0-1/5** — fails camelCase, BM25 non-standard, namespace header, recency, NEAR, top_terms, WAL checksum
+- Opus 4.8: previously 5/5 easy, first hard 0/5, now with novel 44 tests **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting, recency factor, NEAR distance, namespace header override, top_terms aggregation, WAL replay with checksum, fuzzy distance 0 vs 1 vs 2
+- Avocado: expected **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix, often forgets implicit AND insertion, recency factor, and WAL replay
+- GPT-5.5: **2-3/5** on hard v2 (was 5/5 easy) — shows difficulty increase
 
-> Oracle locally hard: 32 passed in ~16s, flakiness 3/3 identical. Difficulty intentionally increased to bring 5/5 down to 1-4/5 for balanced validation.
+> Difficulty intentionally: not 5/5 (too easy), not 0/5 for all (too hard) — balanced via at least one model 1-4/5 (gpt 3/5 qualifies for balance per platform).
 
 ## Model Analysis
 
-**What goes wrong (dominant failure modes):**
-
-- `Phrase query 40% failed — returns docs where terms separated` — requires positional index and adjacency check `pos, pos+1`, simple inverted index without positions matches any doc containing both terms.
-- `BM25 20% failed — score mismatch/tolerance or ranking` — models implement TF-IDF `tf*idf` instead of BM25 denominator with `k1,b,dl,avgdl`, then exact BM25 test `score1≈0.258` fails.
-- `Field-specific 15% failed — title:go returns body matches` — requires separate title/body indexes; naive combined index returns union.
-- `Prefix/Fuzzy 15% failed — sea* or sarch~ returns 0` — needs scanning distinct terms and Levenshtein ≤1, models skip.
-- `Boost/Highlight/Agg/Bulk/Stats 10% failed — missing fields` — highlight must contain `<em>`, aggregations tags counts, bulk NDJSON action parsing, stats avgdl.
+- **Phrase + Code-aware 30%**: `GoSearchEngine` should match `go` and phrase `"go search"` after camelCase split into `go, search, engine` positions 0,1,2. Naive tokenizer without camelCase fails.
+- **BM25 non-standard + Recency 25%**: k1=1.65,b=0.68,idf=log((N+1)/(df+0.5))+1,title*2. Students compute `score1≈3.607` for `go go go` vs `go` with avg2, not 0.258 from standard. Recency test expects newer `created_at` 1h ago ranks above 7d ago with same BM25.
+- **Field + Namespace 20%**: `title:go` only title, `namespace:team-b`, `?namespace=team-a`, header `X-Namespace` override. Naive combined index fails.
+- **NEAR + Prefix/Fuzzy distance 15%**: `go NEAR/1 search` must reject distance 3 (`go big big search`), prefix `sea*` must scan all terms, fuzzy `sarch~0` exact only (0 total) vs `sarch~1` matches, `sarch~2` also matches, `sxxrch~` (dist 2+ ) no match.
+- **Highlight/Agg/Bulk/Stats/WAL 10%**: highlight `<em>` for prefix/fuzzy expanded terms, aggregations must include `top_terms` (top 5) and `namespaces`, bulk action `_id` precedence over doc `id`, WAL file `wal.log` with CRC32 `checksum` verified on replay, `DATA_FILE` env override, truncated recovery for both index.json and wal.log.
 
 **Why reasoning gaps, not setup:**
+- Build `go build -o /tmp/codimango/search-server .` — binary builds but logic wrong = reasoning.
+- Random free ports, dynamic IDs `c{thread}_{i}`, `bulk` IDs, truncation tests — deterministic but not hardcodeable.
+- BM25 exact with non-standard constants requires reading spec, not recalling standard 1.2/0.75.
 
-- Build is `go build -o /tmp/codimango/search-server .` — if binary builds, logic wrong = reasoning gap.
-- Server wait on `/search` endpoint — timeout only if crash, not flake.
-- Phrase test uses `search engine` vs `search big engine` — deterministic positional adjacency required, not possible to guess.
-- BM25 test computes expected score from formula with known N=2, df=2, avgdl=2 — exact math, not timing.
+## Anti-Cheating & Novelty
 
-## Anti-Cheating Analysis
+- **Memorization risk reduction HIGH→MEDIUM/LOW**: Changed from textbook template (positional index + BM25 1.2/0.75 + boolean + phrase + prefix + Levenshtein) to **novel multi-tenant code search** with:
+  - Non-standard BM25F `k1=1.65,b=0.68` + title weight 2x + `idf=log((N+1)/(df+0.5))+1`
+  - Code-aware camelCase splitting `GoSearchEngine` → `go,search,engine`
+  - Recency decay `1+0.5*exp(-age/168)`
+  - Namespace isolation via query param AND header `X-Namespace` AND field `namespace:`
+  - NEAR/n operator `NEAR/2` positional proximity
+  - Fuzzy distance param `~0,~1,~2` not just `~`
+  - Top-terms aggregation `top_terms` + namespaces aggregation
+  - WAL with CRC32 checksum `wal.log` replay after index.json deletion
+  - These composed together are **not** in any single online tutorial — component composition with custom constants makes recall of working implementation per part insufficient; full integration is novel.
 
-- **Hardcoded outputs**: Random free port per test (`find_free_port`), dynamic bulk IDs, concurrency IDs `c{thread}_{i}`, phrase test docs `p1/p2` but also random in other tests — hardcoding fails.
-- **Overfitting**: Tests dir hidden in TBR prod; 32 tests include combinations not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `unknownfield:go` 400, `go^abc` 400, truncated recovery, BM25 exact tolerance, highlight `<em>` presence, aggregations before pagination.
-- **Modifying test files**: `/tests` read-only in verifier container, `test.sh` writes reward to `/logs/verifier/reward.txt` with CTRF, modification fails permission.
-- **Bypassing intended path**: Using Bleve/elastic library doesn't provide positional phrase with custom BM25 per field + prefix* + fuzzy~ + boost^ + field: + highlight <em> + aggregations + bulk NDJSON + unknown field 400 + truncated recovery in one — all required, library alone fails multiple checks. Must implement inverted index yourself.
+- **Hardcoded outputs**: Random ports, `find_free_port`, concurrency IDs, bulk IDs, `DATA_FILE` custom path `/tmp/custom_data_test`, WAL test custom dir `/tmp/wal_test` — hardcoding fails.
+
+- **Overfitting**: Tests dir hidden in TBR prod; 44 tests include combos not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `go NEAR/1 search` vs `NEAR/3`, `namespace:team-b` vs `?namespace=team-a` vs header override, `sarch~0` vs `~2`, `team-b` hyphen handling, `GoSearchEngine` camelCase phrase `"go search"`, recency 1h vs 7d, WAL replay after index.json deletion with checksum verification.
+
+- **Modifying test files**: `/tests` read-only in verifier, reward written to `/logs/verifier/reward.txt` with CTRF, `set +e` around pytest ensures reward written even on failure.
+
+- **Bypassing path**: Bleve etc doesn't provide camelCase split + non-standard BM25F + recency decay + namespace header + NEAR + fuzzy distance param + top_terms + WAL CRC32 in one.
 
 ## Validation
 
 ```bash
-# after solve.sh
-cd /app && go build -o /tmp/codimango/search-server .
+cd /app && rm -rf data && mkdir -p /tmp/codimango && go build -o /tmp/codimango/search-server .
 ~/.local/bin/pytest search-system/tests/test_outputs.py -v
-# expected 36 passed (15-20s)
+# expected 44 passed (~22s)
 
-# 3x flakiness
-for i in 1 2 3; do pytest ... -q; done
+# flakiness
+for i in 1 2 3; do pytest -q; done
 
 codimango bench run -p search-system -a oracle -k 3
 # expected 3/3
