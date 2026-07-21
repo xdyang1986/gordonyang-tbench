@@ -4,7 +4,9 @@
 
 set -euo pipefail
 
-# No network during grading - use pre-installed pytest if available, else python -m pytest
+mkdir -p /logs/verifier
+
+# No network during grading - use pre-installed pytest from Dockerfile
 if command -v pytest >/dev/null 2>&1; then
   PYTEST=pytest
 else
