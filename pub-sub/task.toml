@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Build from scratch ultimate complex: multi-batch hierarchical broker allocator with min, priority, credit-decay. Input: T, T loads, G groups each prio min weight cap, S subs each gid prio min weight cap. State: group_total, sub_total, group_credit, sub_credit persist across batches. Effective group remaining cap = min(group rem cap, sum member rem caps). Per batch: group level allocate with min+priority+credit-decay primitive (min phase sorted prio desc, then weighted multi-round proportional rem*credit/total capped, progress guarantee highest credit, RR fallback total==0, credit update batch>0 ? credit/2+1 : +weight). Then per group allocate its share to members using same primitive. Output T lines CSV per sub per batch. No broken file. Go stdlib only."
+description = "Build from scratch ultimate complex with implicit edge handling: multi-batch hierarchical broker allocator with min, priority, credit-decay. Input: T, loads, G groups prio min weight cap, S subs gid prio min weight cap. Tasks combines hierarchical + min+priority + multi-batch persistent credit + credit-decay. State persists: group_total, sub_total, credits. Per batch effective group remaining cap = min(group rem cap, sum member rem caps) - implied not fully formula. Group level and per-group sub level use min+priority+credit-decay primitive: min phase priority desc tie input order, capping min>cap implicitly, then weighted multi-round proportional rem*credit/total capped, progress guarantee highest credit tie lowest idx, RR fallback input order when total==0, credit decay credit/2+1 if served else +weight (exact decay partially implicit). Output T lines CSV. Implicit robustness: blank lines/spaces, invalid gid, group no members, min>cap, min>load priority, zero caps, large numbers up to 1e12, deterministic tie-breaking. No broken file. Go stdlib only. 30 main cases + 8 implicit corner tests = 40 tests."
 keywords = ["allocation", "go", "broker", "fair-share", "hierarchical", "priority", "multi-batch"]
 
 [[task.authors]]
@@ -14,7 +14,7 @@ email = "gordonyang@meta.com"
 [metadata]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
-difficulty = "medium"
+difficulty = "hard"
 category = "software-engineering"
 category_usecase = "handle_events"
 category_subdomain = "backend_services"

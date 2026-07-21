@@ -1,144 +1,83 @@
-# Build the hierarchical broker allocator with min, priority and multi-batch credit
+# Build the hierarchical broker allocator - complex with implicit edge handling
 
-Implement a Go program at `/app/main.go` that is a **multi-batch hierarchical fan-out allocator** with **minimum guarantees**, **priority** and **credit-decay weighted fair share**.
+Implement a Go program at `/app/main.go` that simulates a **multi-batch hierarchical broker**. This task intentionally leaves some edge handling implicit - you must handle them sensibly and tests will check corner cases not fully described.
 
 ## Input format
 
 ```
 T
 load_1
-load_2
 ...
 load_T
 G
-g_priority_0 g_min_0 g_weight_0 g_cap_0
-...
-g_priority_{G-1} g_min_{G-1} g_weight_{G-1} g_cap_{G-1}
+g_prio g_min g_weight g_cap   (G lines, groups 0..G-1)
 S
-group_id_0 priority_0 min_0 weight_0 cap_0
-...
-group_id_{S-1} priority_{S-1} min_{S-1} weight_{S-1} cap_{S-1}
+gid prio min weight cap       (S lines, subs 0..S-1, gid in [0,G-1] ideally)
 ```
 
-- `T` number of batches (≥1)
-- `load_i` messages in batch i (≥0)
-- `G` number of groups (≥1)
-- Each group line: priority (int, higher = higher), min (≥0) per-batch minimum, weight (≥1), cap (≥0) total cap across all batches
-- `S` number of subscribers (≥1)
-- Each subscriber line: group_id in [0,G-1], priority (int), min (≥0) per-batch minimum, weight (≥1), cap (≥0) total cap
+- `T` batches (≥1), each load ≥0
+- Group: priority (int, higher = higher), min (≥0) per-batch minimum, weight (≥1), cap (≥0) total across all batches
+- Subscriber: group id, priority, min, weight, cap (total)
+- Input may contain blank lines and extra spaces - handle robustly.
 
 ## Output format
 
-`T` lines, each line comma-separated allocation per subscriber in input order (S integers) for that batch. Each allocation respects remaining caps, and allocations are cumulative across batches never exceeding caps.
+`T` lines, each line `S` comma-separated ints in input order, allocation per sub for that batch. No spaces. Each batch allocation respects remaining caps. Cumulative allocations never exceed caps.
 
-Build: `cd /app && go build -o /app/allocator .` Standard library only.
+Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
-## State
+## Core allocation logic (two levels, stateful)
 
-- `group_total[g]` cumulative allocated to group, initially 0
-- `sub_total[s]` cumulative allocated to subscriber, initially 0
-- `group_credit[g] = group_weight[g]` initially
-- `sub_credit[s] = sub_weight[s]` initially
+Maintain persistent state across batches:
 
-## Primitive allocate_with_min_priority
+- `group_total`, `sub_total` cumulative, initially 0
+- `group_credit = group_weight`, `sub_credit = sub_weight` initially, persistent and updated each batch.
 
-Used at both levels. Given `load`, items each with `priority`, `min`, `weight`, `cap` (remaining cap for this batch), `credit`, and `index` (input order), returns `batch_alloc`:
+Per batch with load L:
 
-```
-# min phase - priority order
-order = sort indices by priority descending, tie by index ascending
-rem = load
-batch_alloc = [0]*n
-for i in order:
-  if rem==0: break
-  give = min(min[i], cap[i], rem)
-  batch_alloc[i] += give
-  rem -= give
+**Effective group caps (implicit):** A group's remaining allocation cannot exceed what its members can still take. So effective remaining cap for group g should be limited by sum of remaining caps of its members. If a group has no members, its effective cap is 0. Think about what sensible effective cap means.
 
-# weighted phase - credit-decay
-# remaining caps after min phase
-rem_cap = [cap[i] - batch_alloc[i] for i]
+**Group level:** Allocate L to groups (using effective caps) with min + priority + credit-decay:
 
-# active = i where rem_cap[i] > 0
-# Use credit-decay allocator for remaining load rem:
+- Min phase: allocate per-group mins respecting remaining caps and remaining load. If not enough load to satisfy all mins, higher priority groups get their min first. What if min > cap? Sensible capping.
+- Weighted phase: remaining load allocated by credit-decay fair share (see below) using remaining caps after min phase. Credits persist across batches and are updated after each batch based on whether group got anything.
 
-alloc_w = [0]*n
-credit_tmp = credit copy
-rem_w = rem
-while rem_w > 0:
-  active = [i for i in range(n) if alloc_w[i] < rem_cap[i]]
-  if empty: break
-  total = sum credit_tmp[i] for i in active
-  if total == 0:
-    while rem_w > 0:
-      made=False
-      for i in active in order (input order):
-        if rem_w==0: break
-        if alloc_w[i] < rem_cap[i]:
-          alloc_w[i]+=1
-          rem_w-=1
-          made=True
-      if not made: break
-    break
-  delta=[0]*n
-  used=0
-  for i in active:
-    share = (rem_w * credit_tmp[i]) // total
-    share = min(share, rem_cap[i]-alloc_w[i])
-    alloc_w[i]+=share
-    delta[i]=share
-    used+=share
-  if used==0:
-    best = active[0] max credit tie lowest index
-    alloc_w[best]+=1
-    delta[best]=1
-    used=1
-  rem_w -= used
-  for i in active:
-    if delta[i]>0:
-      credit_tmp[i] = credit_tmp[i]//2 + 1
-    else:
-      credit_tmp[i] += weight[i]
+**Per-group subscriber level:** For each group g, let `gl` be its batch allocation. Allocate `gl` to its subscribers (in input order within group) using same min+priority+credit-decay logic with subscriber remaining caps, mins, priorities, weights, and persistent subscriber credits.
 
-# merge
-for i in range(n):
-  batch_alloc[i] += alloc_w[i]
+Update totals and proceed to next batch. Output per-batch per-sub allocations.
 
-# credit update for next batch (based on total batch_alloc >0)
-for i in range(n):
-  if cap[i] > 0: # was active at start (remaining cap >0)
-    if batch_alloc[i] > 0:
-      credit[i] = credit[i]//2 + 1
-    else:
-      credit[i] += weight[i]
+### Credit-decay primitive (used after min phase)
 
-return batch_alloc
-```
+For weighted phase with `rem`, `weights`, `rem_caps`, `credits`:
 
-Note: credit update uses final `batch_alloc` including min phase: if item got any messages in this batch (min+weighted), decay, else boost.
+- `alloc=0`, `credit_tmp=credits copy`, `rem_w=rem`
+- While rem_w >0:
+  - active = indices where alloc < rem_cap
+  - if empty break
+  - total = sum credit_tmp[active]
+  - If total==0: you must still make progress - implement a sensible fallback (e.g., round-robin in input order) and break after.
+  - Otherwise proportional: `share = (rem_w * credit_tmp[i]) // total` capped to `rem_cap[i]-alloc[i]`
+  - If no progress (used==0): give 1 to highest credit active, tie lowest index, to guarantee progress.
+  - `rem_w -= used`
+  - For active: if served this round, decay credit, else boost credit (decay is halving plus small constant to avoid zero, boost is +weight - deduce exact formula from examples if needed)
 
-## Hierarchical multi-batch steps
+Credit update for next batch (implicit): If an entity got any allocation in this batch (including min), its credit decays, else it grows. What is the exact decay formula? Look at examples and think about avoiding zero credit. The intended decay must keep some memory but not drop to zero too fast.
 
-For each batch t with load L = loads[t]:
+### Implicit robustness requirements (not fully spelled out, but tested)
 
-1. Remaining caps: `g_rem_cap[g] = g_cap[g] - group_total[g]`, `s_rem_cap[s] = s_cap[s] - sub_total[s]`
-2. Sum member remaining caps per group: `sum_member_rem[g] = sum s_rem_cap[s] for s in group g`
-3. Effective remaining group cap: `eff_g_rem[g] = min(g_rem_cap[g], sum_member_rem[g])`
-4. Group-level allocation: `group_batch = allocate_with_min_priority(L, groups with priority/min/weight/cap=eff_g_rem/credit)`
-5. For each group g:
-   - Collect its subscribers indices `idxs` in input order
-   - If empty, continue
-   - Build per-member remaining caps, mins, etc for those subs
-   - `sub_batch_in_group = allocate_with_min_priority(group_batch[g], members)`
-   - Scatter to global per-sub batch allocation
-6. Update totals: `group_total[g] += group_batch[g]`, `sub_total[s] += sub_batch[s]`
-7. Output line for this batch: `sub_batch` for all S subs (0 for subs whose group got 0 or not enough) as CSV in input order.
-
-After all batches, total allocated per sub never exceeds its cap, per group never exceeds its cap, and per batch sum = min(batch load, sum eff remaining caps).
+- Input may have blank lines, leading/trailing spaces - parse robustly.
+- `min` may exceed `cap` or remaining cap - min should be capped sensibly.
+- `gid` may be out of range or group may have no members - allocation should be 0 for those subs and not crash.
+- Large numbers up to 1e12 may appear - use 64-bit, O(n log n) or O(n * rounds) is ok but avoid O(load).
+- Zero caps, zero loads, zero mins must be handled.
+- Priority tie-breaking must be deterministic (lowest index wins) and stable across batches.
+- Total credit can drain to 0 after many decays - your fallback must be deterministic and in input order.
+- Effective caps must be respected at both levels - group allocation cannot exceed sum of what its members can still take.
+- Credits should never go negative.
 
 ## Examples
 
-### Example 1 - hierarchical with min and priority
+### Example 1 - basic hierarchical
 
 Input:
 ```
@@ -153,14 +92,12 @@ Input:
 1 5 0 4 3
 1 1 0 1 12
 ```
-2 groups, both priority, min0, weight5 cap10 and weight3 cap10, 4 subs (group0: prio10 min0 w5 cap6, prio5 min0 w3 cap9, group1: prio5 min0 w4 cap3, prio1 min0 w1 cap12). Load 16 → group alloc 10,6 → within groups 6,4 and 3,3.
-
 Output:
 ```
 6,4,3,3
 ```
 
-### Example 2 - min guarantees and priority
+### Example 2 - min and priority
 
 Input:
 ```
@@ -174,7 +111,7 @@ Input:
 0 5 1 6 10
 1 1 0 6 1
 ```
-Group caps 10 each, but group1 effective cap is 1 (only one sub cap1). Load 9 → effective caps 10 and1 total11, group alloc weighted 4 and5? With credit decay: round1 4,4 (capped group1 to1? actually group1 cap eff1, so share min(4,1)=1), used5 rem4, group0 gets remaining 4 → group alloc 8,1. Within group0: subs have mins 2 and1, priority10 vs5, load8. Min phase: give 2 to sub0, 1 to sub1 (priority order) rem5, weighted remaining caps 8 and9: credits 5 and6 total11, 5*5/11=2, 5*6/11=2 → sub0 gets 2 more total4, sub1 gets 2 more total3? Actually with caps: sub0 cap10-2=8, sub1 cap10-1=9, 5*5/11=2, 5*6/11=2 used4 rem1 best sub1 credit6>5 → sub1 gets1 total4. So group0 subs 4,4. Group1 sub gets1.
+Here subs in group0 have mins 2 and1 with priorities 10 vs5. Load9 with effective caps 10 and1.
 
 Output:
 ```
@@ -196,10 +133,14 @@ Input:
 0 1 0 1 6
 1 10 0 2 5
 ```
-T=2, loads 6 and 6, 2 groups, 3 subs. First batch load6 → group alloc 4,1? Actually group weights 4 and1 caps 11,6. Load6 → 4,1? With min0. 6*4/5=4, 6*1/5=1 → 4,1 remaining1 best group0 → 5,1. Within groups: group0 load5 → subs 4,0 and 1,0? Actually subs: group0 has w4 cap11 and w1 cap6 load5 → 4,1. Group1 load1 → sub 2,5 cap5 →1. So batch1 output `4,1,1`. Credits after batch1: group0: 4/2+1=3, group1:1/2+1=1, subs: sub0 4/2+1=3, sub11/2+1=1, sub2 1/2+1=2. Second batch load6 → group alloc with credits 3 vs1: total4, 6*3/4=4 cap remaining group0: cap11-5=6→4, group1:6*1/4=1 cap remaining 5→1 used5 rem1 best group0 →5,1 again. Within group0 load5 with credits sub0=3 sub1=1 total4 → 5*3/4=3 cap remaining sub0 11-4=7→3, sub1 6-1=5→1 used4 rem1 best sub0 →4,1. Group1 load1 with credit2 →1. So batch2 also `4,1,1`.
+T=2. First batch credit starts at weights, second batch credits are decayed/boosted from first.
 
 Output:
 ```
 4,1,1
 4,1,1
 ```
+
+## Hints for complexity
+
+This task combines hierarchical + min + priority + multi-batch + credit-decay. The reference solution is ~150 LOC but edge handling adds complexity. Pay attention to effective caps, min capping, priority ordering for min phase, credit update, and RR fallback - these are where corner case tests will fail if not handled sensibly.

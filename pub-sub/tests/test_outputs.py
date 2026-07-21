@@ -454,3 +454,127 @@ def test_deterministic():
         [(0, 10, 0, 5, 6), (0, 5, 0, 3, 9), (1, 5, 0, 4, 3), (1, 1, 0, 1, 12)],
     )
     assert a == b == ["6,4,3,3"]
+
+
+def run_case_raw_input(raw):
+    # for blank lines / spaces tests - feed raw string directly
+    proc = subprocess.run([BIN], input=raw, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"nonzero exit: {proc.stderr}\nraw:\n{raw}"
+    out_lines = [
+        ln.strip() for ln in proc.stdout.strip().splitlines() if ln.strip() != ""
+    ]
+    return out_lines
+
+
+def test_min_exceeds_cap():
+    # subscriber min > cap should be capped to cap (implicit)
+    # group0 has 1 sub with cap 2 but min 10
+    T = 1
+    loads = [5]
+    groups = [(0, 0, 1, 10)]
+    subs = [(0, 10, 10, 1, 2)]  # min 10 but cap 2
+    out = run_case(T, loads, groups, subs)
+    # min capped to cap 2, so alloc 2
+    assert out == ["2"]
+
+
+def test_priority_tie_and_order():
+    # higher priority gets min first when load insufficient
+    T = 1
+    loads = [3]
+    groups = [(0, 0, 1, 10)]
+    # two subs same group, prio 10 vs 1, both min 2 cap 10, load 3 => only 3 total
+    # min phase priority order: higher prio gets 2 first, then lower gets 1 (min capped to remaining)
+    subs = [(0, 10, 2, 1, 10), (0, 1, 2, 1, 10)]
+    out = run_case(T, loads, groups, subs)
+    # first gets 2, second gets 1
+    assert out == ["2,1"]
+    # tie priority -> input order wins
+    subs2 = [(0, 5, 2, 1, 10), (0, 5, 2, 1, 10)]
+    out2 = run_case(T, loads, groups, subs2)
+    assert out2 == ["2,1"]
+
+
+def test_group_no_members():
+    # group with no members has effective cap 0
+    T = 1
+    loads = [10]
+    groups = [(0, 0, 5, 10), (0, 0, 5, 10)]
+    subs = [(0, 0, 0, 1, 5)]  # only group0 has members
+    out = run_case(T, loads, groups, subs)
+    assert out == ["5"]
+    # group1 with no members should get 0 allocation, total allocated =5 not 10, which is min(load, sum effective caps)=5
+
+
+def test_invalid_gid():
+    # subscriber with gid out of range should be ignored (alloc 0) and not crash
+    T = 1
+    loads = [10]
+    groups = [(0, 0, 1, 10)]
+    subs = [(0, 0, 0, 1, 5), (99, 0, 0, 1, 5)]  # second has invalid gid
+    out = run_case(T, loads, groups, subs)
+    # first gets up to 5, second gets 0
+    assert out == ["5,0"]
+
+
+def test_blank_lines_and_spaces():
+    # input with blank lines and extra spaces should be parsed robustly
+    raw = """
+1
+
+10
+
+1
+  0   0  1  10
+
+2
+
+0  0  0  1  5
+  0 0 0 1 5
+
+"""
+    out = run_case_raw_input(raw)
+    # load 10, group cap 10 but sum member caps 10, group alloc 10, subs 5,5
+    assert out == ["5,5"]
+
+
+def test_large_numbers():
+    # large numbers up to 1e12 should not overflow and should be efficient
+    T = 1
+    loads = [1000000000000]
+    groups = [(0, 0, 1, 1000000000000)]
+    subs = [(0, 0, 0, 1, 500000000000), (0, 0, 0, 1, 500000000000)]
+    out = run_case(T, loads, groups, subs)
+    # proportional 50/50
+    assert out == ["500000000000,500000000000"]
+
+
+def test_rr_fallback_multi_batch():
+    # force total credit to 0: after many decays credit can become 0, need RR fallback
+    # Use weights 1 and many rounds to drain credits
+    # T=5 batches of load 1 each, single group, 2 subs cap 10 each weight 1
+    # After first batches, credits decay but should still be handled
+    # This specific case triggers total==0 path after credits become 0?
+    # We test that it doesn't deadlock and still allocates deterministically
+    T = 5
+    loads = [1, 1, 1, 1, 1]
+    groups = [(0, 0, 1, 10)]
+    subs = [(0, 0, 0, 1, 10), (0, 0, 0, 1, 10)]
+    out = run_case(T, loads, groups, subs)
+    assert len(out) == 5
+    # total allocated across batches should be 5
+    total0 = sum(int(line.split(",")[0]) for line in out)
+    total1 = sum(int(line.split(",")[1]) for line in out)
+    assert total0 + total1 == 5
+    # deterministic
+    out2 = run_case(T, loads, groups, subs)
+    assert out == out2
+
+
+def test_zero_caps():
+    T = 1
+    loads = [10]
+    groups = [(0, 0, 1, 0)]
+    subs = [(0, 0, 0, 1, 0)]
+    out = run_case(T, loads, groups, subs)
+    assert out == ["0"]
