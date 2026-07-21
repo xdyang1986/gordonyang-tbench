@@ -39,27 +39,30 @@ Payloads are single tokens (no spaces, no commas, 1..1024B). Topic/group names m
 
 ## Completion Rates
 
-Latest validation run (commit `5cec83e`) — **passing**, oracle calibration patch applied locally for harbor docker-compose-build volume mount:
+Latest **online** validation run (commit `34d71d8`, multimango.com) — **Validation: passing**. Numbers below are the actual online per-agent results, not a local harbor run.
+
+| Agent | Model | Attempts | Passed | Mean reward |
+|---|---|---|---|---|
+| Oracle | oracle | 3 | 3/3 | 1.000 |
+| Metacode (gate) | meta/avocado-5.14-code | 5 | 4/5 | 0.800 |
+| Claude-code | claude-opus-4-8 | 5 | 5/5 | 1.000 |
+| Codex | gpt-5.5 | 5 | 0/5 | 0.000 |
+
+**Structural / qualitative checks (all PASS):**
 
 | Check | Result |
 |---|---|
-| Structural | 8 files (Dockerfile, instruction.md, task.toml, tests) |
-| Oracle | 1/1, Mean 1.000, reward 1.0, 42 pytest passed |
-| Nop baseline | 1/1, Mean 0.000 (expected fail) |
-| Difficulty | hard — 42 edge cases + durability + compaction |
-| task.toml validation | fixed — authors, format=terminal_bench_single_turn, workstream=swe_public_repo, subdomain=distributed_systems, usecase=handle_events |
+| Structure | 6/6 required files present |
+| task.toml | valid TOML, taxonomy fields valid |
+| Dockerfile / Internet / Solution / Tests | PASS (`golang:1.26.2-bookworm`, internet enabled, solve.sh has content, tests meaningful) |
+| License / SWE Config | PASS (no external repo clone, not an SWE-config task) |
+| Agentic review verdict | GOOD |
+| Contamination v2 | MEDIUM — NOT_FOUND in internal decontamination table (tbench track) |
+| Difficulty | hard — 42 pytest edge cases + durability + compaction |
 
-**Oracle run:**
-```
-harbor run -p message-queue -a oracle -n 1 --force-build
-  1/1 Mean: 1.000
-  Reward Distribution: reward=1.0 → 1
-  42 passed
-```
-
-**Model notes:**
-- Weak baseline (nop) fails (0.0), oracle succeeds (1.0) → task not trivially solvable, requires full implementation of partitioned logs, group state machine, WAL framing, recovery, compaction.
-- No explicit revalidation triggered for this README update.
+**Calibration read:**
+- **Well-calibrated discriminator.** Strong model (Opus 4.8) solves it 5/5 and oracle is 3/3, confirming the spec is solvable; the avocado gate lands at 4/5 (not the too-easy 5/5), and Codex/gpt-5.5 fails outright 0/5 — the task separates model strength rather than being trivially solvable or unfair.
+- No explicit revalidation triggered for this README update — figures read from the last completed online validation run via `codimango api`.
 
 ## Model Analysis
 
