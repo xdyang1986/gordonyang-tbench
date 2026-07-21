@@ -58,13 +58,13 @@ Per-field (title, body) positional inverted index:
 BM25F with **non-standard parameters** (to reduce textbook memorization):
 
 - Constants `k1=1.65`, `b=0.68` (NOT standard 1.2/0.75)
-- IDF formula **non-standard**: `idf = log((N+1)/(df+0.5))` natural log, where `N=total docs`, `df=docs containing term in field (or union for default)`. This differs from standard `log(1+(N-df+0.5)/(df+0.5))`.
-- `fieldLen = tokens in field for doc`, `avgFieldLen = total tokens in field / N` (minimum 1)
+- IDF formula **non-standard**: `idf = log((N+1)/(df+0.5)) + 1` natural log with trailing +1, where `N=total docs`, `df=docs containing term in field (or union for default)`. This differs from standard `log(1+(N-df+0.5)/(df+0.5))` and includes +1.
+- `fieldLen = tokens in field for doc after code-aware tokenization`, `avgFieldLen = total tokens in field across all docs / N` (minimum 1, per-field: avg title = total title tokens / N, avg body = total body tokens / N)
 - `scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))`
-- For default (no field): `score = scoreTitle*2.0 + scoreBody*1.0` — title weighted double (BM25F style, field boost).
-- For `title:`, `body:`: only that field's BM25F.
-- For `tags:`: fixed `1.0 * boost`.
-- For phrase, prefix, fuzzy, NEAR: sum expanded term BM25F * boost.
+- For default (no field): `score = 2.0*scoreTitle + 1.0*scoreBody` — title weighted double (BM25F style, field boost). That is, title score multiplied by 2.0, body by 1.0, then sum.
+- For `title:`, `body:`: only that field's BM25F contributes (title or body).
+- For `tags:` and `namespace:`: fixed `1.0 * boost * recencyFactor`, no BM25.
+- For phrase, prefix, fuzzy, NEAR: sum expanded term BM25F scores within matching field(s) multiplied by boost.
 
 Recency decay — **novel**:
 
@@ -75,9 +75,9 @@ Recency decay — **novel**:
 
 Namespace isolation — **novel**:
 
-- `namespace` query param (comma? single) and header `X-Namespace` filter docs. Header takes precedence over param; if both absent, search all namespaces.
-- Also support field query `namespace:team-a` inside query language.
-- For `tags` aggregation, counts are per matched docs after namespace filtering.
+- `namespace` query param is a single namespace string (e.g., `?namespace=team-a`) and header `X-Namespace` filters docs by exact namespace case-insensitive. Header takes precedence over query param; if both absent, search all namespaces.
+- Also support field query `namespace:team-a` inside query language as clause with exact namespace match.
+- For `tags` and `namespaces` aggregations, counts are per matched docs after namespace filtering.
 
 ## 5. HTTP API
 
@@ -94,7 +94,13 @@ Namespace isolation — **novel**:
 NDJSON with action lines `{"index":{"_id":"id"}}` + doc, or per-line docs. Action `_id` overrides doc id. Returns `{"errors":bool,"items":[...]}`. Each bulk doc also writes WAL and persists.
 
 ### GET /stats
-`{"docs":2,"terms":15,"avgdl":6.5,"namespaces":2}` — includes `namespaces` count distinct.
+Returns precise index stats with JSON shape `{"docs":int,"terms":int,"avgdl":float,"namespaces":int}`:
+- `docs`: number of documents indexed (len of docs map)
+- `terms`: number of distinct terms across title and body fields after code-aware tokenization (union of title and body distinct terms)
+- `avgdl`: average document length across all docs, defined as `(titleTotalTokens + bodyTotalTokens) / docs` as float. If docs=0, avgdl=0. Minimum 0. Title and body token counts use code-aware tokenization.
+- `namespaces`: number of distinct namespaces across docs (lowercased? Count distinct case-insensitive, but return int)
+
+Example: `{"docs":2,"terms":15,"avgdl":6.5,"namespaces":2}`
 
 ### GET /search and POST /search
 
@@ -122,7 +128,7 @@ Support:
 - **Terms**: `go` analyzed with code-aware tokenizer.
 - **Boolean**: `AND, OR, NOT` with precedence `NOT(3) > NEAR(2) = AND(2) > OR(1)`, parentheses, implicit AND before NOT and between adjacent clauses.
 - **Phrase**: `"search engine"` — positional adjacent in same field (title or body) using code-aware positions. After code-aware split, `GoSearchEngine` contains `go` at pos0 and `search` at pos1, so `"go search"` matches `GoSearchEngine`.
-- **NEAR/n**: `go NEAR/2 search` — terms within distance n in same field. Syntax `NEAR/<int>` case-insensitive? Example `NEAR/2`. `NEAR` without `/n` defaults to distance 5? For this task, require `NEAR/n` with integer, and treat `NEAR` alone as distance 5. Matches if both terms exist in same field and `abs(pos1-pos2) <= n`. For default field, match if NEAR holds in title OR body.
+- **NEAR/n**: `go NEAR/2 search` — terms within distance n in same field. Syntax `NEAR/<int>` where n is non-negative integer. Operator is case-insensitive, example `NEAR/2`. If used as `NEAR` without `/n`, default distance is 5. For this task, require integer n after slash when slash present. Matches if both terms exist in same field and `abs(pos1-pos2) <= n`. For default field (no field specified), match if NEAR holds in title OR body.
 - **Field-specific**: `title:go`, `body:search`, `tags:go`, `namespace:team-a`, default=title OR body (title weighted 2x). Field names allowed: `title, body, tags, namespace`. Unknown field → 400.
 - **Prefix**: `sea*` — term ending `*` matches indexed terms with that prefix (scan distinct terms). Field-specific: `title:sea*`.
 - **Fuzzy**: `sarch~` or `sarch~2` — `~` optionally followed by max distance (e.g., `~2`). If no number after `~`, distance=1. If `~2`, distance=2. Levenshtein ≤ distance. Implement yourself. Field-specific supported.
@@ -159,7 +165,7 @@ If highlight=true, each result includes `highlight` map with `<em>` wrapping. To
 
 #### Aggregations
 
-Always return:
+Always return aggregations for matched docs before pagination:
 
 ```json
 {
@@ -173,9 +179,39 @@ Always return:
 }
 ```
 
-- `tags`: lowercased tag → count among matched (before pagination).
-- `top_terms`: top 5 terms by frequency in matched docs' title+body (after code-aware tokenization), sorted count desc then term asc, each `{"term":string,"count":int}`.
-- `namespaces`: namespace → count among matched.
+- `tags`: map lowercased tag string → count int, counting matched docs containing that tag.
+- `top_terms`: array of top 5 terms by frequency in matched docs' title+body after code-aware tokenization. Each entry `{"term":string,"count":int}` where count is total occurrences across matched docs. Sorted by count descending, then term ascending. If less than 5 distinct terms, return fewer. If no matches, empty array `[]`.
+- `namespaces`: map lowercased namespace string → count int, counting matched docs per namespace.
+
+#### Response Format — Precise
+
+`GET /search` and `POST /search` always return 200 with JSON shape:
+
+```json
+{
+  "total": 2,
+  "results": [
+    {"id":"doc1","score":1.23,"title":"GoSearchEngine","tags":["go"],"namespace":"team-a","highlight":{"title":"<em>Go</em><em>Search</em><em>Engine</em>"}},
+    {"id":"doc2","score":0.89,"title":"Java Search","tags":["java"],"namespace":"team-b"}
+  ],
+  "aggregations": {
+    "tags": {"go":1,"java":1},
+    "top_terms": [{"term":"go","count":2},{"term":"search","count":2}],
+    "namespaces": {"team-a":1,"team-b":1}
+  }
+}
+```
+
+- `total`: int, number of docs matching query before pagination.
+- `results`: array, paginated. Each result object must contain exactly:
+  - `id`: string, doc id
+  - `score`: float64, BM25F with recency decay as defined, must be present and numeric. For empty query, score = 1.0 * recencyFactor.
+  - `title`: string, original doc title
+  - `tags`: array of strings, original doc tags
+  - `namespace`: string, doc namespace (default `"default"` if not set)
+  - `highlight`: optional map<string,string> present only when highlight=true and field has text match. Keys are `title` and/or `body`, values are strings with matched terms wrapped in `<em>` and `</em>` preserving original case. Must contain `<em>` when present.
+
+- `aggregations`: object always present with keys `tags`, `top_terms`, `namespaces` as defined above. If no matches, each aggregation is empty: `tags:{}, top_terms:[], namespaces:{}`.
 
 ## 6. Persistence with WAL and Recovery — Novel
 
