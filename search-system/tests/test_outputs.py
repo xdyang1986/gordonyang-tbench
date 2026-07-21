@@ -698,15 +698,38 @@ def test_bulk_api(server):
 
 def test_stats_endpoint(server):
     base = server
-    post_doc(base, {"id": "s1", "title": "go search", "body": "engine", "tags": []})
-    post_doc(base, {"id": "s2", "title": "java search", "body": "lucene", "tags": []})
+    post_doc(
+        base,
+        {
+            "id": "s1",
+            "title": "go search",
+            "body": "engine",
+            "tags": [],
+            "namespace": "ns-a",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "s2",
+            "title": "java search",
+            "body": "lucene",
+            "tags": [],
+            "namespace": "ns-b",
+        },
+    )
     r = requests.get(f"{base}/stats", timeout=5)
     assert r.status_code == 200, r.text
     j = r.json()
-    assert "docs" in j and "terms" in j and "avgdl" in j
+    assert "docs" in j and "terms" in j and "avgdl" in j and "namespaces" in j, (
+        f"stats should include docs,terms,avgdl,namespaces, got {j}"
+    )
     assert j["docs"] == 2
     assert j["terms"] > 0
     assert isinstance(j["avgdl"], (int, float))
+    assert j["namespaces"] == 2, (
+        f"expected 2 distinct namespaces, got {j['namespaces']}"
+    )
 
 
 def test_complex_bool_field_phrase_prefix(server):
@@ -1262,12 +1285,114 @@ def test_wal_replay():
 def test_fuzzy_with_distance(server):
     base = server
     post_doc(base, {"id": "fzd1", "title": "search", "body": "", "tags": []})
-    # distance 1 should match
     r = search_get(base, q="sarch~1")
     assert r.json()["total"] == 1
-    # distance 2 should also match (since distance 1 <=2)
     r = search_get(base, q="sarch~2")
     assert r.json()["total"] == 1
-    # distance 0 should NOT match (exact only, sarch != search)
     r = search_get(base, q="sarch~0")
     assert r.json()["total"] == 0
+
+
+def test_get_doc_includes_namespace_created_at(server):
+    base = server
+    ts = "2026-07-21T10:00:00Z"
+    post_doc(
+        base,
+        {
+            "id": "nsca1",
+            "title": "test",
+            "body": "test",
+            "tags": [],
+            "namespace": "team-x",
+            "created_at": ts,
+        },
+    )
+    r = get_doc(base, "nsca1")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert "namespace" in j and j["namespace"] == "team-x", (
+        f"GET doc should include namespace, got {j}"
+    )
+    assert "created_at" in j and j["created_at"] == ts, (
+        f"GET doc should include created_at, got {j}"
+    )
+
+
+def test_invalid_near_should_400(server):
+    base = server
+    r = search_get(base, q="go NEAR/abc search")
+    assert r.status_code == 400, (
+        f"invalid NEAR/abc should 400, got {r.status_code} {r.text}"
+    )
+    r = search_get(base, q="go NEAR/-1 search")
+    assert r.status_code == 400
+
+
+def test_wal_checksum_skip():
+    # WAL checksum verification: corrupted line with wrong checksum should be skipped
+    port = find_free_port()
+    custom_dir = "/tmp/wal_checksum_test"
+    custom_file = os.path.join(custom_dir, "index.json")
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert wait_for_server(port, timeout=15)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        r = requests.post(
+            f"{base}/documents",
+            json={"id": "good1", "title": "good", "body": "", "tags": []},
+            timeout=5,
+        )
+        assert r.status_code in (200, 201)
+        time.sleep(0.5)
+        wal_file = os.path.join(custom_dir, "wal.log")
+        assert os.path.exists(wal_file)
+        # append corrupted entry with wrong checksum
+        with open(wal_file, "a") as f:
+            f.write(
+                '{"op":"index","doc":{"id":"bad","title":"bad"},"checksum":"00000000","ts":"2026-07-21T00:00:00Z"}\n'
+            )
+            f.write('{"invalid json line\n')
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        port2 = find_free_port()
+        env2 = {**os.environ, "PORT": str(port2), "DATA_FILE": custom_file}
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert wait_for_server(port2, timeout=15), (
+            "server should start and skip corrupted WAL lines"
+        )
+        base2 = f"http://127.0.0.1:{port2}"
+        # good1 should be recovered, bad should NOT (wrong checksum)
+        r = requests.get(f"{base2}/documents/good1", timeout=5)
+        assert r.status_code == 200, (
+            f"good doc should be recovered after WAL with corrupted lines, got {r.status_code}"
+        )
+        r = requests.get(f"{base2}/documents/bad", timeout=5)
+        assert r.status_code == 404, (
+            f"bad checksum doc should be skipped, got {r.status_code}"
+        )
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)

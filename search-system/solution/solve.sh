@@ -2173,4 +2173,4 @@ GOMAIN
 
 go mod tidy
 go build -o /tmp/codimango/search-server .
-echo "novel oracle built — multi-tenant code search with recency, code-aware, NEAR, WAL"
+echo "novel oracle built — multi-tenant code search with recency, code-aware, NEAR, WAL, top-terms, namespaces"

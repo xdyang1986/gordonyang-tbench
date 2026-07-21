@@ -31,13 +31,13 @@ Naive approach fails because:
 
 ## Completion Rates (local, novel hard)
 
-- Oracle: **3/3 passed** (44/44 tests each run) — 22-24s, flakiness 3/3
-- Sonnet 4.6: expected **0-1/5** — fails camelCase, BM25 non-standard, namespace header, recency, NEAR, top_terms, WAL checksum
-- Opus 4.8: previously 5/5 easy, first hard 0/5, now with novel 44 tests **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting, recency factor, NEAR distance, namespace header override, top_terms aggregation, WAL replay with checksum, fuzzy distance 0 vs 1 vs 2
-- Avocado: expected **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix, often forgets implicit AND insertion, recency factor, and WAL replay
-- GPT-5.5: **2-3/5** on hard v2 (was 5/5 easy) — shows difficulty increase
+- Oracle: **3/3 passed** (47/47 tests each run) — 24-26s, flakiness 3/3
+- Sonnet 4.6: expected **0-1/5** — fails camelCase, BM25 non-standard 1.65/0.68 with +1, namespace header, recency 1h vs 7d, NEAR/1 vs NEAR/3, top_terms, WAL checksum skip, DATA_FILE override
+- Opus 4.8: previously 5/5 easy, first hard 0/5, now novel 47 tests **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting 2x title, recency factor 1+0.5*exp(-age/168), NEAR distance, namespace header override, top_terms aggregation, WAL replay with CRC32 checksum verification, fuzzy ~0 vs ~1 vs ~2, bulk _id precedence
+- Avocado: expected **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix+fuzzy distance, often forgets implicit AND insertion, recency factor, and WAL checksum skip
+- GPT-5.5: **3/5** then **2/5** on hard v2/v3 (was 5/5 easy) — shows difficulty increase from HIGH memorization to balanced
 
-> Difficulty intentionally: not 5/5 (too easy), not 0/5 for all (too hard) — balanced via at least one model 1-4/5 (gpt 3/5 qualifies for balance per platform).
+> Difficulty intentionally: not 5/5 (too easy), not 0/5 for all models (too hard) — balanced via at least one model 1-4/5 (gpt 3/5 qualifies for balance per platform). Previous easy version was 5/5 all models → too easy, first hard 0/5 opus → too hard, novel tuned to 2-3/5 gpt.
 
 ## Model Analysis
 
@@ -65,20 +65,20 @@ Naive approach fails because:
   - WAL with CRC32 checksum `wal.log` replay after index.json deletion
   - These composed together are **not** in any single online tutorial — component composition with custom constants makes recall of working implementation per part insufficient; full integration is novel.
 
-- **Hardcoded outputs**: Random ports, `find_free_port`, concurrency IDs, bulk IDs, `DATA_FILE` custom path `/tmp/custom_data_test`, WAL test custom dir `/tmp/wal_test` — hardcoding fails.
+- **Hardcoded outputs**: Random ports, `find_free_port`, dynamic IDs `c{thread}_{i}`, custom dirs `/tmp/custom_data_test`, `/tmp/wal_test`, `/tmp/wal_checksum_test` with random ports, recency timestamps `now-1h` vs `now-7d`, bulk IDs — hardcoding fails.
 
-- **Overfitting**: Tests dir hidden in TBR prod; 44 tests include combos not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `go NEAR/1 search` vs `NEAR/3`, `namespace:team-b` vs `?namespace=team-a` vs header override, `sarch~0` vs `~2`, `team-b` hyphen handling, `GoSearchEngine` camelCase phrase `"go search"`, recency 1h vs 7d, WAL replay after index.json deletion with checksum verification.
+- **Overfitting**: Tests dir hidden in TBR prod; 47 tests include combos not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `go NEAR/1 search` vs `NEAR/3`, `namespace:team-b` field vs `?namespace=team-a` param vs header `X-Namespace` override, `sarch~0` exact only vs `~1,~2`, `sxxrch~` distance 2+ no match, `team-b` hyphen handling, `GoSearchEngine` camelCase phrase `"go search"`, recency 1h vs 7d, WAL replay after index.json deletion with CRC32 checksum verification and corrupted line skip, `DATA_FILE` custom path, invalid `NEAR/abc` 400, invalid boost `^abc` 400, stats `namespaces` count, GET doc includes `namespace`+`created_at`.
 
-- **Modifying test files**: `/tests` read-only in verifier, reward written to `/logs/verifier/reward.txt` with CTRF, `set +e` around pytest ensures reward written even on failure.
+- **Modifying test files**: `/tests` read-only in verifier, reward written to `/logs/verifier/reward.txt` with CTRF, `set +e` around pytest ensures reward written even on failure (fixed High severity).
 
-- **Bypassing path**: Bleve etc doesn't provide camelCase split + non-standard BM25F + recency decay + namespace header + NEAR + fuzzy distance param + top_terms + WAL CRC32 in one.
+- **Bypassing path**: Bleve etc doesn't provide camelCase split + non-standard BM25F k1=1.65 b=0.68 idf+1 + title weight 2x + recency decay exp(-age/168) + namespace header + NEAR/n + fuzzy distance param ~0/~1/~2 + top_terms + namespaces aggregation + WAL CRC32 checksum skip + DATA_FILE override in one.
 
 ## Validation
 
 ```bash
 cd /app && rm -rf data && mkdir -p /tmp/codimango && go build -o /tmp/codimango/search-server .
 ~/.local/bin/pytest search-system/tests/test_outputs.py -v
-# expected 44 passed (~22s)
+# expected 47 passed (~24s)
 
 # flakiness
 for i in 1 2 3; do pytest -q; done

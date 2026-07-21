@@ -135,8 +135,17 @@ If query contains any explicit boolean operator (AND,OR,NOT,NEAR, parentheses), 
 
 #### Scoring — Recency-decayed BM25F (Novel)
 
-- Use non-standard k1=1.65, b=0.68, idf=log((N+1)/(df+0.5)), title weight 2.0, body 1.0.
-- Recency factor as above.
+- Use non-standard k1=1.65, b=0.68, idf=log((N+1)/(df+0.5)) + 1 (natural log) with trailing +1, title weight 2.0, body 1.0.
+- For each doc d, field f (title, body), term t:
+  - tf = term frequency in field f for doc d
+  - N = total docs
+  - df = docs containing term t in field f, for default field df is union of docs containing term in either title or body
+  - idf = log((N+1)/(df+0.5)) + 1
+  - fieldLen = tokens in field f for doc d after code-aware tokenization
+  - avgFieldLen = total tokens in field f across all docs / N (minimum 1)
+  - scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))
+- Default field score = 2.0*scoreTitle + 1.0*scoreBody.
+- Recency factor: if doc has created_at, ageHours = (now - created_at).Hours(), recency = 1 + 0.5*exp(-ageHours/168), else 1.0.
 - For phrase: sum BM25F of terms in phrase * boost * recency.
 - For prefix/fuzzy/NEAR: sum expanded/matching terms BM25F * boost * recency.
 - For tags, namespace: fixed 1.0 * boost * recency (if matches).
