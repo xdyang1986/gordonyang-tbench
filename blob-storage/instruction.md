@@ -84,7 +84,7 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
     ]
   }
   ```
-- Sorted by name ascending (required, lexicographically). Empty result must be `{"buckets": []}` not `{"buckets": null}` — use empty slice `make([]T,0)` in Go to avoid null.
+- Sorted by name ascending (required, lexicographically). Empty result must be `{"buckets": []}` not `{"buckets": null}`.
 
 **Object Operations**
 
@@ -145,7 +145,7 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
       "count": 2
     }
     ```
-  - Sorted by key lexicographically ascending (required). Empty result must be `{"objects": [], "prefix": "...", "count": 0}` not null — use empty slice.
+  - Sorted by key lexicographically ascending (required). Empty result must be `{"objects": [], "prefix": "...", "count": 0}` not null.
   - `404 Not Found` if bucket doesn't exist.
 - Must exclude `*.meta.json` and `.bucket_meta.json` from listing.
 
@@ -193,10 +193,10 @@ To reduce memorization risk, this task includes two non-standard extensions not 
 - Length 1-1024 characters after URL decoding
 - Must not be empty
 - Must not start with `/`
-- Must not contain `..` path traversal as segment (e.g., `a/../b` invalid). Implementations must also prevent escaping bucket root via `filepath.Rel` check — if cleaned path escapes bucket (Rel starts with `..`), reject as 400. Go's `net/http` cleans `..` before handler, so check raw `r.RequestURI` for `..` segments and reject as 400 (or 404 if cleaned path becomes bucket operation, both block escape).
+- Must not contain `..` path traversal as segment (e.g., `a/../b` invalid) and must prevent escaping bucket root. For cases where `..` causes path to normalize outside bucket, reject as 400 (returning 404 for cleaned path that becomes bucket-level operation is also acceptable as it blocks escape).
 - Must not contain `//` double-slash (reject as 400) and must not contain null bytes.
-- Invalid => `400` `{"error": "invalid object key", "code": "InvalidObjectKey"}`. For cases where `..` causes path to be cleaned to a bucket-level path, returning 404 is also acceptable as it blocks traversal.
-- ETag: header should be unquoted hex MD5, JSON `etag` field must be unquoted hex. Implementations returning quoted ETag `"abc"` should still have matching unquoted value inside quotes — tests will strip quotes leniently, but prefer unquoted.
+- Invalid => `400` `{"error": "invalid object key", "code": "InvalidObjectKey"}`.
+- ETag: header should be hex-encoded MD5 of content (unquoted), JSON `etag` field must be unquoted hex. Content must match exactly.
 
 ### 5. Concurrency & Safety
 
@@ -279,16 +279,16 @@ curl -X DELETE http://localhost:8080/buckets/mybucket
 - Server builds without errors
 - All bucket CRUD operations work with correct status codes
 - All object CRUD operations work, including binary and empty objects
-- Listing with prefix filter works and sorted, empty slices are [] not null
+- Listing with prefix filter works and sorted
 - Metadata preservation (Content-Type, custom X-Amz-Meta-)
-- ETag MD5 correctness (unquoted hex in JSON, header may be unquoted, tests strip quotes leniently but prefer unquoted)
-- Validation of bucket names and object keys (including raw RequestURI .. checks and // rejection, with 400 or 404 both blocking traversal)
+- ETag MD5 correctness
+- Validation of bucket names and object keys
 - 409 on deleting non-empty bucket
-- Persistence on filesystem with atomic writes (temp file + rename)
-- Concurrency safety (tests will do parallel uploads, last-write-wins acceptable)
-- Handles hierarchical keys (slashes) with MkdirAll
+- Persistence on filesystem with atomic writes
+- Concurrency safety (tests will do parallel uploads)
+- Handles hierarchical keys (slashes)
 - **Novel: SHA256 checksum verification via X-Content-SHA256, rejecting BadDigest on mismatch**
-- **Novel: TTL expiration via X-Expire-After, 410 Gone after expiry, background reaper every 1s or lazy check**
+- **Novel: TTL expiration via X-Expire-After, 410 Gone after expiry, background reaper or lazy check**
 - **Novel: Copy operation via POST .../copy with JSON body destBucket/destKey**
 
-Implement the full service now. Ensure `go.mod` is initialized and server starts on :8080. Binary should be `./blob-server` or `/app/blob-server` (avoid `/tmp/blob-server` hardcoded path warning, use `/tmp/codimango/` for logs).
+Implement the full service now. Ensure `go.mod` is initialized and server starts on :8080.
