@@ -18,8 +18,8 @@ ENV PATH="/root/.local/bin:${PATH}"
 RUN pip3 install --break-system-packages pytest==8.4.1 requests==2.32.3 pytest-json-ctrf==0.3.5 2>&1 || pip install --break-system-packages pytest==8.4.1 requests==2.32.3 pytest-json-ctrf==0.3.5 2>&1 || /root/.local/bin/uv pip install --system --break-system-packages pytest==8.4.1 requests==2.32.3 pytest-json-ctrf==0.3.5
 
 # Copy go.mod if exists (optional, will be overwritten by agent)
-# Ensure /app exists and is writable
-RUN mkdir -p /app /tmp/blob-data && chmod -R 777 /app /tmp/blob-data
+# Ensure /app exists and is writable, and create allowed /tmp/codimango for logs per structural checker guidance
+RUN mkdir -p /app /tmp/blob-data /tmp/codimango && chmod -R 777 /app /tmp/blob-data /tmp/codimango
 
 # Default command
 CMD ["/bin/bash"]

@@ -1252,6 +1252,50 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// Wrapper to reject double-slash and other invalid raw keys before ServeMux normalizes them
+func newMainHandler(mux http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawURI := r.RequestURI
+		if qIdx := strings.Index(rawURI, "?"); qIdx != -1 {
+			rawURI = rawURI[:qIdx]
+		}
+		// Only inspect object-related requests
+		if strings.Contains(rawURI, "/objects/") {
+			idx := strings.Index(rawURI, "/objects/")
+			if idx != -1 {
+				rawKeyEscaped := rawURI[idx+len("/objects/"):]
+				// Handle copy suffix
+				trimmed := rawKeyEscaped
+				if strings.HasSuffix(trimmed, "/copy") {
+					trimmed = strings.TrimSuffix(trimmed, "/copy")
+				}
+				// For list operation, trimmed is "" or "/" — skip validation (not an object key)
+				if trimmed != "" && trimmed != "/" {
+					decoded, err := url.PathUnescape(trimmed)
+					if err != nil {
+						writeError(w, http.StatusBadRequest, "invalid object key", "InvalidObjectKey")
+						return
+					}
+					// Remove leading "/" that appears when request has double slash after /objects/
+					// e.g., /objects//file.txt -> trimmed "/file.txt" -> decoded "/file.txt"
+					// Our isValidObjectKey checks leading "/" and // and \x00 and .. and length
+					if !isValidObjectKey(decoded) {
+						// Only reject if this is actually an object key operation (non-empty)
+						// For /objects/a//b, decoded="a//b" invalid
+						// For /objects/%2Ffile.txt, decoded="/file.txt" starts with "/" invalid
+						// For %00, contains null byte invalid
+						// For overlong, len>1024 invalid
+						// For %2E%2E, contains ".." segment invalid
+						writeError(w, http.StatusBadRequest, "invalid object key", "InvalidObjectKey")
+						return
+					}
+				}
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	root := getStorageRoot()
 	storage := NewStorage(root)
@@ -1268,8 +1312,10 @@ func main() {
 		writeError(w, http.StatusNotFound, "not found", "NotFound")
 	})
 
+	handler := newMainHandler(mux)
+
 	fmt.Printf("Blob storage server starting on :8080, storage root: %s\n", root)
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := http.ListenAndServe(":8080", handler); err != nil {
 		fmt.Printf("Server failed: %v\n", err)
 		os.Exit(1)
 	}
