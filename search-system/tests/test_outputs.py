@@ -938,3 +938,107 @@ def test_invalid_inputs(server):
         timeout=5,
     )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage for qualitative Medium gaps
+# ---------------------------------------------------------------------------
+
+
+def test_fuzzy_distance_2_should_not_match(server):
+    base = server
+    post_doc(base, {"id": "fz1", "title": "search", "body": "", "tags": []})
+    # distance 2+ should NOT match (sarchhh vs search distance >1)
+    r = search_get(base, q="sarchhh~")
+    assert r.status_code == 200
+    assert r.json()["total"] == 0, f"fuzzy distance 2+ should not match, got {r.json()}"
+    # distance 2 also not match
+    r = search_get(base, q="seaarch~")
+    # seaarch vs search distance 1? Actually seaarch has extra a, distance 1? Let's use clearly distance 2: "sxxrch~"
+    r = search_get(base, q="sxxrch~")
+    assert r.json()["total"] == 0
+
+
+def test_bulk_action_id_precedence(server):
+    base = server
+    # action _id should override doc's own id
+    ndjson = '{"index":{"_id":"real_id"}}\n{"id":"fake_id","title":"bulk precedence","body":"test","tags":[]}\n'
+    resp = requests.post(
+        f"{base}/bulk",
+        data=ndjson,
+        headers={"Content-Type": "application/x-ndjson"},
+        timeout=5,
+    )
+    assert resp.status_code == 200
+    # fake_id should NOT exist, real_id should
+    assert get_doc(base, "fake_id").status_code == 404
+    assert get_doc(base, "real_id").status_code == 200
+
+
+def test_data_file_env_override():
+    # Tests DATA_FILE env var is respected (spec §4)
+    custom_dir = "/tmp/custom_data_test"
+    custom_file = os.path.join(custom_dir, "custom.json")
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    assert wait_for_server(port, timeout=15), (
+        "server with custom DATA_FILE failed to start"
+    )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        r = requests.post(
+            f"{base}/documents",
+            json={"id": "custom1", "title": "custom file", "body": "test", "tags": []},
+            timeout=5,
+        )
+        assert r.status_code in (200, 201)
+        time.sleep(0.5)
+        assert os.path.exists(custom_file), (
+            f"custom DATA_FILE not created at {custom_file}"
+        )
+        # default file should NOT exist
+        assert not os.path.exists(os.path.join(DATA_DIR, "index.json"))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_prefix_fuzzy_highlight(server):
+    base = server
+    post_doc(
+        base, {"id": "hlp1", "title": "searching", "body": "search engine", "tags": []}
+    )
+    # prefix query with highlight should highlight actual indexed term, not query prefix
+    r = search_get(base, q="sea*", highlight=True)
+    assert r.status_code == 200 and r.json()["total"] >= 1
+    found = False
+    for res in r.json()["results"]:
+        if "highlight" in res:
+            hl = json.dumps(res["highlight"])
+            if "<em>" in hl:
+                found = True
+                break
+    assert found, f"prefix highlight should contain <em>, got {r.json()}"
+    # fuzzy highlight
+    r = search_get(base, q="sarch~", highlight=True)
+    assert r.status_code == 200
+    found = any(
+        "<em>" in json.dumps(x.get("highlight", {})) for x in r.json()["results"]
+    )
+    assert found, "fuzzy highlight should contain <em>"
