@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Build from scratch: implement a Go program at /app/main.go that is a message broker's fan-out allocator (distribute a batch of messages across weighted, capacity-limited subscribers) using a fully-specified multi-round credit-decay weighted allocation: credit starts at weight, each round splits remaining load proportionally to credit with cap, guarantees progress via highest-credit fallback, decays served credit to credit/2+1 and accumulates unserved by +weight, with total==0 fallback to round-robin. No broken file is shipped; image starts empty. Go stdlib only; pytest builds program and drives via stdin/stdout."
-keywords = ["allocation", "go", "broker", "fair-share"]
+description = "Build from scratch hierarchical: implement a Go program at /app/main.go that is a two-level broker fan-out allocator. Groups have weight/cap, subscribers have gid/weight/cap. Effective group cap = min(group cap, sum member caps). First allocate load to groups using credit-decay weighted allocation (credit starts weight, decays to credit/2+1 when served else +weight, proportional share rem*credit/total capped, progress guarantee highest-credit fallback, total==0 fallback RR). Then for each group allocate its group share to its members using same primitive. Input: load, G, G lines group_weight group_cap, S, S lines gid weight cap. Output: comma CSV per subscriber in input order. No broken file shipped. Go stdlib only; pytest builds and checks many hierarchical cases plus invariants."
+keywords = ["allocation", "go", "broker", "fair-share", "hierarchical"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -20,7 +20,7 @@ category_usecase = "handle_events"
 category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
-tags = ["allocation", "go", "broker", "fair-share"]
+tags = ["allocation", "go", "broker", "fair-share", "hierarchical"]
 expert_time_estimate_min = 30.0
 junior_time_estimate_min = 60.0
 

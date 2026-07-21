@@ -1,24 +1,27 @@
 # codimango/pub-sub
 
 ## Description
-**Build-from-scratch** Go task. Agent must implement a message broker's **fan-out allocator** at `/app/main.go` that distributes a batch of `load` messages across weighted, capacity-limited subscribers.
+**Build-from-scratch, hierarchical** Go task. Agent must implement a message broker's **two-level fan-out allocator** at `/app/main.go`.
 
-The required behavior is a fully-specified multi-round **credit-decay weighted allocation**:
-- credit starts = weight, decays to `credit/2+1` when served, otherwise accumulates `+weight`
-- each round splits remaining load proportionally to credit, caps at capacity, guarantees progress with highest-credit fallback (tie: lowest index)
+- **Level 1 - Groups:** G groups each have weight and cap. Effective cap = min(group cap, sum member caps). Allocate load to groups using credit-decay weighted allocation.
+- **Level 2 - Subscribers:** S subscribers each belong to a group (gid) and have weight/cap. For each group, allocate its group-level share to its members using the same credit-decay algorithm.
+
+Primitive `allocate(load, weights, caps)` is a multi-round credit-decay allocator:
+- credit starts = weight, decays to `credit/2+1` when served, else accumulates `+weight`
+- each round splits remaining load proportionally `rem*credit/total`, capped, guarantees progress via highest-credit fallback (tie lowest index)
 - if total credit drains to 0, fallback to round-robin in input order
 
-This shape avoids the trajectory-contamination problem of debug-in-place tasks (which require shipping a buggy file that must itself be human-written). Here no `broken/` file is shipped; the image starts with empty `/app`.
+This hierarchical shape is significantly harder than single-level: agent must correctly implement the primitive once and reuse it at two levels with effective-cap computation and scatter/gather of per-group allocations. Previous debug-in-place calibration showed single-level fully-specified was too easy for the online gate; adding the hierarchical step (double allocation, effective caps) increases reasoning and implementation complexity while avoiding trajectory contamination (no `broken/` file shipped, empty `/app`).
 
 ## Completion Rates
-- Oracle: passes (reference `solve.sh` writes correct allocator to `/app/main.go`).
+- Oracle: passes (reference `solve.sh` writes hierarchical allocator).
 - `claude-code` / `claude-opus-4-6` and `metacode`: to be measured.
 
-Empirical local pytest: 22 parametrized allocation cases + 3 invariants = 25 tests; reference solution passes 25/25.
+Empirical local pytest: 35 parametrized hierarchical cases + 2 invariants (conservation, deterministic) = 37 tests; reference solution passes 37/37. Cases cover group-cap limiting, effective caps, multi-round at both levels, RR fallback, zero load, many groups.
 
 ## Anti-Cheating Analysis
-- **Hardcoded outputs**: tests build and run the program on many `(load, subscribers)` inputs and assert exact allocations plus conservation invariant (`sum == min(load, total_cap)`, each within cap); nothing is statically hardcodeable.
-- **Overfitting to visible tests**: tests are hidden at solve time and include multi-round cases beyond the 3 examples in instruction.
+- **Hardcoded outputs**: tests build and run binary on many (load, groups, subs) combos and assert exact per-sub allocations plus hierarchical invariants (per-sub cap, per-group effective cap, total = min(load, sum effective caps)). Not hardcodeable.
+- **Overfitting to visible tests**: tests hidden at solve time include random hierarchical cases beyond 3 instruction examples.
 - **Modifying test files**: Dockerfile does not copy tests; harness injects `/tests/` after agent run.
-- **Bypassing the intended path**: grade builds and runs `/app`; only a correct allocator passes.
-- **Pinned toolchain**: `GOTOOLCHAIN=local` on pinned `golang` image; no network.
+- **Bypassing the intended path**: grade builds and runs `/app`; only correct hierarchical allocator passes.
+- **Pinned toolchain**: `GOTOOLCHAIN=local` on pinned golang image.
