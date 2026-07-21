@@ -1,0 +1,43 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/search-system"
+description = "Implement a mini Elasticsearch-like search engine in Go with inverted index, TF-IDF ranking, Boolean query parsing (AND/OR/NOT, parentheses), tag filtering, persistence, and HTTP API."
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "search-engine", "inverted-index", "elasticsearch", "tf-idf", "boolean-query"]
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "new_application"
+category_subdomain = "database_internals"
+reward_type = "binary"
+languages = ["go"]
+tags = ["go", "search-engine", "inverted-index", "elasticsearch", "tf-idf", "boolean-query", "http-server"]
+expert_time_estimate_min = 60.0
+junior_time_estimate_min = 180.0
+
+[verifier]
+timeout_sec = 300.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
