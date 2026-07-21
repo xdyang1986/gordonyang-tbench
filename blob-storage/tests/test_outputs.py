@@ -178,9 +178,8 @@ def test_object_put_get_delete():
     resp = requests.get(f"{BASE_URL}/buckets/mybucket/objects/hello.txt", timeout=5)
     assert resp.status_code == 200
     assert resp.content == content
-    # ETag may be quoted per HTTP spec, strip quotes for comparison
-    etag_header = resp.headers.get("ETag", "").strip('"')
-    assert etag_header == expected_etag
+    # ETag must be unquoted hex per task spec (preferred)
+    assert resp.headers.get("ETag") == expected_etag
     assert "Content-Length" in resp.headers
     assert int(resp.headers["Content-Length"]) == len(content)
 
@@ -221,10 +220,7 @@ def test_object_overwrite():
     )
     resp = requests.get(f"{BASE_URL}/buckets/overwrite/objects/file.txt", timeout=5)
     assert resp.content == b"second version longer"
-    assert (
-        resp.headers.get("ETag", "").strip('"')
-        == hashlib.md5(b"second version longer").hexdigest()
-    )
+    assert resp.headers.get("ETag") == hashlib.md5(b"second version longer").hexdigest()
 
 
 def test_object_metadata():
@@ -416,7 +412,7 @@ def test_object_etag_md5():
         assert resp.json()["etag"] == expected_md5
 
         resp = requests.get(f"{BASE_URL}/buckets/etagbucket/objects/{key}", timeout=5)
-        assert resp.headers.get("ETag", "").strip('"') == expected_md5
+        assert resp.headers.get("ETag") == expected_md5
         assert resp.content == content
 
 
@@ -521,10 +517,8 @@ def test_concurrent_same_key():
     )
     assert resp.status_code == 200
     assert resp.content in contents
-    # ETag should match content (strip quotes)
-    assert (
-        resp.headers.get("ETag", "").strip('"') == hashlib.md5(resp.content).hexdigest()
-    )
+    # ETag should match content - must be unquoted hex per spec
+    assert resp.headers.get("ETag") == hashlib.md5(resp.content).hexdigest()
 
 
 def test_object_invalid_keys():
