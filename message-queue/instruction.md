@@ -8,7 +8,7 @@ You will implement a single `package main` binary. It reads commands from stdin,
 
 ## Runtime and Environment
 
-- Go standard library only (enforced by import check; no third-party packages, internet is disabled).
+- Go standard library only (enforced by import check; no third-party packages — verifier rejects any import containing a dot, internet remains enabled for base image but not needed).
 - Build: `cd /app && go build -o /app/broker .`
 - Reads stdin line-by-line, writes stdout, exits 0 on valid input.
 - Single-threaded sequential processing.
@@ -151,7 +151,7 @@ All with timestamp 0 is acceptable. Deterministic sorted order required. Then at
 6. Delete topic removes all related group state (subscriptions, committed, positions) for that topic, but groups themselves persist and remain visible in LIST_GROUPS even when empty (intended). Leniency: GC of empty groups also accepted.
 7. Durable mode survives restarts with crash-consistent recovery and atomic compaction preserving all offsets and group states.
 8. Deterministic output for same stdin and starting disk state; no randomness.
-9. Go stdlib only (enforced, internet disabled); invalid input including negative timestamp → non-zero exit; application errors → `ERROR` line.
+9. Go stdlib only (enforced via verifier import check, allow_internet=true for base image); invalid input including negative timestamp → non-zero exit; application errors → `ERROR` line.
 
 ---
 
