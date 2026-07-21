@@ -142,20 +142,20 @@ Must implement BM25, not TF-IDF:
 - For each doc d, field f (title, body), term t:
   - `tf = term frequency in field f for doc d`
   - `N = total number of docs`
-  - `df = number of docs containing term t in field f (or in any field for default)`
+  - `df = number of docs containing term t in field f. For default field (no field specified), df is number of docs containing term in either title or body (union).
   - `idf = log(1 + (N - df + 0.5)/(df + 0.5))` natural log
   - `fieldLen = number of tokens in field f for doc d`
-  - `avgFieldLen = average field length across all docs for field f` (for default search, use avg of combined title+body lengths? Simpler: compute avg for title and body separately; for default search score = sum of title BM25 + body BM25)
+  - `avgFieldLen = average field length across all docs for field f. Compute average title length as total title tokens / N, average body length as total body tokens / N. For default search, score is sum of title BM25 and body BM25 each using its own average.
   - `scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))`
-- For default (no field) query: score = scoreTitle + scoreBody (if term appears in both, sum).
-- For field-specific: only that field's BM25.
-- For `tags` field: if tag matches, score = 1.0 * boost (or 2.0 if you want) — simple, not BM25.
-- For phrase query: phrase matches if positional adjacency holds. Score = sum of BM25 scores of each term in phrase (within that field) * boost. If phrase appears in both title and body, sum both.
-- For prefix / fuzzy: clause expands to list of matching actual terms. For each doc, score = sum over matching expanded terms of BM25 for that expanded term * boost.
-- For boost: final clause score multiplied by boost.
-- Total doc score = sum over all positive clauses (NOT clauses excluded from scoring) of their scores.
-- If query empty (match all), score=1.0 for all docs.
-- Sort by score descending, then id ascending tie-breaker.
+- For default (no field) query: score = scoreTitle + scoreBody. If term appears in both title and body, total is sum of both field scores.
+- For field-specific: only that field's BM25 contributes.
+- For `tags` field: if tag matches, score = 1.0 * boost. Tag scoring is fixed at 1.0 multiplied by boost, no BM25.
+- For phrase query: phrase matches if positional adjacency holds (terms consecutive in same field). Score = sum of BM25 scores of each term in phrase within the matching field(s) multiplied by phrase boost. If phrase appears in both title and body, sum scores from both fields.
+- For prefix / fuzzy: clause expands to list of matching actual terms from index. For each doc, score = sum over matching expanded terms of BM25 for that expanded term multiplied by clause boost.
+- For boost: final clause score multiplied by boost value parsed from `^`.
+- Total doc score = sum over all positive clauses (clauses not negated by NOT) of their individual scores.
+- If query empty (match all), score = 1.0 for all docs.
+- Sort by score descending, then id ascending as tie-breaker. Scores are deterministic.
 
 Tests will check:
 - BM25 ranking: docs with higher tf and shorter field length rank higher than longer docs with same tf.
@@ -163,16 +163,16 @@ Tests will check:
 
 #### Highlight (NEW)
 
-If `highlight=true` (GET param or POST body), each result must include `highlight` field: map field -> list of highlighted snippets? Simplified: `highlight` as object with `title` and/or `body` strings where matched query terms are wrapped in `<em>` tags.
+If `highlight=true` (GET param or POST body), each result must include `highlight` field. Highlight is an object with `title` and/or `body` keys, where each value is a string with matched query terms wrapped in `<em>` tags.
 
 For example, doc title="Go Search Engine", query "search", highlight: `{"title":"Go <em>Search</em> Engine"}`.
 
 Requirements:
-- Wrap each matched term (case-insensitive, original case preserved inside `<em>`? Or lowercased? Wrap lowercased version is ok) with `<em>` and `</em>`.
-- For phrase, highlight whole phrase? Wrapping each term in phrase individually is okay, but must contain `<em>`.
-- For prefix/fuzzy expanded terms, highlight the actual matched text in doc that corresponds to expanded term.
-- Include highlight only for fields that have matches; if no match but doc matched via tag filter, highlight may be empty or absent — but if highlight requested and doc matched via text, must contain `<em>`.
-- In result JSON, `highlight` field is optional but must be present when `highlight=true` and text matches exist.
+- Highlight is token-based: split original title/body into alphanumeric tokens and separators. For each token whose lowercased form is in the set of matched expanded query terms, wrap the original token with `<em>` and `</em>`, preserving original case.
+- For phrase queries, wrap each term in the phrase individually with `<em>` tags. The highlighted string must contain `<em>` for each phrase term.
+- For prefix and fuzzy queries, highlight uses the actual matched expanded terms from the index (e.g., query `sea*` matches `search`, highlight wraps `search` in doc).
+- Include highlight only for fields that have text matches. If doc matched only via tag filter (no text match), highlight may be absent or empty object. If highlight=true and doc matched via text, highlight must be present and contain at least one `<em>` pair.
+- In result JSON, `highlight` field is optional when highlight=false, but when highlight=true and text match exists, it must be present.
 
 Example result with highlight:
 ```json
