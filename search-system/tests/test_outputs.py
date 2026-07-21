@@ -29,7 +29,7 @@ import os, json, time, shutil, socket, subprocess, threading, math
 import pytest, requests
 
 APP = "/app"
-BIN = "/tmp/search-server"
+BIN = "/tmp/codimango/search-server"
 DATA_DIR = "/app/data"
 GO_ENV = {
     **os.environ,
@@ -66,6 +66,7 @@ def wait_for_server(port, timeout=15):
 def build_binary():
     if os.path.exists(DATA_DIR):
         shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs("/tmp/codimango", exist_ok=True)
     if not os.path.exists(os.path.join(APP, "go.mod")):
         subprocess.run(
             ["go", "mod", "init", "searchengine"],

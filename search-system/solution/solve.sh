@@ -1824,6 +1824,8 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 GOMAIN
 
+mkdir -p /tmp/codimango
+
 go mod tidy
-go build -o /tmp/search-server .
+go build -o /tmp/codimango/search-server .
 echo "oracle hard solution built"
