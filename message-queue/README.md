@@ -41,12 +41,12 @@ Payloads are single tokens (no spaces, no commas, 1..1024B). Topic/group names m
 
 Latest **online** validation run (commit `34d71d8`, multimango.com) — **Validation: passing**. Numbers below are the actual online per-agent results, not a local harbor run.
 
-| Agent | Model | Attempts | Passed | Mean reward |
-|---|---|---|---|---|
-| Oracle | oracle | 3 | 3/3 | 1.000 |
-| Metacode (gate) | meta/avocado-5.14-code | 5 | 4/5 | 0.800 |
-| Claude-code | claude-opus-4-8 | 5 | 5/5 | 1.000 |
-| Codex | gpt-5.5 | 5 | 0/5 | 0.000 |
+| Agent | Model | Attempts | Passed | Mean reward | Notes |
+|---|---|---|---|---|---|
+| Oracle | oracle | 3 | 3/3 | 1.000 | reference solution verified |
+| Metacode (gate) | meta/avocado-5.14-code | 5 | 4/5 | 0.800 | genuine discriminator (see below) |
+| Claude-code | claude-opus-4-8 | 5 | 5/5 | 1.000 | strong model solves reliably |
+| Codex | gpt-5.5 | 5 | 0/5 | 0.000 | ⚠ all 5 `status=error` (harness) — excluded |
 
 **Structural / qualitative checks (all PASS):**
 
@@ -60,8 +60,12 @@ Latest **online** validation run (commit `34d71d8`, multimango.com) — **Valida
 | Contamination v2 | MEDIUM — NOT_FOUND in internal decontamination table (tbench track) |
 | Difficulty | hard — 42 pytest edge cases + durability + compaction |
 
+**Failure validation (are the failures real?):**
+- **Metacode 4/5 — the one failure is genuine.** The failing trial finished with `status=completed`, `reward=0`, no exception, agent ran to completion and the verifier executed — i.e. avocado produced a solution that legitimately failed the pytest suite. A valid discriminating data point, not an infra flake.
+- **Codex 0/5 — NOT a valid difficulty signal.** All 5 trials ended in `status=error` with `NonZeroAgentExitCodeError` (the codex CLI itself exited 1 mid-run, after ~390s and real token spend), so these are agent-harness errors rather than verifier judgments. The separate codex agentic-review run passed 1/1 (verdict GOOD), confirming codex *can* run the task. These 5 errored trials are excluded from the calibration read.
+
 **Calibration read:**
-- **Well-calibrated discriminator.** Strong model (Opus 4.8) solves it 5/5 and oracle is 3/3, confirming the spec is solvable; the avocado gate lands at 4/5 (not the too-easy 5/5), and Codex/gpt-5.5 fails outright 0/5 — the task separates model strength rather than being trivially solvable or unfair.
+- **Well-calibrated discriminator.** Oracle 3/3 and Opus 4.8 5/5 confirm the spec is solvable; the avocado gate lands at 4/5 (not the too-easy 5/5) with one genuine completed failure — the task separates model strength without being trivially solvable or unfair.
 - No explicit revalidation triggered for this README update — figures read from the last completed online validation run via `codimango api`.
 
 ## Model Analysis
