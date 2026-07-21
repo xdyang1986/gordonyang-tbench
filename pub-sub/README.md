@@ -12,10 +12,30 @@
 This shape is intentionally **under-specified on edge handling** to force agents to handle corner cases sensibly, not just transcribe pseudocode. Previous fully-specified version was too easy; now 8 additional corner-case tests enforce implicit requirements.
 
 ## Completion Rates
-- Oracle: passes (reference `solve.sh` implements full spec with all implicit edge handling in Go).
-- Online gate: to be measured.
+
+Latest **online** validation run (commit `72c1ddc`, multimango.com) — **Validation status: passing** on the numeric gates, but the agentic task-quality reviewer returned **`BAD_GRADING_WRONG`** (see caveat below).
+
+| Agent | Model | Attempts | Passed | Mean reward |
+|---|---|---|---|---|
+| Oracle | oracle | 3 | 3/3 | 1.000 |
+| Metacode (gate) | meta/avocado-5.14-code | 5 | 4/5 | 0.800 |
+| Claude-code | claude-opus-4-8 | 5 | 5/5 | 1.000 |
+| Codex | gpt-5.5 | 5 | 5/5 | 1.000 |
+
+Structural: 6/6 files present, all checks PASS. Contamination v2: MEDIUM (NOT_FOUND in internal decontamination table, no public instance found).
 
 Local pytest: 30 parametrized hierarchical multi-batch cases (fixed examples + 25 random) + conservation + deterministic + 8 implicit corner case tests (min>cap, priority tie/order, group no members, invalid gid, blank lines/spaces, large numbers 1e12, RR fallback multi-batch, zero caps) = **40 tests**; oracle passes 40/40.
+
+### ⚠ Agentic-review verdict: `BAD_GRADING_WRONG` (task quality flagged)
+
+Although the numeric gates pass, the online task-quality reviewer rated the task **`BAD_GRADING_WRONG`** (difficulty: MIXED, 14/15 non-oracle attempts passed) and failed rubrics R01, R02, R03, R06, R08, R09, R12. This is a **quality flag on the current design, not a pass/fail infra issue**:
+
+- **R08 Accepts alternatives / R02 Spec-test alignment (primary):** exact-output tests over-pin the golden's unstated `credit/2+1` decay formula. The single metacode failure (`pub-sub__5MuhieU`) was a **false negative** — it implemented a coherent alternative decay (`(credit+weight)/2`) that satisfies the examples but mismatched hidden exact outputs. So the 4/5 is ambiguity-driven, not a clean capability discriminator.
+- **R01/R03 `BAD_AMBIGUOUS`:** the credit-decay formula is implicit and not uniquely determined by the three examples.
+- **R06/R09 `BAD_GRADING_WEAK`:** zero-credit RR fallback is never forced under valid inputs; 1e12 high-weight scale is untested; `tests/test.sh` runs `apt-get` and downloads `uv` from the network during grading (external dependency).
+- **R12 `BAD_GOLDEN`:** the reference uses `rem*credit/total` int math and an O(load) path — it times out (>5s) at the spec-stated 1e12 scale.
+
+**Author action items (from reviewer, not yet applied):** state the exact credit-update formulas (temporary + persistent) and the zero-credit fallback in `instruction.md`; replace exact-output random cases with property checks for underspecified behavior; make the verifier self-contained (preinstall pytest/pytest-json-ctrf, drop network `uv` install); switch the golden to 64-bit-safe arithmetic + non-O(load) fallback and add 1e12-scale tests. These figures are from the last completed online run; **no revalidation was triggered for this README update.**
 
 ## Anti-Cheating Analysis
 - **Hardcoded outputs:** Tests drive binary on many random (T, groups, subs) combos plus explicit corner cases, assert exact per-batch CSVs from reference Python plus invariants (per-sub cap, per-group effective cap, conservation). Not hardcodeable.
