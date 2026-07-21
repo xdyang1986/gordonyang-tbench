@@ -649,21 +649,19 @@ def test_limit_query_param():
     resp = requests.get(f"{BASE_URL}/buckets/limitbucket/objects", timeout=5)
     assert resp.status_code == 200
     assert resp.json()["count"] == 5
+    assert len(resp.json().get("objects", [])) == 5
 
-    # With limit=2: server may implement truncation (count 2) or ignore (count 5)
-    # Both are acceptable, but count must be either 2 or 5, not arbitrary, to enforce meaningful behavior
+    # With limit=2: must truncate to at most 2 after sorting
     resp = requests.get(f"{BASE_URL}/buckets/limitbucket/objects?limit=2", timeout=5)
     assert resp.status_code == 200
     count = resp.json()["count"]
-    assert count in (2, 5), (
-        f"limit=2 should yield count 2 (truncated) or 5 (ignored), got {count}"
-    )
-    # If limit is respected, objects length should also be 2
+    assert count == 2, f"limit=2 should yield count 2, got {count}"
     objs = resp.json().get("objects", [])
-    if count == 2:
-        assert len(objs) == 2
-    else:
-        assert len(objs) == 5
+    assert len(objs) == 2
+    # Ensure sorted order still holds and they are first 2 sorted keys
+    returned_keys = [o["key"] for o in objs]
+    assert returned_keys == sorted(returned_keys)
+    assert returned_keys == sorted([f"file{i}.txt" for i in range(5)])[:2]
 
 
 def test_checksum_sha256():

@@ -132,7 +132,7 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
 - `GET /buckets/{bucketName}/objects?prefix=&limit=`
 - Query params:
   - `prefix` (optional): filter keys starting with prefix
-  - `limit` (optional): max results (if provided, truncate)
+  - `limit` (optional): if provided as positive integer, return at most limit objects after filtering and sorting; if not provided or <=0, return all objects. Truncation is by taking first limit sorted keys.
 - Responses:
   - `200 OK` JSON:
     ```json
@@ -146,6 +146,7 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
     }
     ```
   - Sorted by key lexicographically ascending (required). Empty result must be `{"objects": [], "prefix": "...", "count": 0}` not null.
+  - `count` field must equal length of `objects` array.
   - `404 Not Found` if bucket doesn't exist.
 - Must exclude `*.meta.json` and `.bucket_meta.json` from listing.
 
@@ -161,20 +162,23 @@ To reduce memorization risk, this task includes two non-standard extensions not 
 
 **B. TTL Expiration and Reaper**
 - `PUT` may include header `X-Expire-After: <seconds>` where seconds is integer >0 (e.g., `X-Expire-After: 2` means expire after 2 seconds)
-- Server must store expiration time as `now + seconds` in object metadata. Field `expiresAt` in sidecar JSON (RFC3339) optional, or compute from stored `expireAfter` + `lastModified`.
-- After expiration, GET must return `410 Gone` with `{"error": "object expired", "code": "ExpiredObject"}`, HEAD also 410, and LIST must exclude expired objects (not counted).
-- Implement a background reaper goroutine that every 1 second scans all objects and deletes expired ones (both data file and meta file). Alternatively, lazy expiration on access (GET/HEAD/LIST check expiration and treat as expired) is acceptable if reaper not implemented, but reaper is recommended for completeness.
-- For test simplicity, expiration is checked lazily — if object is expired, return 410 even if not yet deleted by reaper.
-- Empty `X-Expire-After` or invalid value → 400 `InvalidArgument`.
+- Server must store expiration time as absolute RFC3339 timestamp in object metadata field `expiresAt` (e.g., `"expiresAt": "2024-01-01T00:00:02Z"`). Compute as `now + seconds`.
+- After expiration, GET must return `410 Gone` with `{"error": "object expired", "code": "ExpiredObject"}`, HEAD also 410, and LIST must exclude expired objects (not counted in `count` and not in `objects` array).
+- Implement background reaper goroutine ticking every 1 second that scans all buckets and deletes expired objects (data + meta). Lazy check on GET/HEAD/LIST is also required: if object is expired, return 410 or exclude even if reaper hasn't deleted yet.
+- Invalid `X-Expire-After` (non-integer, <=0) → `400` with code `InvalidArgument`.
 
-**C. Copy Operation (optional but required for novelty)**
-- `POST /buckets/{srcBucket}/objects/{srcKey}/copy` with JSON body `{"destBucket": "dst", "destKey": "dstKey"}`
+**C. Copy Operation (required for novelty)**
+- `POST /buckets/{srcBucket}/objects/{srcKey}/copy` with JSON body `{"destBucket": "dstBucket", "destKey": "dstKey"}`
 - Responses:
   - `200 OK` with `{"etag": "...", "size": ...}` if copied
   - `404` if src bucket/key not found, or dest bucket not found
-  - `400` if invalid dest name/key or missing body fields
-- Must copy both data and metadata (including custom metadata, content-type, but new `lastModified` time, same ETag since content same, and preserve `expiresAt`? Compute new expiration as original's remaining TTL? Simpler: copy expiration as original's absolute expiresAt if not expired, or no expiration if original expired — but for test, if src had no expiration, dest should have no expiration).
-- Must be atomic: dest written via temp+rename.
+  - `400` if invalid dest bucket/key name or missing JSON fields `destBucket`/`destKey`
+  - `410 Gone` if src object exists but is expired (code `ExpiredObject`)
+- Copy semantics (precise):
+  - Copy data bytes exactly
+  - Copy metadata: content-type, custom `X-Amz-Meta-*` (same keys/values), ETag stays same (since content same), `lastModified` set to now (new), `expiresAt` preserved: if source has future `expiresAt`, dest gets same absolute `expiresAt`; if source has no expiration, dest has no expiration
+  - Must be atomic via temp file + rename for dest
+  - Original src remains unchanged
 
 #### Optional but Recommended
 - `GET /health` => `200 OK` `{"status": "ok"}` for liveness. Not required but helps testing.
