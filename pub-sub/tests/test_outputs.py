@@ -267,6 +267,27 @@ def test_min_exceeds_cap():
     assert out == ["2"]
 
 
+def test_priority_tie_and_order():
+    T = 1
+    loads = [3]
+    groups = [(0, 0, 1, 10)]
+    subs = [(0, 10, 2, 1, 10), (0, 1, 2, 1, 10)]
+    out = run_case(T, loads, groups, subs)
+    assert out == ["2,1"]
+    subs2 = [(0, 5, 2, 1, 10), (0, 5, 2, 1, 10)]
+    out2 = run_case(T, loads, groups, subs2)
+    assert out2 == ["2,1"]
+
+
+def test_group_no_members():
+    T = 1
+    loads = [10]
+    groups = [(0, 0, 5, 10), (0, 0, 5, 10)]
+    subs = [(0, 0, 0, 1, 5)]
+    out = run_case(T, loads, groups, subs)
+    assert out == ["5"]
+
+
 def test_invalid_gid():
     T = 1
     loads = [10]
@@ -302,3 +323,42 @@ def test_large_numbers():
     subs = [(0, 0, 0, 1, 500000000000), (0, 0, 0, 1, 500000000000)]
     out = run_case(T, loads, groups, subs)
     assert out == ["500000000000,500000000000"]
+
+
+def test_rr_fallback_multi_batch():
+    T = 5
+    loads = [1, 1, 1, 1, 1]
+    groups = [(0, 0, 1, 10)]
+    subs = [(0, 0, 0, 1, 10), (0, 0, 0, 1, 10)]
+    out = run_case(T, loads, groups, subs)
+    assert len(out) == 5
+    total0 = sum(int(line.split(",")[0]) for line in out)
+    total1 = sum(int(line.split(",")[1]) for line in out)
+    assert total0 + total1 == 5
+    out2 = run_case(T, loads, groups, subs)
+    assert out == out2
+
+
+def test_zero_caps():
+    T = 1
+    loads = [10]
+    groups = [(0, 0, 1, 0)]
+    subs = [(0, 0, 0, 1, 0)]
+    out = run_case(T, loads, groups, subs)
+    assert out == ["0"]
+
+
+def test_deterministic():
+    a = run_case(
+        1,
+        [16],
+        [(10, 0, 5, 10), (5, 0, 3, 10)],
+        [(0, 10, 0, 5, 6), (0, 5, 0, 3, 9), (1, 5, 0, 4, 3), (1, 1, 0, 1, 12)],
+    )
+    b = run_case(
+        1,
+        [16],
+        [(10, 0, 5, 10), (5, 0, 3, 10)],
+        [(0, 10, 0, 5, 6), (0, 5, 0, 3, 9), (1, 5, 0, 4, 3), (1, 1, 0, 1, 12)],
+    )
+    assert a == b == ["6,4,3,3"]
