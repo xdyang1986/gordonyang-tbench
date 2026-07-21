@@ -4,7 +4,7 @@ Build a HARD mini search engine similar to Elasticsearch in Go. The server must 
 
 ## Working Directory
 
-All code lives in `/app`. Create a Go module there. Entry must be `main.go` in `/app` so `go run .` and `go build -o /tmp/search-server .` starts server.
+All code lives in `/app`. Create a Go module there. Entry must be `main.go` in `/app` so `go run .` and `go build -o /tmp/codimango/search-server .` starts server.
 
 ## 1. Server
 
@@ -231,7 +231,7 @@ Always return aggregations (even if highlight false) for tag counts among matche
 - Thread-safe for concurrent bulk, index, search, delete, stats.
 - Must handle up to 10k docs, 1000 reqs without OOM.
 - No external deps except Go stdlib; use go.mod.
-- Binary builds with `go build -o /tmp/search-server .`
+- Binary builds with `go build -o /tmp/codimango/search-server .`
 - `/app/data/index.json` path fixed; also respect `DATA_FILE` env for tests.
 
 ### 6. Example Workflows

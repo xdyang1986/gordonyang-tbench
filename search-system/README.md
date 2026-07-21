@@ -53,7 +53,7 @@ A naive approach fails because:
 
 **Why reasoning gaps, not setup:**
 
-- Build is `go build -o /tmp/search-server .` — if binary builds, logic wrong = reasoning gap.
+- Build is `go build -o /tmp/codimango/search-server .` — if binary builds, logic wrong = reasoning gap.
 - Server wait on `/search` endpoint — timeout only if crash, not flake.
 - Phrase test uses `search engine` vs `search big engine` — deterministic positional adjacency required, not possible to guess.
 - BM25 test computes expected score from formula with known N=2, df=2, avgdl=2 — exact math, not timing.
@@ -69,9 +69,9 @@ A naive approach fails because:
 
 ```bash
 # after solve.sh
-cd /app && go build -o /tmp/search-server .
+cd /app && go build -o /tmp/codimango/search-server .
 ~/.local/bin/pytest search-system/tests/test_outputs.py -v
-# expected 32 passed (15-17s)
+# expected 36 passed (15-20s)
 
 # 3x flakiness
 for i in 1 2 3; do pytest ... -q; done
