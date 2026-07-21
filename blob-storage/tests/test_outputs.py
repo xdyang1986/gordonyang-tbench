@@ -178,7 +178,9 @@ def test_object_put_get_delete():
     resp = requests.get(f"{BASE_URL}/buckets/mybucket/objects/hello.txt", timeout=5)
     assert resp.status_code == 200
     assert resp.content == content
-    assert resp.headers.get("ETag") == expected_etag
+    # ETag may be quoted per HTTP spec, strip quotes for comparison
+    etag_header = resp.headers.get("ETag", "").strip('"')
+    assert etag_header == expected_etag
     assert "Content-Length" in resp.headers
     assert int(resp.headers["Content-Length"]) == len(content)
 
@@ -219,7 +221,10 @@ def test_object_overwrite():
     )
     resp = requests.get(f"{BASE_URL}/buckets/overwrite/objects/file.txt", timeout=5)
     assert resp.content == b"second version longer"
-    assert resp.headers.get("ETag") == hashlib.md5(b"second version longer").hexdigest()
+    assert (
+        resp.headers.get("ETag", "").strip('"')
+        == hashlib.md5(b"second version longer").hexdigest()
+    )
 
 
 def test_object_metadata():
@@ -411,7 +416,7 @@ def test_object_etag_md5():
         assert resp.json()["etag"] == expected_md5
 
         resp = requests.get(f"{BASE_URL}/buckets/etagbucket/objects/{key}", timeout=5)
-        assert resp.headers.get("ETag") == expected_md5
+        assert resp.headers.get("ETag", "").strip('"') == expected_md5
         assert resp.content == content
 
 
@@ -516,8 +521,10 @@ def test_concurrent_same_key():
     )
     assert resp.status_code == 200
     assert resp.content in contents
-    # ETag should match content
-    assert resp.headers.get("ETag") == hashlib.md5(resp.content).hexdigest()
+    # ETag should match content (strip quotes)
+    assert (
+        resp.headers.get("ETag", "").strip('"') == hashlib.md5(resp.content).hexdigest()
+    )
 
 
 def test_object_invalid_keys():
@@ -637,20 +644,184 @@ def test_delete_object_idempotency():
 
 
 def test_limit_query_param():
-    """Test limit query param if implemented (optional) - should not break"""
+    """Test limit query param - if implemented should truncate, else return all"""
     requests.put(f"{BASE_URL}/buckets/limitbucket", timeout=5)
     for i in range(5):
         requests.put(
             f"{BASE_URL}/buckets/limitbucket/objects/file{i}.txt", data=b"x", timeout=5
         )
 
-    # Without limit should return all
+    # Without limit should return all 5
     resp = requests.get(f"{BASE_URL}/buckets/limitbucket/objects", timeout=5)
+    assert resp.status_code == 200
     assert resp.json()["count"] == 5
 
-    # With limit if server supports it, should truncate or ignore
+    # With limit=2: server may implement truncation (count 2) or ignore (count 5)
+    # Both are acceptable, but count must be either 2 or 5, not arbitrary, to enforce meaningful behavior
     resp = requests.get(f"{BASE_URL}/buckets/limitbucket/objects?limit=2", timeout=5)
     assert resp.status_code == 200
-    # If server implements limit, count <=2, else 5 both acceptable
     count = resp.json()["count"]
-    assert count in (2, 5) or count <= 5
+    assert count in (2, 5), (
+        f"limit=2 should yield count 2 (truncated) or 5 (ignored), got {count}"
+    )
+    # If limit is respected, objects length should also be 2
+    objs = resp.json().get("objects", [])
+    if count == 2:
+        assert len(objs) == 2
+    else:
+        assert len(objs) == 5
+
+
+def test_checksum_sha256():
+    """Test novel SHA256 checksum verification via X-Content-SHA256"""
+    requests.put(f"{BASE_URL}/buckets/checksumbucket", timeout=5)
+
+    content = b"checksum test content"
+    sha256_hex = hashlib.sha256(content).hexdigest()
+
+    # Valid checksum should succeed
+    headers = {"X-Content-SHA256": sha256_hex}
+    resp = requests.put(
+        f"{BASE_URL}/buckets/checksumbucket/objects/valid.txt",
+        data=content,
+        headers=headers,
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+    assert resp.json()["etag"] == hashlib.md5(content).hexdigest()
+
+    # Invalid checksum should be rejected with 400 BadDigest
+    bad_headers = {"X-Content-SHA256": "0" * 64}
+    resp = requests.put(
+        f"{BASE_URL}/buckets/checksumbucket/objects/invalid.txt",
+        data=content,
+        headers=bad_headers,
+        timeout=5,
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == "BadDigest"
+
+    # Ensure invalid object was NOT stored
+    resp = requests.get(
+        f"{BASE_URL}/buckets/checksumbucket/objects/invalid.txt", timeout=5
+    )
+    assert resp.status_code == 404
+
+    # Without checksum header should still work
+    resp = requests.put(
+        f"{BASE_URL}/buckets/checksumbucket/objects/nochecksum.txt",
+        data=content,
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+
+def test_expiration_ttl():
+    """Test novel TTL expiration via X-Expire-After and 410 Gone"""
+    requests.put(f"{BASE_URL}/buckets/expirebucket", timeout=5)
+
+    # Put object with 2-second TTL
+    headers = {"X-Expire-After": "2"}
+    resp = requests.put(
+        f"{BASE_URL}/buckets/expirebucket/objects/temp.txt",
+        data=b"temporary",
+        headers=headers,
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Immediately GET should succeed
+    resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
+    assert resp.status_code == 200
+    assert resp.content == b"temporary"
+
+    # Wait for expiration (2s + buffer)
+    time.sleep(3)
+
+    # GET after expiry should be 410 Gone (or 404 if reaper deleted)
+    resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
+    assert resp.status_code in (410, 404), (
+        f"Expected 410 Gone or 404 after expiry, got {resp.status_code}"
+    )
+    if resp.status_code == 410:
+        body = resp.json()
+        assert body["code"] == "ExpiredObject"
+
+    # HEAD after expiry also 410 or 404
+    resp = requests.head(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
+    assert resp.status_code in (410, 404)
+
+    # LIST should exclude expired object
+    resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects", timeout=5)
+    assert resp.status_code == 200
+    keys = [o["key"] for o in resp.json().get("objects", [])]
+    assert "temp.txt" not in keys
+
+    # Invalid expire header should be 400
+    resp = requests.put(
+        f"{BASE_URL}/buckets/expirebucket/objects/badexpire.txt",
+        data=b"x",
+        headers={"X-Expire-After": "invalid"},
+        timeout=5,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "InvalidArgument"
+
+
+def test_copy_operation():
+    """Test novel copy operation POST .../objects/{key}/copy"""
+    requests.put(f"{BASE_URL}/buckets/srcbucket", timeout=5)
+    requests.put(f"{BASE_URL}/buckets/destbucket", timeout=5)
+
+    content = b"copy me"
+    resp = requests.put(
+        f"{BASE_URL}/buckets/srcbucket/objects/original.txt", data=content, timeout=5
+    )
+    assert resp.status_code in (200, 201)
+
+    # Copy to dest bucket
+    copy_body = {"destBucket": "destbucket", "destKey": "copied.txt"}
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcbucket/objects/original.txt/copy",
+        json=copy_body,
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201), (
+        f"Copy failed: {resp.status_code} {resp.text}"
+    )
+    assert "etag" in resp.json()
+
+    # Verify dest exists with same content
+    resp = requests.get(f"{BASE_URL}/buckets/destbucket/objects/copied.txt", timeout=5)
+    assert resp.status_code == 200
+    assert resp.content == content
+
+    # Original should still exist
+    resp = requests.get(f"{BASE_URL}/buckets/srcbucket/objects/original.txt", timeout=5)
+    assert resp.status_code == 200
+    assert resp.content == content
+
+    # Copy non-existent src should be 404
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcbucket/objects/nonexistent.txt/copy",
+        json=copy_body,
+        timeout=5,
+    )
+    assert resp.status_code == 404
+
+    # Copy to non-existent dest bucket should be 404
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcbucket/objects/original.txt/copy",
+        json={"destBucket": "nobucket", "destKey": "x.txt"},
+        timeout=5,
+    )
+    assert resp.status_code == 404
+
+    # Copy with missing fields should be 400
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcbucket/objects/original.txt/copy",
+        json={"destBucket": "destbucket"},
+        timeout=5,
+    )
+    assert resp.status_code == 400

@@ -149,6 +149,33 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
   - `404 Not Found` if bucket doesn't exist.
 - Must exclude `*.meta.json` and `.bucket_meta.json` from listing.
 
+#### Non-Canonical Extensions (Novel — breaks standard S3 template)
+
+To reduce memorization risk, this task includes two non-standard extensions not found in typical S3 clone tutorials:
+
+**A. SHA256 Checksum Verification**
+- `PUT /buckets/{bucket}/objects/{key}` may include header `X-Content-SHA256: <hex sha256>` (64 hex chars, case-insensitive)
+- If header present, server must compute SHA256 of body and compare to header value. If mismatch, reject with `400 Bad Request` and JSON `{"error": "checksum mismatch", "code": "BadDigest"}`, and must NOT store the object.
+- If header absent, proceed normally. If header present and matches, proceed normally.
+- This is distinct from ETag MD5 — ETag remains MD5, but verification uses SHA256.
+
+**B. TTL Expiration and Reaper**
+- `PUT` may include header `X-Expire-After: <seconds>` where seconds is integer >0 (e.g., `X-Expire-After: 2` means expire after 2 seconds)
+- Server must store expiration time as `now + seconds` in object metadata. Field `expiresAt` in sidecar JSON (RFC3339) optional, or compute from stored `expireAfter` + `lastModified`.
+- After expiration, GET must return `410 Gone` with `{"error": "object expired", "code": "ExpiredObject"}`, HEAD also 410, and LIST must exclude expired objects (not counted).
+- Implement a background reaper goroutine that every 1 second scans all objects and deletes expired ones (both data file and meta file). Alternatively, lazy expiration on access (GET/HEAD/LIST check expiration and treat as expired) is acceptable if reaper not implemented, but reaper is recommended for completeness.
+- For test simplicity, expiration is checked lazily — if object is expired, return 410 even if not yet deleted by reaper.
+- Empty `X-Expire-After` or invalid value → 400 `InvalidArgument`.
+
+**C. Copy Operation (optional but required for novelty)**
+- `POST /buckets/{srcBucket}/objects/{srcKey}/copy` with JSON body `{"destBucket": "dst", "destKey": "dstKey"}`
+- Responses:
+  - `200 OK` with `{"etag": "...", "size": ...}` if copied
+  - `404` if src bucket/key not found, or dest bucket not found
+  - `400` if invalid dest name/key or missing body fields
+- Must copy both data and metadata (including custom metadata, content-type, but new `lastModified` time, same ETag since content same, and preserve `expiresAt`? Compute new expiration as original's remaining TTL? Simpler: copy expiration as original's absolute expiresAt if not expired, or no expiration if original expired — but for test, if src had no expiration, dest should have no expiration).
+- Must be atomic: dest written via temp+rename.
+
 #### Optional but Recommended
 - `GET /health` => `200 OK` `{"status": "ok"}` for liveness. Not required but helps testing.
 
@@ -252,13 +279,16 @@ curl -X DELETE http://localhost:8080/buckets/mybucket
 - Server builds without errors
 - All bucket CRUD operations work with correct status codes
 - All object CRUD operations work, including binary and empty objects
-- Listing with prefix filter works and sorted
+- Listing with prefix filter works and sorted, empty slices are [] not null
 - Metadata preservation (Content-Type, custom X-Amz-Meta-)
-- ETag MD5 correctness
-- Validation of bucket names and object keys
+- ETag MD5 correctness (unquoted hex in JSON, header may be unquoted, tests strip quotes leniently but prefer unquoted)
+- Validation of bucket names and object keys (including raw RequestURI .. checks and // rejection, with 400 or 404 both blocking traversal)
 - 409 on deleting non-empty bucket
-- Persistence on filesystem with atomic writes
-- Concurrency safety (tests will do parallel uploads)
-- Handles hierarchical keys (slashes)
+- Persistence on filesystem with atomic writes (temp file + rename)
+- Concurrency safety (tests will do parallel uploads, last-write-wins acceptable)
+- Handles hierarchical keys (slashes) with MkdirAll
+- **Novel: SHA256 checksum verification via X-Content-SHA256, rejecting BadDigest on mismatch**
+- **Novel: TTL expiration via X-Expire-After, 410 Gone after expiry, background reaper every 1s or lazy check**
+- **Novel: Copy operation via POST .../copy with JSON body destBucket/destKey**
 
-Implement the full service now. Ensure `go.mod` is initialized and server starts on :8080.
+Implement the full service now. Ensure `go.mod` is initialized and server starts on :8080. Binary should be `./blob-server` or `/app/blob-server` (avoid `/tmp/blob-server` hardcoded path warning, use `/tmp/codimango/` for logs).
