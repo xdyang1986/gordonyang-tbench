@@ -8,7 +8,7 @@ You will implement a single `package main` binary. It reads commands from stdin,
 
 ## Runtime and Environment
 
-- Go standard library only.
+- Go standard library only (enforced by import check; no third-party packages, internet is disabled).
 - Build: `cd /app && go build -o /app/broker .`
 - Reads stdin line-by-line, writes stdout, exits 0 on valid input.
 - Single-threaded sequential processing.
@@ -28,14 +28,14 @@ Blank lines (empty or whitespace-only) are ignored.
 - **Payload**: single token (no spaces), length 1..1024, must NOT contain comma `,` (to keep `FETCH_RANGE` unambiguous). Any token containing comma is invalid input.
 - **Partition**: integer `>=0` for explicit commands. The broker allows up to 1000 partitions per topic.
 - **Offset**: integer `>=0`, except `COMMIT` allows `-1` (meaning no committed offset / clear).
-- **Timestamp**: integer `>=0`. Valid inputs are non-decreasing, but your implementation does not need to enforce ordering; just parse it.
+- **Timestamp**: integer `>=0`. Negative timestamps are invalid input and must cause non-zero exit. Valid inputs are non-decreasing, but your implementation does not need to enforce ordering beyond rejecting negatives; just parse it.
 - **num_partitions**: integer `>=1 && <=1000`.
 
 ---
 
 ## Command Stream
 
-After start, each non-blank line is one command. Tokens are space-separated (no quoted strings). On **invalid input** (malformed line, unknown command, wrong arity, non-integer where integer expected, invalid name according to rules above, `num_partitions` out of range, empty payload), the broker must exit with non-zero status. Output is unspecified in that case.
+After start, each non-blank line is one command. Tokens are space-separated (no quoted strings). On **invalid input** (malformed line, unknown command, wrong arity, non-integer where integer expected, invalid name according to rules above, `num_partitions` out of range, empty payload, negative timestamp), the broker must exit with non-zero status. Output is unspecified in that case.
 
 Application-level errors (e.g., topic does not exist, partition out of range of existing topic, offset beyond log length for `COMMIT`/`SEEK`) are **not** invalid input: they produce a single line `ERROR` and continue.
 
@@ -45,7 +45,7 @@ Application-level errors (e.g., topic does not exist, partition out of range of 
 Create topic with `num_partitions` partitions numbered `0..num_partitions-1`. Initially empty. If topic already exists, it is idempotent: keep existing partitions, do not change them, no output, nothing logged. Logged in durable mode only when it actually creates.
 
 **`DELETE_TOPIC <topic> <timestamp>`**
-Delete topic and all its messages. Also removes all consumer-group state related to that topic (subscriptions, committed offsets, positions). If not exists, no-op. Logged only when topic existed.
+Delete topic and all its messages. Also removes all consumer-group state related to that topic (subscriptions, committed offsets, positions). Groups themselves are NOT deleted — an empty group with no subscriptions left remains visible in `LIST_GROUPS` (this is the intended behavior, matching Kafka where consumer groups outlive topics). For backwards compatibility the verifier leniently accepts either keeping the empty group or garbage-collecting it, but new implementations should keep empty groups. If topic does not exist, no-op. Logged only when topic existed.
 
 **`PRODUCE <topic> <partition> <payload> <timestamp>`**
 Append `payload` to topic-partition log. Offset assigned is current log length (starting at 0). On success output `<offset>` (single integer). On application error (topic missing, partition invalid `partition >= num_partitions`), output `ERROR`. Logged only on success.
@@ -148,10 +148,10 @@ All with timestamp 0 is acceptable. Deterministic sorted order required. Then at
 3. Fetch single offset and range; low always 0, high = log length.
 4. List topics and groups sorted; topic info shows partitions and total messages.
 5. Consumer groups: auto-create, subscribe via JOIN or POLL, per-partition position (next to poll) and committed offset, POLL advances position, COMMIT sets committed, SEEK sets position, GET_GROUP_OFFSET returns committed.
-6. Delete topic removes all related group state.
+6. Delete topic removes all related group state (subscriptions, committed, positions) for that topic, but groups themselves persist and remain visible in LIST_GROUPS even when empty (intended). Leniency: GC of empty groups also accepted.
 7. Durable mode survives restarts with crash-consistent recovery and atomic compaction preserving all offsets and group states.
 8. Deterministic output for same stdin and starting disk state; no randomness.
-9. Go stdlib only; invalid input → non-zero exit; application errors → `ERROR` line.
+9. Go stdlib only (enforced, internet disabled); invalid input including negative timestamp → non-zero exit; application errors → `ERROR` line.
 
 ---
 
@@ -198,16 +198,16 @@ SEEK g1 t 0 0 8
 POLL g1 t 0 9
 ```
 
-Explanation: `foo` bytes sum = 102+111+111=324 %3=0, `bar`=98+97+114=309%3=0? Actually 309%3=0. Let's use different payloads. Output would be:
+Explanation: `foo` bytes sum = 102+111+111=324 %3=0, `bar`=98+97+114=309 %3=0, so both go to partition 0. Offsets are per-partition. `POLL` prints the offset before advancing. Output:
 ```
 0 0
 0 1
 0 foo
-0 bar
+1 bar
 0
 0 foo
 ```
-(First two lines are `PARTITION OFFSET` from PRODUCE_AUTO, next POLL returns offset+payload, second POLL, GET returns committed, final POLL after seek.)
+(First two lines are `PARTITION OFFSET` from PRODUCE_AUTO, next two POLLs return offset+payload at 0 and 1, GET returns committed 0, final POLL after SEEK 0 returns foo again.)
 
 ### Durable
 
