@@ -4,8 +4,8 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Debug in place: a Go program at /app implements a message broker's fan-out allocator (distribute a batch of messages across weighted, capacity-limited subscribers). It builds and mostly works but has a subtle bug — for some inputs the allocation is wrong. The agent must find and fix the defect so the output is correct in general; do not rewrite. The instruction gives only the I/O format and a few failing input/output examples, NOT the algorithm (a bespoke multi-round credit-decay weighted allocation embodied in the shipped code). The defect is a subtle off-by-one in the per-round credit decay that only manifests in multi-round allocations, so it must be found by understanding the shipped algorithm and tracing, not by reading a spec. Go stdlib only; pytest builds the program and drives it via stdin/stdout."
-keywords = ["debugging", "reverse-engineering", "allocation", "go", "broker"]
+description = "Build from scratch: implement a Go program at /app/main.go that is a message broker's fan-out allocator (distribute a batch of messages across weighted, capacity-limited subscribers) using a fully-specified multi-round credit-decay weighted allocation: credit starts at weight, each round splits remaining load proportionally to credit with cap, guarantees progress via highest-credit fallback, decays served credit to credit/2+1 and accumulates unserved by +weight, with total==0 fallback to round-robin. No broken file is shipped; image starts empty. Go stdlib only; pytest builds program and drives via stdin/stdout."
+keywords = ["allocation", "go", "broker", "fair-share"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -20,7 +20,7 @@ category_usecase = "handle_events"
 category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
-tags = ["debugging", "reverse-engineering", "allocation", "go", "broker"]
+tags = ["allocation", "go", "broker", "fair-share"]
 expert_time_estimate_min = 30.0
 junior_time_estimate_min = 60.0
 
