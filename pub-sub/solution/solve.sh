@@ -245,6 +245,7 @@ func main() {
 	groupMin := make([]int, G)
 	groupW := make([]int, G)
 	groupC := make([]int, G)
+	groupRate := make([]int, G)
 	groupCredit := make([]int, G)
 	for g := 0; g < G; g++ {
 		if pos >= len(lines) {
@@ -253,18 +254,20 @@ func main() {
 		}
 		f := strings.Fields(lines[pos])
 		pos++
-		if len(f) != 4 {
-			fmt.Fprintln(os.Stderr, "bad group")
+		if len(f) != 5 {
+			fmt.Fprintln(os.Stderr, "bad group line")
 			os.Exit(1)
 		}
 		p, _ := strconv.Atoi(f[0])
 		mn, _ := strconv.Atoi(f[1])
 		w, _ := strconv.Atoi(f[2])
 		c, _ := strconv.Atoi(f[3])
+		ra, _ := strconv.Atoi(f[4])
 		groupP[g] = p
 		groupMin[g] = mn
 		groupW[g] = w
 		groupC[g] = c
+		groupRate[g] = ra
 		groupCredit[g] = w
 	}
 	if pos >= len(lines) {
@@ -277,6 +280,7 @@ func main() {
 	subMin := make([]int, S)
 	subW := make([]int, S)
 	subC := make([]int, S)
+	subRate := make([]int, S)
 	subCredit := make([]int, S)
 	for s := 0; s < S; s++ {
 		if pos >= len(lines) {
@@ -285,8 +289,8 @@ func main() {
 		}
 		f := strings.Fields(lines[pos])
 		pos++
-		if len(f) != 5 {
-			fmt.Fprintln(os.Stderr, "bad sub")
+		if len(f) != 6 {
+			fmt.Fprintln(os.Stderr, "bad sub line")
 			os.Exit(1)
 		}
 		gid, _ := strconv.Atoi(f[0])
@@ -294,11 +298,13 @@ func main() {
 		mn, _ := strconv.Atoi(f[2])
 		w, _ := strconv.Atoi(f[3])
 		c, _ := strconv.Atoi(f[4])
+		ra, _ := strconv.Atoi(f[5])
 		subG[s] = gid
 		subP[s] = p
 		subMin[s] = mn
 		subW[s] = w
 		subC[s] = c
+		subRate[s] = ra
 		subCredit[s] = w
 	}
 	groupTotal := make([]int, G)
@@ -321,20 +327,33 @@ func main() {
 			}
 			sRemCap[s] = rem
 		}
-		sumMemberRem := make([]int, G)
+		sEffCap := make([]int, S)
+		for s := 0; s < S; s++ {
+			c := sRemCap[s]
+			ra := subRate[s]
+			if ra > 0 && ra < c {
+				c = ra
+			}
+			sEffCap[s] = c
+		}
+		sumMemberEff := make([]int, G)
 		for s := 0; s < S; s++ {
 			gid := subG[s]
 			if gid >= 0 && gid < G {
-				sumMemberRem[gid] += sRemCap[s]
+				sumMemberEff[gid] += sEffCap[s]
 			}
 		}
 		effGRem := make([]int, G)
 		for g := 0; g < G; g++ {
-			if gRemCap[g] < sumMemberRem[g] {
-				effGRem[g] = gRemCap[g]
-			} else {
-				effGRem[g] = sumMemberRem[g]
+			c := gRemCap[g]
+			if sumMemberEff[g] < c {
+				c = sumMemberEff[g]
 			}
+			ra := groupRate[g]
+			if ra > 0 && ra < c {
+				c = ra
+			}
+			effGRem[g] = c
 		}
 		gItems := make([]*item, G)
 		for g := 0; g < G; g++ {
@@ -360,9 +379,11 @@ func main() {
 			if gl <= 0 {
 				continue
 			}
+			// caps for members already limited by sEffCap, but also need to respect sRemCap for cumulative? Actually sEffCap already min(sRem, rate)
+			// For within-group, remaining caps after min? We'll recompute per member rem caps as sEffCap (which includes rate limit per batch)
 			mItems := make([]*item, len(idxs))
 			for i, sIdx := range idxs {
-				mItems[i] = &item{idx: sIdx, priority: subP[sIdx], min: subMin[sIdx], weight: subW[sIdx], cap: sRemCap[sIdx], credit: subCredit[sIdx]}
+				mItems[i] = &item{idx: sIdx, priority: subP[sIdx], min: subMin[sIdx], weight: subW[sIdx], cap: sEffCap[sIdx], credit: subCredit[sIdx]}
 			}
 			allocInGroup := allocateBatch(gl, mItems)
 			for i, sIdx := range idxs {
