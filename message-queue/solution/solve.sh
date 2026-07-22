@@ -747,6 +747,80 @@ func main() {
 			if changed {
 				appendRecord(strings.Join(parts, " "))
 			}
+		case "PRODUCE_BATCH":
+			// PRODUCE_BATCH <topic> <count> <part1> <payload1> ... <timestamp>
+			if len(parts) < 5 {
+				die("PRODUCE_BATCH needs at least 4 args")
+			}
+			topic := parts[1]
+			countStr := parts[2]
+			if !isValidName(topic) {
+				die("invalid topic name")
+			}
+			count, err := strconv.Atoi(countStr)
+			if err != nil || count < 1 || count > 100 {
+				die("invalid count")
+			}
+			// len must be 4 + 2*count
+			if len(parts) != 4+2*count {
+				die("PRODUCE_BATCH arity mismatch")
+			}
+			tsStr := parts[len(parts)-1]
+			tv, err := strconv.ParseInt(tsStr, 10, 64)
+			if err != nil || tv < 0 {
+				die("invalid timestamp")
+			}
+			t, ok := topics[topic]
+			if !ok {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			// Validate all pairs first for atomicity
+			type pair struct {
+				part    int
+				payload string
+			}
+			pairs := make([]pair, count)
+			valid := true
+			for i := 0; i < count; i++ {
+				partStr := parts[3+i*2]
+				payload := parts[3+i*2+1]
+				if !isValidPayload(payload) {
+					die("invalid payload in batch")
+				}
+				p, err := strconv.Atoi(partStr)
+				if err != nil {
+					die("invalid partition in batch")
+				}
+				if p < 0 || p >= t.numPartitions {
+					valid = false
+					break
+				}
+				pairs[i] = pair{part: p, payload: payload}
+			}
+			if !valid {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			// All valid, produce in order
+			offsets := make([]string, count)
+			for i, pr := range pairs {
+				off, ok := doProduce(topic, pr.part, pr.payload)
+				if !ok {
+					// Should not happen since we validated, but treat as ERROR and rollback?
+					// For simplicity, if this fails, output ERROR (partial already appended remains, but spec says none on validation error only)
+					// Since we validated partitions, this should succeed
+					fmt.Fprintln(out, "ERROR")
+					valid = false
+					break
+				}
+				offsets[i] = strconv.FormatInt(off, 10)
+				appendRecord(fmt.Sprintf("PRODUCE %s %d %s %s", topic, pr.part, pr.payload, tsStr))
+			}
+			if !valid {
+				continue
+			}
+			fmt.Fprintln(out, strings.Join(offsets, ","))
 		case "FETCH":
 			if len(parts) != 5 {
 				die("FETCH needs 4 args")

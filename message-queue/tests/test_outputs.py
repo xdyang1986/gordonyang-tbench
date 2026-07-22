@@ -1054,3 +1054,75 @@ def test_compact_preserves_trim(tmp_path):
     )
     # after compact, low=1 high=2, fetch0 NONE, fetch1 b, poll after previous poll had pos2 -> NONE
     assert lines(r.stdout) == ["1 2", "NONE", "b", "NONE"]
+
+
+# --------------------------------------------------------------------------
+# PRODUCE_BATCH atomic (harder)
+# --------------------------------------------------------------------------
+
+
+def test_produce_batch_basic():
+    stdin = """CREATE_TOPIC t 2 0
+PRODUCE_BATCH t 2 0 a 1 b 1
+FETCH t 0 0 2
+FETCH t 1 0 3
+PARTITION_INFO t 0 4
+PARTITION_INFO t 1 5
+"""
+    r = run(stdin)
+    # batch of 2: partition0 a offset0, partition1 b offset0 => outputs "0,0"
+    assert lines(r.stdout) == ["0,0", "a", "b", "0 1", "0 1"]
+
+
+def test_produce_batch_same_partition():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_BATCH t 3 0 x 0 y 0 z 1
+FETCH_RANGE t 0 0 3 2
+"""
+    r = run(stdin)
+    # 3 msgs to same partition: offsets 0,1,2 => "0,1,2"
+    assert lines(r.stdout) == ["0,1,2", "x,y,z"]
+
+
+def test_produce_batch_atomic_error():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 first 1
+PRODUCE_BATCH t 2 0 ok 1 bad 2
+FETCH t 0 0 3
+FETCH t 0 1 4
+TOPIC_INFO t 5
+"""
+    r = run(stdin)
+    # batch has partition 1 invalid (>=1) => whole batch ERROR, none appended, only first message remains
+    assert lines(r.stdout) == ["0", "ERROR", "first", "NONE", "1 1"]
+
+
+def test_produce_batch_invalid_input():
+    cases = [
+        "PRODUCE_BATCH t 2 0 a 1\n",  # missing timestamp? actually arity mismatch
+        "PRODUCE_BATCH t 0 0\n",  # count 0 invalid
+        "PRODUCE_BATCH t 101 0\n",  # count >100 invalid (needs many tokens but count invalid first)
+    ]
+    for stdin in cases:
+        r = run(stdin)
+        assert r.returncode != 0, f"expected non-zero for {stdin!r}"
+
+
+def test_produce_batch_persist(tmp_path):
+    d = str(tmp_path)
+    run("CREATE_TOPIC t 1 0\nPRODUCE_BATCH t 2 0 a 0 b 1\n", state_dir=d)
+    r = run("FETCH t 0 0 2\nFETCH t 0 1 3\n", state_dir=d)
+    assert lines(r.stdout) == ["a", "b"]
+
+
+def test_produce_batch_and_trim():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_BATCH t 3 0 a 0 b 0 c 1
+TRIM t 0 2 2
+FETCH t 0 0 3
+FETCH t 0 2 4
+PARTITION_INFO t 0 5
+"""
+    r = run(stdin)
+    # batch offsets 0,1,2 then trim 2 => low=2 high=3 retained c, so fetch 0 NONE, fetch2 c
+    assert lines(r.stdout) == ["0,1,2", "NONE", "c", "2 3"]

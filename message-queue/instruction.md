@@ -71,6 +71,12 @@ Trims log by removing messages with offset < offset (log retention). Sets low wa
 - `PARTITION_INFO` then returns `<low> <high>`, and `TOPIC_INFO` total counts only retained messages `sum(high-low)`.
 - `COMMIT` must now respect low: offset must be >= low or -1, else `ERROR`. `SEEK` must be >= low.
 
+**`PRODUCE_BATCH <topic> <count> <partition1> <payload1> <partition2> <payload2> ... <timestamp>`**
+Atomically produces `count` messages to `topic` across possibly different partitions. `count` >=1 <=100. Format: after topic and count, there are `2*count` tokens alternating partition and payload, then timestamp. Example: `PRODUCE_BATCH orders 2 0 hello 1 world 10` produces `hello` to partition 0 and `world` to partition 1 atomically.
+- Validation: topic must exist, all partitions must be >=0 and < num_partitions, all payloads valid, count matches number of pairs, timestamp >=0 else invalid input.
+- Application error: if topic missing or any partition invalid → output `ERROR` and **none** of the batch is appended (atomic).
+- On success: assign offsets per partition in order given (each partition's offset is its current high before append), append all messages in order given, and output comma-separated offsets in same order (e.g., `0,0` if two different partitions both at offset 0, or `0,1` if same partition gets two messages). Logged as individual `PRODUCE` records in order given (so replay preserves offsets) only on success.
+
 **`COMPACT <timestamp>`**
 In durable mode, rewrite log to minimal record set that reconstructs current state exactly, via temp file + atomic rename. In-memory mode: no-op. No output.
 
