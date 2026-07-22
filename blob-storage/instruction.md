@@ -112,14 +112,17 @@ All error responses must be JSON: `{"error": "message", "code": "ERROR_CODE"}` w
     - `Content-Type` from stored metadata
     - `Content-Length`
     - `ETag`
+    - `Last-Modified` — HTTP time format (e.g., `Mon, 02 Jan 2006 15:04:05 GMT`, via Go `http.TimeFormat`), corresponding to object's lastModified
     - `X-Amz-Meta-*` custom headers
+    - Optionally `X-Expires-At` if object has expiration
   - `404 Not Found` if bucket or object not found
+  - `410 Gone` with `{"error": "object expired", "code": "ExpiredObject"}` if expired
 - Body is exact bytes uploaded.
 
 **Head Object**
 - `HEAD /buckets/{bucketName}/objects/{objectKey}`
-- Same as GET but no body, only headers.
-- Responses: `200 OK` with headers, `404 Not Found`.
+- Same as GET but no body, only headers: `Content-Type`, `Content-Length`, `ETag`, `Last-Modified` (HTTP time format), `X-Amz-Meta-*`, optional `X-Expires-At`
+- Responses: `200 OK` with headers, `404 Not Found`, `410 Gone` if expired.
 
 **Delete Object**
 - `DELETE /buckets/{bucketName}/objects/{objectKey}`

@@ -164,9 +164,12 @@ else
     PYTEST_EXIT=${PIPESTATUS[0]}
 fi
 
-# Fallback if ctrf failed (no plugin)
+# Fallback if ctrf failed (no plugin) - clean storage to avoid state contamination obscuring original failure
 if [ $PYTEST_EXIT -ne 0 ]; then
-    # Try without ctrf
+    echo "First pytest attempt failed with $PYTEST_EXIT, cleaning storage before retry to avoid contamination..."
+    rm -rf /tmp/blob-data/* /tmp/codimango/blob-data/* 2>/dev/null || true
+    mkdir -p /tmp/blob-data /tmp/codimango/blob-data
+    # Also restart server to ensure clean state? Keep same server but storage cleaned - clear_storage fixture should handle, but we clean physical dirs too
     echo "Retrying without CTRF plugin..."
     pytest $TEST_PATH -rA -v 2>&1 | tee /tmp/codimango/pytest2.log 2>&1 || tee /tmp/pytest2.log 2>&1
     PYTEST_EXIT=${PIPESTATUS[0]}

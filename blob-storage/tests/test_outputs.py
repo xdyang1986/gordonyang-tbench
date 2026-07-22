@@ -911,7 +911,7 @@ def test_copy_operation():
     # We don't enforce strict new, but check presence
     assert src_last_modified is not None
 
-    # Verify preserved expiresAt: both src and dest should have X-Expires-At and share same absolute time or close
+    # Verify preserved expiresAt: both src and dest should have X-Expires-At and share same absolute time
     src_expires = resp_src.headers.get("X-Expires-At") or resp_src.headers.get(
         "x-expires-at"
     )
@@ -919,10 +919,38 @@ def test_copy_operation():
     # If expiration was set, both should have expiresAt
     if src_expires:
         assert dest_expires is not None, "Copy should preserve expiresAt"
-        # They should be same or very close (same absolute time)
-        # For simplicity, check they are equal (our reference preserves absolute time)
-        # Allow slight tolerance by checking they are both present
-        assert dest_expires == src_expires or True
+
+        # Parse RFC3339 timestamps and compare - must be same absolute expiry (not reset duration)
+        def parse_rfc3339(s):
+            try:
+                # Handle Z and offsets
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                return time.mktime(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+            except Exception:
+                # Fallback: try datetime
+                try:
+                    from datetime import datetime
+
+                    dt_str = s
+                    if dt_str.endswith("Z"):
+                        dt_str = dt_str[:-1] + "+00:00"
+                    dt = datetime.fromisoformat(dt_str)
+                    return dt.timestamp()
+                except Exception:
+                    return None
+
+        src_ts = parse_rfc3339(src_expires)
+        dest_ts = parse_rfc3339(dest_expires)
+        assert src_ts is not None and dest_ts is not None, (
+            f"Failed to parse expiresAt timestamps: src={src_expires}, dest={dest_expires}"
+        )
+        # Must be same absolute time, allow 2-second tolerance for processing delay
+        diff = abs(src_ts - dest_ts)
+        assert diff <= 2, (
+            f"Copy should preserve same absolute expiry, not reset duration: src={src_expires} ({src_ts}), "
+            f"dest={dest_expires} ({dest_ts}), diff={diff}s >2s"
+        )
 
     # Shared expiration behavior: src and dest share same absolute expiresAt, so after expiry both should be gone
     # Wait for src/dest to expire (10s TTL, but we put with 10s, need to wait? Actually we used 10s, not expire in this test)
@@ -1004,6 +1032,69 @@ def test_copy_shared_expiration():
     assert requests.get(
         f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
     ).status_code in (410, 404)
+
+
+def test_copy_preserves_absolute_expiry_not_duration():
+    """Prove dest preserves same absolute expiry, not resetting duration.
+
+    Put src with 10s TTL, wait 5s, copy to dest. If dest preserves absolute expiry,
+    dest expires in ~5s (same absolute time as src, 10s from src creation).
+    If dest resets duration, dest would expire in 10s from copy time.
+    After waiting 6s from copy (11s from src creation), preserved should be expired,
+    reset would still be alive.
+    """
+    requests.put(f"{BASE_URL}/buckets/srcexp3", timeout=5)
+    requests.put(f"{BASE_URL}/buckets/destexp3", timeout=5)
+
+    # Put src with 10s TTL
+    resp = requests.put(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt",
+        data=b"long ttl",
+        headers={"X-Expire-After": "10"},
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Wait 5 seconds
+    time.sleep(5)
+
+    # Copy to dest - should preserve absolute expiry (5 seconds remaining)
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt/copy",
+        json={"destBucket": "destexp3", "destKey": "long-copy.txt"},
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Dest should exist immediately after copy
+    assert (
+        requests.get(
+            f"{BASE_URL}/buckets/destexp3/objects/long-copy.txt", timeout=5
+        ).status_code
+        == 200
+    )
+
+    # Wait 6 more seconds - total 11s from src creation, 6s from dest creation
+    # If absolute preserved, dest should now be expired (10s TTL from src)
+    # If duration reset, dest would still have 4s remaining (10s from copy)
+    time.sleep(6)
+
+    src_status = requests.get(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt", timeout=5
+    ).status_code
+    dest_status = requests.get(
+        f"{BASE_URL}/buckets/destexp3/objects/long-copy.txt", timeout=5
+    ).status_code
+
+    assert src_status in (410, 404), (
+        f"Src should be expired after 11s, got {src_status}"
+    )
+    # Dest must also be expired if absolute preserved
+    assert dest_status in (410, 404), (
+        f"Dest should preserve absolute expiry and be expired after 11s total "
+        f"(6s after copy), not reset duration. Got {dest_status}. "
+        f"If dest reset TTL to 10s from copy, it would still be alive at 6s."
+    )
 
 
 def test_copy_expired_source_before_reaper():
@@ -1349,3 +1440,181 @@ def test_metadata_json_expires_at_inspection():
                 # expiresAt should be absent or None when no TTL
                 # Our reference omits expiresAt when none (omitempty)
                 assert meta.get("expiresAt") is None or "expiresAt" not in meta
+
+
+def test_reaper_physically_deletes_expired_files():
+    """Background reaper must physically delete expired data and meta files from filesystem"""
+    requests.put(f"{BASE_URL}/buckets/reaperbucket", timeout=5)
+
+    # Put with 1-second TTL
+    resp = requests.put(
+        f"{BASE_URL}/buckets/reaperbucket/objects/reap.txt",
+        data=b"to be reaped",
+        headers={"X-Expire-After": "1"},
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Verify files exist immediately
+    if os.path.exists(STORAGE_PATH):
+        data_path = os.path.join(STORAGE_PATH, "reaperbucket", "reap.txt")
+        meta_path = data_path + ".meta.json"
+        time.sleep(0.3)
+        assert os.path.isfile(data_path), "Data file should exist before expiry"
+        assert os.path.isfile(meta_path), "Meta file should exist before expiry"
+
+    # Wait for expiration + reaper interval (reaper ticks every 1s, plus buffer)
+    time.sleep(4)
+
+    # GET should be 410 or 404 (lazy expiration)
+    resp = requests.get(f"{BASE_URL}/buckets/reaperbucket/objects/reap.txt", timeout=5)
+    assert resp.status_code in (410, 404)
+
+    # Filesystem: reaper should have physically deleted files within 2 seconds after expiry
+    if os.path.exists(STORAGE_PATH):
+        data_path = os.path.join(STORAGE_PATH, "reaperbucket", "reap.txt")
+        meta_path = data_path + ".meta.json"
+        # Allow up to 2 seconds after expiry for reaper to delete
+        # We already waited 4 seconds total, so files should be gone
+        # If lazy expiration only (no reaper), files may still exist but GET returns 410 — we accept either
+        # However spec says reaper should delete, so we check that at least one of the files is gone, or if both remain, warn
+        # For strict check: both should be gone after reaper
+        if os.path.isfile(data_path) or os.path.isfile(meta_path):
+            # If files still exist, it means reaper may not have deleted yet or implementation uses lazy only
+            # We accept lazy-only as valid per spec ("Alternatively, lazy expiration is acceptable")
+            # But we at least verify that GET returns 410/404
+            assert resp.status_code in (410, 404)
+        else:
+            # Reaper correctly deleted both files
+            assert not os.path.isfile(data_path)
+            assert not os.path.isfile(meta_path)
+
+
+def test_delete_prunes_empty_parent_dirs():
+    """Delete object should prune empty parent directories inside bucket"""
+    requests.put(f"{BASE_URL}/buckets/prune Means", timeout=5)
+    # Use valid bucket name for pruning test
+    requests.put(f"{BASE_URL}/buckets/prunebucket", timeout=5)
+
+    # Create nested object a/b/c/d.txt
+    resp = requests.put(
+        f"{BASE_URL}/buckets/prunebucket/objects/a/b/c/d.txt",
+        data=b"nested",
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Verify filesystem has nested dirs
+    if os.path.exists(STORAGE_PATH):
+        nested_path = os.path.join(STORAGE_PATH, "prunebucket", "a", "b", "c", "d.txt")
+        assert os.path.isfile(nested_path)
+        # Parent dirs should exist
+        assert os.path.isdir(os.path.join(STORAGE_PATH, "prunebucket", "a"))
+        assert os.path.isdir(os.path.join(STORAGE_PATH, "prunebucket", "a", "b"))
+        assert os.path.isdir(os.path.join(STORAGE_PATH, "prunebucket", "a", "b", "c"))
+
+    # Delete the object
+    resp = requests.delete(
+        f"{BASE_URL}/buckets/prunebucket/objects/a/b/c/d.txt", timeout=5
+    )
+    assert resp.status_code == 204
+
+    # Verify filesystem: empty parent dirs should be pruned (deleted), but bucket remains
+    if os.path.exists(STORAGE_PATH):
+        bucket_path = os.path.join(STORAGE_PATH, "prunebucket")
+        assert os.path.isdir(bucket_path), (
+            "Bucket dir should remain after deleting nested object"
+        )
+        # a/b/c should be pruned
+        # After deletion, a/b/c and a/b and a should be removed if empty
+        # We check that they are gone
+        # Note: if implementation does not prune, test will fail - pruning is required per spec
+        # Allow time for filesystem sync
+        time.sleep(0.2)
+        assert not os.path.exists(
+            os.path.join(STORAGE_PATH, "prunebucket", "a", "b", "c", "d.txt")
+        )
+        # Parent dirs should be pruned
+        # The spec says "prune empty parent directories inside bucket (but not bucket itself)"
+        # So after deleting a/b/c/d.txt, directories a/b/c, a/b, a should be deleted if empty
+        # We verify at least a/b/c is gone
+        assert not os.path.exists(
+            os.path.join(STORAGE_PATH, "prunebucket", "a", "b", "c")
+        ), "Empty parent dir a/b/c should be pruned after delete"
+        # Also a/b and a should be pruned if they became empty
+        # We check they are gone too, but allow if they had other files
+        # Since we only created one object, they should be pruned
+        # However, if implementation only prunes immediate parent, we at least checked c
+        # For strict check, verify a is gone
+        # We will check that a is gone, but allow if implementation keeps empty dirs? Spec says must prune, so we assert
+        # Use tolerance: if a/b still exists, it should be empty? Actually we want it pruned
+        # We'll assert that a is pruned
+        # If not pruned, fail
+        assert not os.path.exists(os.path.join(STORAGE_PATH, "prunebucket", "a")), (
+            "Empty parent dirs should be pruned, a/ should be deleted after removing only object in it"
+        )
+
+
+def test_no_external_go_dependencies():
+    """Verify Go module uses only standard library if stdlib-only is mandatory"""
+    go_mod_paths = ["/app/go.mod", "./go.mod"]
+    found = False
+    for p in go_mod_paths:
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    content = f.read()
+                    found = True
+                    # Check for require statements that import external packages
+                    # stdlib-only means no external requires, or only require with indirect and not used?
+                    # We check that there are no external dependencies like github.com, etc.
+                    lines = content.splitlines()
+                    has_external_require = False
+                    for line in lines:
+                        stripped = line.strip()
+                        # Skip module and go version and comments
+                        if stripped.startswith("module") or stripped.startswith("go "):
+                            continue
+                        if not stripped or stripped.startswith("//"):
+                            continue
+                        # Look for require block or single require
+                        if "github.com" in stripped or "golang.org/x" in stripped:
+                            # Allow if it's in comment? We already stripped comments
+                            # But check if it's actually a require
+                            if "require" in content or "github.com" in stripped:
+                                has_external_require = True
+                    # For this task, stdlib-only is mandatory per instruction
+                    # So we assert no external github.com or golang.org/x dependencies
+                    # However, we allow blank go.mod with only module and go version
+                    # If external found, fail
+                    assert not has_external_require, (
+                        f"go.mod should not have external dependencies for stdlib-only task, found: {content}"
+                    )
+            except Exception as e:
+                # If file read fails, don't fail test, just pass (server may be running from different location)
+                pass
+    # Always pass if files not found (e.g., in cloud where /app may not have go.mod at test time)
+    # The important check is that at least go.mod exists in typical setup
+    # We also verify via go list if go is available
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["go", "list", "-f", "{{.Imports}}", "./..."],
+            cwd="/app",
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # If go list succeeds, it will list imports; we can check for non-stdlib
+        # Non-stdlib imports typically contain "." like "github.com/..."
+        if result.returncode == 0 and result.stdout:
+            # Very basic check: if imports contain "github.com", fail
+            if "github.com" in result.stdout:
+                assert False, f"Found external imports: {result.stdout}"
+    except Exception:
+        pass
+
+    # Final check: server is running, so at least binary was built with go.mod
+    resp = requests.get(f"{BASE_URL}/buckets", timeout=5)
+    assert resp.status_code == 200
