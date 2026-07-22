@@ -16,18 +16,37 @@ APP_DIR = Path("/app")
 TMP_BASE = Path("/tmp")
 
 
-def run_cmd(cmd, cwd=APP_DIR, check=False, timeout=120):
+def run_cmd(cmd, cwd=APP_DIR, check=False, timeout=120, env=None):
     """Run command and return result"""
-    # cmd can be string or list
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
     if isinstance(cmd, str):
         result = subprocess.run(
-            cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            cmd,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=merged_env,
         )
     else:
         result = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=merged_env,
         )
     return result
+
+
+def run_uploader_with_env(args, extra_env, cwd=APP_DIR, timeout=120):
+    bin_cmd = get_binary()
+    cmd = bin_cmd + args
+    return run_cmd(cmd, cwd=cwd, timeout=timeout, env=extra_env)
 
 
 def go_run(args, cwd=APP_DIR, timeout=120):
@@ -1211,6 +1230,35 @@ def test_retries_flag_and_backoff():
         )
         assert result.returncode == 0
         assert "UPLOAD COMPLETE" in result.stdout
+
+        # Test retry actually triggered via failure injection (makes RETRY: log not dead)
+        dest = tmp / "dest_retry_inject"
+        dest.mkdir()
+        result = run_uploader_with_env(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--retries",
+                "3",
+                "--chunk-size",
+                "1M",
+            ],
+            {"INJECT_FAIL_CHUNK": "0"},
+            timeout=30,
+        )
+        # Should succeed after retry and log RETRY:
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, (
+            f"Injected failure should be retried and succeed: {combined}"
+        )
+        assert "RETRY:" in combined, (
+            f"Should print RETRY: on injected failure, got {combined}"
+        )
+        assert "UPLOAD COMPLETE" in result.stdout
+        assert compute_sha256(sample) == compute_sha256(dest / "retry.mp4")
 
 
 def test_checksum_algo_flag():

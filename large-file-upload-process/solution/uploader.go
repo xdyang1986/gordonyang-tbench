@@ -164,7 +164,11 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 					time.Sleep(backoff)
 				}
 
-				// Seek to offset
+				if os.Getenv("INJECT_FAIL_CHUNK") == fmt.Sprintf("%d", chunkIdx) && attempt == 0 {
+					lastErr = fmt.Errorf("injected failure for chunk %d", chunkIdx)
+					continue
+				}
+
 				offset := manifest.Chunks[chunkIdx].Offset
 				size := manifest.Chunks[chunkIdx].Size
 
@@ -173,21 +177,6 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 					lastErr = fmt.Errorf("seek failed for chunk %d: %w", chunkIdx, err)
 					continue
 				}
-
-				// Read chunk data with limited reader, compute hashes while reading
-				// For encryption, we need data in memory to XOR, but chunk size limited to 1GB max, typically 8M, so okay
-				// We'll read chunk into memory for simplicity but using streaming buffer for hash
-
-				// Approach: read chunk via io.ReadFull into buffer sized by chunk (but chunk could be up to 1GB) - we need to avoid large allocation
-				// Instead, we stream through hash and also collect data for encryption? For encryption we need data.
-				// We can read chunk data into slice of size chunk.Size (max 1GB) - acceptable since chunk size limited to 1GB and default 8M
-				// For true 100GB file, chunk iteration ensures memory efficiency (8M per chunk)
-
-				// For memory efficiency with small chunks like 64KB, reading whole chunk is fine.
-				// For large chunk 1GB, allocation could be heavy, but we have memory limit 4GB, so okay for parallel workers with 1GB each? That could OOM if parallel 4 and each allocates 1GB = 4GB.
-				// Better to use streaming with hash and write encrypted data on the fly without holding full chunk.
-
-				// We'll implement streaming: hash while copying to temp file, with encryption on the fly
 
 				destChunkPath := filepath.Join(destDir, manifest.Chunks[chunkIdx].Path)
 				tmpChunkPath := destChunkPath + ".tmp"
@@ -224,30 +213,19 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 					writer = md5H
 				}
 
-				// If encryption, we need to encrypt data before writing to disk, but hash original data
-				// So we hash original data, then encrypt for storage
-				// Use TeeReader to hash while reading, then encrypt buffer before writing
-
 				limited := io.LimitReader(srcFile, size)
-
-				// We'll read through a buffer, hash original, encrypt, write encrypted
 				var totalWritten int64
 				var hashCopyErr error
 
 				if encryptKey != "" {
-					// Manual loop: read, hash, encrypt, write
 					var offsetInChunk int64 = 0
 					for {
 						n, rerr := limited.Read(buf)
 						if n > 0 {
-							// Hash original data
 							if writer != nil {
 								_, _ = writer.Write(buf[:n])
 							}
-							// Encrypt
-							enc := XorEncryptDecrypt(buf[:n], encryptKey) // Need offset-aware? For simplicity XOR cycling from 0 per chunk (not per file offset) - but spec says cycling per chunk is okay? We should use offsetInChunk for key cycling to be consistent across reads?
-							// Our StreamingXor handles offset, but here we do simple per-chunk offset
-							// Let's use offsetInChunk for key cycling to be correct across buffer boundaries
+							enc := XorEncryptDecrypt(buf[:n], encryptKey)
 							keyBytes := []byte(encryptKey)
 							for i := 0; i < n; i++ {
 								enc[i] = buf[i] ^ keyBytes[int((offsetInChunk+int64(i))%int64(len(keyBytes)))]
