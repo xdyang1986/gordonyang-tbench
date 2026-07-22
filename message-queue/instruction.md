@@ -140,12 +140,12 @@ Payload is command text exactly as logged, e.g., `CREATE_TOPIC orders 3 0`, `PRO
 - `TRIM` → only when low watermark actually increases.
 - `JOIN_GROUP` → only when adds new subscription.
 - `COMMIT` → only when committed value changes.
-- `SEEK` → only when position changes (including auto-advances after PRODUCE, POLL, TRIM).
+- `SEEK` → only when position changes (including auto-advances after POLL and TRIM). When POLL initializes a missing position and then advances it, durable mode must log only one SEEK record for the final next position (not one for initialization and one for advance).
 Queries and `COMPACT` are never appended as payloads; `COMPACT` rewrites file.
 
 **Startup recovery:** create directory if needed. Before reading stdin, replay `$MQ_STATE_DIR/mq.log` record by record in order. Each record must reconstruct state exactly as originally processed, preserving offsets (since offsets are determined by append order). Stop at first incomplete or corrupt record (truncated header/payload or CRC mismatch); discard it and all following bytes; truncate log to valid prefix so later appends are clean. Never fail startup due to torn tail. An empty log file recovers cleanly.
 
-Each append must be durable before process continues (fsync).
+**Durability (best-effort):** Each append should be made durable before continuing (e.g., via file sync / fsync). This is a best-effort durability guideline — it is not strictly required for functional correctness in the tests that drive the binary via stdin/stdout, but a static best-effort check scans the Go source for a `Sync()`/`fsync` call to encourage correct practice. Implementations that omit sync still pass functional tests but are noted as weaker on durability.
 
 **Compaction:** `COMPACT` writes new temp file `$MQ_STATE_DIR/mq.log.tmp` containing minimal records that replay to same state:
 - For each topic sorted asc: `CREATE_TOPIC <topic> <num_partitions> 0`
