@@ -274,45 +274,8 @@ CASES = [
 ]
 
 
-SENSITIVE_INVARIANT_ONLY = {
-    18,
-    19,
-}  # T=2 multi-sub credit-persistence where undocumented per-round recurrence dominates - relax to invariants
-
-
 @pytest.mark.parametrize("T,loads,groups,subs,expected", CASES)
 def test_allocation(T, loads, groups, subs, expected):
-    # For sensitive cases, exact CSV is brittle due to tie-breaks; check invariants instead (per reviewer recommendation)
-    # Find index of this case in CASES list
-    idx = None
-    for i, c in enumerate(CASES):
-        if c[0] == T and c[1] == loads and c[2] == groups and c[3] == subs:
-            idx = i
-            break
-    if idx in SENSITIVE_INVARIANT_ONLY:
-        # Invariant checks instead of exact
-        out_lines = run_case(T, loads, groups, subs)
-        G = len(groups)
-        S = len(subs)
-        group_caps = [g[3] for g in groups]
-        sub_caps = [s[4] for s in subs]
-        group_tot = [0] * G
-        sub_tot = [0] * S
-        for line in out_lines:
-            parts = [int(x) for x in line.split(",")] if line else []
-            assert len(parts) == S
-            for i, v in enumerate(parts):
-                assert 0 <= v
-            for g in range(G):
-                gs = sum(
-                    parts[i] for i, (gid, _, _, _, _, _) in enumerate(subs) if gid == g
-                )
-                # check cap/rate compliance via effective caps etc. - use conservation as proxy
-            # conservation
-        # Use same conservation logic as test_conservation for this batch
-        # For simplicity, just check that output is deterministic and within caps (detailed invariant checks in test_conservation and other corner tests)
-        assert len(out_lines) == T
-        return
     out_lines = run_case(T, loads, groups, subs)
     assert len(out_lines) == len(expected), (
         f"expected {len(expected)} lines, got {len(out_lines)}: {out_lines}"
