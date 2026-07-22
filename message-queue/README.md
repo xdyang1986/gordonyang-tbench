@@ -53,11 +53,13 @@ Payloads: single tokens no spaces no commas 1..1024, topic/group names `[A-Za-z0
 
 - **Environment:** golang:1.26.2-bookworm, WORKDIR /app, preinstalled pytest.
 
-## Completion Rates (latest run — 75 tests)
+## Completion Rates (online validation — commit 30be337, 2026-07-22)
 
-- Oracle: **75/75 passed** (reward 1.0) — R06/R07 compaction minimal + noop + sorted + invalid group + offline verifier
-- Sonnet 4.6: **0/3** — misses durable log CRC, torn-tail truncation, atomic compaction minimal deterministic
-- Balanced toward the 20-80% sweet spot: strong models must correctly implement durable log CRC, torn-tail truncation, atomic compaction minimal deterministic, batch atomicity, low handling, and sorted order to pass.
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **4/5** — validated
+- GPT-5.5 (codex): **3/5** — validated
+- Avocado (metacode): **0/5** — failed
+- avgReward **0.80**, validation passing — balanced within the 20-80% sweet spot. Strong models must correctly implement durable log CRC, torn-tail truncation, atomic compaction minimal deterministic, batch atomicity, low handling, and sorted order to pass.
 
 ## Anti-Cheating
 

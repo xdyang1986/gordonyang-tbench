@@ -29,15 +29,13 @@ Naive approach fails because:
 - No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
 - Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (local, novel hard — latest run 72 tests)
+## Completion Rates (online validation — commit 656cbd1, 2026-07-22)
 
-- Oracle: **3/3 passed** (72/72 tests each run) — 32-39s, flakiness 3/3 (local 44s total, online oracle 3/3)
-- Sonnet 4.6: **0-2/5** — fails code-aware camelCase highlight, BM25 non-standard k1=1.65 b=0.68 idf+1 with title weight 2x, namespace header override, recency exact constants 0.5/168, NEAR/1 vs NEAR/3, top_terms sorting, WAL checksum CRC32 enforcement
-- Opus 4.8: **5/5** on easy, **0/5** on first hard, **5/5** on 58-test, **2/5 and 1/5** on 72-test final (balanced) — genuine reasoning: may get CRUD and simple boolean but misses camelCase sub-token highlight exact, BM25F per-field df vs union, recency exact ratio, namespace case-insensitive stats, top_terms top-5 sorted, id-asc tie break, body/default BM25F df, fixed scores, WAL delete replay, truncated recovery, invalid operator/fuzzy/NEAR 400, limit clamp 100
-- Avocado (Metacode): **1/6, 2/7, 3/7** — real near-misses on positional NEAR wiring, recency factor, WAL checksum skip, code-aware highlight
-- GPT-5.5 (Codex): **5/5** easy → **3/5** hard v2 → **2/5 and 1/5** final 72-test — difficulty increased via custom constants and novel composition, balanced 1-4/5
-
-> Difficulty intentionally balanced: not 5/5 for all models (too easy), not 0/5 for all (too hard) — at least one model lands 1-4/5 (GPT 2-3/5, Avocado 1-3/5 qualifies; Opus 5/5 on some commits but 0-2/5 on others shows genuine reasoning attempts). Previous easy version was 5/5 for all → too easy, first hard 0/5 opus → too hard, novel 72-test tuned to 2-3/5 GPT and 1/6 Avocado.
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **3/5** — validated
+- GPT-5.5 (codex): **3/5** — validated
+- Avocado (metacode): **0/5** — failed
+- avgReward **0.55**, validation pending — balanced within the 20-80% sweet spot (Oracle solves it, agents land 0-3/5).
 
 ## Model Analysis
 
