@@ -129,17 +129,19 @@ Flags:
 - `--encrypt-key`: optional, string key for XOR encryption. If provided, each chunk's bytes are XORed with key bytes cycling (`chunk_byte[i] XOR key[i % len(key)]`) before writing to dest. Must be streaming (not loading whole chunk for XOR? But chunk-sized XOR is okay, as chunk is limited to 1GB). On assembly, if manifest has encrypt_key, decrypt similarly. Final assembled file checksum should match source (decrypted).
 
 Steps:
-1. Validate source file format (fail if invalid) - follow symlinks
-2. Stat size (int64)
-3. Parse flags: chunk size, parallel (1-32, error "invalid parallel" if out of range), retries (0-10, error "invalid retries"), checksum algo (must be sha256|md5|both, error "invalid checksum algo"), encrypt-key (any string, may be empty = no encryption)
-4. Compute source file checksum(s) streaming based on requested algo
-5. If manifest exists: load and resume
-   - If corrupted JSON, warn `WARN: corrupted manifest, starting fresh`
-   - If source_size != current size → error `source file changed`
-   - If parallel differs → WARN and use manifest's parallel? Or use new parallel? Use new parallel but warn.
-   - If checksum algo differs → WARN and use manifest's? Actually if algo changed, should error or recalc? For simplicity, if algo differs, WARN and use new algo but re-verify all chunks.
-   - Verify existing chunks (decrypt if needed? For encrypted uploads, chunk files on disk are encrypted, so verification must decrypt or compare encrypted checksum? Simplest: store checksum of encrypted data? But spec says checksum of original chunk. For encrypted case, we need to handle: if encrypt-key present, chunk file on disk is encrypted, so to verify we must either decrypt then checksum, or checksum encrypted data and store encrypted checksum? Let's define: checksum fields always refer to ORIGINAL unencrypted chunk data and file. So for verification of encrypted chunk file, we must read file, decrypt (XOR), then compute checksum of decrypted data and compare to manifest's checksum (original). Implement that.
-6. Else create new manifest
+1. Validate source file format (fail if invalid) - follow symlinks via os.Stat (which follows links by default)
+2. Stat size (int64) via os.Stat
+3. Parse flags: chunk size (human-readable with optional spaces), parallel (1-32, error "invalid parallel" if out of range), retries (0-10, error "invalid retries"), checksum algo (must be sha256|md5|both, error "invalid checksum algo"), encrypt-key (any string, may be empty = no encryption)
+4. Compute source file checksum(s) streaming based on requested algo (sha256 uses 64-char hex, md5 32-char, both computes both in single pass via MultiWriter)
+5. If manifest exists: load and resume with defined policy:
+   - If corrupted JSON, print `WARN: corrupted manifest, starting fresh` to stderr and create new manifest
+   - If source_size != current size → error `ERROR: source file changed since manifest creation (size mismatch)` and exit 1
+   - If encrypt_key in manifest != provided encrypt-key → error `ERROR: encrypt key mismatch` and exit 1
+   - If parallel in manifest differs from requested parallel → print `WARN: parallel changed from <old> to <new>, using new` to stderr and use the newly requested parallel value for workers
+   - If checksum_algo in manifest differs from requested → print `WARN: checksum algo changed from <old> to <new>, using new algo but re-verifying` to stderr, use new algo, and re-verify all existing chunks under new algo (reset uploaded flags if checksum fields missing)
+   - For verification of existing chunks: chunk files on disk may be encrypted if encrypt_key is set. Checksum fields in manifest always refer to ORIGINAL unencrypted data. Therefore verification must read chunk file, decrypt via XOR with encrypt_key if present, then compute checksum(s) of decrypted data and compare to manifest's stored checksum(s). If size matches and checksums match, mark uploaded true; else mark false and re-upload.
+   - After verification, continue uploading remaining chunks
+6. Else create new manifest with new session_id, file checksums, parallel, encrypt_key, checksum_algo
 7. Ensure `dest/chunks/` exists
 8. Save initial manifest
 9. **Parallel upload**: 

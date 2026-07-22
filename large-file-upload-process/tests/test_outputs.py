@@ -265,8 +265,24 @@ def test_chunk_size_parsing():
         sample = tmp / "sample.mp4"
         create_dummy_video(sample, "mp4", size_bytes=5 * 1024 * 1024)
 
-        # Valid sizes
-        valid_cases = ["512K", "512KB", "1M", "8M", "8MB", "1G", "1024", "1048576"]
+        # Valid sizes - must include spaced forms per spec §2 ("8 MB" should parse)
+        valid_cases = [
+            "512K",
+            "512KB",
+            "1M",
+            "8M",
+            "8MB",
+            "1G",
+            "1024",
+            "1048576",
+            "8 MB",
+            "512 KB",
+            "1MB",
+            "4 M",
+            "1 G",
+            "8 mb",
+            "8Mb",
+        ]
         for cs in valid_cases:
             result = run_uploader(
                 ["info", "--file", str(sample), "--chunk-size", cs], timeout=15
@@ -1097,18 +1113,38 @@ def test_parallel_flag_validation():
             )
             assert "UPLOAD COMPLETE" in result.stdout
 
-        # Check that implementation actually uses goroutines for parallel>1
-        uploader_content = (APP_DIR / "uploader.go").read_text()
-        # Must have concurrency primitives
-        assert "go " in uploader_content or "go func" in uploader_content, (
-            "Must use goroutines for parallel"
-        )
-        assert (
-            "WaitGroup" in uploader_content or "sync.WaitGroup" in uploader_content
-        ), "Must use WaitGroup"
-        assert "Mutex" in uploader_content or "sync.Mutex" in uploader_content, (
-            "Must use Mutex for thread-safe manifest"
-        )
+        # Behavioral check for parallel correctness via manifest field and actual upload
+        # Parallel uploads with different worker counts must all produce correct files
+        for valid in ["1", "4"]:
+            dest = tmp / f"dest_check_{valid}"
+            dest.mkdir()
+            sample_check = tmp / f"parallel_check_{valid}.mp4"
+            create_dummy_video(sample_check, "mp4", size_bytes=3 * 1024 * 1024)
+            result = run_uploader(
+                [
+                    "upload",
+                    "--source",
+                    str(sample_check),
+                    "--dest",
+                    str(dest),
+                    "--parallel",
+                    valid,
+                ],
+                timeout=30,
+            )
+            assert result.returncode == 0
+            manifest_files = list(dest.glob("*.manifest.json"))
+            assert len(manifest_files) == 1
+            mdata = json.loads(manifest_files[0].read_text())
+            assert mdata["parallel"] == int(valid)
+            orig_cs = compute_sha256(sample_check)
+            final_files = [
+                f
+                for f in dest.glob("*.mp4")
+                if f.stat().st_size == sample_check.stat().st_size
+            ]
+            assert len(final_files) > 0
+            assert compute_sha256(final_files[0]) == orig_cs
 
 
 def test_retries_flag_and_backoff():
@@ -1135,25 +1171,46 @@ def test_retries_flag_and_backoff():
             assert result.returncode != 0
             assert "invalid retries" in (result.stdout + result.stderr).lower()
 
-        # Valid retries should succeed even without failures
-        dest = tmp / "dest_retry"
+        # Valid retries should succeed even without failures (behavioral)
+        for r in ["0", "3", "5"]:
+            dest = tmp / f"dest_retry_{r}"
+            dest.mkdir()
+            result = run_uploader(
+                [
+                    "upload",
+                    "--source",
+                    str(sample),
+                    "--dest",
+                    str(dest),
+                    "--retries",
+                    r,
+                ],
+                timeout=30,
+            )
+            assert result.returncode == 0, (
+                f"retries={r} should succeed: {result.stderr}"
+            )
+            assert "UPLOAD COMPLETE" in result.stdout
+            assert compute_sha256(sample) == compute_sha256(dest / "retry.mp4")
+
+        dest = tmp / "dest_retry_3b"
         dest.mkdir()
         result = run_uploader(
-            ["upload", "--source", str(sample), "--dest", str(dest), "--retries", "3"],
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--retries",
+                "3",
+                "--parallel",
+                "2",
+            ],
             timeout=30,
         )
         assert result.returncode == 0
-
-        # Code must contain retry logic with backoff
-        uploader_content = (APP_DIR / "uploader.go").read_text()
-        assert (
-            "retries" in uploader_content.lower()
-            or "Retry" in uploader_content
-            or "RETRY" in uploader_content
-        )
-        assert "Sleep" in uploader_content or "backoff" in uploader_content.lower(), (
-            "Must implement exponential backoff with Sleep"
-        )
+        assert "UPLOAD COMPLETE" in result.stdout
 
 
 def test_checksum_algo_flag():
