@@ -14,8 +14,8 @@ This task tests your ability to build a backend storage service from scratch usi
 - Working directory: `/app`
 - You must create a `go.mod` file (e.g., `module blob-storage`)
 - The server binary must be buildable via `go build -o blob-server .` or `go build -o ./blob-server .` or `go build -o /app/blob-server .` from `/app` (legacy `/tmp/blob-server` also accepted if needed)
-- Server must listen on `:8080` (0.0.0.0:8080)
-- Data persistence: Use directory specified by env var `STORAGE_PATH` or `DATA_DIR`, fallback to `./data` if not set. Tests will set `STORAGE_PATH=/tmp/blob-data` (or `/tmp/codimango/blob-data`).
+- Server must listen on `:8080` (0.0.0.0:8080) by default, but must respect `PORT` env var if set (e.g., `PORT=8081` → listen on :8081). This is required for testing DATA_DIR fallback without port conflict.
+- Data persistence: Use directory specified by env var `STORAGE_PATH`, else `DATA_DIR`, fallback to `./data` if neither set. Tests will set `STORAGE_PATH=/tmp/blob-data` (or `/tmp/codimango/blob-data`) for main phase, and `DATA_DIR=/tmp/codimango/data_dir_test` with `STORAGE_PATH` unset for fallback phase. Must handle both.
 - Use **only Go standard library** (no external dependencies) for portability.
 
 ### 2. Storage Layout

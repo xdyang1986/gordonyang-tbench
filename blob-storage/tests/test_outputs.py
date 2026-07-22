@@ -736,6 +736,25 @@ def test_checksum_sha256():
     )
     assert resp.status_code in (200, 201)
 
+    # Invalid SHA256 header format (non-hex, wrong length) should be 400 InvalidArgument
+    for bad_format in [
+        "not-hex",
+        "abc",  # too short
+        "g" * 64,  # non-hex
+        "0" * 63,  # too short by 1
+        "0" * 65,  # too long by 1
+    ]:
+        resp = requests.put(
+            f"{BASE_URL}/buckets/checksumbucket/objects/badformat.txt",
+            data=content,
+            headers={"X-Content-SHA256": bad_format},
+            timeout=5,
+        )
+        assert resp.status_code == 400, (
+            f"Expected 400 for invalid SHA256 format {bad_format}, got {resp.status_code}"
+        )
+        assert resp.json()["code"] in ("InvalidArgument", "BadDigest")
+
 
 def test_expiration_ttl():
     """Test novel TTL expiration via X-Expire-After and 410 Gone, plus metadata JSON inspection"""
@@ -1000,6 +1019,30 @@ def test_copy_operation():
         timeout=5,
     )
     assert resp.status_code == 400
+
+    # Copy with invalid dest bucket name format should be 400 InvalidBucketName
+    for bad_bucket in ["AB", "InvalidUpper", "-bad", "bad-", "ab"]:
+        resp = requests.post(
+            f"{BASE_URL}/buckets/srcbucket/objects/original.txt/copy",
+            json={"destBucket": bad_bucket, "destKey": "valid.txt"},
+            timeout=5,
+        )
+        assert resp.status_code == 400, (
+            f"Expected 400 for bad dest bucket {bad_bucket}, got {resp.status_code}"
+        )
+        assert resp.json()["code"] in ("InvalidBucketName", "InvalidArgument")
+
+    # Copy with invalid dest key format should be 400 InvalidObjectKey
+    for bad_key in ["../escape.txt", "a//b", "/leading.txt", "a/../b.txt"]:
+        resp = requests.post(
+            f"{BASE_URL}/buckets/srcbucket/objects/original.txt/copy",
+            json={"destBucket": "destbucket", "destKey": bad_key},
+            timeout=5,
+        )
+        # Accept 400 for invalid key, or 404 if path cleaned to bucket route (for .. cases)
+        assert resp.status_code in (400, 404), (
+            f"Expected 400/404 for bad dest key {bad_key}, got {resp.status_code}"
+        )
 
 
 def test_copy_shared_expiration():
