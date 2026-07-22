@@ -1640,3 +1640,235 @@ def test_topic_name_255_boundary():
 
     r2 = run(f"CREATE_TOPIC {long_bad} 1 0\n")
     assert r2.returncode != 0
+
+
+def parse_log_payloads(log_path):
+    payloads = []
+    try:
+        with open(log_path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return payloads
+    off = 0
+    while off + 8 <= len(data):
+        plen, crc = struct.unpack("<II", data[off : off + 8])
+        if off + 8 + plen > len(data):
+            break
+        payload_bytes = data[off + 8 : off + 8 + plen]
+        if zlib.crc32(payload_bytes) & 0xFFFFFFFF != crc:
+            break
+        try:
+            payloads.append(payload_bytes.decode())
+        except Exception:
+            break
+        off += 8 + plen
+    return payloads
+
+
+def log_file_size(state_dir):
+    p = os.path.join(state_dir, "mq.log")
+    try:
+        return os.path.getsize(p)
+    except FileNotFoundError:
+        return 0
+
+
+# --------------------------------------------------------------------------
+# R06/R07 coverage: durable log, compaction minimal deterministic, no-op logging
+# --------------------------------------------------------------------------
+
+
+def test_compact_minimal_deterministic_and_smaller(tmp_path):
+    d = str(tmp_path)
+    # Build a log with redundant changing COMMIT/SEEK records so compaction makes it strictly smaller
+    # Sequence: create topic, produce 2 msgs, join group, poll (logs SEEK 1), commit 0, commit 1, commit 0, commit 1, seek 0, seek 1, trim 1
+    cmds = [
+        "CREATE_TOPIC t 1 0",
+        "PRODUCE t 0 a 1",
+        "PRODUCE t 0 b 2",
+        "JOIN_GROUP g1 t 3",
+        "POLL g1 t 0 4",  # logs SEEK 1
+        "COMMIT g1 t 0 0 5",
+        "COMMIT g1 t 0 1 6",
+        "COMMIT g1 t 0 0 7",
+        "COMMIT g1 t 0 1 8",
+        "SEEK g1 t 0 0 9",
+        "SEEK g1 t 0 1 10",
+        "TRIM t 0 1 11",
+    ]
+    run("\n".join(cmds) + "\n", state_dir=d)
+    logp = os.path.join(d, "mq.log")
+    before_payloads = parse_log_payloads(logp)
+    before_size = os.path.getsize(logp)
+    # before should have 12 records: CREATE, PRODUCE a, PRODUCE b, JOIN, SEEK1(poll), COMMIT0, COMMIT1, COMMIT0, COMMIT1, SEEK0, SEEK1, TRIM1
+    assert len(before_payloads) == 12, (
+        f"before payloads expected 12 got {len(before_payloads)}: {before_payloads}"
+    )
+    assert before_size > 0
+
+    run("COMPACT 12\n", state_dir=d)
+    after_payloads = parse_log_payloads(logp)
+    after_size = os.path.getsize(logp)
+    assert after_size < before_size, (
+        f"compacted file not strictly smaller: before {before_size} after {after_size}"
+    )
+    # Minimal deterministic sequence per instruction.md, sorted, timestamp 0
+    # CREATE_TOPIC t 1 0
+    # PRODUCE t 0 a 0
+    # PRODUCE t 0 b 0
+    # TRIM t 0 1 0
+    # JOIN_GROUP g1 t 0
+    # COMMIT g1 t 0 1 0  (latest)
+    # SEEK g1 t 0 1 0   (pos 1 != expected 2)
+    expected = [
+        "CREATE_TOPIC t 1 0",
+        "PRODUCE t 0 a 0",
+        "PRODUCE t 0 b 0",
+        "TRIM t 0 1 0",
+        "JOIN_GROUP g1 t 0",
+        "COMMIT g1 t 0 1 0",
+        "SEEK g1 t 0 1 0",
+    ]
+    assert after_payloads == expected, (
+        f"compacted minimal sequence mismatch:\nGot: {after_payloads}\nExp: {expected}"
+    )
+
+
+def test_produce_auto_logged_as_normalized_produce(tmp_path):
+    d = str(tmp_path)
+    run("CREATE_TOPIC t 3 0\n", state_dir=d)
+    # foo sum 324 %3=0
+    r = run("PRODUCE_AUTO t foo 1\n", state_dir=d)
+    assert r.returncode == 0
+    payloads = parse_log_payloads(os.path.join(d, "mq.log"))
+    assert len(payloads) == 2  # CREATE + PRODUCE
+    assert payloads[0].startswith("CREATE_TOPIC t 3 ")
+    assert payloads[1].startswith("PRODUCE t 0 foo "), (
+        f"expected normalized PRODUCE, got {payloads[1]!r}"
+    )
+    assert "PRODUCE_AUTO" not in payloads[1]
+
+
+def test_noop_does_not_append_records(tmp_path):
+    d = str(tmp_path)
+    logp = os.path.join(d, "mq.log")
+    run("CREATE_TOPIC t 1 0\n", state_dir=d)
+    size_after_create = log_file_size(d)
+    # no-op CREATE_TOPIC same topic should not append
+    run("CREATE_TOPIC t 1 1\n", state_dir=d)
+    assert log_file_size(d) == size_after_create
+
+    run("PRODUCE t 0 a 2\n", state_dir=d)
+    size_after_produce = log_file_size(d)
+
+    run("JOIN_GROUP g t 3\n", state_dir=d)
+    size_after_join = log_file_size(d)
+    run("JOIN_GROUP g t 4\n", state_dir=d)
+    assert log_file_size(d) == size_after_join
+
+    run("COMMIT g t 0 0 5\n", state_dir=d)
+    size_after_commit = log_file_size(d)
+    run("COMMIT g t 0 0 6\n", state_dir=d)
+    assert log_file_size(d) == size_after_commit
+
+    run("SEEK g t 0 0 7\n", state_dir=d)
+    size_after_seek = log_file_size(d)
+    run("SEEK g t 0 0 8\n", state_dir=d)
+    assert log_file_size(d) == size_after_seek
+
+    run("TRIM t 0 1 9\n", state_dir=d)
+    size_after_trim = log_file_size(d)
+    run("TRIM t 0 1 10\n", state_dir=d)
+    assert log_file_size(d) == size_after_trim
+    run("TRIM t 0 0 11\n", state_dir=d)  # trim <= low no-op
+    assert log_file_size(d) == size_after_trim
+
+
+def test_compaction_preserves_sorted_order(tmp_path):
+    d = str(tmp_path)
+    # Create topics/groups in unsorted order, produce in unsorted partition order
+    cmds = [
+        "CREATE_TOPIC z 1 0",
+        "CREATE_TOPIC a 2 1",
+        "CREATE_TOPIC m 1 2",
+        "PRODUCE z 0 zm1 3",
+        "PRODUCE a 1 a1 4",
+        "PRODUCE a 0 a0 5",
+        "PRODUCE m 0 mm 6",
+        "JOIN_GROUP g2 a 7",
+        "JOIN_GROUP g2 m 8",
+        "JOIN_GROUP g1 z 9",
+        "JOIN_GROUP g1 a 10",
+        "COMMIT g2 a 0 0 11",
+        "COMMIT g1 z 0 0 12",
+        "SEEK g2 m 0 1 13",
+        "TRIM a 0 1 14",
+    ]
+    run("\n".join(cmds) + "\n", state_dir=d)
+    run("COMPACT 15\n", state_dir=d)
+    payloads = parse_log_payloads(os.path.join(d, "mq.log"))
+    # Check sorted orders per instruction
+    # CREATE_TOPICs sorted asc
+    creates = [p for p in payloads if p.startswith("CREATE_TOPIC")]
+    assert creates == sorted(creates), f"CREATE_TOPIC not sorted: {creates}"
+    # PRODUCE sorted by topic asc, partition asc, offset asc
+    produces = [p for p in payloads if p.startswith("PRODUCE ")]
+    # Expected order: a 0, a 1, m 0, z 0 (topics a,m,z sorted, partitions 0,1 for a)
+    # Our reference: a 0 a0, a 1 a1, m 0 mm, z 0 zm1
+    assert produces == [
+        "PRODUCE a 0 a0 0",
+        "PRODUCE a 1 a1 0",
+        "PRODUCE m 0 mm 0",
+        "PRODUCE z 0 zm1 0",
+    ], f"PRODUCE order mismatch: {produces}"
+    # TRIMs sorted
+    trims = [p for p in payloads if p.startswith("TRIM")]
+    assert trims == sorted(trims)
+    assert trims == ["TRIM a 0 1 0"]
+    # JOIN_GROUP sorted by group asc, topic asc
+    joins = [p for p in payloads if p.startswith("JOIN_GROUP")]
+    assert joins == sorted(joins)
+    assert joins == [
+        "JOIN_GROUP g1 a 0",
+        "JOIN_GROUP g1 z 0",
+        "JOIN_GROUP g2 a 0",
+        "JOIN_GROUP g2 m 0",
+    ]
+    # COMMIT sorted
+    commits = [p for p in payloads if p.startswith("COMMIT")]
+    assert commits == sorted(commits)
+    # SEEK sorted and only those where pos != expected_default
+    seeks = [p for p in payloads if p.startswith("SEEK")]
+    assert seeks == sorted(seeks)
+    # In this case, after all ops, group g2 position for m is 1, low 0, committed none, expected 0, so pos1 !=0 -> SEEK kept
+    # g1 positions: after no polls, no pos, so none
+    # So only SEEK g2 m 0 1 0 should remain
+    assert seeks == ["SEEK g2 m 0 1 0"]
+
+
+def test_invalid_group_names():
+    invalid_names = [
+        "bad/group",  # contains /
+        ".",  # dot
+        "..",  # double dot
+        "a" * 256,  # too long
+        "has,comma",  # contains comma? Actually payload check, but group name with comma invalid? Group name regex does not allow comma, so should be invalid input
+        "invalid!",  # contains !
+    ]
+    for name in invalid_names:
+        for cmd in [
+            f"JOIN_GROUP {name} t 0\n",
+            f"POLL {name} t 0 0\n",
+            f"COMMIT {name} t 0 0 0\n",
+            f"SEEK {name} t 0 0 0\n",
+            f"GET_GROUP_OFFSET {name} t 0 0\n",
+        ]:
+            r = run(cmd)
+            assert r.returncode != 0, (
+                f"expected non-zero for invalid group name {name!r} in {cmd!r}, got {r.returncode} out={r.stdout} err={r.stderr}"
+            )
+
+
+# --------------------------------------------------------------------------
+# Additional hard cases to increase difficulty (too easy fix)
+# --------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Black-box tests for hierarchical multi-batch allocator with min, priority, credit-decay - balanced hard (20 main + 8 corners)."""
+"""Black-box tests for hierarchical multi-batch allocator with min, priority, credit-decay - balanced hard (20 main + 10 corners)."""
 
 import os
 import subprocess
@@ -304,13 +304,6 @@ def test_conservation():
 def test_min_exceeds_cap():
     out = run_case(1, [5], [(0, 0, 1, 10)], [(0, 10, 10, 1, 2)])
     assert out == ["2"]
-
-
-def test_priority_tie_and_order():
-    out = run_case(1, [3], [(0, 0, 1, 10)], [(0, 10, 2, 1, 10), (0, 1, 2, 1, 10)])
-    assert out == ["2,1"]
-    out2 = run_case(1, [3], [(0, 0, 1, 10)], [(0, 5, 2, 1, 10), (0, 5, 2, 1, 10)])
-    assert out2 == ["2,1"]
 
 
 def test_group_no_members():

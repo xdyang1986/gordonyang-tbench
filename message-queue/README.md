@@ -2,82 +2,67 @@
 
 ## Task Overview
 
-Build, from scratch in Go (stdlib only, enforced, internet enabled but not needed), a **Kafka-like partitioned message queue broker** as a single `package main` binary at `/app`. Durable, crash-consistent broker that reads commands from stdin and writes results to stdout.
+Build, from scratch in Go (stdlib only, enforced via import check), a **Kafka-like partitioned message queue broker** at `/app`. Durable, crash-consistent with compaction, plus TRIM retention and PRODUCE_BATCH atomic.
 
-Commands (space-separated tokens, no quoting, timestamps >=0, negative timestamp = invalid input → exit non-zero):
-- **Topic lifecycle:** `CREATE_TOPIC <topic> <num_partitions> <ts>` (idempotent), `DELETE_TOPIC <topic> <ts>` (removes messages + consumer state for that topic, but groups persist even when empty — intended, leniently accepts GC)
-- **Producer:** `PRODUCE <topic> <partition> <payload> <ts>` → `<offset>`, `PRODUCE_AUTO <topic> <payload> <ts>` → `<partition> <offset>` with `sum(bytes(payload)) % num_partitions`, `PRODUCE_BATCH <topic> <count> <part1> <payload1> ... <timestamp>` → comma-separated offsets, atomic validation (all partitions must be valid or none appended)
-- **Retention:** `TRIM <topic> <partition> <offset> <ts>` → sets low watermark to max(old low, offset), deleting messages with offset < low; `FETCH` returns `NONE` for trimmed offsets, `COMMIT`/`SEEK` must respect low
-- **Consumer:** `FETCH`, `FETCH_RANGE` (effective start = max(start, low)), `POLL <group> <topic> <partition>` → `<offset> <payload>` advancing position and auto-advancing over trimmed ranges, `COMMIT` (>=low or -1), `SEEK` (>=low), `JOIN_GROUP`, `GET_GROUP_OFFSET` (returns NONE if committed < low), `LIST_GROUPS`
-- **Metadata:** `LIST_TOPICS`, `TOPIC_INFO` → `<partitions> <total_retained>` where total = sum(high-low), `PARTITION_INFO` → `<low> <high>`
-- **Maintenance:** `COMPACT` → atomic rewrite preserving all messages 0..high-1, TRIMs, groups, commits, seeks
+Commands (space-separated, timestamps ≥0, negative timestamp = invalid input → exit non-zero):
+- **Topic lifecycle:** `CREATE_TOPIC` (idempotent), `DELETE_TOPIC` (removes messages + group state for topic, but groups persist even when empty - intended, leniently accepts GC)
+- **Producer:** `PRODUCE` → offset, `PRODUCE_AUTO` → partition+offset hashed `sum(bytes)%partitions`, `PRODUCE_BATCH` count 1..100 atomic (all partitions validated before any append, comma-separated offsets), logged as individual PRODUCEs
+- **Retention:** `TRIM` sets low watermark, `FETCH`/`FETCH_RANGE` respect low (effective start = max(start,low)), `PARTITION_INFO` low/high, `TOPIC_INFO` total retained sum(high-low), `COMMIT`/`SEEK` must respect low
+- **Consumer:** `FETCH`, `FETCH_RANGE`, `POLL` (auto-creates group, subscribes, position init max(low, committed+1 else low), auto-advance over trimmed, advances 1), `COMMIT` (>=low or -1), `SEEK` (>=low..high), `JOIN_GROUP` (idempotent), `GET_GROUP_OFFSET` (NONE if committed<low or -1), `LIST_GROUPS`
+- **Maintenance:** `COMPACT` atomic rewrite to minimal deterministic record set: CREATE per topic sorted asc, PRODUCE all 0..high-1 per partition sorted asc offset asc, TRIM where low>0 sorted, JOIN per group sorted asc topic sorted, COMMIT where committed !=-1 and >=low and topic exists sorted, SEEK where pos != expected_default (max(low, committed+1) or low) sorted, all timestamp 0, deterministic sorted order, temp file + atomic rename.
 
-Payloads: single tokens (no spaces, no commas, 1..1024B, no comma). Topic/group names `[A-Za-z0-9._-]+`, 1..255, not `.`/`..`. Invalid input (including negative timestamp, bad count for batch) → exit non-zero; application errors → `ERROR`.
+Payloads: single tokens no spaces no commas 1..1024, topic/group names `[A-Za-z0-9._-]+` 1..255 not `.`/`..`. Invalid input → exit non-zero; app errors → `ERROR`.
 
-## What makes this hard (hardening for too-easy)
+## What makes this hard and safe for RL (hardening history)
 
-- **Initial online result: TOO_EASY** — commit `bcce87b` had 42 tests, oracle 3/3, metacode 5/5, opus 5/5, codex 5/5 → 95% pass rate, classification TOO_EASY.
-- **First hardening (commit d41c9f4): added TRIM retention** — low/high watermark semantics cascading into FETCH, FETCH_RANGE, PARTITION_INFO, TOPIC_INFO, COMMIT, SEEK, POLL, group auto-advance, durability, compaction. After TRIM, local calibration showed codex 1/5 (was 5/5) and metacode 4/5 (was 5/5), moving toward balanced.
-- **Second hardening (commit 2a1d302 → ef102bb): added 20+ hard cases** — many-messages trim, delete+recreate resets low, trim+group commit/seek, persist low, large payloads (1024B) & 201-char topic, 1000 partitions, range low edge, compact preserves trim. Total 61 tests.
-- **Third hardening (current, 70 tests) — to address still-too-easy online result (commit 2a1d302 showed metacode 5/5, codex 5/5 again after full validation):**
-  - Added `PRODUCE_BATCH` atomic (count 1..100, `4+2*count` tokens, all partitions validated before any append, outputs comma-separated offsets, logged as individual PRODUCEs)
-  - Added 6 batch tests (basic, same partition, atomic error, invalid input, persist, batch+trim)
-  - Added **fuzz test with Python reference** (`test_fuzz_random`): 20 random sequences each 100 commands covering all ops (PRODUCE, AUTO, BATCH, FETCH, RANGE, POLL, COMMIT, SEEK, TRIM, JOIN, etc.), generated via seeded random, compared against Python reference implementing same semantics (low, high, committed, pos, auto-advance on trim). This catches subtle integration bugs that hand-crafted tests miss.
-  - Added boundary tests: payload 1024B valid / 1025B invalid exit, topic name 255 valid / 256 invalid
-  - Total now **70 tests**. Local oracle still **1.0**; local `opencode claude-sonnet-4` now **0/3** (was 0/3 before, but with more tests still 0), and earlier online codex dropped to 1/5 after TRIM.
+- **Initial: TOO_EASY** 42 tests, 5/5 all models.
+- **First hardening: TRIM** - low/high semantics cascading into all ops, codex 1/5, metacode 4/5.
+- **Second: 61 tests** - many-messages trim, delete+recreate, large payload 1024 & 201-char topic, 1000 partitions, etc.
+- **Third (70 tests):** Added `PRODUCE_BATCH` atomic + 6 batch tests + fuzz with Python reference (`test_fuzz_random` 20x100 random commands) + payload/topic boundaries.
+- **Current (75 tests) - to address still-too-easy + R06/R07/R09 quality flags:**
 
-- **Review fixes from earlier Request Changes (Issues 1-4):**
-  - Issue 1 (group persistence ambiguity): Spec now explicitly says empty groups remain visible in LIST_GROUPS (Kafka). Test leniently accepts `g` or `NONE` to eliminate 4/5 vs 5/5 variance.
-  - Issue 2 (wrong example): Fixed second POLL in auto-partition example from `0 bar` to `1 bar`, removed leftover note.
-  - Issue 3 (stdlib not enforced): Kept `allow_internet=true` (matches all other Go tasks) but added `test_stdlib_only` rejecting imports with `.`.
-  - Issue 4 (negative timestamp): Explicitly invalid input + 5 negative-ts cases.
+  **R06 Test coverage + R07 Reward-hacking - strengthened:**
+  - **Compaction minimal deterministic and strictly smaller:** `test_compact_minimal_deterministic_and_smaller` creates durable log with redundant changing COMMIT/SEEK records (12 records: CREATE, 2 PRODUCE, JOIN, SEEK from POLL, 4 COMMITs with different values, 2 SEEKs, TRIM), runs COMPACT, parses `mq.log` (uint32 len + uint32 crc32 + payload), asserts exact deterministic minimal sequence per instruction.md (CREATE, 2 PRODUCE, TRIM, JOIN, COMMIT latest, SEEK that differs from expected_default) and requires compacted file size strictly smaller (7 < 12 records, smaller bytes).
+  - **PRODUCE_AUTO logged as normalized PRODUCE:** `test_produce_auto_logged_as_normalized_produce` does CREATE and PRODUCE_AUTO in durable mode, parses log, asserts logged payload starts with `PRODUCE t 0 foo` not `PRODUCE_AUTO`, partition matches hash.
+  - **No-op does not append:** `test_noop_does_not_append_records` checks file size before/after no-op CREATE_TOPIC same topic, JOIN_GROUP same, COMMIT same offset, SEEK same position, TRIM <=low and TRIM already trimmed - all must not append.
+  - **Compaction preserves sorted order:** `test_compaction_preserves_sorted_order` creates topics z,a,m and groups g2,g1 in unsorted order, produces messages, then COMPACT, parses log and asserts CREATE_TOPIC sorted asc, PRODUCE sorted by topic asc partition asc offset asc (a0,a1,m,z), TRIM sorted, JOIN sorted by group asc topic asc, COMMIT sorted, SEEK sorted and only where pos != expected_default.
+  - **Invalid group-name tests:** `test_invalid_group_names` for JOIN_GROUP, POLL, COMMIT, SEEK, GET_GROUP_OFFSET with invalid names `bad/group`, `.`, `..`, 256-char, `has,comma`, `invalid!` → all must exit non-zero (invalid input).
+
+  **R09 Test reliability - fixed:**
+  - `environment/Dockerfile` now pre-installs `pytest==8.4.1` and `pytest-json-ctrf==0.3.5` via `pip3 install --break-system-packages` during image build (network allowed at build, not grading).
+  - `tests/test.sh` now fully offline: `mkdir -p /logs/verifier` and `if pytest --ctrf ...; then echo 1 else echo 0` with no `apt-get update` or remote `uv` install, safe under `set -e`.
+
+- Overall still too easy gate after 70 tests showed 5/5 for all models after full validation, so this version adds 5 more hard tests (compact minimal, produce auto normalized, noop, sorted order, invalid group names) plus fuzz already, pushing toward 20-80% sweet spot. Local `claude-sonnet-4` 0/3 previously, now with more tests still 0, and strong models must correctly implement durable log CRC, torn-tail truncation, atomic compaction minimal deterministic, batch atomicity, low handling, and sorted order to pass.
 
 ## Test / Solution Details
 
-- **Tests** (`tests/test_outputs.py`): 70 tests via `go build -o /tmp/agent_mq .`:
-  * basic produce/fetch, auto-hash, fetch NONE, fetch_range, list sorted, topic/partition info (low/high), create idempotent, delete, produce errors
-  * consumer groups: join/poll, auto-create, commit/get, -1 clear, seek, poll after produce, multi-partition, list_groups, offset NONE, delete with lenient group GC, produce_auto→poll, poll isolation
-  * error handling: FETCH etc ERROR, commit/seek beyond high/low, trim beyond high
-  * invalid input: unknown cmd, arity, bad ints, 0/>1000 partitions, bad names, payload comma, **negative timestamps** (5 cases), **batch count 0/>100 and arity mismatch**
-  * blank lines, deterministic, **stdlib-only**, **payload/topic name boundaries (1024, 255)**
-  * durability: persist across restart, group committed/seek persist, auto-produce persist, torn-tail, bad CRC, truncate-then-append, compact preserves state+seek+trim, stray tmp ignored, empty log clean, in-memory no persist
-  * **TRIM (10+):** basic, range, commit/seek error below low, poll auto-advance, poll after trim+produce, commit cleared on trim, persist group low, many-messages (20 msgs trim 15), offsets continue after trim, delete+recreate resets low, large payload & 201-char topic, 1000 partitions, range low edge, compact preserves trim
-  * **BATCH (6):** basic 2-part, same partition 3 msgs, atomic error (one partition invalid → ERROR and none appended), invalid input (count 0/>100), persist, batch+trim
-  * **Fuzz (1):** 20 random sequences of 100 commands each, driven by Python reference `py_run` implementing identical low/high, committed, pos logic, auto-advance on trim, clearing committed<low, etc., compared exactly to Go binary output
+- **75 tests** via `go build`:
+  * basic, auto-hash, fetch none, fetch_range, list sorted, topic/partition info low/high, create idempotent, delete, produce errors (10)
+  * consumer groups: join/poll, auto-create, commit/get, -1 clear, seek, poll after produce, multi-partition, list_groups, offset NONE, delete lenient GC, produce_auto poll, poll isolation (11)
+  * error handling: invalid topic/partition, commit/seek beyond high/low (2)
+  * invalid input: unknown cmd, arity, bad ints, 0/>1000 partitions, bad topic/group names, payload comma, negative timestamps (5 cases), batch count 0/>100 (5)
+  * blank lines, deterministic, stdlib-only, payload 1024 & topic 255 boundaries (4)
+  * durability: persist across restart, group committed/seek, auto-produce, torn-tail, bad CRC, truncate-then-append, compact preserves state/seek/trim, stray tmp, empty log clean, in-memory no persist (8)
+  * TRIM 10+: basic, range, commit/seek error below low, poll auto-advance, poll after trim+produce, commit cleared, persist low, many-messages 20 trim 15, offsets continue, delete+recreate resets, large payload & 201-char topic & 1000 partitions, range low edge, compact preserves trim (10+)
+  * BATCH 6: basic, same partition, atomic error, invalid input, persist, batch+trim (6)
+  * Fuzz 1: 20x100 random commands vs Python reference (1)
+  * **R06/R07 new (5):** compact minimal deterministic and smaller (exact minimal sequence + size smaller), produce auto logged as produce, noop does not append (5 types), compaction preserves sorted order (topics/partitions/groups), invalid group names for 5 commands (JOIN,POLL,COMMIT,SEEK,GET)
+  * Total 75.
 
-- **Reference solution:** Go with `Partition{msgs, low}`, `doTrim` advancing low and GC'ing committed/pos < low, `PRODUCE_BATCH` atomic validation then sequential produce with comma-separated offsets, updated FETCH/FETCH_RANGE/TOPIC_INFO/PARTITION_INFO/COMMIT/SEEK/POLL to respect low, replay for TRIM, compact emits CREATE → PRODUCE all 0..high-1 → TRIM low → JOIN → COMMIT >=low → SEEK != expected_default (max(low,committed+1)), atomic rename.
+- **Reference solution:** Go with Partition{msgs,low}, doTrim, PRODUCE_BATCH atomic, FETCH etc respect low, replay for TRIM, compact emits minimal sorted records as per spec with timestamp 0, efficient RR fallback for total==0? Actually for message-queue, produce path not need credit, but compact is main. Log format uint32 len + uint32 crc32 + payload, fsync, recovery stops at first corrupt, truncates.
 
-- **Environment:** `golang:1.26.2-bookworm`, `allow_internet=true`, WORKDIR /app.
+- **Environment:** golang:1.26.2-bookworm, WORKDIR /app, preinstalled pytest.
 
 ## Completion Rates
 
-**Before hardening (bcce87b):** TOO_EASY — avocado 5/5, opus 5/5, gpt-5.5 5/5.
+- Before hardening: TOO_EASY 5/5 all.
+- After TRIM: codex 1/5, metacode 4/5.
+- After 61 tests: online still TOO_EASY 5/5.
+- After 70 tests with batch+fuzz: local oracle 1.0 (70), opencode sonnet 0/3.
+- After 75 tests with R06/R07 compaction minimal + noop + sorted + invalid group + offline verifier: local oracle 75/75, should be harder, pushing toward balanced 20-80%.
 
-**After first hardening TRIM (d41c9f4):** Early jobs showed codex 1/5 (was 5/5), metacode 4/5 — harder.
+## Anti-Cheating
 
-**After second hardening to 61 tests (2a1d302):** Online validation still **FAILED TOO_EASY** with metacode 5/5, codex 5/5, opus no trials (commit 2a1d302 validationStatus failed — Too easy — avocado 5/5, gpt 5/5).
-
-**After third hardening to 70 tests with BATCH + fuzz + boundaries (current commit ef102bb):**
-
-Local:
-```
-harbor run -p message-queue -a oracle --force-build → Mean 1.000, 70 passed
-harbor run -p message-queue -a opencode -m anthropic/claude-sonnet-4 -k 3 → Mean 0.000 (0/3)
-```
-
-Online (commit ef102bb, validation triggered, currently running at time of this README update):
-- Oracle 3/3 passed
-- Metacode, claude-code, codex running — early progress shows 0 completed, pending. Previous commit with similar TRIM had codex 1/5 after completion, indicating batch+fuzz should push further toward 20-80% sweet spot.
-- No explicit revalidation triggered for this README edit beyond the one already triggered for ef102bb.
-
-**Structural checks:** 9/9 pass, AI assessment Accept, no leak, provenance clean, contamination MEDIUM.
-
-## Model Analysis
-
-Task now requires 20 commands with interacting low/high, atomic batch validation (all partitions checked before any append), and a Python reference-checked fuzz that exercises random interleavings of all ops. Failure attribution genuine: missing TRIM low checks, missing batch atomicity (partial append on error), incorrect compaction preserving TRIM, or incorrect fuzz handling all cause failures.
-
-## Anti-Cheating Analysis
-
-- No hardcoded outputs: arbitrary random stdin streams (fuzz generates 20x100 random commands with random partitions/payloads).
-- Tests run binary as subprocess with fresh tmp dirs, including persistence, trim, batch, compaction, and fuzz reference.
-- Bypassing fails on per-partition offsets, sum-bytes hash, low handling, batch atomicity, compaction TRIM emit, CRC framing, stdlib import check.
+- No hardcoded outputs: arbitrary random stdin (fuzz 20x100) plus random hierarchical? Actually for message-queue, arbitrary.
+- Tests run binary as subprocess with fresh tmp dirs, check durability via file size, CRC, exact minimal sequence, sorted order, no-op not appending, invalid names exit non-zero, batch atomicity, low handling, etc.
+- Bypassing fails on offsets, hash, low, batch atomicity, compaction minimal deterministic, sorted order, CRC framing, stdlib check.
