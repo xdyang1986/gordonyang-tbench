@@ -635,15 +635,31 @@ def test_highlight(server):
             "tags": [],
         },
     )
-    r = search_get(base, q="search", highlight=True)
-    assert r.status_code == 200
-    assert len(r.json()["results"]) == 1
+    # query only go -> only Go should be wrapped, not Search or Engine (vacuous check fix)
+    r = search_get(base, q="go", highlight=True)
+    assert r.status_code == 200 and len(r.json()["results"]) == 1
     res = r.json()["results"][0]
-    assert "highlight" in res, "highlight field missing"
-    # must contain <em>
-    hl_str = json.dumps(res["highlight"])
-    assert "<em>" in hl_str and "</em>" in hl_str, (
-        f"highlight should contain <em>, got {hl_str}"
+    assert "highlight" in res
+    hl_title = res["highlight"].get("title", "")
+    assert "<em>Go</em>" in hl_title, f"expected <em>Go</em> in title, got {hl_title}"
+    assert "<em>Search</em>" not in hl_title and "<em>Engine</em>" not in hl_title, (
+        f"only matched token should be wrapped, got {hl_title}"
+    )
+
+    r = search_get(base, q="search", highlight=True)
+    res = r.json()["results"][0]
+    hl_title = res["highlight"].get("title", "")
+    assert "<em>Search</em>" in hl_title
+    assert "<em>Go</em>" not in hl_title
+
+    # phrase go search -> Go and Search wrapped, Engine not
+    r = search_get(base, q='"go search"', highlight=True)
+    res = r.json()["results"][0]
+    hl_title = res["highlight"].get("title", "")
+    assert "<em>Go</em>" in hl_title and "<em>Search</em>" in hl_title
+    assert "<em>Engine</em>" not in hl_title
+    assert hl_title.count("<em>") == 2, (
+        f"phrase should have exactly 2 em spans, got {hl_title}"
     )
 
 
@@ -1056,20 +1072,24 @@ def test_prefix_fuzzy_highlight(server):
     )
     r = search_get(base, q="sea*", highlight=True)
     assert r.status_code == 200 and r.json()["total"] >= 1
-    found = False
-    for res in r.json()["results"]:
-        if "highlight" in res:
-            hl = json.dumps(res["highlight"])
-            if "<em>" in hl:
-                found = True
-                break
-    assert found, f"prefix highlight should contain <em>, got {r.json()}"
+    res = next((x for x in r.json()["results"] if x["id"] == "hlp1"), None)
+    assert res is not None and "highlight" in res
+    hl_title = res["highlight"].get("title", "")
+    assert "<em>searching</em>" in hl_title.lower() or "<em>search" in hl_title.lower()
+    hl_body = res["highlight"].get("body", "")
+    if hl_body:
+        assert "engine" in hl_body.lower()
+        assert "<em>engine</em>" not in hl_body.lower(), (
+            f"engine should NOT be wrapped for sea*, got {hl_body}"
+        )
+
     r = search_get(base, q="sarch~", highlight=True)
     assert r.status_code == 200
-    found = any(
-        "<em>" in json.dumps(x.get("highlight", {})) for x in r.json()["results"]
-    )
-    assert found, "fuzzy highlight should contain <em>"
+    res = next((x for x in r.json()["results"] if x["id"] == "hlp1"), None)
+    assert res is not None and "highlight" in res
+    hl_body = res["highlight"].get("body", "")
+    assert "<em>search</em>" in hl_body.lower()
+    assert "<em>engine</em>" not in hl_body.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1180,11 +1200,62 @@ def test_recency_decay_ranking(server):
     r = search_get(base, q="go")
     assert r.status_code == 200
     results = r.json()["results"]
-    # same BM25 but recency should boost recent higher
     assert results[0]["id"] == "recent", (
         f"recency should rank recent first, got {[x['id'] for x in results]}"
     )
     assert results[0]["score"] > results[1]["score"]
+
+
+def test_recency_exact_constants(server):
+    base = server
+    # Pin exact constants 0.5 and 168 from spec: recencyFactor = 1 + 0.5*exp(-ageHours/168)
+    # Two docs with same BM25 content but different ages: now (0h) and exactly 168h (1 week)
+    now = time.time()
+    now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    week_ago = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 168 * 3600))
+    post_doc(
+        base,
+        {"id": "nowDoc", "title": "go", "body": "", "tags": [], "created_at": now_str},
+    )
+    post_doc(
+        base,
+        {
+            "id": "weekDoc",
+            "title": "go",
+            "body": "",
+            "tags": [],
+            "created_at": week_ago,
+        },
+    )
+    r = search_get(base, q="go")
+    assert r.status_code == 200 and r.json()["total"] == 2
+    scores = {x["id"]: x["score"] for x in r.json()["results"]}
+    # Both have same tf/len so BM25 equal, ratio should be recencyNow / recencyWeek
+    # recencyNow = 1 + 0.5*exp(0)=1.5, recencyWeek=1+0.5*exp(-1)=1+0.1839=1.1839, ratio=1.5/1.1839≈1.267
+    # Compute expected ratio
+    expected_ratio = (1 + 0.5 * math.exp(0)) / (1 + 0.5 * math.exp(-1))
+    actual_ratio = scores["nowDoc"] / scores["weekDoc"] if scores["weekDoc"] != 0 else 0
+    assert abs(actual_ratio - expected_ratio) < 0.05, (
+        f"recency exact constants 0.5 and 168 not pinned, expected ratio {expected_ratio} got {actual_ratio} scores {scores}"
+    )
+    # also test that future date is treated as age 0 => factor 1.5
+    future = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 24 * 3600))
+    post_doc(
+        base,
+        {
+            "id": "futureDoc",
+            "title": "go",
+            "body": "",
+            "tags": [],
+            "created_at": future,
+        },
+    )
+    r = search_get(base, q="go")
+    scores = {x["id"]: x["score"] for x in r.json()["results"]}
+    # future should have same score as nowDoc (age 0)
+    assert abs(scores["futureDoc"] - scores["nowDoc"]) < 0.05, (
+        f"future created_at should be age 0 factor 1.5, got {scores}"
+    )
 
 
 def test_near_operator(server):
@@ -1329,7 +1400,9 @@ def test_invalid_near_should_400(server):
 
 
 def test_wal_checksum_skip():
-    # WAL checksum verification: corrupted line with wrong checksum should be skipped
+    # WAL checksum verification: must enforce CRC32-IEEE algorithm, not any self-consistent hash
+    import binascii
+
     port = find_free_port()
     custom_dir = "/tmp/wal_checksum_test"
     custom_file = os.path.join(custom_dir, "index.json")
@@ -1354,12 +1427,47 @@ def test_wal_checksum_skip():
         time.sleep(0.5)
         wal_file = os.path.join(custom_dir, "wal.log")
         assert os.path.exists(wal_file)
-        # append corrupted entry with wrong checksum
+
+        # Craft a valid doc with correct CRC32-IEEE checksum via Python (should replay)
+        doc_valid = {
+            "id": "crc_valid",
+            "title": "crc valid doc",
+            "body": "",
+            "tags": [],
+        }
+        doc_json = json.dumps(doc_valid, separators=(",", ":")).encode()
+        crc_val = binascii.crc32(doc_json) & 0xFFFFFFFF
+        crc_hex = format(crc_val, "08x")
+        with open(wal_file, "a") as f:
+            entry = {
+                "op": "index",
+                "doc": doc_valid,
+                "checksum": crc_hex,
+                "ts": "2026-07-21T00:00:00Z",
+            }
+            f.write(json.dumps(entry) + "\n")
+
+        # Craft doc with checksum of id only (wrong algorithm) — should be skipped (enforces CRC32 of doc, not id)
+        doc_bad_algo = {"id": "bad_algo", "title": "bad algo", "body": "", "tags": []}
+        bad_crc = format(
+            binascii.crc32(doc_bad_algo["id"].encode()) & 0xFFFFFFFF, "08x"
+        )  # CRC32 of id, not doc JSON
+        with open(wal_file, "a") as f:
+            entry = {
+                "op": "index",
+                "doc": doc_bad_algo,
+                "checksum": bad_crc,
+                "ts": "2026-07-21T00:00:00Z",
+            }
+            f.write(json.dumps(entry) + "\n")
+
+        # Append corrupted entry with obviously wrong checksum and invalid json
         with open(wal_file, "a") as f:
             f.write(
                 '{"op":"index","doc":{"id":"bad","title":"bad"},"checksum":"00000000","ts":"2026-07-21T00:00:00Z"}\n'
             )
             f.write('{"invalid json line\n')
+
         proc.terminate()
         proc.wait(timeout=5)
         time.sleep(0.5)
@@ -1372,14 +1480,17 @@ def test_wal_checksum_skip():
             "server should start and skip corrupted WAL lines"
         )
         base2 = f"http://127.0.0.1:{port2}"
-        # good1 should be recovered, bad should NOT (wrong checksum)
         r = requests.get(f"{base2}/documents/good1", timeout=5)
+        assert r.status_code == 200
+        r = requests.get(f"{base2}/documents/crc_valid", timeout=5)
         assert r.status_code == 200, (
-            f"good doc should be recovered after WAL with corrupted lines, got {r.status_code}"
+            f"doc with correct CRC32 should be replayed, got {r.status_code}"
         )
         r = requests.get(f"{base2}/documents/bad", timeout=5)
+        assert r.status_code == 404
+        r = requests.get(f"{base2}/documents/bad_algo", timeout=5)
         assert r.status_code == 404, (
-            f"bad checksum doc should be skipped, got {r.status_code}"
+            f"doc with wrong algo (CRC32 of id not doc) should be skipped, got {r.status_code}"
         )
         proc2.terminate()
         proc2.wait(timeout=5)
@@ -1409,32 +1520,49 @@ def test_camelcase_acronym_highlighting(server):
             "tags": [],
         },
     )
+    # go should wrap only Go sub-token, preserving case Go, not Search/Engine
     r = search_get(base, q="go", highlight=True)
     assert r.status_code == 200 and r.json()["total"] == 1
-    hl = r.json()["results"][0].get("highlight", {})
-    assert "<em>" in json.dumps(hl), (
-        f"camelCase highlight for go should have <em>, got {hl}"
+    hl_title = r.json()["results"][0].get("highlight", {}).get("title", "")
+    assert "<em>Go</em>" in hl_title, (
+        f"expected <em>Go</em> preserving case, got {hl_title}"
+    )
+    assert "<em>Search</em>" not in hl_title and "<em>Engine</em>" not in hl_title, (
+        f"only Go should be wrapped for query go, got {hl_title}"
     )
 
+    # search query wraps Search only
     r = search_get(base, q="search", highlight=True)
-    hl = r.json()["results"][0].get("highlight", {})
-    assert "<em>" in json.dumps(hl)
+    hl_title = r.json()["results"][0].get("highlight", {}).get("title", "")
+    assert "<em>Search</em>" in hl_title
+    assert "<em>Go</em>" not in hl_title
 
+    # phrase go search wraps Go and Search, not Engine, preserves case and count 2
     r = search_get(base, q='"go search"', highlight=True)
-    hl = r.json()["results"][0].get("highlight", {})
-    assert json.dumps(hl).count("<em>") >= 2, (
-        f"phrase highlight should have >=2 <em>, got {hl}"
+    hl_title = r.json()["results"][0].get("highlight", {}).get("title", "")
+    assert "<em>Go</em>" in hl_title and "<em>Search</em>" in hl_title
+    assert "<em>Engine</em>" not in hl_title
+    assert hl_title.count("<em>") == 2, (
+        f"phrase should wrap exactly 2 sub-tokens, got {hl_title}"
     )
 
+    # acronym IOError
     post_doc(base, {"id": "ac1", "title": "IOError occurred", "body": "", "tags": []})
     r = search_get(base, q="io", highlight=True)
     assert r.json()["total"] >= 1
+    res_ac1 = next((x for x in r.json()["results"] if x["id"] == "ac1"), None)
+    assert res_ac1 is not None and "highlight" in res_ac1
+    assert "<em>IO</em>" in res_ac1["highlight"].get("title", ""), (
+        f"IOError should highlight IO preserving case, got {res_ac1['highlight']}"
+    )
 
     post_doc(
         base, {"id": "ac2", "title": "HTTPRequest handler", "body": "", "tags": []}
     )
     r = search_get(base, q="http", highlight=True)
     assert "ac2" in {x["id"] for x in r.json()["results"]}
+    res_ac2 = next((x for x in r.json()["results"] if x["id"] == "ac2"), None)
+    assert "<em>HTTP</em>" in res_ac2.get("highlight", {}).get("title", "")
 
 
 def test_namespace_stats_case_insensitive(server):
@@ -1732,7 +1860,10 @@ def test_exact_response_keys(server):
 
 def test_performance_scale(server):
     base = server
-    n_docs = 500
+    # Bounded scale test without wall-clock gate to avoid timing false-negatives on 2 CPUs
+    # Previously had elapsed <15s which is hardware-dependent and caused HIGH severity failure
+    # Now only checks functional correctness under moderate load, no strict timing
+    n_docs = 300
     for i in range(n_docs):
         post_doc(
             base,
@@ -1743,14 +1874,16 @@ def test_performance_scale(server):
                 "tags": ["go", "search"] if i % 2 == 0 else ["java"],
             },
         )
-    start = time.time()
+    # 100 searches should complete without crash/OOM, no timing assertion to avoid hardware-dependent flake
     for _ in range(100):
         r = search_get(base, q="go search", limit=10)
         assert r.status_code == 200
-    elapsed = time.time() - start
-    assert elapsed < 15, f"100 searches over 500 docs took {elapsed}s, too slow"
     r = search_get(base, q="go", limit=100)
     assert r.json()["total"] >= n_docs // 2
+    # also test that stats still works under load
+    r = requests.get(f"{base}/stats", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["docs"] == n_docs
 
 
 def test_regression_camelcase_highlight_subtokens(server):
@@ -2045,6 +2178,8 @@ def test_no_external_search_dependencies():
 
 def test_performance_scale_less_brittle(server):
     base = server
+    # Previously had avg<0.2 p95<0.5 wall-clock gates inside all-must-pass reward — HIGH timing false-negative risk
+    # Now checks functional correctness under scale without timing assertion, plus very lenient total bound to avoid hardware flake
     n_docs = 300
     for i in range(n_docs):
         post_doc(
@@ -2056,14 +2191,15 @@ def test_performance_scale_less_brittle(server):
                 "tags": ["go"],
             },
         )
-    latencies = []
+    # 50 searches should complete without OOM/crash; we record latency but only assert extremely lenient total <60s to avoid brittleness
+    start = time.time()
     for _ in range(50):
-        start = time.time()
         r = search_get(base, q="go search", limit=10)
         assert r.status_code == 200
-        latencies.append(time.time() - start)
-    latencies.sort()
-    p95 = latencies[int(len(latencies) * 0.95)]
-    avg = sum(latencies) / len(latencies)
-    assert p95 < 0.5, f"p95 latency {p95}s too high"
-    assert avg < 0.2, f"avg latency {avg}s too high"
+    elapsed = time.time() - start
+    assert elapsed < 60, (
+        f"50 searches over 300 docs took {elapsed}s, unexpectedly slow (possible O(N^2))"
+    )
+    # also ensure search still returns correct totals under load
+    r = search_get(base, q="go", limit=10)
+    assert r.json()["total"] == n_docs

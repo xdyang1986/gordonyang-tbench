@@ -146,12 +146,12 @@ If query contains any explicit boolean operator (AND,OR,NOT,NEAR, parentheses), 
 - For each doc d, field f (title, body), term t:
   - tf = term frequency in field f for doc d
   - N = total docs
-  - df = docs containing term t in field f, for default field df is union of docs containing term in either title or body
-  - idf = log((N+1)/(df+0.5)) + 1
+  - df = docs containing term t in field f (per-field document frequency). For default field (no field specified), scoring uses per-field df for each field separately, not union: title part uses title df, body part uses body df.
+  - idf = log((N+1)/(df+0.5)) + 1 (natural log) with trailing +1
   - fieldLen = tokens in field f for doc d after code-aware tokenization
-  - avgFieldLen = total tokens in field f across all docs / N (minimum 1)
+  - avgFieldLen = total tokens in field f across all docs / N (minimum 1), per-field: avgTitle = total title tokens / N, avgBody = total body tokens / N
   - scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))
-- Default field score = 2.0*scoreTitle + 1.0*scoreBody.
+- Default field score = 2.0*scoreTitle + 1.0*scoreBody. That is, compute BM25F for title using title df and avgTitle, and for body using body df and avgBody, then combine with weights.
 - Recency factor: if doc has created_at, ageHours = (now - created_at).Hours(), recency = 1 + 0.5*exp(-ageHours/168), else 1.0.
 - For phrase: sum BM25F of terms in phrase * boost * recency.
 - For prefix/fuzzy/NEAR: sum expanded/matching terms BM25F * boost * recency.

@@ -2,11 +2,11 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/search-system"
-description = "Implement a mini Elasticsearch-like search engine in Go with inverted index, TF-IDF ranking, Boolean query parsing (AND/OR/NOT, parentheses), tag filtering, persistence, and HTTP API."
+description = "Implement a novel multi-tenant code search engine in Go with code-aware camelCase positional inverted index, recency-decayed BM25F (k1=1.65,b=0.68,idf=log((N+1)/(df+0.5))+1, title weight 2x), boolean query parsing with AND/OR/NOT/NEAR/n and parentheses, field-specific (title,body,tags,namespace), prefix (sea*) and fuzzy (sarch~ with distance ~0/~2), boost (^), namespace isolation via param and header X-Namespace, highlight with <em> spans using code-aware sub-tokens, aggregations (tags, top_terms top5, namespaces case-insensitive), WAL with CRC32 checksums and recovery, bulk NDJSON and stats endpoints."
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "search-engine", "inverted-index", "elasticsearch", "tf-idf", "boolean-query"]
+keywords = ["go", "search-engine", "inverted-index", "bm25f", "code-search", "positional-index", "boolean-query", "multi-tenant"]
 
 [metadata]
 author_name = "Gordon Yang"
@@ -17,7 +17,7 @@ category_usecase = "new_application"
 category_subdomain = "database_internals"
 reward_type = "binary"
 languages = ["go"]
-tags = ["go", "search-engine", "inverted-index", "elasticsearch", "tf-idf", "boolean-query", "http-server"]
+tags = ["go", "search-engine", "inverted-index", "bm25f", "code-search", "positional-index", "boolean-query", "multi-tenant", "nasacl-isolation", "wal"]
 expert_time_estimate_min = 60.0
 junior_time_estimate_min = 180.0
 
