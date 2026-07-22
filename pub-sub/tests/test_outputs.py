@@ -354,6 +354,36 @@ def test_large_numbers():
     assert out == "500000000000,500000000000"
 
 
+def test_large_weight_overflow():
+    # remaining * credit would overflow int64: rem=1e12, credit=1e12 => product 1e24 > 2^63-1
+    # This tests 64-bit safety requirement (R06) - must use 128-bit or safe decomposition
+    out = run_case(
+        1000000000000,
+        [(0, 0, 1000000000000, 1000000000000)],
+        [
+            (0, 0, 0, 1000000000000, 500000000000),
+            (0, 0, 0, 1000000000000, 500000000000),
+        ],
+    )
+    assert out == "500000000000,500000000000"
+
+
+def test_large_credit_overflow():
+    # credit grows when idle: weight large, not served first round, credit becomes weight*2 etc.
+    # After first round, one sub idle, credit grows to 2e12, then second round rem*credit = 1e12*2e12=2e24 overflow
+    # Input: load 1000000000000, 3 subs in same group, caps small for one to force idle? Actually to force idle need share=0
+    # Simpler: load 3, caps 10 each, weights 4000000000000000000 (4e18) which is >2^62, product 3*4e18=1.2e19 > 9e18 overflow
+    # Use weights 4000000000000000000 (4e18) with load 3
+    out = run_case(
+        3,
+        [(0, 0, 1, 10)],
+        [(0, 0, 0, 4000000000000000000, 10), (0, 0, 0, 4000000000000000000, 10)],
+    )
+    # With equal weights, proportional share: 3*4e18 / 8e18 = 1 (floor), remaining 1, etc. Should still allocate 3 total
+    # Exact output with credit decay: first round share 1,1 used2 rem1 best first gets 1 => 2,1
+    assert out == "2,1"
+
+
 def test_zero_caps():
     out = run_case(10, [(0, 0, 1, 0)], [(0, 0, 0, 1, 0)])
     assert out == "0"

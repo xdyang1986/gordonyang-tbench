@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/bits"
 	"os"
 	"sort"
 	"strconv"
@@ -27,6 +28,21 @@ type item struct {
 	weight   int
 	cap      int
 	credit   int
+}
+
+func mulDiv(a, b, c int) int {
+	if c == 0 {
+		return 0
+	}
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	if hi == 0 {
+		return int(lo / uint64(c))
+	}
+	if hi >= uint64(c) {
+		return 1 << 60
+	}
+	q, _ := bits.Div64(hi, lo, uint64(c))
+	return int(q)
 }
 
 func allocateBatch(load int, items []*item) []int {
@@ -138,7 +154,7 @@ func allocateBatch(load int, items []*item) []int {
 		delta := make([]int, n)
 		used := 0
 		for _, i := range active {
-			share := (remW * creditTmp[i]) / total
+			share := mulDiv(remW, creditTmp[i], total)
 			if share > remCap[i]-allocW[i] {
 				share = remCap[i] - allocW[i]
 			}
