@@ -66,13 +66,7 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 				// For simplicity, keep manifest but will re-verify and re-upload missing checksums
 			}
 			if loaded.EncryptKey != encryptKey {
-				if loaded.EncryptKey != "" || encryptKey != "" {
-					// If key changed and previous was encrypted or new is encrypted, error
-					// Actually if both empty, okay
-					if loaded.EncryptKey != encryptKey {
-						return fmt.Errorf("encrypt key mismatch: manifest has key %q vs provided %q", loaded.EncryptKey, encryptKey)
-					}
-				}
+				return fmt.Errorf("encrypt key mismatch: manifest has key %q vs provided %q", loaded.EncryptKey, encryptKey)
 			}
 			if loaded.ChunkSize != chunkSize {
 				fmt.Fprintf(os.Stderr, "WARN: chunk size changed from %d to %d, using manifest's chunk size\n", loaded.ChunkSize, chunkSize)
@@ -338,22 +332,18 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 
 				// Success - update manifest thread-safely
 				mu.Lock()
-				manifest.Chunks[chunkIdx].Checksum = chunkSHA
-				if checksumAlgo == "md5" {
-					// For md5 only, store md5 in Checksum field as per spec (checksum is md5)
-					// But also store in ChecksumMD5
-					if chunkSHA == "" {
-						manifest.Chunks[chunkIdx].Checksum = chunkMD5
-					}
+				switch checksumAlgo {
+				case "md5":
+					manifest.Chunks[chunkIdx].Checksum = chunkMD5
 					manifest.Chunks[chunkIdx].ChecksumMD5 = chunkMD5
-				} else if checksumAlgo == "both" {
+				case "both":
 					manifest.Chunks[chunkIdx].Checksum = chunkSHA
 					manifest.Chunks[chunkIdx].ChecksumMD5 = chunkMD5
-				} else {
+				default:
 					manifest.Chunks[chunkIdx].Checksum = chunkSHA
+					manifest.Chunks[chunkIdx].ChecksumMD5 = ""
 				}
 				manifest.Chunks[chunkIdx].Uploaded = true
-				// Save manifest
 				saveErr := SaveManifest(manifest, manifestPath)
 				mu.Unlock()
 
@@ -369,8 +359,6 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 
 			if !success {
 				setErr(fmt.Errorf("chunk %d failed after %d retries: %v", chunkIdx, retries, lastErr))
-				// Continue to next job? Actually should stop?
-				// For simplicity, continue to attempt other chunks but error will be returned after
 			}
 		}
 	}
