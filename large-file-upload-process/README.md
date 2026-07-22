@@ -14,27 +14,26 @@ The starter skeleton compiles but panics with `TODO: implement...` for core logi
 
 **Why naive approach fails**: Loading a 100GB file via `os.ReadFile` OOMs. Using `int32` overflows at 2GB. Trusting extension without magic allows fake uploads. Without manifest atomic writes, resume corrupts. Without `Seek`, chunking reads entire file sequentially inefficiently.
 
-## Completion Rates (online validation — commit 37aa7fa, 2026-07-22)
+## Completion Rates (online validation — commit 974d309, 2026-07-22)
 
 - **Oracle**: **3/3** — validated
-- **Opus 4.8 (agent)**: **1/5** — validated
-- **GPT-5.5 (codex)**: **1/5** — validated
-- **Avocado (metacode)**: **0/7** — failed
-- avgReward **0.43**, validation passing — a hard task; only Oracle solves it reliably.
+- **Opus 4.8 (agent)**: **5/5** — failed (solved every trial → too easy for this model)
+- **GPT-5.5 (codex)**: **2/5** — validated (the 3 losses were infra errors, not test failures)
+- **Avocado (metacode)**: **1/2** — validated
+- avgReward **0.56**, validation passing.
 
 ## Failure Analysis (latest run)
 
-Derived from downloaded trial CTRF artifacts. Two distinct factors drive the low pass rates: genuine spec-compliance gaps and heavy infrastructure flakiness.
+Derived from downloaded trial CTRF artifacts. In the latest validation, **no model produced a genuine test failure** — every non-passing trial across GPT-5.5 and Avocado was `status=error` (Daytona `ThrottlerException: Too Many Requests` / build-harness failures that score 0), while every *clean* (completed) trial passed.
 
-- **Infrastructure noise — the largest single factor.** A majority of non-passing trials across GPT-5.5 and Avocado were `status=error` (Daytona `ThrottlerException: Too Many Requests` / build-harness failures that score 0), not test failures. In their clean trials these models often passed, so the headline 1/5 and 0/7 overstate the true reasoning difficulty. Example: the GPT-5.5 validation job was 4× `status=error` + 1 clean pass; an Avocado job was 4× `status=error` + 3 clean passes.
+- **Opus 4.8 (agent) — 5/5 clean passes.** Flagged too easy for this model.
+- **GPT-5.5 (codex) — 2/5.** Both completed trials passed; the 3 losses were `status=error` infra flakes. No real test failures.
+- **Avocado (metacode) — clean trials all pass.** Every loss was `status=error` infra. No real test failures.
+- **Oracle — 3/3.**
 
-- **Opus 4.8 — genuine miss on the `assemble` output contract.** Both real completed failures failed *only* `test_assemble_command` (18/19). The model assembled the file correctly (right size 15,728,640 bytes, correct SHA256, 3 chunks) but printed `ASSEMBLED: <path> Size: ... Checksum: ... Chunks: 3` — the `UPLOAD COMPLETE` format — instead of the spec-mandated `ASSEMBLE COMPLETE: <output_path>` (instruction.md §138). A spec-reading / output-contract failure, not an algorithmic one.
+**Assessment:** once infrastructure noise is removed, all models solve the task on clean trials — it is currently **too easy** (Opus already 5/5, and GPT-5.5/Avocado show zero genuine test failures). The sub-5/5 headline scores are provisioning instability, not reasoning difficulty. To reach the 20-80% sweet spot the task needs real hardening (e.g. stricter resume / manifest-corruption edge cases, tighter streaming-memory enforcement, or adversarial format-detection cases) rather than relying on flaky infra to suppress pass rates.
 
-- **GPT-5.5 — genuine miss on the memory-efficiency scan.** Its one real completed failure failed *only* `test_memory_efficiency_code_scan` (16/17): the code tripped the forbidden whole-file-read check (`os.ReadFile` / `ioutil.ReadFile`) or lacked the required streaming patterns (`Seek`, `io.CopyBuffer`, `int64`).
-
-- **Oracle — 3/3.** Reference solution passes every clean trial.
-
-**Assessment:** the true discriminators observed are narrow (exact `assemble` success string; memory-efficiency code scan) rather than the deep streaming/format reasoning the task targets. Much of the low online pass rate is provisioning instability, not reasoning depth — the task is worth re-running to separate infra noise from real difficulty before treating 1/5–0/7 as its genuine hardness.
+> Note: an earlier run on the prior commit showed genuine misses (Opus on the exact `ASSEMBLE COMPLETE:` output string per instruction.md §138; GPT-5.5 on `test_memory_efficiency_code_scan`), but those did not reproduce as failures in the latest clean trials.
 
 ## Anti-Cheating Analysis
 
