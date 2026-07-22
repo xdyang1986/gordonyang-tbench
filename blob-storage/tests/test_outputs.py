@@ -914,12 +914,8 @@ def test_copy_operation():
     assert lower_headers.get("x-amz-meta-author") == "bob"
     assert lower_headers.get("x-amz-meta-version") == "1"
 
-    # Verify ETag same
-    assert (
-        resp.headers.get("ETag") == src_etag
-        or resp.headers.get("ETag", "").strip('"') == src_etag
-        or resp.headers.get("ETag") == dest_etag
-    )
+    # Verify ETag same - strict unquoted per spec
+    assert resp.headers.get("ETag") == src_etag, f"Copy ETag should match src exactly per spec, got {resp.headers.get('ETag')} vs {src_etag}"
 
     # Verify lastModified is new (dest should have newer or >= src lastModified) and is actually new
     dest_last_modified = resp.headers.get("Last-Modified")
