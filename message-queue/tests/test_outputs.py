@@ -1126,3 +1126,517 @@ PARTITION_INFO t 0 5
     r = run(stdin)
     # batch offsets 0,1,2 then trim 2 => low=2 high=3 retained c, so fetch 0 NONE, fetch2 c
     assert lines(r.stdout) == ["0,1,2", "NONE", "c", "2 3"]
+
+
+# --------------------------------------------------------------------------
+# Fuzz with Python reference (hard)
+# --------------------------------------------------------------------------
+
+
+class PyPartition:
+    def __init__(self):
+        self.msgs = []
+        self.low = 0
+
+    @property
+    def high(self):
+        return len(self.msgs)
+
+
+class PyTopic:
+    def __init__(self, name, num):
+        self.name = name
+        self.num = num
+        self.parts = [PyPartition() for _ in range(num)]
+
+
+class PyGroup:
+    def __init__(self):
+        self.subs = set()
+        self.committed = {}  # (topic, part) -> offset
+        self.pos = {}  # (topic, part) -> next offset
+
+
+def py_run(commands):
+    """Python reference broker, returns list of output lines."""
+    topics = {}
+    groups = {}
+    out = []
+
+    def tp_key(t, p):
+        return (t, p)
+
+    for line in commands:
+        if not line.strip():
+            continue
+        parts = line.strip().split()
+        cmd = parts[0]
+        if cmd == "CREATE_TOPIC":
+            topic = parts[1]
+            num = int(parts[2])
+            if topic not in topics:
+                topics[topic] = PyTopic(topic, num)
+        elif cmd == "DELETE_TOPIC":
+            topic = parts[1]
+            if topic in topics:
+                del topics[topic]
+                for g in groups.values():
+                    g.subs.discard(topic)
+                    for k in list(g.committed.keys()):
+                        if k[0] == topic:
+                            del g.committed[k]
+                    for k in list(g.pos.keys()):
+                        if k[0] == topic:
+                            del g.pos[k]
+        elif cmd == "PRODUCE":
+            topic = parts[1]
+            part = int(parts[2])
+            payload = parts[3]
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part < 0 or part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            off = p.high
+            p.msgs.append(payload)
+            out.append(str(off))
+        elif cmd == "PRODUCE_AUTO":
+            topic = parts[1]
+            payload = parts[2]
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            s = sum(b for b in payload.encode())
+            chosen = s % t.num
+            p = t.parts[chosen]
+            off = p.high
+            p.msgs.append(payload)
+            out.append(f"{chosen} {off}")
+        elif cmd == "PRODUCE_BATCH":
+            topic = parts[1]
+            count = int(parts[2])
+            # last token timestamp, middle 2*count tokens
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            pairs = []
+            valid = True
+            for i in range(count):
+                part = int(parts[3 + i * 2])
+                pay = parts[3 + i * 2 + 1]
+                if part < 0 or part >= t.num:
+                    valid = False
+                    break
+                pairs.append((part, pay))
+            if not valid:
+                out.append("ERROR")
+                continue
+            offs = []
+            for part, pay in pairs:
+                p = t.parts[part]
+                off = p.high
+                p.msgs.append(pay)
+                offs.append(str(off))
+            out.append(",".join(offs))
+        elif cmd == "TRIM":
+            topic = parts[1]
+            part = int(parts[2])
+            off = int(parts[3])
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part < 0 or part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            high = p.high
+            if off < 0 or off > high:
+                out.append("ERROR")
+                continue
+            if off <= p.low:
+                continue
+            p.low = off
+            for g in groups.values():
+                key = (topic, part)
+                if key in g.committed and g.committed[key] < off:
+                    del g.committed[key]
+                if key in g.pos and g.pos[key] < off:
+                    g.pos[key] = off
+        elif cmd == "FETCH":
+            topic = parts[1]
+            part = int(parts[2])
+            off = int(parts[3])
+            if part < 0 or off < 0:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            if off < p.low or off >= p.high:
+                out.append("NONE")
+                continue
+            out.append(p.msgs[off])
+        elif cmd == "FETCH_RANGE":
+            topic = parts[1]
+            part = int(parts[2])
+            start = int(parts[3])
+            end = int(parts[4])
+            if part < 0 or start < 0 or end < 0 or end < start:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            high = p.high
+            low = p.low
+            if start < low:
+                start = low
+            if start >= high or start >= end:
+                out.append("NONE")
+                continue
+            real_end = min(end, high)
+            if start >= real_end:
+                out.append("NONE")
+                continue
+            sl = p.msgs[start:real_end]
+            if not sl:
+                out.append("NONE")
+            else:
+                out.append(",".join(sl))
+        elif cmd == "LIST_TOPICS":
+            if not topics:
+                out.append("NONE")
+            else:
+                out.append(",".join(sorted(topics.keys())))
+        elif cmd == "TOPIC_INFO":
+            topic = parts[1]
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            total = sum(p.high - p.low for p in t.parts)
+            out.append(f"{t.num} {total}")
+        elif cmd == "PARTITION_INFO":
+            topic = parts[1]
+            part = int(parts[2])
+            if part < 0:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            out.append(f"{p.low} {p.high}")
+        elif cmd == "JOIN_GROUP":
+            group = parts[1]
+            topic = parts[2]
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            if group not in groups:
+                groups[group] = PyGroup()
+            groups[group].subs.add(topic)
+        elif cmd == "POLL":
+            group = parts[1]
+            topic = parts[2]
+            part = int(parts[3])
+            if part < 0:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            if group not in groups:
+                groups[group] = PyGroup()
+            g = groups[group]
+            g.subs.add(topic)
+            key = (topic, part)
+            p = t.parts[part]
+            if key not in g.pos:
+                if key in g.committed:
+                    pos = g.committed[key] + 1
+                    if pos < p.low:
+                        pos = p.low
+                else:
+                    pos = p.low
+                g.pos[key] = pos
+            else:
+                pos = g.pos[key]
+                if pos < p.low:
+                    pos = p.low
+                    g.pos[key] = pos
+            if pos >= p.high:
+                out.append("NONE")
+                continue
+            out.append(f"{pos} {p.msgs[pos]}")
+            g.pos[key] = pos + 1
+        elif cmd == "COMMIT":
+            group = parts[1]
+            topic = parts[2]
+            part = int(parts[3])
+            off = int(parts[4])
+            if part < 0 or off < -1:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            if off != -1 and (off >= p.high or off < p.low):
+                out.append("ERROR")
+                continue
+            if group not in groups:
+                groups[group] = PyGroup()
+            g = groups[group]
+            g.subs.add(topic)
+            key = (topic, part)
+            if off == -1:
+                g.committed.pop(key, None)
+            else:
+                g.committed[key] = off
+        elif cmd == "SEEK":
+            group = parts[1]
+            topic = parts[2]
+            part = int(parts[3])
+            off = int(parts[4])
+            if part < 0 or off < 0:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            if off < p.low or off > p.high:
+                out.append("ERROR")
+                continue
+            if group not in groups:
+                groups[group] = PyGroup()
+            g = groups[group]
+            g.subs.add(topic)
+            g.pos[(topic, part)] = off
+        elif cmd == "GET_GROUP_OFFSET":
+            group = parts[1]
+            topic = parts[2]
+            part = int(parts[3])
+            if part < 0:
+                out.append("ERROR")
+                continue
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            if group not in groups:
+                out.append("NONE")
+                continue
+            g = groups[group]
+            key = (topic, part)
+            if key not in g.committed or g.committed[key] < p.low:
+                out.append("NONE")
+            else:
+                out.append(str(g.committed[key]))
+        elif cmd == "LIST_GROUPS":
+            if not groups:
+                out.append("NONE")
+            else:
+                # spec says groups persist even when empty, lenient accepts GC
+                # Python ref keeps empty groups
+                out.append(",".join(sorted(groups.keys())))
+        elif cmd == "COMPACT":
+            continue
+        else:
+            # unknown
+            pass
+    return out
+
+
+def test_fuzz_random():
+    import random
+
+    random.seed(12345)
+    for _ in range(20):
+        topics = {}
+        cmds = []
+        # create 1-3 topics with 1-3 partitions
+        for ti in range(random.randint(1, 3)):
+            tname = f"t{ti}"
+            parts = random.randint(1, 3)
+            topics[tname] = parts
+            cmds.append(f"CREATE_TOPIC {tname} {parts} {len(cmds)}")
+        # produce random messages
+        for _ in range(100):
+            op = random.choice(
+                [
+                    "PRODUCE",
+                    "PRODUCE_AUTO",
+                    "PRODUCE_BATCH",
+                    "FETCH",
+                    "FETCH_RANGE",
+                    "POLL",
+                    "COMMIT",
+                    "SEEK",
+                    "TRIM",
+                    "JOIN_GROUP",
+                    "GET_GROUP_OFFSET",
+                    "LIST_TOPICS",
+                    "TOPIC_INFO",
+                    "PARTITION_INFO",
+                    "LIST_GROUPS",
+                ]
+            )
+            if op == "PRODUCE":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                payload = f"msg{random.randint(0, 1000)}"
+                cmds.append(f"PRODUCE {t} {p} {payload} {len(cmds)}")
+            elif op == "PRODUCE_AUTO":
+                t = random.choice(list(topics.keys()))
+                payload = f"auto{random.randint(0, 1000)}"
+                cmds.append(f"PRODUCE_AUTO {t} {payload} {len(cmds)}")
+            elif op == "PRODUCE_BATCH":
+                t = random.choice(list(topics.keys()))
+                cnt = random.randint(1, 3)
+                tokens = [f"PRODUCE_BATCH {t} {cnt}"]
+                for _ in range(cnt):
+                    p = random.randint(0, topics[t] - 1)
+                    pay = f"b{random.randint(0, 1000)}"
+                    tokens.append(str(p))
+                    tokens.append(pay)
+                tokens.append(str(len(cmds)))
+                cmds.append(" ".join(tokens))
+            elif op == "FETCH":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                off = random.randint(0, 10)
+                cmds.append(f"FETCH {t} {p} {off} {len(cmds)}")
+            elif op == "FETCH_RANGE":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                start = random.randint(0, 5)
+                end = start + random.randint(1, 5)
+                cmds.append(f"FETCH_RANGE {t} {p} {start} {end} {len(cmds)}")
+            elif op == "POLL":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                g = f"g{random.randint(0, 2)}"
+                cmds.append(f"POLL {g} {t} {p} {len(cmds)}")
+            elif op == "COMMIT":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                g = f"g{random.randint(0, 2)}"
+                off = random.randint(0, 5)
+                cmds.append(f"COMMIT {g} {t} {p} {off} {len(cmds)}")
+            elif op == "SEEK":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                g = f"g{random.randint(0, 2)}"
+                off = random.randint(0, 5)
+                cmds.append(f"SEEK {g} {t} {p} {off} {len(cmds)}")
+            elif op == "TRIM":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                off = random.randint(0, 5)
+                cmds.append(f"TRIM {t} {p} {off} {len(cmds)}")
+            elif op == "JOIN_GROUP":
+                t = random.choice(list(topics.keys()))
+                g = f"g{random.randint(0, 2)}"
+                cmds.append(f"JOIN_GROUP {g} {t} {len(cmds)}")
+            elif op == "GET_GROUP_OFFSET":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                g = f"g{random.randint(0, 2)}"
+                cmds.append(f"GET_GROUP_OFFSET {g} {t} {p} {len(cmds)}")
+            elif op == "LIST_TOPICS":
+                cmds.append(f"LIST_TOPICS {len(cmds)}")
+            elif op == "TOPIC_INFO":
+                t = random.choice(list(topics.keys()))
+                cmds.append(f"TOPIC_INFO {t} {len(cmds)}")
+            elif op == "PARTITION_INFO":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                cmds.append(f"PARTITION_INFO {t} {p} {len(cmds)}")
+            elif op == "LIST_GROUPS":
+                cmds.append(f"LIST_GROUPS {len(cmds)}")
+
+        # Run both
+        py_out = py_run(cmds)
+        stdin = "\n".join(cmds) + "\n"
+        r = run(stdin)
+        assert r.returncode == 0, f"non-zero exit on fuzz: {r.stderr}\n{stdin}"
+        go_out = lines(r.stdout)
+        # Compare len and content, allowing lenient group GC in one specific case (we already handle)
+        assert len(go_out) == len(py_out), (
+            f"len mismatch {len(go_out)} vs {len(py_out)}\nGo:{go_out}\nPy:{py_out}\nCmds:{cmds}"
+        )
+        for i, (g, p) in enumerate(zip(go_out, py_out)):
+            # Allow lenient group GC: if py says g in list but go says NONE? Only for LIST_GROUPS after delete? Our fuzz doesn't delete topics, so groups always kept
+            # For delete test we leniently accept, but for fuzz we keep strict
+            # Also for GET_GROUP_OFFSET after trim, both should be NONE
+            if g != p:
+                # For LIST_GROUPS, allow superset? No, python keeps empty groups, go keeps too, so should match
+                assert False, (
+                    f"mismatch at line {i}: go={g!r} py={p!r}\nCmds:{cmds}\nGoOut:{go_out}\nPyOut:{py_out}"
+                )
+
+
+# --------------------------------------------------------------------------
+# Additional corner cases from review (payload/topic bounds)
+# --------------------------------------------------------------------------
+
+
+def test_payload_1024_boundary():
+    valid = "a" * 1024
+    invalid = "b" * 1025
+    r1 = run(f"CREATE_TOPIC t 1 0\nPRODUCE t 0 {valid} 1\nFETCH t 0 0 2\n")
+    assert r1.returncode == 0
+    assert lines(r1.stdout)[0] == "0"
+    assert lines(r1.stdout)[1] == valid
+
+    r2 = run(f"CREATE_TOPIC t 1 0\nPRODUCE t 0 {invalid} 1\n")
+    assert r2.returncode != 0
+
+
+def test_topic_name_255_boundary():
+    long_ok = "a" * 255
+    long_bad = "b" * 256
+    r1 = run(f"CREATE_TOPIC {long_ok} 1 0\nLIST_TOPICS 1\n")
+    assert r1.returncode == 0
+    assert long_ok in lines(r1.stdout)[0]
+
+    r2 = run(f"CREATE_TOPIC {long_bad} 1 0\n")
+    assert r2.returncode != 0
