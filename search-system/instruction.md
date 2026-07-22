@@ -8,9 +8,9 @@ Build a **novel** multi-tenant code search service in Go, not a textbook Elastic
 
 ## 1. Server & Constraints
 
-- Go stdlib only, no Bleve/elastic lib — implement index yourself.
-- Concurrent-safe (RWMutex), handle 10k docs, 1000 reqs.
-- No crash on bad input, correct status codes.
+- Go stdlib only, no Bleve/elastic lib — implement index yourself. `go.mod` must not contain `bleve`, `elastic`, `elasticsearch`, `algolia`, `meilisearch`, `sonic`, or `tantivy` dependencies.
+- Concurrent-safe (RWMutex). Scalability target is 10k docs and 1000 requests without OOM, but grader uses a bounded scale check (500 docs + 100 searches) to avoid wall-clock brittleness. Implementation should handle at least 1000 docs efficiently with linear scaling, no O(N^2) blowup per search, average search latency under 200ms for 500 docs.
+- No crash on bad input, correct status codes: 400 for invalid inputs, 404 for missing doc, 201 for index, 200 for search/stats/bulk.
 
 ## 2. Document Model — Novel
 
@@ -49,11 +49,12 @@ This code-aware analyzer is **not** in standard tutorials — it makes memorizat
 
 ## 4. Index — Positional + BM25F + Recency
 
-Per-field (title, body) positional inverted index:
+Per-field (title, body) positional inverted index (black-box verified via phrase and NEAR queries, not via internal inspection — you must still implement positions):
 
 - `term -> docID -> {tf, positions[]}` where positions are incremental after code-aware split.
-- `titleDocFreq`, `bodyDocFreq`, `titleDocLengths` (token count after code-aware split), `bodyDocLengths`, totals.
-- Store docs map with namespace and created_at.
+- `titleDocFreq`, `bodyDocFreq`, `titleDocLengths` (token count after code-aware split), `bodyDocLengths`, totals for BM25F avg calculations.
+- Store docs map with namespace and created_at for filtering and recency.
+- Grader does NOT inspect internal index structure; positional correctness is enforced via phrase `"search engine"` matching only adjacent tokens and NEAR/n distance checks, and via tie-break and scoring tests.
 
 BM25F with **non-standard parameters** (to reduce textbook memorization):
 
@@ -203,15 +204,27 @@ Always return aggregations for matched docs before pagination:
 ```
 
 - `total`: int, number of docs matching query before pagination.
-- `results`: array, paginated. Each result object must contain exactly:
+- `results`: array, paginated. Each result object has **exact allowed keys** `id, score, title, tags, namespace` required, plus optional `highlight`. No other keys allowed. Specifically:
   - `id`: string, doc id
-  - `score`: float64, BM25F with recency decay as defined, must be present and numeric. For empty query, score = 1.0 * recencyFactor.
+  - `score`: float64, BM25F with recency decay as defined, must be present and numeric (not string). For empty query, score = 1.0 * recencyFactor.
   - `title`: string, original doc title
   - `tags`: array of strings, original doc tags
-  - `namespace`: string, doc namespace (default `"default"` if not set)
-  - `highlight`: optional map<string,string> present only when highlight=true and field has text match. Keys are `title` and/or `body`, values are strings with matched terms wrapped in `<em>` and `</em>` preserving original case. Must contain `<em>` when present.
+  - `namespace`: string, doc namespace. If doc had no namespace on index, returned namespace must be `"default"` (default namespace rule).
+  - `highlight`: optional map<string,string> present only when highlight=true and field has text match. Allowed keys inside highlight are `title` and/or `body` only. Values are strings where matched tokens (including camelCase sub-tokens) are wrapped with `<em>` and `</em>` preserving original sub-token case. Must contain literal `<em>` when present. When highlight=false or no text match, highlight must be absent (not null, not empty).
 
-- `aggregations`: object always present with keys `tags`, `top_terms`, `namespaces` as defined above. If no matches, each aggregation is empty: `tags:{}, top_terms:[], namespaces:{}`.
+- Top-level search response must have **exact keys** `total, results, aggregations` only — no extra top-level keys.
+
+- `aggregations`: object always present with **exact keys** `tags, top_terms, namespaces` only. If no matches, each aggregation empty: `tags:{}, top_terms:[], namespaces:{}`.
+  - `tags` as defined, `top_terms` top 5 sorted count desc term asc, `namespaces` case-insensitive counts (lowercased keys).
+
+- `GET /stats` must have **exact keys** `docs, terms, avgdl, namespaces` only, with precise definitions as in §5.
+  - `terms` distinct count after code-aware tokenization (union title+body)
+  - `avgdl` must be computed as `(titleTotalTokens + bodyTotalTokens)/docs` float, with code-aware token counts, 0 when docs=0
+  - `docs` int, `namespaces` int distinct case-insensitive
+
+- `POST /documents` returns `{ok:true, id:string}` with exact keys `ok,id`.
+- `DELETE` returns `{ok:true}` exact.
+- `POST /bulk` returns `{errors:bool, items:[{index:{_id,status}}]}` with exact top-level keys `errors,items`.
 
 ## 6. Persistence with WAL and Recovery — Novel
 

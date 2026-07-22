@@ -2177,4 +2177,4 @@ GOMAIN
 
 go mod tidy
 go build -o /tmp/codimango/search-server .
-echo "novel oracle built — fixed highlight camelCase and namespace stats case-insensitive, 58 tests"
+echo "novel oracle final — 72 tests, highlight camelCase, namespace case-insensitive, tightened grader"

@@ -1397,13 +1397,24 @@ def test_wal_checksum_skip():
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
 
+
 def test_camelcase_acronym_highlighting(server):
     base = server
-    post_doc(base, {"id":"cc_hl1","title":"GoSearchEngine","body":"Implements SearchEngine","tags":[]})
+    post_doc(
+        base,
+        {
+            "id": "cc_hl1",
+            "title": "GoSearchEngine",
+            "body": "Implements SearchEngine",
+            "tags": [],
+        },
+    )
     r = search_get(base, q="go", highlight=True)
     assert r.status_code == 200 and r.json()["total"] == 1
     hl = r.json()["results"][0].get("highlight", {})
-    assert "<em>" in json.dumps(hl), f"camelCase highlight for go should have <em>, got {hl}"
+    assert "<em>" in json.dumps(hl), (
+        f"camelCase highlight for go should have <em>, got {hl}"
+    )
 
     r = search_get(base, q="search", highlight=True)
     hl = r.json()["results"][0].get("highlight", {})
@@ -1411,43 +1422,92 @@ def test_camelcase_acronym_highlighting(server):
 
     r = search_get(base, q='"go search"', highlight=True)
     hl = r.json()["results"][0].get("highlight", {})
-    assert json.dumps(hl).count("<em>") >= 2, f"phrase highlight should have >=2 <em>, got {hl}"
+    assert json.dumps(hl).count("<em>") >= 2, (
+        f"phrase highlight should have >=2 <em>, got {hl}"
+    )
 
-    post_doc(base, {"id":"ac1","title":"IOError occurred","body":"","tags":[]})
+    post_doc(base, {"id": "ac1", "title": "IOError occurred", "body": "", "tags": []})
     r = search_get(base, q="io", highlight=True)
     assert r.json()["total"] >= 1
 
-    post_doc(base, {"id":"ac2","title":"HTTPRequest handler","body":"","tags":[]})
+    post_doc(
+        base, {"id": "ac2", "title": "HTTPRequest handler", "body": "", "tags": []}
+    )
     r = search_get(base, q="http", highlight=True)
     assert "ac2" in {x["id"] for x in r.json()["results"]}
 
 
 def test_namespace_stats_case_insensitive(server):
     base = server
-    post_doc(base, {"id":"nsci1","title":"a","body":"","tags":[],"namespace":"Team-A"})
-    post_doc(base, {"id":"nsci2","title":"b","body":"","tags":[],"namespace":"team-a"})
-    post_doc(base, {"id":"nsci3","title":"c","body":"","tags":[],"namespace":"TEAM-B"})
+    post_doc(
+        base,
+        {"id": "nsci1", "title": "a", "body": "", "tags": [], "namespace": "Team-A"},
+    )
+    post_doc(
+        base,
+        {"id": "nsci2", "title": "b", "body": "", "tags": [], "namespace": "team-a"},
+    )
+    post_doc(
+        base,
+        {"id": "nsci3", "title": "c", "body": "", "tags": [], "namespace": "TEAM-B"},
+    )
     r = requests.get(f"{base}/stats", timeout=5)
     assert r.status_code == 200
     j = r.json()
     assert j["docs"] == 3
-    assert j["namespaces"] == 2, f"Team-A and team-a should be one namespace, got {j['namespaces']}"
+    assert j["namespaces"] == 2, (
+        f"Team-A and team-a should be one namespace, got {j['namespaces']}"
+    )
 
 
 def test_namespace_filtered_aggregations(server):
     base = server
-    post_doc(base, {"id":"nfa1","title":"go","body":"","tags":["go"],"namespace":"team-a"})
-    post_doc(base, {"id":"nfa2","title":"go","body":"","tags":["java"],"namespace":"team-b"})
-    post_doc(base, {"id":"nfa3","title":"go","body":"","tags":["go","java"],"namespace":"team-a"})
-    r = requests.get(f"{base}/search", params={"q":"go","namespace":"team-a"}, timeout=5)
+    post_doc(
+        base,
+        {
+            "id": "nfa1",
+            "title": "go",
+            "body": "",
+            "tags": ["go"],
+            "namespace": "team-a",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "nfa2",
+            "title": "go",
+            "body": "",
+            "tags": ["java"],
+            "namespace": "team-b",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "nfa3",
+            "title": "go",
+            "body": "",
+            "tags": ["go", "java"],
+            "namespace": "team-a",
+        },
+    )
+    r = requests.get(
+        f"{base}/search", params={"q": "go", "namespace": "team-a"}, timeout=5
+    )
     assert r.status_code == 200
     j = r.json()
     assert j["total"] == 2
-    assert j.get("aggregations",{}).get("tags",{}).get("go") == 2
-    assert j.get("aggregations",{}).get("tags",{}).get("java") == 1
-    assert j.get("aggregations",{}).get("namespaces",{}).get("team-a") == 2
-    assert "team-b" not in j.get("aggregations",{}).get("namespaces",{})
-    r = requests.get(f"{base}/search", params={"q":"go"}, headers={"X-Namespace":"team-b"}, timeout=5)
+    assert j.get("aggregations", {}).get("tags", {}).get("go") == 2
+    assert j.get("aggregations", {}).get("tags", {}).get("java") == 1
+    assert j.get("aggregations", {}).get("namespaces", {}).get("team-a") == 2
+    assert "team-b" not in j.get("aggregations", {}).get("namespaces", {})
+    r = requests.get(
+        f"{base}/search",
+        params={"q": "go"},
+        headers={"X-Namespace": "team-b"},
+        timeout=5,
+    )
     assert r.json()["total"] == 1
 
 
@@ -1461,11 +1521,17 @@ def test_wal_replay_delete_after_index_removal():
     env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
     if os.path.exists(DATA_DIR):
         shutil.rmtree(DATA_DIR, ignore_errors=True)
-    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     assert wait_for_server(port, timeout=15)
     base = f"http://127.0.0.1:{port}"
     try:
-        requests.post(f"{base}/documents", json={"id":"todel","title":"to delete","body":"","tags":[]}, timeout=5)
+        requests.post(
+            f"{base}/documents",
+            json={"id": "todel", "title": "to delete", "body": "", "tags": []},
+            timeout=5,
+        )
         requests.delete(f"{base}/documents/todel", timeout=5)
         time.sleep(0.5)
         wal_file = os.path.join(custom_dir, "wal.log")
@@ -1476,11 +1542,15 @@ def test_wal_replay_delete_after_index_removal():
         time.sleep(0.5)
         port2 = find_free_port()
         env2 = {**os.environ, "PORT": str(port2), "DATA_FILE": custom_file}
-        proc2 = subprocess.Popen([BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         assert wait_for_server(port2, timeout=15)
         base2 = f"http://127.0.0.1:{port2}"
         r = requests.get(f"{base2}/documents/todel", timeout=5)
-        assert r.status_code == 404, f"deleted doc should stay deleted after WAL replay, got {r.status_code}"
+        assert r.status_code == 404, (
+            f"deleted doc should stay deleted after WAL replay, got {r.status_code}"
+        )
         proc2.terminate()
         proc2.wait(timeout=5)
     finally:
@@ -1503,12 +1573,23 @@ def test_truncated_index_preserves_last_valid():
     env = {**os.environ, "PORT": str(port)}
     if os.path.exists(DATA_DIR):
         shutil.rmtree(DATA_DIR, ignore_errors=True)
-    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     assert wait_for_server(port, timeout=15)
     base = f"http://127.0.0.1:{port}"
     try:
         for i in range(3):
-            requests.post(f"{base}/documents", json={"id":f"trunc{i}","title":f"valid doc {i}","body":"test","tags":[]}, timeout=5)
+            requests.post(
+                f"{base}/documents",
+                json={
+                    "id": f"trunc{i}",
+                    "title": f"valid doc {i}",
+                    "body": "test",
+                    "tags": [],
+                },
+                timeout=5,
+            )
         time.sleep(0.5)
         data_file = os.path.join(DATA_DIR, "index.json")
         assert os.path.exists(data_file)
@@ -1522,13 +1603,17 @@ def test_truncated_index_preserves_last_valid():
         time.sleep(0.5)
         port2 = find_free_port()
         env2 = {**os.environ, "PORT": str(port2)}
-        proc2 = subprocess.Popen([BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         assert wait_for_server(port2, timeout=15)
         base2 = f"http://127.0.0.1:{port2}"
         r = requests.get(f"{base2}/search", timeout=5)
         assert r.status_code == 200
-        total = r.json().get("total",0)
-        assert total >= 1, f"truncated recovery should preserve at least 1 doc, got {total}"
+        total = r.json().get("total", 0)
+        assert total >= 1, (
+            f"truncated recovery should preserve at least 1 doc, got {total}"
+        )
         proc2.terminate()
         proc2.wait(timeout=5)
     finally:
@@ -1546,9 +1631,36 @@ def test_truncated_index_preserves_last_valid():
 
 def test_invalid_and_future_created_at(server):
     base = server
-    post_doc(base, {"id":"inv1","title":"go","body":"","tags":[],"created_at":"not-a-date"})
-    post_doc(base, {"id":"future1","title":"go","body":"","tags":[],"created_at":"2099-12-31T23:59:59Z"})
-    post_doc(base, {"id":"valid1","title":"go","body":"","tags":[],"created_at":"2026-07-21T10:00:00Z"})
+    post_doc(
+        base,
+        {
+            "id": "inv1",
+            "title": "go",
+            "body": "",
+            "tags": [],
+            "created_at": "not-a-date",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "future1",
+            "title": "go",
+            "body": "",
+            "tags": [],
+            "created_at": "2099-12-31T23:59:59Z",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "valid1",
+            "title": "go",
+            "body": "",
+            "tags": [],
+            "created_at": "2026-07-21T10:00:00Z",
+        },
+    )
     r = search_get(base, q="go")
     assert r.status_code == 200
     assert r.json()["total"] == 3
@@ -1559,11 +1671,35 @@ def test_invalid_and_future_created_at(server):
 
 def test_post_body_overrides_get_params(server):
     base = server
-    post_doc(base, {"id":"over1","title":"go search","body":"","tags":[],"namespace":"team-a"})
-    post_doc(base, {"id":"over2","title":"java search","body":"","tags":[],"namespace":"team-b"})
-    r = requests.get(f"{base}/search", params={"q":"java","namespace":"team-b"}, timeout=5)
+    post_doc(
+        base,
+        {
+            "id": "over1",
+            "title": "go search",
+            "body": "",
+            "tags": [],
+            "namespace": "team-a",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "over2",
+            "title": "java search",
+            "body": "",
+            "tags": [],
+            "namespace": "team-b",
+        },
+    )
+    r = requests.get(
+        f"{base}/search", params={"q": "java", "namespace": "team-b"}, timeout=5
+    )
     assert r.json()["total"] == 1
-    resp = requests.post(f"{base}/search?q=java&namespace=team-b", json={"query":"go","namespace":"team-a"}, timeout=5)
+    resp = requests.post(
+        f"{base}/search?q=java&namespace=team-b",
+        json={"query": "go", "namespace": "team-a"},
+        timeout=5,
+    )
     assert resp.status_code == 200
     j = resp.json()
     assert j["total"] == 1 and j["results"][0]["id"] == "over1"
@@ -1571,25 +1707,42 @@ def test_post_body_overrides_get_params(server):
 
 def test_exact_response_keys(server):
     base = server
-    post_doc(base, {"id":"key1","title":"go","body":"search","tags":["go"],"namespace":"default"})
+    post_doc(
+        base,
+        {
+            "id": "key1",
+            "title": "go",
+            "body": "search",
+            "tags": ["go"],
+            "namespace": "default",
+        },
+    )
     r = search_get(base, q="go")
     assert r.status_code == 200
     j = r.json()
     assert "total" in j and "results" in j and "aggregations" in j
     res = j["results"][0]
-    for k in ["id","score","title","tags"]:
+    for k in ["id", "score", "title", "tags"]:
         assert k in res
     agg = j["aggregations"]
-    for k in ["tags","top_terms","namespaces"]:
+    for k in ["tags", "top_terms", "namespaces"]:
         assert k in agg
-    assert isinstance(res["score"], (int,float))
+    assert isinstance(res["score"], (int, float))
 
 
 def test_performance_scale(server):
     base = server
     n_docs = 500
     for i in range(n_docs):
-        post_doc(base, {"id":f"scale{i}","title":f"doc {i} search engine go java","body":f"body content {i} with search term go","tags":["go","search"] if i%2==0 else ["java"]})
+        post_doc(
+            base,
+            {
+                "id": f"scale{i}",
+                "title": f"doc {i} search engine go java",
+                "body": f"body content {i} with search term go",
+                "tags": ["go", "search"] if i % 2 == 0 else ["java"],
+            },
+        )
     start = time.time()
     for _ in range(100):
         r = search_get(base, q="go search", limit=10)
@@ -1597,12 +1750,12 @@ def test_performance_scale(server):
     elapsed = time.time() - start
     assert elapsed < 15, f"100 searches over 500 docs took {elapsed}s, too slow"
     r = search_get(base, q="go", limit=100)
-    assert r.json()["total"] >= n_docs//2
+    assert r.json()["total"] >= n_docs // 2
 
 
 def test_regression_camelcase_highlight_subtokens(server):
     base = server
-    post_doc(base, {"id":"reg_cc1","title":"GoSearchEngine","body":"","tags":[]})
+    post_doc(base, {"id": "reg_cc1", "title": "GoSearchEngine", "body": "", "tags": []})
     r = search_get(base, q="go", highlight=True)
     assert r.json()["total"] == 1
     hl = r.json()["results"][0].get("highlight", {})
@@ -1623,12 +1776,34 @@ def test_regression_namespace_stats_case_insensitive():
     env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
     if os.path.exists(DATA_DIR):
         shutil.rmtree(DATA_DIR, ignore_errors=True)
-    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     assert wait_for_server(port, timeout=15)
     base = f"http://127.0.0.1:{port}"
     try:
-        requests.post(f"{base}/documents", json={"id":"ns1","title":"a","body":"","tags":[],"namespace":"Team-A"}, timeout=5)
-        requests.post(f"{base}/documents", json={"id":"ns2","title":"b","body":"","tags":[],"namespace":"team-a"}, timeout=5)
+        requests.post(
+            f"{base}/documents",
+            json={
+                "id": "ns1",
+                "title": "a",
+                "body": "",
+                "tags": [],
+                "namespace": "Team-A",
+            },
+            timeout=5,
+        )
+        requests.post(
+            f"{base}/documents",
+            json={
+                "id": "ns2",
+                "title": "b",
+                "body": "",
+                "tags": [],
+                "namespace": "team-a",
+            },
+            timeout=5,
+        )
         time.sleep(0.5)
         r = requests.get(f"{base}/stats", timeout=5)
         assert r.status_code == 200
@@ -1643,3 +1818,252 @@ def test_regression_namespace_stats_case_insensitive():
             shutil.rmtree(custom_dir, ignore_errors=True)
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_invalid_operator_should_400(server):
+    base = server
+    r = requests.get(f"{base}/search", params={"operator": "INVALID"}, timeout=5)
+    assert r.status_code == 400
+    r = requests.post(
+        f"{base}/search", json={"query": "go", "operator": "WRONG"}, timeout=5
+    )
+    assert r.status_code == 400
+
+
+def test_nonnumeric_limit_offset_should_400(server):
+    base = server
+    r = requests.get(f"{base}/search", params={"limit": "abc"}, timeout=5)
+    assert r.status_code == 400
+    r = requests.get(f"{base}/search", params={"offset": "xyz"}, timeout=5)
+    assert r.status_code == 400
+    r = requests.get(f"{base}/search", params={"limit": "10.5"}, timeout=5)
+    assert r.status_code == 400
+    r = requests.post(
+        f"{base}/search", json={"query": "go", "limit": "notint"}, timeout=5
+    )
+    assert r.status_code == 400
+
+
+def test_invalid_fuzzy_distance_should_400(server):
+    base = server
+    r = search_get(base, q="sarch~abc")
+    assert r.status_code == 400, f"sarch~abc should 400, got {r.status_code}"
+    r = search_get(base, q="go~xyz")
+    assert r.status_code == 400
+
+
+def test_empty_phrase_should_400(server):
+    base = server
+    r = search_get(base, q='""')
+    assert r.status_code == 400, f"empty phrase should 400, got {r.status_code}"
+    r = search_get(base, q='title:""')
+    assert r.status_code == 400
+    r = search_get(base, q='body:"   "')
+    assert r.status_code == 400
+
+
+def test_limit_clamping_to_100(server):
+    base = server
+    for i in range(150):
+        post_doc(
+            base,
+            {
+                "id": f"clamp{i}",
+                "title": f"doc clamp {i}",
+                "body": "clamp test",
+                "tags": [],
+            },
+        )
+    r = search_get(base, q="clamp", limit=200)
+    assert r.status_code == 200, (
+        f"limit 200 should be clamped to 100, not 400, got {r.status_code}"
+    )
+    j = r.json()
+    assert j["total"] == 150
+    assert len(j["results"]) == 100, f"expected clamped to 100, got {len(j['results'])}"
+
+
+def test_exact_result_keys_highlight_absent_present(server):
+    base = server
+    post_doc(
+        base,
+        {
+            "id": "keys1",
+            "title": "go search",
+            "body": "test",
+            "tags": ["go"],
+            "namespace": "default",
+        },
+    )
+    r = search_get(base, q="go", highlight=False)
+    assert r.status_code == 200
+    j = r.json()
+    assert set(j.keys()) == {"total", "results", "aggregations"}, (
+        f"top-level exact keys mismatch, got {set(j.keys())}"
+    )
+    res = j["results"][0]
+    assert "highlight" not in res
+    allowed_without_hl = {"id", "score", "title", "tags", "namespace"}
+    assert set(res.keys()) == allowed_without_hl, (
+        f"expected {allowed_without_hl}, got {set(res.keys())}"
+    )
+    r = search_get(base, q="go", highlight=True)
+    res = r.json()["results"][0]
+    allowed_with_hl = {"id", "score", "title", "tags", "namespace", "highlight"}
+    assert set(res.keys()) == allowed_with_hl, (
+        f"expected {allowed_with_hl}, got {set(res.keys())}"
+    )
+    for k in res["highlight"].keys():
+        assert k in ("title", "body")
+
+
+def test_default_namespace_in_results(server):
+    base = server
+    post_doc(base, {"id": "defns1", "title": "go", "body": "", "tags": []})
+    r = search_get(base, q="go")
+    res = next((x for x in r.json()["results"] if x["id"] == "defns1"), None)
+    assert res is not None
+    assert res.get("namespace") == "default"
+
+
+def test_precise_stats_terms_avgdl(server):
+    base = server
+    post_doc(
+        base,
+        {
+            "id": "st1",
+            "title": "go search",
+            "body": "engine",
+            "tags": [],
+            "namespace": "ns1",
+        },
+    )
+    post_doc(
+        base,
+        {
+            "id": "st2",
+            "title": "java",
+            "body": "search engine",
+            "tags": [],
+            "namespace": "ns2",
+        },
+    )
+    r = requests.get(f"{base}/stats", timeout=5)
+    j = r.json()
+    assert j["docs"] == 2
+    assert j["terms"] == 4, f"expected 4 distinct terms, got {j['terms']}"
+    assert abs(j["avgdl"] - 3.0) < 0.01, f"expected avgdl 3.0, got {j['avgdl']}"
+    assert set(j.keys()) == {"docs", "terms", "avgdl", "namespaces"}
+
+
+def test_top_terms_sorting_and_counts(server):
+    base = server
+    post_doc(
+        base,
+        {"id": "ttc1", "title": "go go go search", "body": "engine engine", "tags": []},
+    )
+    post_doc(base, {"id": "ttc2", "title": "go search", "body": "go", "tags": []})
+    r = search_get(base, q="go")
+    top = r.json().get("aggregations", {}).get("top_terms", [])
+    assert len(top) <= 5 and len(top) >= 1
+    assert top[0]["term"] == "go" and top[0]["count"] == 5
+    counts = [x["count"] for x in top]
+    assert counts == sorted(counts, reverse=True)
+    cnt2_terms = [x["term"] for x in top if x["count"] == 2]
+    assert cnt2_terms == sorted(cnt2_terms)
+
+
+def test_id_ascending_tie_break(server):
+    base = server
+    post_doc(base, {"id": "aaa", "title": "go", "body": "", "tags": []})
+    post_doc(base, {"id": "zzz", "title": "go", "body": "", "tags": []})
+    post_doc(base, {"id": "mmm", "title": "go", "body": "", "tags": []})
+    r = search_get(base, q="go")
+    ids = [x["id"] for x in r.json()["results"]]
+    assert ids == sorted(ids)
+    assert ids == ["aaa", "mmm", "zzz"]
+
+
+def test_body_default_bm25_df_behavior(server):
+    base = server
+    post_doc(
+        base, {"id": "bd1", "title": "uniqueTitleTerm", "body": "common", "tags": []}
+    )
+    post_doc(
+        base, {"id": "bd2", "title": "common", "body": "uniqueBodyTerm", "tags": []}
+    )
+    post_doc(base, {"id": "bd3", "title": "common", "body": "common", "tags": []})
+    r = search_get(base, q="title:uniqueTitleTerm")
+    assert r.json()["total"] == 1 and r.json()["results"][0]["id"] == "bd1"
+    r = search_get(base, q="body:uniqueBodyTerm")
+    assert r.json()["total"] == 1 and r.json()["results"][0]["id"] == "bd2"
+    r = search_get(base, q="common")
+    assert r.json()["total"] == 3
+    ids_order = [x["id"] for x in r.json()["results"]]
+    assert ids_order[0] == "bd3", (
+        f"bd3 with both fields should rank highest, got {ids_order}"
+    )
+
+
+def test_tag_namespace_fixed_scores(server):
+    base = server
+    post_doc(
+        base,
+        {
+            "id": "fixed1",
+            "title": "no match",
+            "body": "no match",
+            "tags": ["go"],
+            "namespace": "team-a",
+        },
+    )
+    r = search_get(base, q="tags:go")
+    assert abs(r.json()["results"][0]["score"] - 1.0) < 0.01
+    r = search_get(base, q="tags:go^2")
+    assert abs(r.json()["results"][0]["score"] - 2.0) < 0.01
+    r = search_get(base, q="namespace:team-a")
+    assert abs(r.json()["results"][0]["score"] - 1.0) < 0.01
+    r = search_get(base, q="namespace:team-a^3")
+    assert abs(r.json()["results"][0]["score"] - 3.0) < 0.01
+
+
+def test_no_external_search_dependencies():
+    mod_path = os.path.join(APP, "go.mod")
+    if os.path.exists(mod_path):
+        content = open(mod_path).read().lower()
+        for f in [
+            "bleve",
+            "elastic",
+            "algolia",
+            "meilisearch",
+            "sonic",
+            "tantivy",
+            "elasticsearch",
+        ]:
+            assert f not in content, f"go.mod should not contain {f}"
+
+
+def test_performance_scale_less_brittle(server):
+    base = server
+    n_docs = 300
+    for i in range(n_docs):
+        post_doc(
+            base,
+            {
+                "id": f"perf{i}",
+                "title": f"doc {i} search engine go java",
+                "body": f"body {i} search",
+                "tags": ["go"],
+            },
+        )
+    latencies = []
+    for _ in range(50):
+        start = time.time()
+        r = search_get(base, q="go search", limit=10)
+        assert r.status_code == 200
+        latencies.append(time.time() - start)
+    latencies.sort()
+    p95 = latencies[int(len(latencies) * 0.95)]
+    avg = sum(latencies) / len(latencies)
+    assert p95 < 0.5, f"p95 latency {p95}s too high"
+    assert avg < 0.2, f"avg latency {avg}s too high"
