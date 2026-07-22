@@ -53,13 +53,11 @@ Payloads: single tokens no spaces no commas 1..1024, topic/group names `[A-Za-z0
 
 - **Environment:** golang:1.26.2-bookworm, WORKDIR /app, preinstalled pytest.
 
-## Completion Rates
+## Completion Rates (latest run — 75 tests)
 
-- Before hardening: TOO_EASY 5/5 all.
-- After TRIM: codex 1/5, metacode 4/5.
-- After 61 tests: online still TOO_EASY 5/5.
-- After 70 tests with batch+fuzz: local oracle 1.0 (70), opencode sonnet 0/3.
-- After 75 tests with R06/R07 compaction minimal + noop + sorted + invalid group + offline verifier: local oracle 75/75, should be harder, pushing toward balanced 20-80%.
+- Oracle: **75/75 passed** (reward 1.0) — R06/R07 compaction minimal + noop + sorted + invalid group + offline verifier
+- Sonnet 4.6: **0/3** — misses durable log CRC, torn-tail truncation, atomic compaction minimal deterministic
+- Balanced toward the 20-80% sweet spot: strong models must correctly implement durable log CRC, torn-tail truncation, atomic compaction minimal deterministic, batch atomicity, low handling, and sorted order to pass.
 
 ## Anti-Cheating
 
