@@ -76,13 +76,31 @@ def built():
     yield
 
 
+def _chmod_no_access():
+    try:
+        os.chmod(__file__, 0o000)
+    except Exception:
+        pass
+
+
+def _chmod_restore():
+    try:
+        os.chmod(__file__, 0o644)
+    except Exception:
+        pass
+
+
 def run(stdin, timeout=20, state_dir=None):
     env = {k: v for k, v in os.environ.items() if k != "MQ_STATE_DIR"}
     if state_dir is not None:
         env["MQ_STATE_DIR"] = state_dir
-    return subprocess.run(
-        [BIN], input=stdin, capture_output=True, text=True, timeout=timeout, env=env
-    )
+    _chmod_no_access()
+    try:
+        return subprocess.run(
+            [BIN], input=stdin, capture_output=True, text=True, timeout=timeout, env=env
+        )
+    finally:
+        _chmod_restore()
 
 
 def lines(out):

@@ -63,6 +63,20 @@ def built():
     yield
 
 
+def _chmod_no_access():
+    try:
+        os.chmod(__file__, 0o000)
+    except Exception:
+        pass
+
+
+def _chmod_restore():
+    try:
+        os.chmod(__file__, 0o644)
+    except Exception:
+        pass
+
+
 def run_case(T, loads, groups, subs):
     lines = [str(T)]
     for ld in loads:
@@ -74,7 +88,13 @@ def run_case(T, loads, groups, subs):
     for gid, p, mn, w, c, ra in subs:
         lines.append(f"{gid} {p} {mn} {w} {c} {ra}")
     inp = "\n".join(lines) + "\n"
-    proc = subprocess.run([BIN], input=inp, capture_output=True, text=True, timeout=30)
+    _chmod_no_access()
+    try:
+        proc = subprocess.run(
+            [BIN], input=inp, capture_output=True, text=True, timeout=30
+        )
+    finally:
+        _chmod_restore()
     assert proc.returncode == 0, f"nonzero exit: {proc.stderr}\ninput:\n{inp}"
     out_lines = [
         ln.strip() for ln in proc.stdout.strip().splitlines() if ln.strip() != ""
@@ -83,7 +103,13 @@ def run_case(T, loads, groups, subs):
 
 
 def run_case_raw(raw):
-    proc = subprocess.run([BIN], input=raw, capture_output=True, text=True, timeout=30)
+    _chmod_no_access()
+    try:
+        proc = subprocess.run(
+            [BIN], input=raw, capture_output=True, text=True, timeout=30
+        )
+    finally:
+        _chmod_restore()
     assert proc.returncode == 0, f"nonzero exit: {proc.stderr}\nraw:\n{raw}"
     return [ln.strip() for ln in proc.stdout.strip().splitlines() if ln.strip() != ""]
 

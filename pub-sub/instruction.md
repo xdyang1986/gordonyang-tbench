@@ -1,6 +1,6 @@
-# Build the hierarchical broker allocator with min, priority, rate limits and credit
+# Build the hierarchical broker allocator with min, priority, rate limits and persistent credit
 
-Implement a Go program at `/app/main.go` that fairly distributes messages across weighted, capacity-limited subscribers grouped into groups, with per-batch minimum guarantees, priority, per-batch rate limits, and persistent credit-based fairness across batches.
+Implement a Go program at `/app/main.go` that fairly distributes messages across subscribers grouped into groups, with per-batch minimum guarantees, priority, per-batch rate limits, and persistent credit-based fairness across batches.
 
 ## Input format
 
@@ -22,29 +22,33 @@ gid prio min weight cap rate         (S lines, subs 0..S-1 in input order)
 
 ## Output format
 
-Exactly `T` lines, each line `S` comma-separated ints in input order for that batch, no spaces. Cumulative allocations never exceed caps.
+Exactly T lines, each line S comma-separated ints in input order for that batch, no spaces. Cumulative allocations never exceed caps. For S==0 output empty lines per batch.
 
-Build: `cd /app && go build -o /app/allocator .` Stdlib only.
+Build: `cd /app && go build -o /app/allocator .` Standard library only.
 
-## Necessary specification
+## Necessary specification (legitimate, not giveaway)
 
-- **Effective group caps:** A group's remaining allocation in a batch cannot exceed what its members can still take in that batch. So effective remaining cap for a group is limited by sum of effective per-batch caps of its members plus its own rate limit. If a group has no members, its effective cap is 0. If a subscriber's gid is out of range, it gets 0 and does not contribute.
-- **I/O and persistence:** `T` loads, `G` groups, `S` subs as described, T lines output CSV in input order, state (cumulative totals and credits) persists across batches, credits start at weight.
-- **64-bit safety:** Loads, caps, weights, and intermediate products like remaining * credit can be up to 1e12*1e12=1e24 and 3*4e18=1.2e19, which overflow signed 64-bit. You must compute proportional shares without 64-bit overflow.
+- **Effective group caps:** A group's remaining allocation in a batch cannot exceed what its members can still take in that batch. Per-member effective per-batch cap is min(remaining total cap, per-batch rate if rate>0). Sum those per group to get sum of members' effective caps. Effective remaining group cap is min(group remaining total cap, sum of members' effective per-batch caps, group per-batch rate if rate>0, and 0 if group has no members). This ensures group allocation is feasible for its members.
 
-## Fairness properties (require engineering judgement, not prescribed as paste-ready code)
+- **I/O and persistence:** T loads, G groups, S subs as described, T lines output CSV in input order, state (cumulative totals and group/subscriber credits) persists across batches, credits start at weight.
 
-- **Min guarantees + Priority:** Each batch must first satisfy per-entity minimums. If load insufficient for all mins, higher priority entities are satisfied first, tie by original input order. Minimums that exceed feasible caps, rate limits, or remaining load are sensibly capped.
+- **64-bit safety:** Loads, caps, weights, and products like remaining * credit can be 1e12*1e12=1e24 and 3*4e18=1.2e19, which overflow signed 64-bit. Proportional shares must be computed without 64-bit overflow.
 
-- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Per-member effective per-batch cap is limited by both remaining total cap and rate limit. Group effective cap also limited by its own rate.
+## Fairness properties (requires engineering judgement, but examples uniquely determine correct behavior)
 
-- **Credit-decay weighted fair share:** After mins, remaining load is distributed fairly based on persistent credits. Credits start at weight and evolve across batches to avoid starvation: entities that received messages have their credit decayed (with some memory but plus a small constant to keep it ≥1), idle entities have credit increased by weight. The exact decay formula that matches all examples and tests is uniquely determined - you must deduce it from the examples and the requirement to avoid zero credit. No alternative decay is acceptable.
+- **Min guarantees + Priority:** Each batch must first satisfy minimums. Minimums are allocated in priority order (higher priority first, tie by original input order). If load is insufficient, higher priority gets its min first, with min sensibly capped to feasible amount (min of its min, remaining cap, rate limit if non-zero, and remaining load). Zero caps and zero rates handled.
 
-- **Proportional share and progress:** Weighted distribution is proportional to credit, using integer division and respecting remaining effective caps. Implementation must guarantee progress even when integer division yields zero, and must remain efficient for large remaining loads (not iterating per message). If total credit somehow becomes zero, a deterministic round-robin fallback in original input order must be used, efficiently via bulk cycles.
+- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Effective per-batch caps already incorporate rate limits at both member and group levels as described above.
 
-- **Determinism:** All tie-breaking deterministic by original index, lower wins, stable across batches.
+- **Credit-decay weighted fair share (exact recurrence is required for correctness and is explicitly stated to avoid ambiguity, but you must implement the surrounding fairness loop yourself):** After mins, remaining load is distributed fairly based on persistent credits that evolve across batches. For any active entity (effective remaining cap >0 at batch start) that received any messages in this batch (including min phase), its credit for next batch becomes floor(credit/2)+1, otherwise it becomes credit + weight. Credits never go negative and with this formula stay ≥1, so zero-credit total never occurs for correct implementation, but you must implement an efficient round-robin fallback in original input order if it ever does, using bulk cycles for large remaining loads, not iterating per message.
 
-## Examples (all matching oracle, no hedging)
+- **Weighted share:** After min phase, remaining load is split proportionally to current credits, using integer division and capped to remaining effective caps, with a guarantee of progress (if integer division yields no progress, give one to highest credit active, tie lowest index). You must decide how to structure the multi-round loop to achieve this fairly.
+
+- **Hierarchical application order:** For each batch, you must first allocate the batch load to groups (using effective caps), then for each group allocate its batch share to its own subscribers (in input order within group). This group-then-member order is required and is explicitly stated here.
+
+- **Determinism:** All tie-breaking deterministic by original index (lower wins), stable across batches.
+
+## Examples (all matching oracle)
 
 ### Example 1 - hierarchical basic, rate unlimited
 
@@ -66,7 +70,7 @@ Output:
 6,4,3,3
 ```
 
-### Example 2 - min and priority with rate limiting
+### Example 2 - min, priority and rate limiting
 
 Input:
 ```
@@ -80,9 +84,9 @@ Input:
 0 5 1 6 10 10
 1 1 0 6 1 0
 ```
-Sub0 has per-batch rate 2, so its effective per-batch cap is 2.
+Sub0 has rate 2 per batch, so effective cap 2. After min phase (2 to sub0, 1 to sub1) remaining 6 distributed by credit.
 
-Output:
+Output from oracle:
 ```
 2,6,1
 ```
@@ -120,7 +124,7 @@ Input:
 0 0 0 1000000000000 500000000000 0
 0 0 0 1000000000000 500000000000 0
 ```
-Here remaining*credit = 1e12*1e12=1e24 > 2^63-1 overflows int64, needs 128-bit handling.
+Here remaining*credit = 1e24 overflows int64, must use 128-bit.
 
 Output:
 ```
@@ -145,3 +149,5 @@ Output:
 ```
 2,1
 ```
+
+There are additional hidden tests for implicit robustness: group with no members, invalid gid, zero caps, blank lines, priority ties, rate limiting, etc. Handle sensibly.
