@@ -29,15 +29,15 @@ Naive approach fails because:
 - No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
 - Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (local, novel hard — latest run)
+## Completion Rates (local, novel hard — latest run 72 tests)
 
-- Oracle: **3/3 passed** (47/47 tests each run) — 24-26s, flakiness 3/3
-- Sonnet 4.6: **0-1/5** — fails camelCase, BM25 non-standard 1.65/0.68 with +1, namespace header, recency 1h vs 7d, NEAR/1 vs NEAR/3, top_terms, WAL checksum skip, DATA_FILE override
-- Opus 4.8: **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting 2x title, recency factor 1+0.5*exp(-age/168), NEAR distance, namespace header override, top_terms aggregation, WAL replay with CRC32 checksum verification, fuzzy ~0 vs ~1 vs ~2, bulk _id precedence
-- Avocado: **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix+fuzzy distance, often forgets implicit AND insertion, recency factor, and WAL checksum skip
-- GPT-5.5: **2/5** — balanced difficulty (not memorization-solvable)
+- Oracle: **3/3 passed** (72/72 tests each run) — 32-39s, flakiness 3/3 (local 44s total, online oracle 3/3)
+- Sonnet 4.6: **0-2/5** — fails code-aware camelCase highlight, BM25 non-standard k1=1.65 b=0.68 idf+1 with title weight 2x, namespace header override, recency exact constants 0.5/168, NEAR/1 vs NEAR/3, top_terms sorting, WAL checksum CRC32 enforcement
+- Opus 4.8: **5/5** on easy, **0/5** on first hard, **5/5** on 58-test, **2/5 and 1/5** on 72-test final (balanced) — genuine reasoning: may get CRUD and simple boolean but misses camelCase sub-token highlight exact, BM25F per-field df vs union, recency exact ratio, namespace case-insensitive stats, top_terms top-5 sorted, id-asc tie break, body/default BM25F df, fixed scores, WAL delete replay, truncated recovery, invalid operator/fuzzy/NEAR 400, limit clamp 100
+- Avocado (Metacode): **1/6, 2/7, 3/7** — real near-misses on positional NEAR wiring, recency factor, WAL checksum skip, code-aware highlight
+- GPT-5.5 (Codex): **5/5** easy → **3/5** hard v2 → **2/5 and 1/5** final 72-test — difficulty increased via custom constants and novel composition, balanced 1-4/5
 
-> Difficulty intentionally balanced: not 5/5 (too easy), not 0/5 for all models (too hard) — at least one model lands 1-4/5 (GPT 2/5 qualifies per platform).
+> Difficulty intentionally balanced: not 5/5 for all models (too easy), not 0/5 for all (too hard) — at least one model lands 1-4/5 (GPT 2-3/5, Avocado 1-3/5 qualifies; Opus 5/5 on some commits but 0-2/5 on others shows genuine reasoning attempts). Previous easy version was 5/5 for all → too easy, first hard 0/5 opus → too hard, novel 72-test tuned to 2-3/5 GPT and 1/6 Avocado.
 
 ## Model Analysis
 
@@ -65,9 +65,9 @@ Naive approach fails because:
   - WAL with CRC32 checksum `wal.log` replay after index.json deletion
   - These composed together are **not** in any single online tutorial — component composition with custom constants makes recall of working implementation per part insufficient; full integration is novel.
 
-- **Hardcoded outputs**: Random ports, `find_free_port`, dynamic IDs `c{thread}_{i}`, custom dirs `/tmp/custom_data_test`, `/tmp/wal_test`, `/tmp/wal_checksum_test` with random ports, recency timestamps `now-1h` vs `now-7d`, bulk IDs — hardcoding fails.
+- **Hardcoded outputs**: Random ports via `find_free_port`, dynamic IDs `c{thread}_{i}`, `scale{i}`, `clamp{i}`, `perf{i}`, custom dirs `/tmp/custom_data_test`, `/tmp/wal_test`, `/tmp/wal_checksum_test`, `/tmp/wal_delete_test`, `/tmp/ns_ci_test` with random ports, recency timestamps `now-1h` vs `now-7d` computed at runtime, bulk action `_id` precedence `real_id` vs `fake_id`, exact response keys `total,results,aggregations` with allowed sets — hardcoding fails.
 
-- **Overfitting**: Tests dir hidden in TBR prod; 47 tests include combos not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `go NEAR/1 search` vs `NEAR/3`, `namespace:team-b` field vs `?namespace=team-a` param vs header `X-Namespace` override, `sarch~0` exact only vs `~1,~2`, `sxxrch~` distance 2+ no match, `team-b` hyphen handling, `GoSearchEngine` camelCase phrase `"go search"`, recency 1h vs 7d, WAL replay after index.json deletion with CRC32 checksum verification and corrupted line skip, `DATA_FILE` custom path, invalid `NEAR/abc` 400, invalid boost `^abc` 400, stats `namespaces` count, GET doc includes `namespace`+`created_at`.
+- **Overfitting**: Tests dir hidden in TBR prod; 72 tests include combos not in instruction examples: `title:"go search" OR (body:engine AND tags:go)`, `go NEAR/1 search` vs `NEAR/3`, `namespace:team-b` field vs `?namespace=team-a` param vs header `X-Namespace` override, `sarch~0` exact only vs `~1,~2` vs `sarch~abc` 400, `sxxrch~` distance 2+ no match, `team-b` hyphen handling, `GoSearchEngine` camelCase highlight `go` → `<em>Go</em>SearchEngine` and phrase `"go search"` → `<em>Go</em><em>Search</em>Engine` count 2, recency exact ratio with constants 0.5 and 168, WAL replay delete after index.json removal, truncated recovery preserves last valid doc, invalid operator `INVALID` 400, non-numeric limit/offset 400, empty phrase `""` 400, limit clamp 200→100, exact keys `total,results,aggregations` and result keys `id,score,title,tags,namespace` (+highlight), default namespace `default` in results, precise stats `terms=4 avgdl=3.0`, top_terms sorting count desc term asc and top-5, id-asc tie break `aaa,mmm,zzz`, body/default BM25F df per-field vs union, tag/namespace fixed scores `1.0*boost`, no external deps `bleve`, scale 500 docs + 100 searches functional (no strict timing, lenient <60s to avoid HIGH timing false-negative), POST body overrides GET params, invalid/future `created_at` handling, `DATA_FILE` env override, `X-Namespace` header override, invalid `NEAR/abc` 400, invalid boost `^abc` 400.
 
 - **Modifying test files**: `/tests` read-only in verifier, reward written to `/logs/verifier/reward.txt` with CTRF, `set +e` around pytest ensures reward written even on failure (fixed High severity).
 
@@ -78,7 +78,14 @@ Naive approach fails because:
 ```bash
 cd /app && rm -rf data && mkdir -p /tmp/codimango && go build -o /tmp/codimango/search-server .
 ~/.local/bin/pytest search-system/tests/test_outputs.py -v
-# expected 47 passed (~24s)
+# expected 72 passed (~32-39s)
+
+# after golden fixes (highlight camelCase + namespace stats case-insensitive)
+# GoSearchEngine with go => <em>Go</em>SearchEngine, Team-A/team-a namespaces=1
+
+# flakiness — oracle must be 3/3
+for i in 1 2 3; do rm -rf /app/data && pytest -q; done
+# 72 passed x3
 
 # flakiness
 for i in 1 2 3; do pytest -q; done
