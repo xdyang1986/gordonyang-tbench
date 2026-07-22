@@ -25,10 +25,24 @@ Format precise: T lines, S CSV no spaces, empty for S==0. Residual numeric ambig
 - **Implicit robustness now explicit:** blank lines/spaces, invalid gid→0, group no members eff0, min>cap capped, priority tie deterministic, zero caps, large numbers, rate limiting 0=unlimited per batch, deterministic, credit never negative - all explicitly documented.
 - **Harder via rate limiting:** Adds extra per-batch capping layer at both group and subscriber levels, plus sum member effective caps must include rate limits. 20 main cases include rate 0 (unlimited) and non-zero rates, plus dedicated test_rate_limiting.
 
-## Completion Rates
+## Completion Rates (online validation — commit 4104fa0, 2026-07-22)
 
-- Oracle: passes **31/31** with efficient overflow-safe implementation including rate limits.
-- Previous balanced hierarchical single-batch 29-test was too easy (5/5), ultimate 60-test multi-batch too hard (0/5). This hierarchical multi-batch + min/priority + rate + overflow + 8 corners + 20 main = 31 tests should be hard-but-passable, targeting 20-80% sweet spot.
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **5/5** — failed (solved every trial → too easy for this model)
+- GPT-5.5 (codex): **5/5** — failed (too easy for this model)
+- Avocado (metacode): **1/5** — validated (the 4 losses were infra errors, not test failures)
+- avgReward **0.76**, validation passing.
+
+## Failure Analysis (latest run)
+
+Derived from downloaded trial CTRF artifacts. In the latest validation, **no model produced a genuine test failure** — every completed trial passed, and every loss was `status=error` (Daytona `ThrottlerException: Too Many Requests` / build-harness failures that score 0).
+
+- **Opus 4.8 (agent) — 5/5 clean passes.** Too easy for this model.
+- **GPT-5.5 (codex) — 5/5 clean passes.** Too easy for this model.
+- **Avocado (metacode) — clean trials all pass.** Across both recent jobs every completed trial passed; all losses were `status=error` infra flakes. No real test failures.
+- **Oracle — 3/3.**
+
+**Assessment:** once infrastructure noise is removed, all three models solve the task on every clean trial — it is currently **too easy** (both frontier models 5/5, and Avocado passes every completed trial). The avgReward 0.76 is held up by the 5/5s; Avocado's sub-5/5 headline is provisioning instability, not reasoning difficulty. To reach the 20-80% sweet spot the allocator needs genuine hardening (e.g. deeper credit-decay interaction across more batches, tighter overflow-only paths, or additional adversarial rate/min/priority corner combinations) rather than relying on flaky infra to suppress pass rates.
 
 ## Anti-Cheating
 
