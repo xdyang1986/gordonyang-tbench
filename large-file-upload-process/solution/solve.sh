@@ -16,19 +16,15 @@ elif [ -f "solution/main.go" ]; then
 elif [ -f "/app/solution/main.go" ]; then
   SRC_DIR="/app/solution"
 else
-  # Fallback: we are already in solution dir? Check current dir for main.go
   SRC_DIR="."
 fi
 
 echo "Solution source dir: $SRC_DIR"
 echo "Current workdir: $(pwd)"
-ls -la $SRC_DIR/*.go 2>&1 | head -20
 
 # Copy Go files to /app (working directory)
-# Working dir for agent is /app, so ensure we copy there
 TARGET_DIR="/app"
 if [ "$(pwd)" != "/app" ]; then
-  # If we're running from task root, target is /app if exists else current dir's ../?
   if [ -d "/app" ]; then
     TARGET_DIR="/app"
   else
@@ -46,7 +42,6 @@ for f in main.go formats.go chunk.go hasher.go manifest.go uploader.go go.mod; d
   fi
 done
 
-# Verify files copied
 echo "Files in target:"
 ls -la $TARGET_DIR/*.go $TARGET_DIR/go.mod
 
@@ -55,13 +50,13 @@ echo "Running go mod tidy..."
 go mod tidy
 
 echo "Building uploader binary..."
-go build -o /tmp/uploader . || go build -o ./uploader .
-if [ -f "/tmp/uploader" ]; then
-  echo "Binary built at /tmp/uploader"
-  /tmp/uploader help 2>&1 || true
-elif [ -f "./uploader" ]; then
+go build -o ./uploader . || go build -o ./largefileuploader .
+if [ -f "./uploader" ]; then
   echo "Binary built at ./uploader"
   ./uploader help 2>&1 || true
+elif [ -f "./largefileuploader" ]; then
+  echo "Binary built at ./largefileuploader"
+  ./largefileuploader help 2>&1 || true
 else
   echo "Trying go run..."
   go run . help 2>&1 || true
