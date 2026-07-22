@@ -1296,8 +1296,19 @@ func newMainHandler(mux http.Handler) http.Handler {
 	})
 }
 
+func getPort() string {
+	if v := os.Getenv("PORT"); v != "" {
+		return v
+	}
+	if v := os.Getenv("BLOB_PORT"); v != "" {
+		return v
+	}
+	return "8080"
+}
+
 func main() {
 	root := getStorageRoot()
+	port := getPort()
 	storage := NewStorage(root)
 	storage.StartReaper()
 
@@ -1314,8 +1325,8 @@ func main() {
 
 	handler := newMainHandler(mux)
 
-	fmt.Printf("Blob storage server starting on :8080, storage root: %s\n", root)
-	if err := http.ListenAndServe(":8080", handler); err != nil {
+	fmt.Printf("Blob storage server starting on :%s, storage root: %s\n", port, root)
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		fmt.Printf("Server failed: %v\n", err)
 		os.Exit(1)
 	}

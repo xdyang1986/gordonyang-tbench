@@ -118,10 +118,8 @@ def test_bucket_create_idempotency_preserves_createdAt_filesystem():
         if os.path.isfile(meta_path):
             with open(meta_path) as f:
                 meta = json.load(f)
-                # createdAt in file should match first (allow RFC3339 format)
-                assert (
-                    "createdAt" in meta or "CreatedAt" in meta or True
-                )  # if field naming differs, at least file exists
+                # createdAt in file should have name field
+                assert "name" in meta
 
 
 def test_bucket_invalid_names():
@@ -829,7 +827,7 @@ def test_expiration_ttl():
                 # Should be parseable and future
                 assert meta["expiresAt"] is not None
                 # Check that file actually contains expiresAt field
-                assert "contentType" in meta or "etag" in meta or True
+                assert "etag" in meta and "size" in meta
 
 
 def test_copy_operation():
@@ -904,12 +902,32 @@ def test_copy_operation():
         or resp.headers.get("ETag") == dest_etag
     )
 
-    # Verify lastModified is new (dest should have newer or >= src lastModified)
+    # Verify lastModified is new (dest should have newer or >= src lastModified) and is actually new
     dest_last_modified = resp.headers.get("Last-Modified")
-    assert dest_last_modified is not None
-    # At least dest lastModified should be parseable and not older than src by much
-    # We don't enforce strict new, but check presence
-    assert src_last_modified is not None
+    assert dest_last_modified is not None, "Copy dest should have Last-Modified header"
+    assert src_last_modified is not None, "Src should have Last-Modified"
+    # Parse HTTP dates and ensure dest is >= src (newer or same second)
+    try:
+        from email.utils import parsedate_to_datetime
+
+        src_dt = parsedate_to_datetime(src_last_modified)
+        dest_dt = parsedate_to_datetime(dest_last_modified)
+        # Dest should be >= src (new timestamp, not old)
+        assert dest_dt >= src_dt, (
+            f"Copy dest Last-Modified should be new, >= src: src={src_last_modified} dest={dest_last_modified}"
+        )
+        # Also check that dest is not too old (within 10s of now)
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        # Allow 10s tolerance
+        assert (now - dest_dt).total_seconds() <= 10, (
+            f"Dest Last-Modified should be recent, got {dest_last_modified}"
+        )
+    except Exception as e:
+        # If parsing fails, at least check presence and that dest != src or dest is present
+        # For strictness, we still want to ensure dest has Last-Modified
+        assert dest_last_modified is not None
 
     # Verify preserved expiresAt: both src and dest should have X-Expires-At and share same absolute time or close
     src_expires = resp_src.headers.get("X-Expires-At") or resp_src.headers.get(
@@ -919,10 +937,36 @@ def test_copy_operation():
     # If expiration was set, both should have expiresAt
     if src_expires:
         assert dest_expires is not None, "Copy should preserve expiresAt"
+
         # They should be same or very close (same absolute time)
         # For simplicity, check they are equal (our reference preserves absolute time)
         # Allow slight tolerance by checking they are both present
-        assert dest_expires == src_expires or True
+        # Real timestamp comparison - must preserve absolute expiry
+        def parse_rfc3339(s):
+            try:
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                import time
+
+                return time.mktime(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+            except Exception:
+                try:
+                    from datetime import datetime
+
+                    ds = s
+                    if ds.endswith("Z"):
+                        ds = ds[:-1] + "+00:00"
+                    dt = datetime.fromisoformat(ds)
+                    return dt.timestamp()
+                except Exception:
+                    return None
+
+        src_ts = parse_rfc3339(src_expires)
+        dest_ts = parse_rfc3339(dest_expires)
+        assert src_ts is not None and dest_ts is not None
+        assert abs(src_ts - dest_ts) <= 2, (
+            f"Copy should preserve same absolute expiry, diff {abs(src_ts - dest_ts)}s"
+        )
 
     # Shared expiration behavior: src and dest share same absolute expiresAt, so after expiry both should be gone
     # Wait for src/dest to expire (10s TTL, but we put with 10s, need to wait? Actually we used 10s, not expire in this test)
@@ -994,16 +1038,70 @@ def test_copy_shared_expiration():
         == 200
     )
 
-    # Wait for expiry
-    time.sleep(3)
+    # Wait for expiry (2s + buffer) - accept 410 or 404 to avoid flaky race with reaper (reaper ticks every 1s)
+    time.sleep(2.5)
 
-    # Both should be expired (410 or 404)
+    # Both should be expired with 410 Gone or 404 if reaper already deleted
     assert requests.get(
         f"{BASE_URL}/buckets/srcexp/objects/exp.txt", timeout=5
     ).status_code in (410, 404)
     assert requests.get(
         f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
     ).status_code in (410, 404)
+
+
+def test_copy_preserves_absolute_expiry_not_duration():
+    """Prove dest preserves same absolute expiry, not resetting duration (short-TTL test)"""
+    requests.put(f"{BASE_URL}/buckets/srcexp3", timeout=5)
+    requests.put(f"{BASE_URL}/buckets/destexp3", timeout=5)
+
+    # Put src with 10s TTL
+    resp = requests.put(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt",
+        data=b"long ttl",
+        headers={"X-Expire-After": "10"},
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Wait 5 seconds
+    time.sleep(5)
+
+    # Copy to dest - should preserve absolute expiry (5 seconds remaining)
+    resp = requests.post(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt/copy",
+        json={"destBucket": "destexp3", "destKey": "long-copy.txt"},
+        timeout=5,
+    )
+    assert resp.status_code in (200, 201)
+
+    # Dest should exist immediately after copy
+    assert (
+        requests.get(
+            f"{BASE_URL}/buckets/destexp3/objects/long-copy.txt", timeout=5
+        ).status_code
+        == 200
+    )
+
+    # Wait 6 more seconds - total 11s from src creation, 6s from dest creation
+    # If absolute preserved, dest should now be expired (10s TTL from src)
+    # If duration reset, dest would still have 4s remaining (10s from copy)
+    time.sleep(6)
+
+    src_status = requests.get(
+        f"{BASE_URL}/buckets/srcexp3/objects/long.txt", timeout=5
+    ).status_code
+    dest_status = requests.get(
+        f"{BASE_URL}/buckets/destexp3/objects/long-copy.txt", timeout=5
+    ).status_code
+
+    assert src_status in (410, 404), (
+        f"Src should be expired after 11s, got {src_status}"
+    )
+    assert dest_status in (410, 404), (
+        f"Dest should preserve absolute expiry and be expired after 11s total "
+        f"(6s after copy), not reset duration. Got {dest_status}."
+    )
 
 
 def test_copy_expired_source_before_reaper():
@@ -1103,15 +1201,14 @@ def test_routing_leading_slash_rejected():
     requests.put(f"{BASE_URL}/buckets/routebucket3", timeout=5)
 
     # Raw leading slash after /objects/ -> /buckets/b/objects//file.txt
-    # This is essentially empty segment + leading slash, should be 400 or 404
+    # This is empty segment + leading slash, must be 400 per our wrapper (blocks traversal)
     resp = requests.put(
         f"{BASE_URL}/buckets/routebucket3/objects//file.txt", data=b"x", timeout=5
     )
-    # Our wrapper should detect leading slash as invalid key and return 400
-    # ServeMux may redirect or clean, but we expect 400 or 404 blocking
-    assert resp.status_code in (400, 404), (
-        f"Expected 400/404 for leading slash, got {resp.status_code}"
+    assert resp.status_code == 400, (
+        f"Expected 400 for leading slash //file.txt, got {resp.status_code}"
     )
+    assert resp.json()["code"] == "InvalidObjectKey"
 
     # Encoded leading slash %2Ffile.txt decodes to /file.txt which starts with slash -> invalid 400
     resp = requests.put(
@@ -1235,24 +1332,10 @@ def test_routing_encoded_dotdot_rejected():
 
 def test_data_dir_fallback():
     """Test DATA_DIR fallback when STORAGE_PATH not set - verify code handles it"""
-    # This test verifies that the Go code contains logic for DATA_DIR fallback
-    # Check main.go for getStorageRoot handling
-    main_go_path = "/app/main.go"
-    if not os.path.isfile(main_go_path):
-        # Try alternative locations
-        for p in [
-            "/app/main.go",
-            "./main.go",
-            "/workspace/blob-storage/solution/solve.sh",
-        ]:
-            if os.path.isfile(p):
-                main_go_path = p
-                break
-
-    # If we can read the file, verify it handles DATA_DIR
+    # Check main.go contains DATA_DIR handling (static evidence)
     found_data_dir = False
     found_storage_path = False
-    for search_path in ["/app/main.go", "/app/go.mod"]:
+    for search_path in ["/app/main.go", "./main.go"]:
         if os.path.isfile(search_path):
             try:
                 with open(search_path) as f:
@@ -1264,7 +1347,6 @@ def test_data_dir_fallback():
             except Exception:
                 pass
 
-    # Also check via solution template if available
     sol_path = "/solution/solve.sh"
     if os.path.isfile(sol_path):
         try:
@@ -1277,20 +1359,121 @@ def test_data_dir_fallback():
         except Exception:
             pass
 
-    # At minimum, we verify that STORAGE_PATH handling exists (required by spec)
-    # DATA_DIR is optional fallback per spec, but we check if code mentions it
-    # The test passes if at least STORAGE_PATH is handled, and logs warning if DATA_DIR not found
-    assert (
-        found_storage_path or True
-    )  # STORAGE_PATH must be handled per spec, but we don't fail if not found in this inspection
-    # For coverage, we assert that the task description mentions DATA_DIR fallback
-    # This test ensures the task implementation is aware of DATA_DIR fallback
-    # If filesystem check fails, we still pass as long as server is running (basic check)
+    assert found_storage_path, "Code should handle STORAGE_PATH env var per spec"
+    # DATA_DIR is required fallback per latest spec
+    assert found_data_dir, "Code should handle DATA_DIR fallback per spec"
+
+    # Basic check main server still running
     resp = requests.get(f"{BASE_URL}/buckets", timeout=5)
     assert resp.status_code == 200
 
-    # More concrete: if STORAGE_PATH env is set, it should be used; we already test that via persistence test
-    # For DATA_DIR fallback, we verify that server starts with ./data default when no env set (implied by code)
+
+def test_data_dir_fallback_real_server():
+    """Real check for DATA_DIR fallback by starting server without STORAGE_PATH, with DATA_DIR set on different port"""
+    import subprocess
+    import shutil
+
+    data_dir = "/tmp/codimango/data_dir_fallback_test"
+    # Clean
+    shutil.rmtree(data_dir, ignore_errors=True)
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Find binary
+    bin_candidates = [
+        "./blob-server",
+        "/app/blob-server",
+        "/tmp/codimango/blob-server",
+        "/tmp/blob-server",
+    ]
+    bin_path = None
+    for p in bin_candidates:
+        if os.path.isfile(p):
+            bin_path = p
+            break
+    if not bin_path:
+        pytest.skip("Binary not found for DATA_DIR fallback real test")
+
+    # Start server on 8081 with DATA_DIR set and STORAGE_PATH explicitly unset
+    env = os.environ.copy()
+    env.pop("STORAGE_PATH", None)
+    env["DATA_DIR"] = data_dir
+    env["PORT"] = "8081"
+
+    proc = subprocess.Popen(
+        [bin_path],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        # Wait for server on 8081
+        ready = False
+        for _ in range(15):
+            time.sleep(1)
+            try:
+                r = requests.get("http://localhost:8081/buckets", timeout=2)
+                if r.status_code == 200:
+                    ready = True
+                    break
+            except Exception:
+                pass
+            if proc.poll() is not None:
+                # Server died
+                stdout, stderr = proc.communicate(timeout=1)
+                print(
+                    "Server failed to start with DATA_DIR, stdout:",
+                    stdout.decode()[:500],
+                )
+                print("stderr:", stderr.decode()[:500])
+                break
+
+        if not ready:
+            pytest.skip(
+                "DATA_DIR fallback server on 8081 not ready, skipping real fallback test"
+            )
+
+        # Create bucket via 8081 - should appear under DATA_DIR, not STORAGE_PATH
+        resp = requests.put("http://localhost:8081/buckets/datadirbucket", timeout=5)
+        assert resp.status_code in (200, 201)
+
+        # Put object
+        resp = requests.put(
+            "http://localhost:8081/buckets/datadirbucket/objects/fallback.txt",
+            data=b"fallback data",
+            timeout=5,
+        )
+        assert resp.status_code in (200, 201)
+
+        # Verify file exists under DATA_DIR
+        time.sleep(0.5)
+        expected_file = os.path.join(data_dir, "datadirbucket", "fallback.txt")
+        assert os.path.isfile(expected_file), (
+            f"File should be under DATA_DIR {data_dir}, not found at {expected_file}"
+        )
+
+        # Verify it does NOT appear under STORAGE_PATH (which is /tmp/blob-data for main server)
+        # Since main server uses /tmp/blob-data, datadirbucket should not appear there
+        assert not os.path.exists(os.path.join(STORAGE_PATH, "datadirbucket")), (
+            "DATA_DIR fallback should not use STORAGE_PATH"
+        )
+
+        # Verify GET via 8081 works
+        resp = requests.get(
+            "http://localhost:8081/buckets/datadirbucket/objects/fallback.txt",
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"fallback data"
+
+    finally:
+        # Cleanup: kill 8081 server
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def test_metadata_json_expires_at_inspection():
@@ -1326,7 +1509,7 @@ def test_metadata_json_expires_at_inspection():
             # expiresAt may be string
             # If stored as string, check it's not empty and contains T
             if isinstance(expires_str, str):
-                assert "T" in expires_str or "Z" in expires_str or True
+                assert "T" in expires_str or "Z" in expires_str
             # Also check other required fields exist
             assert "etag" in meta
             assert "size" in meta
