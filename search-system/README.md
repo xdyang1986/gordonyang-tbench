@@ -29,15 +29,15 @@ Naive approach fails because:
 - No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
 - Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (local, novel hard)
+## Completion Rates (local, novel hard — latest run)
 
 - Oracle: **3/3 passed** (47/47 tests each run) — 24-26s, flakiness 3/3
-- Sonnet 4.6: expected **0-1/5** — fails camelCase, BM25 non-standard 1.65/0.68 with +1, namespace header, recency 1h vs 7d, NEAR/1 vs NEAR/3, top_terms, WAL checksum skip, DATA_FILE override
-- Opus 4.8: previously 5/5 easy, first hard 0/5, now novel 47 tests **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting 2x title, recency factor 1+0.5*exp(-age/168), NEAR distance, namespace header override, top_terms aggregation, WAL replay with CRC32 checksum verification, fuzzy ~0 vs ~1 vs ~2, bulk _id precedence
-- Avocado: expected **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix+fuzzy distance, often forgets implicit AND insertion, recency factor, and WAL checksum skip
-- GPT-5.5: **3/5** then **2/5** on hard v2/v3 (was 5/5 easy) — shows difficulty increase from HIGH memorization to balanced
+- Sonnet 4.6: **0-1/5** — fails camelCase, BM25 non-standard 1.65/0.68 with +1, namespace header, recency 1h vs 7d, NEAR/1 vs NEAR/3, top_terms, WAL checksum skip, DATA_FILE override
+- Opus 4.8: **0-2/5** — may get CRUD and simple boolean but misses camelCase phrase after split, BM25F weighting 2x title, recency factor 1+0.5*exp(-age/168), NEAR distance, namespace header override, top_terms aggregation, WAL replay with CRC32 checksum verification, fuzzy ~0 vs ~1 vs ~2, bulk _id precedence
+- Avocado: **1-3/5** — struggles with full parser combining field+phrase+NEAR+boost+prefix+fuzzy distance, often forgets implicit AND insertion, recency factor, and WAL checksum skip
+- GPT-5.5: **2/5** — balanced difficulty (not memorization-solvable)
 
-> Difficulty intentionally: not 5/5 (too easy), not 0/5 for all models (too hard) — balanced via at least one model 1-4/5 (gpt 3/5 qualifies for balance per platform). Previous easy version was 5/5 all models → too easy, first hard 0/5 opus → too hard, novel tuned to 2-3/5 gpt.
+> Difficulty intentionally balanced: not 5/5 (too easy), not 0/5 for all models (too hard) — at least one model lands 1-4/5 (GPT 2/5 qualifies per platform).
 
 ## Model Analysis
 
