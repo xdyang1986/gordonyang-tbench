@@ -1,0 +1,42 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/large-file-upload-process"
+description = "Go CLI tool for resumable chunked upload of hundreds-of-GB YouTube-like video files with format validation and streaming checksums"
+authors = [{ name = "gordonyang", email = "gordonyang@meta.com" }]
+keywords = ["go", "large file", "video upload", "chunked upload", "resumable upload", "youtube", "streaming", "checksum"]
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+author_name = "gordonyang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "multimedia"
+category_usecase = "new_cli_tool"
+category_subdomain = "multimedia_and_signal_processing"
+reward_type = "binary"
+languages = ["go"]
+tags = ["go", "upload", "video-processing", "large-files", "resumable", "chunking", "cli"]
+expert_time_estimate_min = 60.0
+junior_time_estimate_min = 180.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 20480
+gpus = 0
+allow_internet = true
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
