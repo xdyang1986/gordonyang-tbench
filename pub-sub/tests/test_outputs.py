@@ -323,6 +323,17 @@ def test_min_exceeds_cap():
     assert out == ["2"]
 
 
+def test_priority_tie_and_order():
+    out = run_case(
+        1, [3], [(0, 0, 1, 10, 0)], [(0, 10, 2, 1, 10, 0), (0, 1, 2, 1, 10, 0)]
+    )
+    assert out == ["2,1"]
+    out2 = run_case(
+        1, [3], [(0, 0, 1, 10, 0)], [(0, 5, 2, 1, 10, 0), (0, 5, 2, 1, 10, 0)]
+    )
+    assert out2 == ["2,1"]
+
+
 def test_group_no_members():
     out = run_case(1, [10], [(0, 0, 5, 10, 0), (0, 0, 5, 10, 0)], [(0, 0, 0, 1, 5, 0)])
     assert out == ["5"]
