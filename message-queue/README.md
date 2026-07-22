@@ -2,92 +2,81 @@
 
 ## Task Overview
 
-Build, from scratch in Go (stdlib only, enforced, internet disabled), a **Kafka-like partitioned message queue broker** as a single `package main` binary at `/app`. The agent must implement a durable, crash-consistent broker that reads commands from stdin and writes results to stdout.
+Build, from scratch in Go (stdlib only, enforced, internet enabled but not needed), a **Kafka-like partitioned message queue broker** as a single `package main` binary at `/app`. Durable, crash-consistent broker that reads commands from stdin and writes results to stdout.
 
-Supported commands (space-separated tokens, no quoting, timestamps >=0, negative timestamp = invalid input):
-- **Topic lifecycle:** `CREATE_TOPIC <topic> <num_partitions> <ts>` (idempotent), `DELETE_TOPIC <topic> <ts>` (removes messages + consumer state for that topic, but groups themselves persist even when empty — intended behavior; GC of empty groups leniently accepted)
-- **Producer:** `PRODUCE <topic> <partition> <payload> <ts>` → `<offset>`, `PRODUCE_AUTO <topic> <payload> <ts>` → `<partition> <offset>` with deterministic partition `sum(bytes(payload)) % num_partitions`
-- **Consumer:** `FETCH <topic> <partition> <offset> <ts>` → payload/NONE/ERROR, `FETCH_RANGE <topic> <partition> <start> <end> <ts>` → comma-joined, `POLL <group> <topic> <partition> <ts>` → `<offset> <payload>` advancing per-group position, `COMMIT`, `SEEK`, `JOIN_GROUP`, `GET_GROUP_OFFSET`, `LIST_GROUPS`
-- **Metadata:** `LIST_TOPICS`, `TOPIC_INFO <topic>` → `<partitions> <total>`, `PARTITION_INFO <topic> <partition>` → `0 <high>`
-- **Maintenance:** `COMPACT <ts>` rewrites log
+Commands (space-separated tokens, no quoting, timestamps >=0, negative timestamp = invalid input → exit non-zero):
+- **Topic lifecycle:** `CREATE_TOPIC <topic> <num_partitions> <ts>` (idempotent), `DELETE_TOPIC <topic> <ts>` (removes messages + consumer state for that topic, but groups persist even when empty — intended, leniently accepts GC)
+- **Producer:** `PRODUCE <topic> <partition> <payload> <ts>` → `<offset>`, `PRODUCE_AUTO <topic> <payload> <ts>` → `<partition> <offset>` with `sum(bytes(payload)) % num_partitions`
+- **Retention:** `TRIM <topic> <partition> <offset> <ts>` → sets low watermark to max(old low, offset), deleting messages with offset < low; `FETCH` returns `NONE` for trimmed offsets, `COMMIT`/`SEEK` must respect low
+- **Consumer:** `FETCH`, `FETCH_RANGE` (effective start = max(start, low)), `POLL <group> <topic> <partition>` → `<offset> <payload>` advancing position and auto-advancing over trimmed ranges, `COMMIT` (>=low or -1), `SEEK` (>=low), `JOIN_GROUP`, `GET_GROUP_OFFSET` (returns NONE if committed < low), `LIST_GROUPS`
+- **Metadata:** `LIST_TOPICS`, `TOPIC_INFO` → `<partitions> <total_retained>` where total = sum(high-low), `PARTITION_INFO` → `<low> <high>`
+- **Maintenance:** `COMPACT` → atomic rewrite preserving all messages 0..high-1, TRIMs, groups, commits, seeks
 
-Payloads are single tokens (no spaces, no commas, 1..1024B). Topic/group names match `[A-Za-z0-9._-]+`, 1..255 chars, not `.`/`..`. Invalid input including negative timestamp → exit non-zero; application errors (missing topic, out-of-range partition) → `ERROR`.
+Payloads: single tokens (no spaces, no commas, 1..1024B, no comma). Topic/group names `[A-Za-z0-9._-]+`, 1..255, not `.`/`..`. Invalid input (including negative timestamp) → exit non-zero; app errors → `ERROR`.
 
-## What makes this hard (and what was fixed from review)
+## What makes this hard (including hardening for too-easy)
 
-- **Partitioned log semantics:** per-partition append-only offsets starting at 0, total messages across partitions, low always 0, high = log length. Tests check offset per partition, not global.
-- **Auto-partition determinism:** `PRODUCE_AUTO` must hash via sum of byte values mod partitions, normalized logging as `PRODUCE` to keep replay deterministic. Previous spec had wrong example output (`0 bar` instead of `1 bar`) and leftover editing note — now corrected.
-- **Consumer group state machine:** per-group per-partition `committed` (-1 = none) and `positions` (next to poll). `POLL` auto-creates group and subscribes, initializes position to `committed+1` or 0, returns NONE when at high, auto-advances and logs `SEEK` for durability. `COMMIT` allows -1 clear, must reject beyond high. `SEEK` allows to high.
-- **DELETE_TOPIC group persistence (Issue 1 fixed):** Previously spec said "removes all consumer-group state related to that topic" but never said whether empty group should stay. Test expected group to remain in LIST_GROUPS, causing 4/5 vs 5/5 variance across models. Now spec explicitly states groups themselves are NOT deleted — empty groups remain visible. Test leniently accepts either keeping or GC'ing empty group (`g` or `NONE`) for backwards compatibility, eliminating variance. Reference implementation keeps empty groups.
-- **Durable WAL:** `MQ_STATE_DIR/mq.log` with framing `uint32 LE len | uint32 LE crc32 IEEE | payload`. What is logged: only state-changing successes (CREATE, DELETE, PRODUCE incl. normalized AUTO, JOIN, COMMIT on change, SEEK on change). Queries never logged.
-- **Crash recovery:** on startup read `mq.log` sequentially, CRC-check, stop at first torn/corrupt record, truncate tail. Empty log recovers clean. Must survive restart across topics, messages, groups, committed + positions.
-- **Compaction:** atomic `mq.log.tmp` → `mq.log` rename. Minimal deterministic sorted record set: CREATE per topic asc, PRODUCE per partition asc offset asc, JOIN per group/topic asc, COMMIT per group asc with committed != -1, SEEK only when `pos != committed+1`. Preserves offsets and poll positions.
-- **Sorting invariants:** `LIST_TOPICS` and `LIST_GROUPS` must be lexicographically sorted comma-joined or NONE.
-- **Blank lines ignored, strict arity/name validation:** payload with comma invalid → exit non-zero; negative timestamp now explicitly invalid input (Issue 4 fixed); tests include many invalid-input cases.
-- **Go stdlib only (Issue 3 fixed):** previously stated but not enforced and `allow_internet=true`. Now `allow_internet=false` in `task.toml` and new test `test_stdlib_only` checks that all imports contain no dot and `go.mod` has no external requires.
-- **Go stdlib only, no randomness:** deterministic output for same stdin + disk state.
+- **High initial pass rate (too easy) fix:** Original version had 42 tests, oracle 3/3, metacode 5/5, opus 5/5, codex 5/5 → `TOO_EASY` (95%). Review noted flaky `test_delete_topic_removes_group_state` was only differentiator. After making that test lenient, pass rate became 5/5 across all models, even easier.
+- **Hardening via TRIM/retention:** Added `TRIM` command with low/high watermark semantics, which cascades into every other command:
+  - `PARTITION_INFO` now returns low/high, not always 0; `TOPIC_INFO` totals retained `sum(high-low)`
+  - `FETCH`/`FETCH_RANGE` must treat offset < low as `NONE` and adjust effective start to low
+  - `COMMIT` must reject offset < low (except -1) → `ERROR`; `SEEK` must reject below low
+  - Consumer groups: position < low auto-advanced to low, committed < low cleared (GET → NONE), POLL after trim must respect new low
+  - Durable: TRIM logged only when low increases, recovery replays TRIM and clears/advances group state, compaction must preserve low via TRIM records after emitting all PRODUCEs
+  - This interacts with existing durability, compaction, and group logic, requiring correct ordering: CREATE → PRODUCE all (0..high-1) → TRIM low → JOIN → COMMIT (committed>=low) → SEEK
+- **Other review fixes (Issues 1-4):**
+  - **Issue 1 (group persistence ambiguity):** Spec now explicitly says groups remain visible after DELETE_TOPIC even when empty (Kafka behavior). Test leniently accepts `g` or `NONE` to eliminate 4/5 vs 5/5 variance, but reference keeps empty group.
+  - **Issue 2 (wrong example):** Fixed auto-partition example second POLL from `0 bar` to `1 bar` and removed leftover note *“Actually 309%3=0. Let's use different payloads.”*
+  - **Issue 3 (stdlib not enforced):** Spec says stdlib only, previously `allow_internet=true` with no check. Now `allow_internet=true` (matches all other Go tasks) but added `test_stdlib_only` that rejects any import containing `.` and external `go.mod` requires.
+  - **Issue 4 (negative timestamp):** Spec now explicitly lists negative timestamp as invalid input; added 5 negative-ts cases.
+- **Additional hard tests:** 20 extra cases added (now 61 total): many-messages + trim + range, trim then produce offsets continue, delete+recreate resets low, trim group commit after trim, trim group seek/poll, persist group low after restart, large 1024B payload & 201-char topic, 1000 partitions, fetch_range low edge, compact preserves trim.
+- **Local calibration after hardening:** `harbor run -p message-queue -a opencode -m anthropic/claude-sonnet-4 -k 3` → **0.000 mean (0/3)** vs previously 0.8 for metacode, indicating increased difficulty. Oracle still **1.000** (61 passed). Sonnet now fails on trim logic.
+- Online validation after TRIM (commit `d41c9f4`) shows: oracle 3/3, codex 1/5 (was 5/5), metacode 3/4 running (was 5/5), opus pending — moving from TOO_EASY toward balanced.
 
 ## Test / Solution Details
 
-- **Tests** (`tests/test_outputs.py`): 43 black-box pytest cases via built Go binary (`go build -o /tmp/agent_mq .`):
-  * basic produce/fetch, auto-hash (foo=324%3=0, bar=309%3=0, baz=317%3=2), fetch NONE beyond high, fetch_range comma-joined, list topics sorted/NONE, topic_info/partition_info, create idempotent (keep partitions), delete, produce error cases
-  * consumer groups: join+poll basic, poll auto-creates, commit+get_offset, commit -1 clear, seek to high, poll after produce, multi-partition groups, list_groups sorted, offset NONE for new group, delete removes group state but keeps empty group (leniently accepts `g` or `NONE`), produce_auto→poll, poll leaves other groups untouched
-  * error handling: FETCH/PARTITION_INFO/TOPIC_INFO/PRODUCE_AUTO/JOIN error cases, commit/seek beyond high, commit -2 error
-  * invalid input exits non-zero: unknown cmd, wrong arity, bad ints, num_partitions 0/>1000, bad names (`bad/topic`, `.`, `..`), payload with comma, **negative timestamps** (CREATE, PRODUCE, FETCH, LIST_TOPICS, COMPACT) per Issue 4
-  * blank lines ignored, deterministic, stdlib-only enforcement
-  * durability: persist across restart via `MQ_STATE_DIR`, persist group committed + seek position, auto produce persist, torn-tail truncation handling, bad CRC tail ignored, truncated tail then appendable, compact preserves state + seek, ignores stray `.tmp`, empty log clean, in-memory mode does not persist, example from spec (now corrected to `1 bar`)
-- **Reference solution** (`solution/solve.sh`): Go stdlib-only broker implementing all commands, `hashPartition`, `tpKey`, `isValidName/Payload`, `doCreate/Delete/Produce/Join/Commit/Seek`, `writeRecord/appendRecord` with CRC, `replay` lenient, `recoverLog` truncates, `compact` with sorted deterministic emit and atomic rename, main loop with `bufio.Scanner`, `die` on invalid input including negative timestamp, `ERROR/NONE` handling, auto-subscribe on POLL/COMMIT/SEEK with JOIN logging, SEEK logging on POLL advance, keeps empty groups after DELETE.
-- **Environment**: `golang:1.26.2-bookworm`, WORKDIR /app, `allow_internet=false`, no starter code.
+- **Tests** (`tests/test_outputs.py`): 61 tests via `go build -o /tmp/agent_mq .`:
+  * basic produce/fetch, auto-hash (foo 324%3=0, bar 309%3=0, baz 317%3=2), fetch NONE beyond high, fetch_range, list sorted, topic_info/partition_info (now low/high), create idempotent, delete, produce errors
+  * consumer groups: join/poll, auto-create, commit/get, commit -1 clear, seek, poll after produce, multi-partition, list_groups, offset NONE, delete removes state (lenient), produce_auto→poll, poll isolation
+  * error handling: FETCH etc ERROR, commit/seek beyond high, commit -2, trim beyond high
+  * invalid input: unknown cmd, arity, bad ints, 0/>1000 partitions, bad names, payload comma, **negative timestamps** (5 cases) → exit non-zero
+  * blank lines, deterministic, **stdlib-only**
+  * durability: persist across restart, group committed/seek persist, auto-produce persist, torn-tail, bad CRC, truncate-then-append, compact preserves state+seek+trim, stray tmp ignored, empty log clean, in-memory no persist
+  * **TRIM (10 new):** basic (low moves, FETCH NONE for trimmed, TOPIC_INFO retained count), fetch_range with low, commit/seek error below low, poll auto-advance after trim, poll after trim+produce, commit cleared on trim, persist group low, many-messages (20 msgs trim 15), produce offsets continue after trim, delete+recreate resets low, large payload 1024B + 201-char topic, 1000 partitions, range low edge, compact preserves trim
+- **Reference solution:** Go stdlib-only with `Partition{msgs, low}`, `doTrim` that advances low and clears/advances group committed/positions < low, updated FETCH/FETCH_RANGE/TOPIC_INFO/PARTITION_INFO/COMMIT/SEEK/POLL to respect low, replay handles TRIM, compact emits CREATE → PRODUCE all → TRIM low → JOIN → COMMIT (>=low) → SEEK (!= expected_default where expected=max(low,committed+1)), atomic rename, fsync, handles negative timestamp as invalid.
+- **Environment:** `golang:1.26.2-bookworm`, WORKDIR /app, `allow_internet=true`, stdlib check in tests.
 
 ## Completion Rates
 
-Latest **online** validation run (commit `34d71d8`, before review fixes) — **Validation: passing**. Figures below are actual online per-agent results, not local harbor runs. Local post-fix calibration still passes after addressing review issues:
+**Latest online validation (before hardening, commit `bcce87b`):** TOO_EASY — avocado 5/5, opus 5/5, gpt-5.5 5/5.
 
-| Agent | Model | Attempts | Passed | Mean reward | Notes |
-|---|---|---|---|---|---|
-| Oracle | oracle | 3 | 3/3 | 1.000 | reference solution verified |
-| Metacode (gate) | meta/avocado-5.14-code | 5 | 4/5 | 0.800 | the one failure was *only* test_delete_topic_removes_group_state (Issue 1) — now lenient, would be 5/5 |
-| Claude-code | claude-opus-4-8 | 5 | 5/5 | 1.000 | strong model solves reliably |
-| Codex | gpt-5.5 | 5 | 0/5 | 0.000 | all 5 `status=error` (harness NonZeroAgentExitCodeError) — excluded |
+**After hardening with TRIM (commit `d41c9f4` + extra tests, local + online running):**
 
-**Local post-review-fix calibration (commit after `34d71d8` with Issues 1-4 fixed):**
-```
-harbor run -p message-queue -a oracle -n 1 --force-build
-  1/1 Mean: 1.000
-  Reward Distribution: reward=1.0 → 1
-  43 passed (was 42, + test_stdlib_only and negative-ts cases)
-```
+| Agent | Model | Pass Rate (latest job) | Mean | Notes |
+|---|---|---|---|---|
+| Oracle | oracle | 3/3 | 1.000 | reference with TRIM passes 61 tests |
+| Codex | gpt-5.5 | 1/5 (prev 5/5) | 0.200 | TRIM causes 4 failures — difficulty up |
+| Metacode | meta/avocado-5.14-code | 4/5 (prev 5/5) → running 3/4 (0.75) → fluctuating, not 5/5 | 0.75 | harder than before |
+| Claude-code | claude-opus-4-8 | 4/5 (prev 5/5) → pending | 0.80 | previously 5/5, now 4/5 in earlier run |
+| Opencode | anthropic/claude-sonnet-4 (local) | 0/3 | 0.000 | local calibration shows TRIM is hard for weaker models |
 
-**Structural / qualitative checks (all PASS):**
+This moves from **TOO_EASY (95% pass)** toward balanced 20-80%. Final validation is still pending for opus/avocado at time of this README update; local oracle remains 1.0.
 
-| Check | Result |
-|---|---|
-| Structure | 6/6 required files present |
-| task.toml | valid TOML, taxonomy fields valid (fixed: authors, format=terminal_bench_single_turn, workstream=swe_public_repo, subdomain=distributed_systems, usecase=handle_events, allow_internet=false) |
-| Dockerfile / Internet / Solution / Tests | PASS (`golang:1.26.2-bookworm`, internet disabled, solve.sh has content, tests meaningful + stdlib check) |
-| License / SWE Config | PASS (no external repo clone, not an SWE-config task) |
-| Agentic review verdict | GOOD (with Request Changes now addressed) |
-| Contamination v2 | MEDIUM — NOT_FOUND in internal decontamination table (tbench track) |
-| Difficulty | hard — 43 pytest edge cases + durability + compaction + stdlib enforcement |
+**Structural checks:** 9/9 pass, AI assessment Accept, no solution leak, provenance clean, contamination MEDIUM (not found).
 
-**Review issues fixed (no explicit revalidation triggered for this README update):**
-- **Issue 1 (flaky group after delete):** Clarified spec that empty groups remain; made test accept `g` or `NONE` to eliminate 4/5 vs 5/5 variance.
-- **Issue 2 (wrong example):** Fixed second POLL in auto-partition example from `0 bar` to `1 bar`, removed leftover note "Actually 309%3=0. Let's use different payloads."
-- **Issue 3 (stdlib not enforced):** Set `allow_internet=false` and added `test_stdlib_only` checking no dot in imports and no external requires.
-- **Issue 4 (negative timestamp):** Explicitly listed negative timestamp as invalid input in spec and added 5 negative-ts cases to `test_invalid_input_exits_nonzero`; reference already exits non-zero.
-
-**Failure validation (are the failures real?):**
-- Previous metacode 4/5 failure was *only* Issue 1 test, now would pass with lenient check.
-- Codex 0/5 were all harness errors (NonZeroAgentExitCodeError), not verifier judgments, excluded.
-- No explicit revalidation triggered for this README update — numbers from last completed online validation plus local post-fix oracle run.
+**Fixes from review (no explicit model revalidation triggered for this README edit):**
+- Issue 1: clarified group persistence + lenient test
+- Issue 2: fixed example 0 bar → 1 bar, removed note
+- Issue 3: allow_internet true + test_stdlib_only
+- Issue 4: negative timestamp → invalid input + tests
+- New: added TRIM retention to address TOO_EASY
 
 ## Model Analysis
 
-Task requires synthesizing Kafka semantics from spec: per-partition offsets, auto-hash partition selection, consumer group position vs committed separation, auto-create+subscribe on POLL, idempotent CREATE_TOPIC, DELETE purging only topic-related state but keeping empty group, sorted LIST outputs, FETCH_RANGE joining, error vs invalid-input distinction including negative timestamp, WAL with CRC framing and torn-tail handling, compaction minimality, stdlib-only constraint. Implementation must be deadlock-free, deterministic, stdlib-only, and survive restarts via correct logging of JOIN/COMMIT/SEEK/POLL position.
+Task now requires integrating 19 commands with interacting low/high watermarks, consumer group committed/position cascade on TRIM, and crash-consistent WAL with compaction that preserves low. Failure attribution is genuine: missing TRIM handling (low check in FETCH/COMMIT/SEEK/POLL, auto-advance, clearing committed < low, compaction TRIM emit) causes failures, not spec ambiguity.
 
 ## Anti-Cheating Analysis
 
-- No hardcoded outputs viable: broker behavior driven by arbitrary stdin command streams, partition hashing of arbitrary payloads, randomized durability tests involving crash truncations and compaction, group interleaving.
-- Hidden tests not shipped in instruction; payloads never contain commas except to test invalid input.
-- Grader runs black-box binary with fresh temp dirs per test, including `MQ_STATE_DIR` persistence across multiple invocations.
-- Bypassing fails on offset per partition vs global, hash formula mismatch, missing auto-subscribe logging, incorrect compaction (must preserve positions where `pos != committed+1`), incorrect torn-tail truncation, wrong sorted order, incorrect ERROR vs NONE vs exit handling, or third-party import.
+- No hardcoded outputs: arbitrary stdin streams with TRIM interleaving, many partitions, large payloads, retention.
+- Tests run binary as subprocess with fresh tmp dirs, including persistence + trim + compaction.
+- Bypassing fails on per-partition offsets, sum-bytes hash, low/high handling, group auto-advance, compaction preserving TRIM, CRC framing, stdlib import check.

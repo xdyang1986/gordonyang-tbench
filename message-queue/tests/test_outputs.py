@@ -882,3 +882,175 @@ PARTITION_INFO t 0 6
     r = run(stdin)
     # produce, trim 0 no-op, trim1 low=1, trim1 again no-op, trim5 beyond high=1 -> ERROR
     assert lines(r.stdout) == ["0", "ERROR", "1 1"]
+
+
+# --------------------------------------------------------------------------
+# Additional hard cases to increase difficulty (too easy fix)
+# --------------------------------------------------------------------------
+
+
+def test_trim_many_messages_and_range():
+    # 20 messages, trim first 15, fetch range should respect low
+    cmds = ["CREATE_TOPIC t 1 0"]
+    for i in range(20):
+        cmds.append(f"PRODUCE t 0 m{i} {i + 1}")
+    cmds.append("TRIM t 0 15 21")
+    cmds.append("PARTITION_INFO t 0 22")
+    cmds.append("FETCH_RANGE t 0 0 20 23")
+    cmds.append("FETCH_RANGE t 0 15 20 24")
+    cmds.append("TOPIC_INFO t 25")
+    r = run("\n".join(cmds))
+    out = lines(r.stdout)
+    # 20 produces => offsets 0..19, then partition_info after trim = 15 20, then 2 ranges, then topic_info 1 5
+    assert out[20] == "15 20"
+    assert out[21] == "m15,m16,m17,m18,m19"
+    assert out[22] == "m15,m16,m17,m18,m19"
+    assert out[23] == "1 5"
+
+
+def test_trim_then_produce_offsets_continue():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+TRIM t 0 2 3
+PRODUCE t 0 c 4
+PARTITION_INFO t 0 5
+FETCH t 0 0 6
+FETCH t 0 2 7
+FETCH t 0 1 8
+"""
+    r = run(stdin)
+    # a0,b1 trimmed by trim2 (low=2 high=2), then produce c offset 2, so high=3 low=2
+    # fetch 0 -> NONE (trimmed), fetch2 -> c, fetch1 -> NONE (trimmed)
+    assert lines(r.stdout) == ["0", "1", "2", "2 3", "NONE", "c", "NONE"]
+
+
+def test_trim_delete_recreate_resets():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+TRIM t 0 1 2
+DELETE_TOPIC t 3
+CREATE_TOPIC t 1 4
+PARTITION_INFO t 0 5
+FETCH t 0 0 6
+PRODUCE t 0 new 7
+FETCH t 0 0 8
+"""
+    r = run(stdin)
+    # after delete+recreate, low resets to 0, partition empty, then produce new
+    assert lines(r.stdout) == ["0", "0 0", "NONE", "0", "new"]
+
+
+def test_trim_group_commit_after_trim():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+JOIN_GROUP g t 3
+POLL g t 0 4
+COMMIT g t 0 0 5
+TRIM t 0 1 6
+GET_GROUP_OFFSET g t 0 7
+COMMIT g t 0 0 8
+COMMIT g t 0 1 9
+GET_GROUP_OFFSET g t 0 10
+"""
+    r = run(stdin)
+    # poll a, commit 0, trim1 clears committed 0, get NONE, commit 0 -> ERROR (trimmed), commit1 ok, get 1
+    assert lines(r.stdout) == ["0", "1", "0 a", "NONE", "ERROR", "1"]
+
+
+def test_trim_group_seek_and_poll():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+PRODUCE t 0 c 3
+JOIN_GROUP g t 4
+TRIM t 0 2 5
+SEEK g t 0 1 6
+SEEK g t 0 2 7
+POLL g t 0 8
+POLL g t 0 9
+POLL g t 0 10
+"""
+    r = run(stdin)
+    # low=2 high=3, seek1 ERROR, seek2 ok, poll c, then NONE, NONE
+    assert lines(r.stdout) == ["0", "1", "2", "ERROR", "2 c", "NONE", "NONE"]
+
+
+def test_trim_persist_group_low(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_TOPIC t 1 0\nPRODUCE t 0 a 1\nPRODUCE t 0 b 2\nJOIN_GROUP g t 3\nPOLL g t 0 4\nTRIM t 0 1 5\n",
+        state_dir=d,
+    )
+    r = run(
+        "GET_GROUP_OFFSET g t 0 6\nPARTITION_INFO t 0 7\nPOLL g t 0 8\n", state_dir=d
+    )
+    # after restart, group pos was 1 before trim, trim advanced to 1? Actually poll a pos->1, trim1 -> pos stays1 (since 1<1? no, 1==low so stays), poll returns b at 1
+    # No commit, so get NONE
+    out = lines(r.stdout)
+    assert out[0] == "NONE"
+    assert out[1] == "1 2"
+    assert out[2] == "1 b"
+
+
+def test_large_payload_and_topic_name():
+    long_topic = "t" + "a" * 200  # 201 chars, valid (<255)
+    payload = "x" * 1024  # max valid
+    stdin = f"""CREATE_TOPIC {long_topic} 1 0
+PRODUCE {long_topic} 0 {payload} 1
+PARTITION_INFO {long_topic} 0 2
+FETCH {long_topic} 0 0 3
+TOPIC_INFO {long_topic} 4
+"""
+    r = run(stdin)
+    out = lines(r.stdout)
+    assert out[0] == "0"
+    assert out[1] == "0 1"
+    assert out[2] == payload
+    assert out[3] == "1 1"
+
+
+def test_create_topic_1000_partitions():
+    stdin = """CREATE_TOPIC t 1000 0
+PRODUCE t 999 last 1
+PARTITION_INFO t 999 2
+TOPIC_INFO t 3
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["0", "0 1", "1000 1"]
+
+
+def test_fetch_range_low_edge():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+TRIM t 0 1 3
+FETCH_RANGE t 0 0 1 4
+FETCH_RANGE t 0 0 2 5
+FETCH_RANGE t 0 1 1 6
+"""
+    r = run(stdin)
+    # after trim low=1 high=2 retained b
+    # range 0 1 -> effective start max(0,1)=1 >= end1? Actually end=1, start effective1 => start>=end => NONE
+    # range 0 2 -> effective 1 2 => b
+    # range 1 1 -> start 1 end1 => start>=end => NONE
+    assert lines(r.stdout) == ["0", "1", "NONE", "b", "NONE"]
+
+
+def test_compact_preserves_trim(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_TOPIC t 1 0\nPRODUCE t 0 a 1\nPRODUCE t 0 b 2\nTRIM t 0 1 3\nJOIN_GROUP g t 4\nPOLL g t 0 5\n",
+        state_dir=d,
+    )
+    before = os.path.getsize(os.path.join(d, "mq.log"))
+    run("COMPACT 6\n", state_dir=d)
+    after = os.path.getsize(os.path.join(d, "mq.log"))
+    assert after <= before
+    r = run(
+        "PARTITION_INFO t 0 7\nFETCH t 0 0 8\nFETCH t 0 1 9\nPOLL g t 0 10\n",
+        state_dir=d,
+    )
+    # after compact, low=1 high=2, fetch0 NONE, fetch1 b, poll after previous poll had pos2 -> NONE
+    assert lines(r.stdout) == ["1 2", "NONE", "b", "NONE"]
