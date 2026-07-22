@@ -1,10 +1,8 @@
 package main
 
-import (
-	"fmt"
-)
+import "fmt"
 
-func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath string) error {
+func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath string, parallel int, retries int, checksumAlgo string, encryptKey string) error {
 	return fmt.Errorf("not implemented")
 }
 

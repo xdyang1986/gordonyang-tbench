@@ -1,16 +1,19 @@
-# Large File Upload Processor for YouTube-like Video Platform (Go)
+# Large File Upload Processor for YouTube-like Video Platform (Go) — HARD MODE
 
-You are building a Go CLI tool that handles uploading massive video files (hundreds of GBs) for a YouTube-like platform. Think YouTube's resumable upload protocol - users upload 100GB+ 4K videos from unreliable networks.
+You are building a Go CLI tool that handles uploading massive video files (hundreds of GBs) for a YouTube-like platform. Think YouTube's resumable upload protocol - users upload 100GB+ 4K videos from unreliable networks with parallel workers, encryption, and multiple checksum algos.
 
-Working directory: `/app`. Go module already initialized (`go.mod` with module `largefileuploader`, Go 1.23). Starter skeleton exists with TODOs - you must implement the missing logic.
+Working directory: `/app`. Go module already initialized (`go.mod` with module `largefileuploader`, Go 1.23). Starter skeleton exists with TODOs - you must implement the missing logic. This is HARD MODE - requires concurrency, crypto, and robust error handling.
 
 ## Problem Context
 
 The current uploader crashes or OOMs on large files because it tries to load entire files into memory. It also lacks:
-- Proper video format validation (magic bytes, not just extension)
+- Proper video format validation (magic bytes, not just extension) for 10 formats
 - Resumable chunked upload with manifest tracking
-- Streaming SHA256 checksums
+- Streaming SHA256/MD5 checksums with multiple algo support
 - Support for huge sparse files without disk blowup
+- Parallel upload with worker pool
+- Retry with exponential backoff
+- Streaming XOR encryption
 
 ## Requirements
 
@@ -18,25 +21,33 @@ The current uploader crashes or OOMs on large files because it tries to load ent
 
 Support at least: `mp4`, `mov`, `mkv`, `webm`, `avi`, `flv`, `mpeg`, `mpg`, `3gp`, `wmv`
 
-**Validation must check BOTH extension AND magic bytes (file signatures).** Don't trust extension alone.
+**Validation must check magic bytes FIRST (more reliable than extension).**
 
 Magic byte rules (check first 16 bytes, provide best-effort detection):
 
-- `mp4`: byte 4-7 is `ftyp`, and bytes 8-11 contains `isom`, `iso2`, `mp41`, `mp42`, `avc1`, `dash`, `msnv` etc. Essentially contains `ftyp`.
-- `mov`: byte 4-7 is `ftyp` with `qt` brand, OR starts with `moov` or `mdat` + `ftypqt`
+- `mp4`: byte 4-7 is `ftyp`, and bytes 8-11 contains `isom`, `iso2`, `mp41`, `mp42`, `avc1`, `dash`, `msnv` etc.
+- `mov`: byte 4-7 is `ftyp` with `qt` brand, OR starts with `moov`
 - `mkv`: starts with `0x1A 0x45 0xDF 0xA3` (EBML)
 - `webm`: same EBML header as MKV, but header after should contain `webm` string within first 64 bytes
 - `avi`: starts with `RIFF` and bytes 8-11 is `AVI `
 - `flv`: starts with `FLV` (0x46 0x4C 0x56)
-- `mpeg`/`mpg`: starts with `0x00 0x00 0x01` followed by `0xB3` or `0xBA`, OR starts with `0x47` sync byte for TS (optional)
+- `mpeg`/`mpg`: starts with `0x00 0x00 0x01` followed by `0xB3` or `0xBA`, OR starts with `0x47` sync byte for TS
 - `3gp`: byte 4-7 `ftyp` and bytes 8-11 contains `3gp`
 - `wmv`: starts with `0x30 0x26 0xB2 0x75 0x8E 0x66 0xCF 0x11`
 
-If file < 16 bytes, it's INVALID. Empty file INVALID. Unsupported extension INVALID unless magic matches known type (then report detected type).
+**Format resolution policy (clear, no ambiguity)**:
+1. Try magic-byte detection first. If magic matches a supported format, return that format as VALID, regardless of extension. This handles files with no extension or wrong extension.
+2. If magic does not match any supported format, then treat file as INVALID. If extension is supported but magic mismatches, output must be `INVALID: magic mismatch ...` (contain "magic mismatch").
+3. If extension is unsupported and magic unknown, output `INVALID: unsupported format <ext>`.
+4. Uppercase extensions must be handled: `.MP4`, `.MKV` etc. should be treated case-insensitively.
+5. No-extension files: if magic matches supported format, VALID with detected format. If no magic match and no extension, INVALID.
+6. Multiple dots: `my.video.backup.mp4` → ext `mp4` (last suffix).
+
+If file < 16 bytes, it's INVALID. Empty file INVALID.
 
 `validate` command output format:
 - Valid: `VALID: <format>` e.g., `VALID: mp4` (lowercase)
-- Invalid: `INVALID: <reason>` e.g., `INVALID: unsupported format xyz` or `INVALID: magic mismatch expected mp4 got ...` or `INVALID: file too small`
+- Invalid: `INVALID: <reason>` e.g., `INVALID: unsupported format xyz` or `INVALID: magic mismatch expected mp4 got avi` or `INVALID: file too small`
 
 Exit code 0 for valid, 1 for invalid.
 
@@ -48,200 +59,218 @@ Must parse human-readable sizes:
 - `1G` or `1GB` => 1*1024*1024*1024
 - Plain number => bytes
 - Case-insensitive, optional `B` suffix
+- Support spaces: `8 MB` should also parse (trim spaces)
 - Reject: zero, negative, > 1GB chunk (max 1GB), non-numeric. Error message must contain "invalid chunk size"
 
-Default chunk size: `8M` (8388608 bytes) — YouTube's recommended.
+Default chunk size: `8M` (8388608 bytes).
 
 ### 3. Streaming & Memory Efficiency (CRITICAL for 100s of GB)
 
-- **MUST NOT load entire file into memory.** No `os.ReadFile`, `ioutil.ReadFile`, `io.ReadAll` on full file. Only chunk-sized buffers (e.g., 8MB + small overhead) allowed.
+- **MUST NOT load entire file into memory.** No `os.ReadFile`, `ioutil.ReadFile`, `io.ReadAll` on full file. Only chunk-sized buffers (e.g., 8MB + small overhead) allowed, ideally 1MB internal buffer reused.
 - Must handle files larger than RAM (tests include sparse 10GB+ files created via `truncate` - Stat size reports big, but disk usage tiny, and reading should use Seek).
 - Use `int64` for offsets/sizes — must handle >4GB (int32 overflow).
-- Checksum: streaming SHA256 — `io.Copy` through hash, chunk by chunk, not loading whole file.
+- Checksum: streaming SHA256/MD5 — `io.Copy` through hash, chunk by chunk, not loading whole file.
 - Chunking: `io.Seek` + `io.ReadFull` with fixed buffer.
+- Many small chunks: tests will use 64KB chunk size with 20MB file = 320 chunks. Must handle many chunks without leaking file descriptors or growing memory.
 
 Tests enforce streaming behaviorally via memory limit (4096 MB) and large sparse file uploads (5GB+). Implementations loading entire file will OOM or timeout. Only chunk-sized buffers allowed.
 
 ### 4. Manifest Format (Resumable Upload)
 
-JSON file tracking upload progress. Example `/tmp/upload.json`:
+JSON file tracking upload progress. Example:
 
 ```json
 {
-  "session_id": "random-uuid-or-nano-id",
+  "session_id": "random-uuid",
   "source_file": "/path/to/video.mp4",
   "source_size": 107374182400,
   "chunk_size": 8388608,
   "total_chunks": 12800,
   "file_checksum": "sha256 hex",
+  "file_checksum_md5": "md5 hex (if both)",
+  "checksum_algo": "sha256|md5|both",
   "chunks": [
-    {"index": 0, "offset": 0, "size": 8388608, "checksum": "ab12...", "uploaded": true, "path": "chunks/chunk_000000"},
-    {"index": 1, "offset": 8388608, "size": 8388608, "checksum": "cd34...", "uploaded": false, "path": "chunks/chunk_000001"}
+    {"index": 0, "offset": 0, "size": 8388608, "checksum": "sha256 ab12...", "checksum_md5": "md5 cd34...", "uploaded": true, "path": "chunks/chunk_000000"},
+    {"index": 1, "offset": 8388608, "size": 8388608, "checksum": "sha256...", "uploaded": false, "path": "chunks/chunk_000001"}
   ],
   "created_at": "2024-01-02T15:04:05Z",
   "updated_at": "2024-01-02T15:04:05Z",
-  "dest_dir": "/dest/path"
+  "dest_dir": "/dest/path",
+  "parallel": 4,
+  "encrypt_key": "mykey (if used)"
 }
 ```
 
 Requirements:
-- `session_id`: unique per upload (uuid, timestamp+rand, etc.)
+- `session_id`: unique per upload (uuid, crypto/rand)
 - `source_size`: int64 from file stat
 - `total_chunks = ceil(source_size / chunk_size)` — handle last chunk smaller
-- Each chunk: index, offset (int64), size (int64), checksum (SHA256 hex), uploaded bool, path relative to manifest's dest chunk dir
+- Each chunk: index, offset (int64), size (int64), checksum(s), uploaded bool, path relative
+- `checksum_algo`: records which algo(s) used
+- `parallel`: number of workers used
+- `encrypt_key`: if encryption used, store key (or hash) for verification? Store original key or empty if none. For simplicity store key string if provided, else "".
 - Must be able to resume: if manifest exists, re-validate already uploaded chunks by checksumming dest chunk files, mark corrupted as not uploaded, continue.
-- Atomic manifest updates: write to temp + rename, or sync after each chunk.
+- Atomic manifest updates: write to temp + rename, with mutex for parallel workers.
 - Timestamps: RFC3339
+- Thread-safe: parallel workers must not corrupt manifest — use mutex or sync after each chunk with lock.
 
-### 5. Upload Logic
+### 5. Upload Logic — HARD MODE
 
-`upload` command: `go run . upload --source <src> --dest <dest-dir> --chunk-size 8M --manifest <manifest.json>`
+`upload` command: `go run . upload --source <src> --dest <dest-dir> --chunk-size 8M --parallel 4 --retries 3 --checksum both --encrypt-key mysecret --manifest <manifest.json>`
 
-- `--source`: required, path to video file
+Flags:
+- `--source`: required, path to video file (symlink allowed, must follow)
 - `--dest`: required, directory simulating remote storage (create if not exists)
 - `--chunk-size`: optional, default 8M
 - `--manifest`: optional, default `<dest>/<filename>.manifest.json`
+- `--parallel`: optional, int 1-32, default 4, number of concurrent upload workers. Must actually use goroutines (`go func`, `sync.WaitGroup`, channels). Sequential (1) must still work.
+- `--retries`: optional, int 0-10, default 3, number of retries for failed chunk upload with exponential backoff: `backoff = 100ms * 2^attempt` (e.g., 100ms, 200ms, 400ms). Must retry on transient errors (e.g., temp file write failure, checksum mismatch). Print `RETRY: chunk X attempt Y` to stderr on retry.
+- `--checksum`: optional, string `sha256` (default), `md5`, or `both`. If `md5`, use MD5 hex. If `both`, compute and store both SHA256 and MD5 per chunk and for final file. Manifest must contain appropriate fields.
+- `--encrypt-key`: optional, string key for XOR encryption. If provided, each chunk's bytes are XORed with key bytes cycling (`chunk_byte[i] XOR key[i % len(key)]`) before writing to dest. Must be streaming (not loading whole chunk for XOR? But chunk-sized XOR is okay, as chunk is limited to 1GB). On assembly, if manifest has encrypt_key, decrypt similarly. Final assembled file checksum should match source (decrypted).
 
 Steps:
-1. Validate source file format (fail if invalid)
+1. Validate source file format (fail if invalid) - follow symlinks
 2. Stat size (int64)
-3. If manifest exists from prior run for same source+dest: load and resume (verify existing chunk files checksums)
-4. Else create new manifest + session_id
-5. Ensure `dest/chunks/` exists
-6. Upload chunks sequentially (in order) — for each not-yet-uploaded chunk:
-   - Seek source to offset, read `size` bytes (streaming, buffer = chunk_size or 1MB internal)
-   - Compute SHA256 of chunk
-   - Write chunk to `dest/chunks/chunk_%06d` (e.g., `chunk_000000`). Use atomic write (temp file + rename) to avoid partial writes.
-   - Verify written chunk checksum
-   - Update manifest: mark uploaded, store checksum, update timestamp, atomic write manifest
-   - Print progress: `Uploading chunk X/Y (Z%)` or JSON line — at least print something per chunk to stdout for progress tracking
-7. After all chunks done: assemble final file to `dest/<source_basename>` by concatenating chunks in order streaming (no loading all chunks into memory). Use `io.Copy`.
-8. Compute SHA256 of assembled file, compare to source file SHA256 (streaming). If mismatch, fail: `ERROR: final checksum mismatch`
-9. On success print: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <sha256> Chunks: <total>`
+3. Parse flags: chunk size, parallel (1-32, error "invalid parallel" if out of range), retries (0-10, error "invalid retries"), checksum algo (must be sha256|md5|both, error "invalid checksum algo"), encrypt-key (any string, may be empty = no encryption)
+4. Compute source file checksum(s) streaming based on requested algo
+5. If manifest exists: load and resume
+   - If corrupted JSON, warn `WARN: corrupted manifest, starting fresh`
+   - If source_size != current size → error `source file changed`
+   - If parallel differs → WARN and use manifest's parallel? Or use new parallel? Use new parallel but warn.
+   - If checksum algo differs → WARN and use manifest's? Actually if algo changed, should error or recalc? For simplicity, if algo differs, WARN and use new algo but re-verify all chunks.
+   - Verify existing chunks (decrypt if needed? For encrypted uploads, chunk files on disk are encrypted, so verification must decrypt or compare encrypted checksum? Simplest: store checksum of encrypted data? But spec says checksum of original chunk. For encrypted case, we need to handle: if encrypt-key present, chunk file on disk is encrypted, so to verify we must either decrypt then checksum, or checksum encrypted data and store encrypted checksum? Let's define: checksum fields always refer to ORIGINAL unencrypted chunk data and file. So for verification of encrypted chunk file, we must read file, decrypt (XOR), then compute checksum of decrypted data and compare to manifest's checksum (original). Implement that.
+6. Else create new manifest
+7. Ensure `dest/chunks/` exists
+8. Save initial manifest
+9. **Parallel upload**: 
+   - Create channel of chunk indices that are not yet uploaded
+   - Start `parallel` workers (goroutines) with `sync.WaitGroup`
+   - Each worker:
+     - For each chunk index from channel, attempt upload with retries:
+       - Seek source file (need per-worker file handle or mutex around Seek, because os.File Seek is not thread-safe - use separate file handle per worker or mutex)
+       - Read chunk via LimitReader
+       - Compute checksum(s) of original data
+       - If encrypt-key: XOR encrypt the chunk data with key
+       - Write chunk atomically to `dest/chunks/chunk_%06d` (temp file + rename) with retry+backoff
+       - Verify written chunk: read back, if encrypted decrypt, compute checksum, compare
+       - On failure, retry up to `retries` times with exponential backoff, print `RETRY: chunk X attempt Y` to stderr
+       - On success, update manifest: mark uploaded, store checksums, update timestamp, save atomically with mutex protection
+       - Print progress thread-safely: `Uploading chunk X/Y (Z%)` 
+   - Wait for all workers via WaitGroup
+   - Must handle many chunks (320+ with 64KB size) without leaking file descriptors
+10. After all chunks: assemble final file to `dest/<basename>` streaming
+   - If encrypted, decrypt each chunk while assembling (XOR)
+   - Use `io.Copy` with 1MB buffer, no loading all chunks
+11. Compute final checksum(s) of assembled file, compare to source checksum(s). If mismatch, fail `ERROR: final checksum mismatch`
+12. On success print: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <sha256> Chunks: <total> Parallel: <parallel> ChecksumAlgo: <algo>`
+    - If algo=both, include both checksums? Print at least sha256, but manifest has both.
 
-Resume capability: If process interrupted (manifest partially done), re-running upload with same args should continue from where left off, not re-upload already valid chunks.
+Resume capability: re-running upload with same args (including parallel, encrypt-key, checksum) should continue from where left.
 
-Corrupted chunk detection: If a chunk file exists but checksum doesn't match manifest expected (or manifest says uploaded but file missing/corrupt), re-upload it.
+Corrupted chunk detection: If chunk file exists but after decrypt checksum doesn't match manifest expected, re-upload.
 
-Sparse file handling: Use `os.Stat` size, not reading to determine EOF. Seek must work beyond real data — reading sparse holes returns zeros (valid). Must not try to allocate file-size buffer.
+Encryption: If `--encrypt-key` provided, manifest stores `encrypt_key`. On resume, must use same key; if different key provided on resume, error `ERROR: encrypt key mismatch`.
 
 ### 6. Other CLI Commands
 
 - `validate --file <path>`: as described
-- `info --file <path>`: prints JSON to stdout:
+- `info --file <path>`: prints JSON:
   ```json
-  {"file": "/path", "size": 12345, "format": "mp4", "valid": true, "checksum": "sha256 hex", "chunk_info": {"chunk_size": 8388608, "total_chunks": 2}}
+  {"file": "/path", "size": 12345, "format": "mp4", "valid": true, "checksum": "sha256 hex", "checksum_md5": "md5 hex (if both or md5)", "chunk_info": {"chunk_size": 8388608, "total_chunks": 2}}
   ```
-  If invalid format, valid=false and format is "unknown". Still prints size and full file SHA256 streaming (required for integrity).
+  If invalid format, valid=false and format="unknown". Still prints size and checksums.
+  Must handle `--checksum` flag: if `both`, include both `checksum` (sha256) and `checksum_md5`. If `md5` only, `checksum` should be md5? For simplicity: `checksum` always sha256 unless algo=md5, then checksum is md5. If both, `checksum` is sha256 and `checksum_md5` is md5.
 
-- `upload` as above
-- `assemble --manifest <path> --output <path>`: manual assembly from manifest chunks. Reads manifest, concatenates chunks to output streaming, verifies checksum if file_checksum present. On success print: `ASSEMBLE COMPLETE: <output_path>`
+- `upload` as above with new flags
 
-All commands must handle `--help` / `-h` with usage.
+- `assemble --manifest <path> --output <path>`: manual assembly from manifest chunks. Reads manifest, concatenates chunks to output streaming, decrypts if encrypt_key present, verifies checksum if file_checksum present. On success print: `ASSEMBLE COMPLETE: <output_path>`
+
+All commands must handle `--help` / `-h`.
 
 ### 7. Go Specific Requirements
 
 - Module: `largefileuploader` already in `go.mod`
-- Go 1.23
-- Entry: `main.go` in package main at `/app/main.go` with subpackages allowed at `/app/internal/...` or `/app/...` but `go run .` must work from `/app`.
-- Must not have external dependencies beyond stdlib (allowed to use only standard library). No third-party packages — keep `go.mod` clean (no `require` external).
-- Use `flag` or hand-rolled cli parsing — no cobra dependency.
-- Error handling: meaningful messages, exit codes 0=success, 1=validation/failure, 2=usage error.
-- Concurrency: sequential upload is fine (no need goroutines), but code should be concurrency-safe for future parallelization (manifest atomic updates).
-- Must work on Linux (container is Ubuntu 24.04 with Go 1.23).
+- Go 1.23, stdlib only (no external deps)
+- Entry: `main.go` at `/app/main.go`, `go run .` must work
+- Error handling: exit codes 0=success, 1=validation/failure, 2=usage error
+- **Concurrency**: Must use goroutines for parallel>1, `sync.WaitGroup`, `sync.Mutex` for manifest, channels for work distribution. Code must be race-free (should pass `go test -race` if there were tests, and not have data races on manifest).
+- Must handle `parallel` flag parsing and validation
+- Must handle `encrypt-key` XOR streaming correctly
+- Must handle multiple checksum algos
 
 ### 8. Edge Cases (Must Handle)
 
 - Empty file: INVALID
-- File exactly chunk size, smaller than chunk, 1 byte larger than chunk
-- Last chunk smaller than chunk size
-- Destination exists with partial chunks — resume correctly
-- Manifest corrupted JSON — start fresh with warning to stderr: `WARN: corrupted manifest, starting fresh`
-- Source file modified between resume attempts (size changed) — detect and error: `ERROR: source file changed since manifest creation (size mismatch)`
-- Format resolution policy (clear):
-  1. Try magic-byte detection first (more reliable than extension). If magic matches a supported format, return that format as VALID, regardless of extension.
-  2. If magic does not match any supported format, then treat file as INVALID. If extension is supported but magic mismatches, output must be `INVALID: magic mismatch ...` (contain "magic mismatch").
-  3. If extension is unsupported and magic unknown, output `INVALID: unsupported format <ext>`.
-  This policy ensures magic takes precedence, and unsupported extension with valid magic still validates as detected format.
-- Chunk size parsing edge: `0`, `-1`, `abc`, `8MBB`, `9999G` (>1GB) should fail with "invalid chunk size"
-- Symlink source: `os.Stat` follows symlinks by default - validation should follow link and validate target file's magic and size. Create symlink test: `ln -s real.mp4 link.mp4` should validate as target's format.
-- Very large file simulation: tests will create 5GB sparse file via `truncate -s 5G file.mp4` + write magic bytes at start. Your code must handle this without trying to allocate 5GB.
-- 100s of GB scenario: tests will create 10GB-20GB sparse files and verify info reports correct size and chunk count via `CalculateTotalChunks`. Must handle calculation with int64 without overflow, and not OOM. Example: 100GB/8MB = 12800 chunks, 500GB/8MB = 64000 chunks.
+- File exactly chunk size, smaller than chunk, 1 byte larger
+- Last chunk smaller
+- Resume with partial chunks — must work with parallel>1 and sequential
+- Manifest corrupted JSON — `WARN: corrupted manifest, starting fresh`
+- Source changed size mismatch — `ERROR: source file changed`
+- Format resolution: magic first, then unsupported. Uppercase extensions `.MP4` must work. No-extension files with valid magic must VALID. Multiple dots `my.video.backup.mp4` → ext mp4. Magic mismatch: if ext supported but magic mismatches, `INVALID: magic mismatch...` contain "magic mismatch". Symlink: follow link, validate target.
+- Chunk size parsing: `0`, `-1`, `abc`, `8MBB`, `9999G` (>1GB) → "invalid chunk size". Also `8 MB` with space should parse.
+- Parallel flag: `0`, `-1`, `33`, `abc` → "invalid parallel" (must be 1-32). Default 4.
+- Retries flag: `-1`, `11`, `abc` → "invalid retries" (0-10). Default 3.
+- Checksum flag: `xxx` → "invalid checksum algo". Must be sha256|md5|both.
+- Encrypt-key: any string allowed, including empty (no encryption). If provided on resume with different key → `ERROR: encrypt key mismatch`.
+- Very large file: 5GB sparse file via `truncate -s 5G file.mp4` + magic
+- 100s GB: 10GB-20GB sparse files, info reports correct size and chunk count via int64. Must not OOM.
+- Many small chunks: 64KB chunk size with 20MB file = 320 chunks, must handle without leaking FDs.
+- Parallel upload with many chunks must preserve correctness even if chunks uploaded out-of-order.
 
 ### 9. Expected File Layout After Success
 
 After `upload`:
 ```
 <dest>/
-  <filename>                # assembled final file
-  <filename>.manifest.json  # final manifest
+  <filename>
+  <filename>.manifest.json
   chunks/
-    chunk_000000
-    chunk_000001
+    chunk_000000 (may be encrypted if key provided)
     ...
 ```
 
 ### 10. Build & Run
-
-Tests will run:
 
 ```bash
 cd /app
 go build -o ./uploader .        # must build
 ./uploader validate --file /tmp/test.mp4
 go run . validate --file /tmp/test.mp4
-go run . upload --source /tmp/big.mp4 --dest /tmp/dest --chunk-size 4M
+go run . upload --source /tmp/big.mp4 --dest /tmp/dest --chunk-size 4M --parallel 4 --checksum both
+go run . upload --source /tmp/big.mp4 --dest /tmp/dest --chunk-size 4M --parallel 8 --encrypt-key mysecret --retries 5
 ```
-
-If `go run .` doesn't work, task fails. Binary should be built at `./uploader` in `/app` (avoid `/tmp/uploader` hardcoded path).
 
 ### What to Implement
 
-Look at `/app/*.go` — multiple TODOs commented with `// TODO:`. You must fill them. Key files:
+Look at `/app/*.go` — TODOs. Key files:
+- `main.go`: CLI, flag parsing for parallel/retries/checksum/encrypt
+- `formats.go`: magic detection with uppercase/no-ext/multiple-dots support
+- `chunk.go`: chunk size parsing, total chunks, parallel validation
+- `hasher.go`: SHA256 + MD5 streaming, both
+- `manifest.go`: manifest with parallel, encrypt_key, checksum_algo, thread-safe save, checksum fields for both algos
+- `uploader.go`: parallel worker pool, retry+backoff, XOR encryption streaming, thread-safe manifest
 
-- `main.go`: CLI dispatch, flag parsing
-- `formats.go`: Supported formats, magic detection, validation
-- `chunk.go`: Chunk size parsing, chunk calculation, chunk reading
-- `hasher.go`: Streaming SHA256 file & chunk
-- `manifest.go`: Manifest create/load/save/resume logic
-- `uploader.go`: Core upload + assemble logic
+### Success Criteria (Hard Mode)
 
-You may refactor, add files, but keep `go run .` working and don't break expected CLI interface described.
-
-### Success Criteria
-
-- All CLI commands work as specified
-- Memory efficient (no whole-file reads)
-- Handles sparse huge files (int64, seek)
-- Resumable upload works (manifest tracking + atomic writes)
-- Format validation via extension + magic bytes
-- Chunk size parser human-readable
-- Final assembled file SHA256 matches source
-- No external dependencies (stdlib only)
+- All CLI commands with new flags work
+- Parallel upload actually uses goroutines (`go` keyword, `WaitGroup`, `Mutex`, channel)
+- Retry logic with exponential backoff prints `RETRY: ...`
+- Multiple checksum algos stored in manifest
+- Encryption XOR streaming works and final file matches source after decrypt
+- No external deps, stdlib only
+- Memory efficient, handles sparse huge files
+- Resumable, atomic writes, thread-safe
 - Exit codes correct
+- Handles uppercase, no-ext, symlink, many small chunks
 
-Example happy path:
+Example happy path hard:
 
 ```bash
 truncate -s 20M /tmp/sample.mp4
 printf '\x00\x00\x00\x18ftypisom' | dd of=/tmp/sample.mp4 bs=1 seek=0 conv=notrunc 2>/dev/null
-go run . validate --file /tmp/sample.mp4  # VALID: mp4
-go run . info --file /tmp/sample.mp4
-go run . upload --source /tmp/sample.mp4 --dest /tmp/upload_dest --chunk-size 4M
-ls /tmp/upload_dest/sample.mp4  # assembled file exists
-sha256sum /tmp/sample.mp4 /tmp/upload_dest/sample.mp4  # should match
+go run . upload --source /tmp/sample.mp4 --dest /tmp/dest --chunk-size 4M --parallel 4 --checksum both --encrypt-key secret123
+sha256sum /tmp/sample.mp4 /tmp/dest/sample.mp4  # must match
+go run . assemble --manifest /tmp/dest/sample.mp4.manifest.json --output /tmp/final.mp4
 ```
 
-### Notes on YouTube-Scale
-
-YouTube handles:
-- Files up to 256GB (or 128GB) for verified users
-- Resumable upload protocol via tus
-- Chunked transfer with checksums
-- Transcoding pipeline after upload
-
-Your task simulates the upload ingestion part — focus on robust chunk handling, not transcoding.
-
-Start by reading all Go files in `/app`, understanding TODOs, then implement.
-
-Good luck!
+Good luck — this is hard!

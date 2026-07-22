@@ -12,12 +12,13 @@ func ParseChunkSize(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid chunk size: empty")
 	}
 
+	// Allow space between number and unit: "8 MB" -> "8MB"
+	s = strings.ReplaceAll(s, " ", "")
 	upper := strings.ToUpper(s)
 
 	var multiplier int64 = 1
 	numStr := upper
 
-	// Order matters: check GB before G etc.
 	if strings.HasSuffix(upper, "GB") {
 		multiplier = 1024 * 1024 * 1024
 		numStr = strings.TrimSuffix(upper, "GB")
@@ -46,11 +47,8 @@ func ParseChunkSize(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid chunk size: %s", s)
 	}
 
-	// Disallow float, extra suffixes like B after M already handled, but reject if leftover letters
-	// Ensure numStr is pure integer digits
 	for _, ch := range numStr {
 		if ch < '0' || ch > '9' {
-			// Allow leading - for negative check but will be caught as <=0
 			if ch == '-' {
 				continue
 			}
@@ -93,4 +91,38 @@ func GetChunkSizeForIndex(fileSize int64, chunkSize int64, index int64, totalChu
 		}
 	}
 	return chunkSize
+}
+
+func ParseParallel(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid parallel: %s", s)
+	}
+	if val < 1 || val > 32 {
+		return 0, fmt.Errorf("invalid parallel: must be 1-32, got %s", s)
+	}
+	return val, nil
+}
+
+func ParseRetries(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	val, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid retries: %s", s)
+	}
+	if val < 0 || val > 10 {
+		return 0, fmt.Errorf("invalid retries: must be 0-10, got %s", s)
+	}
+	return val, nil
+}
+
+func ParseChecksumAlgo(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "sha256", "md5", "both":
+		return s, nil
+	default:
+		return "", fmt.Errorf("invalid checksum algo: must be sha256|md5|both, got %s", s)
+	}
 }

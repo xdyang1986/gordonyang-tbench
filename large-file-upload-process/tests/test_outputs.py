@@ -1045,3 +1045,520 @@ def test_symlink_handling():
                     break
         assert final_video is not None
         assert compute_sha256(final_video) == real_checksum
+
+
+# ==================== HARD MODE TESTS ====================
+
+
+def test_parallel_flag_validation():
+    """Test parallel flag parsing and that parallel upload uses goroutines"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "parallel.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=5 * 1024 * 1024)
+
+        # Invalid parallel values
+        for invalid in ["0", "-1", "33", "abc"]:
+            result = run_uploader(
+                [
+                    "upload",
+                    "--source",
+                    str(sample),
+                    "--dest",
+                    str(tmp / f"dest_{invalid}"),
+                    "--parallel",
+                    invalid,
+                ],
+                timeout=15,
+            )
+            assert result.returncode != 0, f"parallel={invalid} should be invalid"
+            assert "invalid parallel" in (result.stdout + result.stderr).lower()
+
+        # Valid parallel values should work
+        for valid in ["1", "2", "4", "8"]:
+            dest = tmp / f"dest_valid_{valid}"
+            dest.mkdir()
+            result = run_uploader(
+                [
+                    "upload",
+                    "--source",
+                    str(sample),
+                    "--dest",
+                    str(dest),
+                    "--parallel",
+                    valid,
+                    "--chunk-size",
+                    "1M",
+                ],
+                timeout=30,
+            )
+            assert result.returncode == 0, (
+                f"parallel={valid} should succeed: {result.stderr}"
+            )
+            assert "UPLOAD COMPLETE" in result.stdout
+
+        # Check that implementation actually uses goroutines for parallel>1
+        uploader_content = (APP_DIR / "uploader.go").read_text()
+        # Must have concurrency primitives
+        assert "go " in uploader_content or "go func" in uploader_content, (
+            "Must use goroutines for parallel"
+        )
+        assert (
+            "WaitGroup" in uploader_content or "sync.WaitGroup" in uploader_content
+        ), "Must use WaitGroup"
+        assert "Mutex" in uploader_content or "sync.Mutex" in uploader_content, (
+            "Must use Mutex for thread-safe manifest"
+        )
+
+
+def test_retries_flag_and_backoff():
+    """Test retries flag and that retry prints RETRY: and uses backoff"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "retry.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=2 * 1024 * 1024)
+
+        # Invalid retries
+        for invalid in ["-1", "11", "abc"]:
+            result = run_uploader(
+                [
+                    "upload",
+                    "--source",
+                    str(sample),
+                    "--dest",
+                    str(tmp / f"dest_{invalid}"),
+                    "--retries",
+                    invalid,
+                ],
+                timeout=15,
+            )
+            assert result.returncode != 0
+            assert "invalid retries" in (result.stdout + result.stderr).lower()
+
+        # Valid retries should succeed even without failures
+        dest = tmp / "dest_retry"
+        dest.mkdir()
+        result = run_uploader(
+            ["upload", "--source", str(sample), "--dest", str(dest), "--retries", "3"],
+            timeout=30,
+        )
+        assert result.returncode == 0
+
+        # Code must contain retry logic with backoff
+        uploader_content = (APP_DIR / "uploader.go").read_text()
+        assert (
+            "retries" in uploader_content.lower()
+            or "Retry" in uploader_content
+            or "RETRY" in uploader_content
+        )
+        assert "Sleep" in uploader_content or "backoff" in uploader_content.lower(), (
+            "Must implement exponential backoff with Sleep"
+        )
+
+
+def test_checksum_algo_flag():
+    """Test checksum algo flag md5, sha256, both"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "checksum_algo.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=4 * 1024 * 1024)
+
+        # Invalid algo
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(tmp / "dest_invalid"),
+                "--checksum",
+                "crc32",
+            ],
+            timeout=15,
+        )
+        assert result.returncode != 0
+        assert "invalid checksum algo" in (result.stdout + result.stderr).lower()
+
+        # Test md5
+        dest_md5 = tmp / "dest_md5"
+        dest_md5.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest_md5),
+                "--checksum",
+                "md5",
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0, f"md5 upload failed: {result.stderr}"
+        manifest = json.loads(
+            (dest_md5 / "checksum_algo.mp4.manifest.json").read_text()
+        )
+        assert manifest["checksum_algo"] == "md5"
+        assert "file_checksum" in manifest
+        # MD5 hex is 32 chars, SHA256 is 64 - if md5 only, checksum could be 32 or 64? Our impl stores md5 in file_checksum (32) or sha field
+        # Check at least checksum exists and length 32 or 64
+        assert len(manifest["file_checksum"]) in [32, 64]
+
+        # Test both
+        dest_both = tmp / "dest_both"
+        dest_both.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest_both),
+                "--checksum",
+                "both",
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0, f"both upload failed: {result.stderr}"
+        manifest = json.loads(
+            (dest_both / "checksum_algo.mp4.manifest.json").read_text()
+        )
+        assert manifest["checksum_algo"] == "both"
+        assert "file_checksum" in manifest and len(manifest["file_checksum"]) == 64
+        assert (
+            "file_checksum_md5" in manifest and len(manifest["file_checksum_md5"]) == 32
+        )
+        for ch in manifest["chunks"]:
+            assert "checksum" in ch and len(ch["checksum"]) == 64
+            assert "checksum_md5" in ch and len(ch["checksum_md5"]) == 32
+
+        # Verify info with both
+        result = run_uploader(
+            ["info", "--file", str(sample), "--checksum", "both"], timeout=15
+        )
+        assert result.returncode == 0
+        info = json.loads(result.stdout)
+        assert "checksum" in info and len(info["checksum"]) == 64
+        assert "checksum_md5" in info and len(info["checksum_md5"]) == 32
+
+
+def test_encryption_xor():
+    """Test XOR encryption streaming - chunks on disk encrypted, final decrypted matches source"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "enc.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=8 * 1024 * 1024)
+        orig_checksum = compute_sha256(sample)
+
+        # Upload with encryption key
+        dest = tmp / "dest_enc"
+        dest.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "2M",
+                "--encrypt-key",
+                "mysecretkey",
+                "--parallel",
+                "2",
+            ],
+            timeout=45,
+        )
+        assert result.returncode == 0, (
+            f"Encrypted upload failed: {result.stderr}\n{result.stdout}"
+        )
+        assert "UPLOAD COMPLETE" in result.stdout
+
+        # Final file should match original (decrypted)
+        final = dest / "enc.mp4"
+        assert final.exists()
+        assert compute_sha256(final) == orig_checksum
+
+        # Chunks on disk should be encrypted (not equal to original chunk data)
+        chunk0 = dest / "chunks" / "chunk_000000"
+        assert chunk0.exists()
+        # Read chunk file - should NOT match original first 2M of sample (because encrypted)
+        with open(sample, "rb") as f:
+            orig_first = f.read(2 * 1024 * 1024)
+        with open(chunk0, "rb") as f:
+            enc_first = f.read()
+        # Encrypted data should differ from original (unless key is empty)
+        assert orig_first != enc_first, (
+            "Chunk file should be encrypted and differ from original"
+        )
+
+        # Manifest should contain encrypt_key
+        manifest = json.loads((dest / "enc.mp4.manifest.json").read_text())
+        assert manifest["encrypt_key"] == "mysecretkey"
+
+        # Assemble manually should also decrypt and match
+        output = tmp / "assembled_decrypted.mp4"
+        result = run_uploader(
+            [
+                "assemble",
+                "--manifest",
+                str(dest / "enc.mp4.manifest.json"),
+                "--output",
+                str(output),
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0
+        assert "ASSEMBLE COMPLETE" in result.stdout
+        assert compute_sha256(output) == orig_checksum
+
+        # Test encrypt key mismatch on resume should error
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "2M",
+                "--encrypt-key",
+                "differentkey",
+            ],
+            timeout=15,
+        )
+        assert result.returncode != 0
+        assert "encrypt key mismatch" in (result.stdout + result.stderr).lower()
+
+
+def test_no_extension_and_uppercase_and_many_dots():
+    """Test no-extension, uppercase extension, and multiple dots handling"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        # No extension file with valid mp4 magic
+        noext = tmp / "video_noext"
+        create_dummy_video(noext, "mp4", size_bytes=1 * 1024 * 1024)
+        # Remove extension by renaming (already no ext)
+        # Ensure file has no extension but magic is mp4
+        result = run_uploader(["validate", "--file", str(noext)], timeout=10)
+        assert result.returncode == 0, (
+            f"No-ext file with mp4 magic should be VALID: {result.stdout}"
+        )
+        assert "VALID" in result.stdout
+        assert "mp4" in result.stdout.lower()
+
+        # Uppercase extension
+        upper = tmp / "video.MP4"
+        create_dummy_video(upper, "mp4", size_bytes=1 * 1024 * 1024)
+        result = run_uploader(["validate", "--file", str(upper)], timeout=10)
+        assert result.returncode == 0
+        assert "VALID" in result.stdout
+        assert "mp4" in result.stdout.lower()
+
+        # Multiple dots
+        multidots = tmp / "my.video.backup.mp4"
+        create_dummy_video(multidots, "mp4", size_bytes=1 * 1024 * 1024)
+        result = run_uploader(["validate", "--file", str(multidots)], timeout=10)
+        assert result.returncode == 0
+        assert "VALID" in result.stdout
+
+        # Uppercase MKV
+        upper_mkv = tmp / "video.MKV"
+        create_dummy_video(upper_mkv, "mkv", size_bytes=1 * 1024 * 1024)
+        result = run_uploader(["validate", "--file", str(upper_mkv)], timeout=10)
+        assert result.returncode == 0
+        assert "mkv" in result.stdout.lower()
+
+        # Info on no-ext file should also work
+        result = run_uploader(["info", "--file", str(noext)], timeout=10)
+        assert result.returncode == 0
+        info = json.loads(result.stdout)
+        assert info["valid"] is True
+        assert info["format"] == "mp4"
+
+        # Upload no-ext file should work
+        dest = tmp / "dest_noext"
+        dest.mkdir()
+        result = run_uploader(
+            ["upload", "--source", str(noext), "--dest", str(dest)], timeout=30
+        )
+        assert result.returncode == 0
+        assert "UPLOAD COMPLETE" in result.stdout
+
+
+def test_many_small_chunks():
+    """Test handling of many small chunks (64KB) without leaking FDs - hard edge case"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # 20MB file with 64KB chunks = 320 chunks
+        sample = tmp / "many_chunks.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=20 * 1024 * 1024)
+        dest = tmp / "dest_many"
+
+        dest.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "64K",
+                "--parallel",
+                "8",
+            ],
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"Many small chunks upload failed: {result.stderr}"
+        )
+        assert "UPLOAD COMPLETE" in result.stdout
+
+        manifest_path = dest / "many_chunks.mp4.manifest.json"
+        assert manifest_path.exists()
+        data = json.loads(manifest_path.read_text())
+        assert data["total_chunks"] == 320
+
+        chunks = list((dest / "chunks").glob("chunk_*"))
+        assert len(chunks) == 320
+
+        final = dest / "many_chunks.mp4"
+        assert final.exists()
+        assert compute_sha256(sample) == compute_sha256(final)
+
+        # Test with even smaller 32K chunks and parallel 16 - 640 chunks
+        sample2 = tmp / "many_chunks2.mp4"
+        create_dummy_video(sample2, "mp4", size_bytes=10 * 1024 * 1024)
+        dest2 = tmp / "dest_many2"
+        dest2.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample2),
+                "--dest",
+                str(dest2),
+                "--chunk-size",
+                "32K",
+                "--parallel",
+                "16",
+            ],
+            timeout=60,
+        )
+        assert result.returncode == 0
+        assert compute_sha256(sample2) == compute_sha256(dest2 / "many_chunks2.mp4")
+
+
+def test_parallel_correctness_out_of_order():
+    """Test that parallel upload correctness holds even when chunks uploaded out-of-order"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "parallel_order.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=12 * 1024 * 1024)
+        orig_checksum = compute_sha256(sample)
+
+        dest = tmp / "dest_parallel"
+        dest.mkdir()
+
+        # Upload with high parallelism - chunks will be uploaded out-of-order due to goroutine scheduling
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "1M",
+                "--parallel",
+                "8",
+            ],
+            timeout=45,
+        )
+        assert result.returncode == 0
+
+        # Final file must still be correctly assembled in order (not out-of-order concatenation)
+        final = dest / "parallel_order.mp4"
+        assert final.exists()
+        assert compute_sha256(final) == orig_checksum, (
+            "Parallel upload must assemble chunks in correct order"
+        )
+
+        # Now test resume with parallel after interruption maintains correctness
+        final.unlink()
+        # Delete some chunks
+        (dest / "chunks" / "chunk_000002").unlink()
+        (dest / "chunks" / "chunk_000005").unlink()
+
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "1M",
+                "--parallel",
+                "8",
+            ],
+            timeout=45,
+        )
+        assert result.returncode == 0
+        assert compute_sha256(final) == orig_checksum
+
+
+def test_combined_hard_features():
+    """Test combined hard features: parallel + both checksums + encryption + small chunks"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "combined.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=10 * 1024 * 1024)
+        orig_sha = compute_sha256(sample)
+
+        dest = tmp / "dest_combined"
+        dest.mkdir()
+
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "512K",
+                "--parallel",
+                "8",
+                "--checksum",
+                "both",
+                "--encrypt-key",
+                "hardmodekey123",
+                "--retries",
+                "5",
+            ],
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"Combined hard features failed: {result.stderr}\n{result.stdout}"
+        )
+        assert "UPLOAD COMPLETE" in result.stdout
+        assert "Parallel:" in result.stdout
+        assert "ChecksumAlgo:" in result.stdout
+
+        final = dest / "combined.mp4"
+        assert final.exists()
+        assert compute_sha256(final) == orig_sha
+
+        manifest = json.loads((dest / "combined.mp4.manifest.json").read_text())
+        assert manifest["parallel"] == 8
+        assert manifest["checksum_algo"] == "both"
+        assert manifest["encrypt_key"] == "hardmodekey123"
+        assert len(manifest["file_checksum"]) == 64
+        assert len(manifest["file_checksum_md5"]) == 32
+        assert len(manifest["chunks"]) == 20  # 10MB / 512K = 20
+        for ch in manifest["chunks"]:
+            assert len(ch["checksum"]) == 64
+            assert len(ch["checksum_md5"]) == 32
