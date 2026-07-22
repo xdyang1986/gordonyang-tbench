@@ -733,7 +733,6 @@ def test_stdlib_only():
                 pass
 
         # More precise: extract import blocks
-        # Find all import lines
         lines_go = content.splitlines()
         in_import_block = False
         for line in lines_go:
@@ -745,9 +744,141 @@ def test_stdlib_only():
                 in_import_block = False
                 continue
             if in_import_block or stripped.startswith("import "):
-                # Extract quoted imports in this line
                 for q in import_re.findall(line):
                     if "." in q:
                         assert False, (
                             f"Third-party import found in {gf}: {q} (stdlib only)"
                         )
+
+
+# --------------------------------------------------------------------------
+# TRIM / retention (makes task harder, Issue: too easy)
+# --------------------------------------------------------------------------
+
+
+def test_trim_basic():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+PRODUCE t 0 c 3
+PARTITION_INFO t 0 4
+TRIM t 0 1 5
+PARTITION_INFO t 0 6
+FETCH t 0 0 7
+FETCH t 0 1 8
+TOPIC_INFO t 9
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["0", "1", "2", "0 3", "1 3", "NONE", "b", "1 2"]
+
+
+def test_trim_fetch_range():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+PRODUCE t 0 c 3
+TRIM t 0 2 4
+FETCH_RANGE t 0 0 3 5
+FETCH_RANGE t 0 1 3 6
+FETCH_RANGE t 0 2 10 7
+"""
+    r = run(stdin)
+    # after trim low=2, retained b? actually a offset0, b offset1, c offset2. trim 2 means low=2, retained only c
+    # FETCH_RANGE 0 3 with low=2 -> effective start 2, returns c
+    # 1 3 -> start 1 < low -> effective 2 returns c
+    # 2 10 -> c
+    assert lines(r.stdout) == ["0", "1", "2", "c", "c", "c"]
+
+
+def test_trim_commit_and_seek_errors():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+TRIM t 0 1 3
+COMMIT g t 0 0 4
+SEEK g t 0 0 5
+COMMIT g t 0 1 6
+SEEK g t 0 1 7
+GET_GROUP_OFFSET g t 0 8
+"""
+    r = run(stdin)
+    # produce 0,1 then trim low=1, commit 0 (trimmed) -> ERROR, seek 0 (trimmed) -> ERROR, commit 1 ok, seek 1 ok, get offset 1
+    assert lines(r.stdout) == ["0", "1", "ERROR", "ERROR", "1"]
+
+
+def test_trim_poll_auto_advance():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+PRODUCE t 0 b 2
+JOIN_GROUP g t 3
+POLL g t 0 4
+TRIM t 0 2 5
+POLL g t 0 6
+POLL g t 0 7
+GET_GROUP_OFFSET g t 0 8
+"""
+    r = run(stdin)
+    # poll a at 0, pos->1, trim low=2 advances pos to 2, high=2 -> poll NONE, second poll NONE, get offset NONE (no commit)
+    assert lines(r.stdout) == ["0", "1", "0 a", "NONE", "NONE", "NONE"]
+
+
+def test_trim_poll_after_trim_and_produce():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+JOIN_GROUP g t 2
+POLL g t 0 3
+TRIM t 0 1 4
+POLL g t 0 5
+PRODUCE t 0 b 6
+POLL g t 0 7
+"""
+    r = run(stdin)
+    # poll a, trim removes a, poll NONE, produce b offset1? Actually after trim, msgs len=1, high=1, low=1, produce b offset=1? Wait len=1 before produce after trim still len=1, so offset 1
+    # Then poll should return b at offset 1
+    assert lines(r.stdout) == ["0", "0 a", "NONE", "1", "1 b"]
+
+
+def test_trim_commit_cleared():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 a 1
+JOIN_GROUP g t 2
+POLL g t 0 3
+COMMIT g t 0 0 4
+GET_GROUP_OFFSET g t 0 5
+TRIM t 0 1 6
+GET_GROUP_OFFSET g t 0 7
+"""
+    r = run(stdin)
+    # after commit 0, get 0, then trim 1 clears committed < low
+    assert lines(r.stdout) == ["0", "0 a", "0", "NONE"]
+
+
+def test_trim_persist_and_compact(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_TOPIC t 1 0\nPRODUCE t 0 a 1\nPRODUCE t 0 b 2\nTRIM t 0 1 3\n",
+        state_dir=d,
+    )
+    r = run(
+        "PARTITION_INFO t 0 4\nFETCH t 0 0 5\nFETCH t 0 1 6\nTOPIC_INFO t 7\n",
+        state_dir=d,
+    )
+    assert lines(r.stdout) == ["1 2", "NONE", "b", "1 1"]
+    # compact should preserve low
+    run("COMPACT 8\n", state_dir=d)
+    r2 = run("PARTITION_INFO t 0 9\nFETCH t 0 1 10\n", state_dir=d)
+    assert lines(r2.stdout) == ["1 2", "b"]
+
+
+def test_trim_idempotent_and_error():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE t 0 x 1
+TRIM t 0 0 2
+TRIM t 0 1 3
+TRIM t 0 1 4
+TRIM t 0 5 5
+PARTITION_INFO t 0 6
+"""
+    r = run(stdin)
+    # produce, trim 0 no-op, trim1 low=1, trim1 again no-op, trim5 beyond high=1 -> ERROR
+    assert lines(r.stdout) == ["0", "ERROR", "1 1"]
