@@ -29,26 +29,27 @@ Naive approach fails because:
 - No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
 - Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (online validation — commit 656cbd1, 2026-07-22)
+## Completion Rates (online validation — commit fe5d696, 2026-07-22)
 
 - Oracle: **3/3** — validated
-- Opus 4.8 (agent): **3/5** — validated
-- GPT-5.5 (codex): **3/5** — validated
+- Opus 4.8 (agent): **4/5** — validated
+- GPT-5.5 (codex): **1/5** — validated
 - Avocado (metacode): **0/5** — failed
-- avgReward **0.55**, validation pending — balanced within the 20-80% sweet spot (Oracle solves it, agents land 0-3/5).
+- avgReward **0.53**, validation passing.
 
-## Model Analysis
+## Failure Analysis (latest run)
 
-- **Phrase + Code-aware 30%**: `GoSearchEngine` should match `go` and phrase `"go search"` after camelCase split into `go, search, engine` positions 0,1,2. Naive tokenizer without camelCase fails.
-- **BM25 non-standard + Recency 25%**: k1=1.65,b=0.68,idf=log((N+1)/(df+0.5))+1,title*2. Students compute `score1≈3.607` for `go go go` vs `go` with avg2, not 0.258 from standard. Recency test expects newer `created_at` 1h ago ranks above 7d ago with same BM25.
-- **Field + Namespace 20%**: `title:go` only title, `namespace:team-b`, `?namespace=team-a`, header `X-Namespace` override. Naive combined index fails.
-- **NEAR + Prefix/Fuzzy distance 15%**: `go NEAR/1 search` must reject distance 3 (`go big big search`), prefix `sea*` must scan all terms, fuzzy `sarch~0` exact only (0 total) vs `sarch~1` matches, `sarch~2` also matches, `sxxrch~` (dist 2+ ) no match.
-- **Highlight/Agg/Bulk/Stats/WAL 10%**: highlight `<em>` for prefix/fuzzy expanded terms, aggregations must include `top_terms` (top 5) and `namespaces`, bulk action `_id` precedence over doc `id`, WAL file `wal.log` with CRC32 `checksum` verified on replay, `DATA_FILE` env override, truncated recovery for both index.json and wal.log.
+Derived from downloaded trial CTRF artifacts. The one clean, granular reasoning failure is Opus's; the GPT-5.5 and Avocado losses are dominated by infrastructure and a build failure.
 
-**Why reasoning gaps, not setup:**
-- Build `go build -o /tmp/codimango/search-server .` — binary builds but logic wrong = reasoning.
-- Random free ports, dynamic IDs `c{thread}_{i}`, `bulk` IDs, truncation tests — deterministic but not hardcodeable.
-- BM25 exact with non-standard constants requires reading spec, not recalling standard 1.2/0.75.
+- **Opus 4.8 (agent) — 4/5, one real edge miss (72/73).** The single genuine failure was `test_empty_phrase_should_400`: the server correctly returns 400 for an empty phrase `q='""'` and `q='title:""'`, but a **whitespace-only phrase** `q='body:"   "'` returned **200** instead of 400. It validates truly-empty phrases but not phrases that tokenize to nothing. Everything else (BM25F, camelCase, namespace, NEAR, fuzzy distance, WAL, aggregations) passed.
+
+- **GPT-5.5 (codex) — 1/5, not a logic failure.** One clean trial passed all 73 tests; the other 4 losses were `status=error` infra flakes (Daytona `ThrottlerException` / harness errors). No granular test failures were produced.
+
+- **Avocado (metacode) — 0/5, did not deliver code.** 4 trials were `status=error` infra; the one completed trial failed the build entirely — `go build failed: no Go files in /app` → 0/73. Avocado never produced a compilable solution this run.
+
+- **Oracle — 3/3.** Reference solution passes every clean trial.
+
+**Assessment:** the task discriminates well on real trials — Oracle solves it, and Opus's only miss is a legitimate spec edge (whitespace-only phrase → 400). But this run's headline avgReward (0.53) is depressed by infrastructure flakiness (GPT-5.5's 4 error trials) and Avocado's failure to emit code, not by reasoning difficulty. The narrowest genuine gap worth noting for hardening/spec-clarity is empty-vs-whitespace phrase validation.
 
 ## Anti-Cheating & Novelty
 
