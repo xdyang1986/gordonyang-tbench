@@ -264,12 +264,23 @@ DELETE /documents/1
 # restart with WAL: doc2 persists, doc1 deleted persists via WAL replay if index.json deleted
 ```
 
-## 8. Failure Handling
+## 8. Failure Handling — Precise
 
-- 400 on invalid JSON, missing id, invalid limit/offset (<0 or not number), invalid operator (must be AND/OR), invalid field (unknown field name), invalid boost (not number or <=0), invalid NEAR (e.g., NEAR/abc), invalid fuzzy distance (e.g., ~abc), phrase empty.
-- 404 for missing doc.
-- Empty index: total 0, aggregations empty.
-- Operator case-insensitive, field names case-insensitive.
+- **400** on:
+  - Invalid JSON for any endpoint
+  - Missing id or empty id for POST /documents and bulk
+  - Invalid limit/offset: negative (<0) or non-numeric or float (e.g., `10.5`, `abc`) → 400
+  - Invalid operator: must be `AND` or `OR` case-insensitive, other values → 400
+  - Invalid field: field name not in `title, body, tags, namespace` → 400 (e.g., `unknownfield:go`)
+  - Invalid boost: not a number or <=0 (e.g., `go^abc`, `go^0`, `go^-1`) → 400
+  - Invalid NEAR: `NEAR/abc` non-numeric, `NEAR/-1` negative → 400
+  - Invalid fuzzy distance: `sarch~abc`, `go~xyz` non-numeric or negative → 400 (e.g., `sarch~abc`)
+  - **Empty phrase**: `""` (quotes empty), whitespace-only phrase `"   "`, field-specific empty phrase `title:""`, `title:"   "`, `body:""` → **400**. This is distinct from empty query.
+- **Empty query** (no `q` param, `q=""` empty string, or `q` with only whitespace) → **200** with match-all semantics (before tag/namespace filtering), not 400. Empty phrase `""` is inside quotes and is 400, while empty query without quotes is 200.
+- **404**: GET /documents/{id} and DELETE missing → `{"error":"not found"}`
+- **Empty index**: search total 0, results `[]`, aggregations `tags:{}, top_terms:[], namespaces:{}` with 200
+- **Operator and field names**: case-insensitive
+- **Limit clamping**: `limit>100` clamped to 100, not 400, with 200
 
 ## 9. Anti-Requirements
 
