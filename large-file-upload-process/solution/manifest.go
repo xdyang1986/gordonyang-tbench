@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,8 +17,8 @@ type ChunkInfo struct {
 	Index       int64  `json:"index"`
 	Offset      int64  `json:"offset"`
 	Size        int64  `json:"size"`
-	Checksum    string `json:"checksum"`               // SHA256 (always, or MD5 if algo=md5, or SHA256 if both)
-	ChecksumMD5 string `json:"checksum_md5,omitempty"` // MD5 if algo=md5 or both
+	Checksum    string `json:"checksum"`
+	ChecksumMD5 string `json:"checksum_md5,omitempty"`
 	Uploaded    bool   `json:"uploaded"`
 	Path        string `json:"path"`
 }
@@ -26,9 +29,9 @@ type Manifest struct {
 	SourceSize      int64       `json:"source_size"`
 	ChunkSize       int64       `json:"chunk_size"`
 	TotalChunks     int64       `json:"total_chunks"`
-	FileChecksum    string      `json:"file_checksum"`               // SHA256 or MD5 or SHA256 if both
-	FileChecksumMD5 string      `json:"file_checksum_md5,omitempty"` // MD5 if needed
-	ChecksumAlgo    string      `json:"checksum_algo"`               // sha256|md5|both
+	FileChecksum    string      `json:"file_checksum"`
+	FileChecksumMD5 string      `json:"file_checksum_md5,omitempty"`
+	ChecksumAlgo    string      `json:"checksum_algo"`
 	Chunks          []ChunkInfo `json:"chunks"`
 	CreatedAt       string      `json:"created_at"`
 	UpdatedAt       string      `json:"updated_at"`
@@ -125,7 +128,6 @@ func LoadManifest(path string) (*Manifest, error) {
 		return nil, fmt.Errorf("corrupted manifest: invalid fields")
 	}
 
-	// Defaults for older manifests
 	if m.ChecksumAlgo == "" {
 		m.ChecksumAlgo = "sha256"
 	}
@@ -147,61 +149,95 @@ func VerifyChunkFile(destDir string, chunk ChunkInfo, encryptKey string, checksu
 		return false, err
 	}
 
-	// If encrypted, on-disk size is same as original (XOR doesn't change size)
 	if info.Size() != chunk.Size {
 		return false, nil
 	}
 
-	// Read file, decrypt if needed, then checksum
-	data, err := os.ReadFile(chunkPath)
+	f, err := os.Open(chunkPath)
 	if err != nil {
 		return false, err
 	}
+	defer f.Close()
 
-	// Decrypt if key present
-	if encryptKey != "" {
-		data = XorEncryptDecrypt(data, encryptKey)
+	buf := make([]byte, 1024*1024)
+	decBuf := make([]byte, 1024*1024)
+
+	var shaH, md5H interface {
+		Write([]byte) (int, error)
+		Sum([]byte) []byte
 	}
 
-	// Verify checksums based on algo
-	switch checksumAlgo {
-	case "sha256":
+	if checksumAlgo == "sha256" || checksumAlgo == "both" || checksumAlgo == "" {
+		shaH = sha256.New()
+	}
+	if checksumAlgo == "md5" || checksumAlgo == "both" {
+		md5H = md5.New()
+	}
+
+	var offset int64 = 0
+	keyBytes := []byte(encryptKey)
+
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			var dataToHash []byte
+			if encryptKey != "" {
+				// Decrypt
+				for i := 0; i < n; i++ {
+					decBuf[i] = buf[i] ^ keyBytes[int((offset+int64(i))%int64(len(keyBytes)))]
+				}
+				dataToHash = decBuf[:n]
+			} else {
+				dataToHash = buf[:n]
+			}
+			if shaH != nil {
+				shaH.Write(dataToHash)
+			}
+			if md5H != nil {
+				md5H.Write(dataToHash)
+			}
+			offset += int64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return false, rerr
+		}
+	}
+
+	if checksumAlgo == "sha256" || checksumAlgo == "" {
 		if chunk.Checksum == "" {
 			return true, nil
 		}
-		actual := ComputeBytesSHA256(data)
+		actual := hex.EncodeToString(shaH.Sum(nil))
 		return actual == chunk.Checksum, nil
-	case "md5":
-		// In md5 mode, Checksum field holds md5
-		if chunk.Checksum == "" && chunk.ChecksumMD5 == "" {
-			return true, nil
-		}
+	}
+	if checksumAlgo == "md5" {
 		expected := chunk.Checksum
 		if expected == "" {
 			expected = chunk.ChecksumMD5
 		}
-		actual := ComputeBytesMD5(data)
+		if expected == "" {
+			return true, nil
+		}
+		actual := hex.EncodeToString(md5H.Sum(nil))
 		return actual == expected, nil
-	case "both":
+	}
+	if checksumAlgo == "both" {
 		if chunk.Checksum != "" {
-			actual := ComputeBytesSHA256(data)
+			actual := hex.EncodeToString(shaH.Sum(nil))
 			if actual != chunk.Checksum {
 				return false, nil
 			}
 		}
 		if chunk.ChecksumMD5 != "" {
-			actualMD5 := ComputeBytesMD5(data)
-			if actualMD5 != chunk.ChecksumMD5 {
+			actual := hex.EncodeToString(md5H.Sum(nil))
+			if actual != chunk.ChecksumMD5 {
 				return false, nil
 			}
 		}
 		return true, nil
-	default:
-		// Default sha256
-		if chunk.Checksum == "" {
-			return true, nil
-		}
-		actual := ComputeBytesSHA256(data)
-		return actual == chunk.Checksum, nil
 	}
+	return true, nil
 }
