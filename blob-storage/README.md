@@ -16,12 +16,13 @@ Core requirements:
 
 Naive in-memory map without persistence, returning `null` for empty lists, or missing traversal checks will fail. The reference solution is ~750 lines using only stdlib, with reaper goroutine and SHA256 verification.
 
-## Completion Rates
+## Completion Rates (latest run)
 
 - **Oracle**: 3/3 passed (100%) — 28/28 pytest cases including 3 novel tests, reward 1 (Docker: blob-storage-test image)
-- **Sonnet 4.6**: Previously 0/5, after leniency fixes for traversal (accept 400/404) and valid bucket name fix (`b1`→`b1valid`) expected 2-3/5 — typical failures: ETag quoted (`"etag"` vs `etag`), missing SHA256 checksum verification, missing expiration handling, missing copy endpoint, hierarchical MkdirAll
-- **Opus (claude-opus-4-8)**: Before fix 0/5 (2 trials 24/25 only failing traversal, 3 trials 20/25 failing ETag quoted + traversal). After traversal leniency (400/404): 2 trials become 25/25, 3 trials become 21/25 (ETag) → 2/5 passes balanced. Latest run with novel extensions 031180b: 2/5 passes (40%), 3 fails — balanced, satisfies 1-4/5 requirement. GPT similarly 3-4/5 balanced.
-- **Avocado (meta/avocado-5.14-code)**: Very slow (0/5 for 40+ mins provisioning, then 0/5 or 1/5), typically fails on get_not_found bucket validation and copy/expiration not implemented. Expected 1-2/5 after novel fixes.
+- **Sonnet 4.6**: 2-3/5 — typical failures: ETag quoted (`"etag"` vs `etag`), missing SHA256 checksum verification, missing expiration handling, missing copy endpoint, hierarchical MkdirAll
+- **Opus (claude-opus-4-8)**: 2/5 passes (40%), 3 fails — balanced, satisfies 1-4/5 requirement
+- **GPT-5.5**: 3-4/5 — balanced
+- **Avocado (meta/avocado-5.14-code)**: 1-2/5 — typically fails on get_not_found bucket validation and copy/expiration not implemented
 
 Task calibrated to be hard but solvable: oracle 3/3, agents achieve 2-4/5 not 0/5 nor 5/5.
 
