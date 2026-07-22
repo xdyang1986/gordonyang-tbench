@@ -60,7 +60,7 @@ Default chunk size: `8M` (8388608 bytes) — YouTube's recommended.
 - Checksum: streaming SHA256 — `io.Copy` through hash, chunk by chunk, not loading whole file.
 - Chunking: `io.Seek` + `io.ReadFull` with fixed buffer.
 
-Tests will grep your code for forbidden patterns AND test with 2GB+ sparse files to catch OOM.
+Tests enforce streaming behaviorally via memory limit (4096 MB) and large sparse file uploads (5GB+). Implementations loading entire file will OOM or timeout. Only chunk-sized buffers allowed.
 
 ### 4. Manifest Format (Resumable Upload)
 
@@ -130,12 +130,12 @@ Sparse file handling: Use `os.Stat` size, not reading to determine EOF. Seek mus
 - `validate --file <path>`: as described
 - `info --file <path>`: prints JSON to stdout:
   ```json
-  {"file": "/path", "size": 12345, "format": "mp4", "valid": true, "checksum": "sha256 hex (first 10MB or full? Compute full streaming)", "chunk_info": {"chunk_size": 8388608, "total_chunks": 2}}
+  {"file": "/path", "size": 12345, "format": "mp4", "valid": true, "checksum": "sha256 hex", "chunk_info": {"chunk_size": 8388608, "total_chunks": 2}}
   ```
-  If invalid format, valid=false and format is "unknown" or detected. Still prints size. Checksum can be computed for full file streaming (required). If <10MB compute full; requirement says full SHA256 anyway for integrity.
+  If invalid format, valid=false and format is "unknown". Still prints size and full file SHA256 streaming (required for integrity).
 
 - `upload` as above
-- `assemble --manifest <path> --output <path>`: manual assembly from manifest chunks (useful for testing). Reads manifest, concatenates chunks to output, verifies checksum if file_checksum present.
+- `assemble --manifest <path> --output <path>`: manual assembly from manifest chunks. Reads manifest, concatenates chunks to output streaming, verifies checksum if file_checksum present. On success print: `ASSEMBLE COMPLETE: <output_path>`
 
 All commands must handle `--help` / `-h` with usage.
 
@@ -158,11 +158,15 @@ All commands must handle `--help` / `-h` with usage.
 - Destination exists with partial chunks — resume correctly
 - Manifest corrupted JSON — start fresh with warning to stderr: `WARN: corrupted manifest, starting fresh`
 - Source file modified between resume attempts (size changed) — detect and error: `ERROR: source file changed since manifest creation (size mismatch)`
-- Unsupported format but magic matches known — should still validate as that known format if magic is clear? Actually require both extension AND magic to align OR magic alone if extension missing? Simplest: check extension first, if in supported list, then verify magic matches extension type; if extension not supported but magic matches supported type, accept as valid (report detected format). If neither matches, invalid.
+- Format resolution policy (clear):
+  1. Try magic-byte detection first (more reliable than extension). If magic matches a supported format, return that format as VALID, regardless of extension.
+  2. If magic does not match any supported format, then treat file as INVALID. If extension is supported but magic mismatches, output must be `INVALID: magic mismatch ...` (contain "magic mismatch").
+  3. If extension is unsupported and magic unknown, output `INVALID: unsupported format <ext>`.
+  This policy ensures magic takes precedence, and unsupported extension with valid magic still validates as detected format.
 - Chunk size parsing edge: `0`, `-1`, `abc`, `8MBB`, `9999G` (>1GB) should fail with "invalid chunk size"
-- Symlink source: follow link, validate target
+- Symlink source: `os.Stat` follows symlinks by default - validation should follow link and validate target file's magic and size. Create symlink test: `ln -s real.mp4 link.mp4` should validate as target's format.
 - Very large file simulation: tests will create 5GB sparse file via `truncate -s 5G file.mp4` + write magic bytes at start. Your code must handle this without trying to allocate 5GB.
-- 100s of GB scenario: similar, 100GB sparse file, chunk count = 100GB/8MB = 12800 chunks. Should handle calculation with int64 without overflow, and not OOM.
+- 100s of GB scenario: tests will create 10GB-20GB sparse files and verify info reports correct size and chunk count via `CalculateTotalChunks`. Must handle calculation with int64 without overflow, and not OOM. Example: 100GB/8MB = 12800 chunks, 500GB/8MB = 64000 chunks.
 
 ### 9. Expected File Layout After Success
 
@@ -183,13 +187,13 @@ Tests will run:
 
 ```bash
 cd /app
-go build -o /tmp/uploader .        # must build
-/tmp/uploader validate --file /tmp/test.mp4
+go build -o ./uploader .        # must build
+./uploader validate --file /tmp/test.mp4
 go run . validate --file /tmp/test.mp4
 go run . upload --source /tmp/big.mp4 --dest /tmp/dest --chunk-size 4M
 ```
 
-If `go run .` doesn't work, task fails.
+If `go run .` doesn't work, task fails. Binary should be built at `./uploader` in `/app` (avoid `/tmp/uploader` hardcoded path).
 
 ### What to Implement
 

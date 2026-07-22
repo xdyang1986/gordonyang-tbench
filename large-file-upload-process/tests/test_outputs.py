@@ -982,3 +982,66 @@ def test_info_invalid_file():
             info = json.loads(result.stdout)
             assert info["valid"] is False
             assert info["size"] == 0
+
+
+def test_symlink_handling():
+    """Test that symlink source is followed and validated as target"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # Create real video file
+        real = tmp / "real_video.mp4"
+        create_dummy_video(real, "mp4", size_bytes=2 * 1024 * 1024)
+        real_checksum = compute_sha256(real)
+
+        # Create symlink to real file
+        link = tmp / "link_video.mp4"
+        os.symlink(real, link)
+
+        # Validate symlink should succeed and report same format as real
+        result = run_uploader(["validate", "--file", str(link)], timeout=15)
+        assert result.returncode == 0, (
+            f"Symlink validation should succeed: {result.stderr}"
+        )
+        assert "VALID" in result.stdout
+        assert "mp4" in result.stdout.lower()
+
+        # Info on symlink should report size and checksum of target
+        result = run_uploader(["info", "--file", str(link)], timeout=15)
+        assert result.returncode == 0
+        info = json.loads(result.stdout)
+        assert info["valid"] is True
+        assert info["size"] == 2 * 1024 * 1024
+        assert info["checksum"] == real_checksum
+
+        # Upload via symlink should work
+        dest = tmp / "dest_symlink"
+        dest.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(link),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "1M",
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0, f"Upload via symlink failed: {result.stderr}"
+        assert (
+            (dest / "link_video.mp4").exists()
+            or (dest / "real_video.mp4").exists()
+            or len(list(dest.glob("*.mp4"))) > 0
+        )
+        # Final file checksum should match real file
+        final_files = list(dest.glob("*.mp4"))
+        # Filter out manifest json
+        final_video = None
+        for f in final_files:
+            if f.suffix == ".mp4" and not f.name.endswith(".manifest.json"):
+                if f.stat().st_size == real.stat().st_size:
+                    final_video = f
+                    break
+        assert final_video is not None
+        assert compute_sha256(final_video) == real_checksum
