@@ -435,3 +435,180 @@ def test_deterministic():
         ],
     )
     assert a == b == ["6,4,3,3"]
+
+
+def test_fuzz_random():
+    import random as _rnd
+
+    def allocate_batch(load, prio, mins, weights, caps, credits):
+        n = len(weights)
+        batch = [0] * n
+        if n == 0 or load <= 0:
+            for i in range(n):
+                if caps[i] > 0:
+                    if batch[i] > 0:
+                        credits[i] = credits[i] // 2 + 1
+                    else:
+                        credits[i] += weights[i]
+            return batch
+        order = sorted(range(n), key=lambda i: (-prio[i], i))
+        rem = load
+        for oi in order:
+            if rem == 0:
+                break
+            if caps[oi] <= 0:
+                continue
+            give = mins[oi]
+            if give > caps[oi]:
+                give = caps[oi]
+            if give > rem:
+                give = rem
+            batch[oi] += give
+            rem -= give
+        rem_cap = [caps[i] - batch[i] for i in range(n)]
+        alloc_w = [0] * n
+        credit_tmp = credits[:]
+        rem_w = rem
+        while rem_w > 0:
+            active = [i for i in range(n) if alloc_w[i] < rem_cap[i]]
+            if not active:
+                break
+            total = sum(credit_tmp[i] for i in active)
+            if total == 0:
+                while rem_w > 0:
+                    cur_active = [i for i in active if alloc_w[i] < rem_cap[i]]
+                    if not cur_active:
+                        break
+                    min_rem = min(rem_cap[i] - alloc_w[i] for i in cur_active)
+                    cycles = min(min_rem, rem_w // len(cur_active))
+                    if cycles > 0:
+                        for i in cur_active:
+                            alloc_w[i] += cycles
+                        rem_w -= cycles * len(cur_active)
+                    made = False
+                    for i in cur_active:
+                        if rem_w == 0:
+                            break
+                        if alloc_w[i] < rem_cap[i]:
+                            alloc_w[i] += 1
+                            rem_w -= 1
+                            made = True
+                    if not made:
+                        break
+                break
+            delta = [0] * n
+            used = 0
+            for i in active:
+                share = (rem_w * credit_tmp[i]) // total
+                if share > rem_cap[i] - alloc_w[i]:
+                    share = rem_cap[i] - alloc_w[i]
+                alloc_w[i] += share
+                delta[i] = share
+                used += share
+            if used == 0:
+                best = active[0]
+                for i in active[1:]:
+                    if credit_tmp[i] > credit_tmp[best]:
+                        best = i
+                alloc_w[best] += 1
+                delta[best] = 1
+                used = 1
+            rem_w -= used
+            for i in active:
+                if delta[i] > 0:
+                    credit_tmp[i] = credit_tmp[i] // 2 + 1
+                else:
+                    credit_tmp[i] += weights[i]
+        for i in range(n):
+            batch[i] += alloc_w[i]
+        for i in range(n):
+            if caps[i] > 0:
+                if batch[i] > 0:
+                    credits[i] = credits[i] // 2 + 1
+                else:
+                    credits[i] += weights[i]
+        return batch
+
+    def hier_multi(T, loads, groups, subs):
+        G = len(groups)
+        S = len(subs)
+        gp = [g[0] for g in groups]
+        gmin = [g[1] for g in groups]
+        gw = [g[2] for g in groups]
+        gc = [g[3] for g in groups]
+        gr = [g[4] for g in groups]
+        sg = [s[0] for s in subs]
+        sp = [s[1] for s in subs]
+        smin = [s[2] for s in subs]
+        sw = [s[3] for s in subs]
+        sc = [s[4] for s in subs]
+        sr = [s[5] for s in subs]
+        gtot = [0] * G
+        stot = [0] * S
+        gcred = [w for w in gw]
+        scred = [w for w in sw]
+        out = []
+        for t in range(T):
+            L = loads[t]
+            grem = [max(0, gc[g] - gtot[g]) for g in range(G)]
+            srem = [max(0, sc[s] - stot[s]) for s in range(S)]
+            seff = [srem[s] if sr[s] == 0 else min(srem[s], sr[s]) for s in range(S)]
+            sum_mem = [0] * G
+            for s in range(S):
+                if 0 <= sg[s] < G:
+                    sum_mem[sg[s]] += seff[s]
+            eff_g = [min(grem[g], sum_mem[g]) for g in range(G)]
+            for g in range(G):
+                if gr[g] > 0 and gr[g] < eff_g[g]:
+                    eff_g[g] = gr[g]
+            g_batch = allocate_batch(L, gp, gmin, gw, eff_g, gcred)
+            for g in range(G):
+                gtot[g] += g_batch[g]
+            sub_batch = [0] * S
+            for g in range(G):
+                idxs = [i for i in range(S) if sg[i] == g]
+                if not idxs or g_batch[g] <= 0:
+                    continue
+                mp = [sp[i] for i in idxs]
+                mmin = [smin[i] for i in idxs]
+                mw = [sw[i] for i in idxs]
+                mcap = [seff[i] for i in idxs]
+                mcred = [scred[i] for i in idxs]
+                alloc_in = allocate_batch(g_batch[g], mp, mmin, mw, mcap, mcred)
+                for lp, gi in enumerate(idxs):
+                    scred[gi] = mcred[lp]
+                    sub_batch[gi] = alloc_in[lp]
+            for s in range(S):
+                stot[s] += sub_batch[s]
+            out.append(sub_batch[:])
+        return out
+
+    _rnd.seed(2024)
+    for _ in range(20):
+        T = _rnd.randint(1, 3)
+        loads = [_rnd.randint(0, 30) for _ in range(T)]
+        G = _rnd.randint(1, 3)
+        groups = []
+        for _ in range(G):
+            p = _rnd.randint(0, 10)
+            mn = _rnd.randint(0, 3)
+            w = _rnd.randint(1, 8)
+            c = _rnd.randint(0, 20)
+            ra = _rnd.choice([0, 0, _rnd.randint(1, 10)])
+            groups.append((p, mn, w, c, ra))
+        S = _rnd.randint(1, G * 4 + 2)
+        subs = []
+        for _ in range(S):
+            gid = _rnd.randint(0, G - 1)
+            p = _rnd.randint(0, 10)
+            mn = _rnd.randint(0, 2)
+            w = _rnd.randint(1, 6)
+            c = _rnd.randint(0, 15)
+            ra = _rnd.choice([0, 0, _rnd.randint(1, 8)])
+            subs.append((gid, p, mn, w, c, ra))
+        expected_batches = hier_multi(T, loads, groups, subs)
+        expected_lines = [",".join(map(str, b)) for b in expected_batches]
+        got_lines = run_case(T, loads, groups, subs)
+        assert got_lines == expected_lines, (
+            f"fuzz mismatch T={T} loads={loads} groups={groups} subs={subs}\nGot {got_lines}\nExp {expected_lines}"
+        )
