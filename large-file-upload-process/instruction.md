@@ -123,10 +123,12 @@ Flags:
 - `--dest`: required, directory simulating remote storage (create if not exists)
 - `--chunk-size`: optional, default 8M
 - `--manifest`: optional, default `<dest>/<filename>.manifest.json`
-- `--parallel`: optional, int 1-32, default 4, number of concurrent upload workers. Must actually use goroutines (`go func`, `sync.WaitGroup`, channels). Sequential (1) must still work.
-- `--retries`: optional, int 0-10, default 3, number of retries for failed chunk upload with exponential backoff: `backoff = 100ms * 2^attempt` (e.g., 100ms, 200ms, 400ms). Must retry on transient errors (e.g., temp file write failure, checksum mismatch). Print `RETRY: chunk X attempt Y` to stderr on retry.
-- `--checksum`: optional, string `sha256` (default), `md5`, or `both`. If `md5`, use MD5 hex. If `both`, compute and store both SHA256 and MD5 per chunk and for final file. Manifest must contain appropriate fields.
-- `--encrypt-key`: optional, string key for XOR encryption. If provided, each chunk's bytes are XORed with key bytes cycling (`chunk_byte[i] XOR key[i % len(key)]`) before writing to dest. Must be streaming (not loading whole chunk for XOR? But chunk-sized XOR is okay, as chunk is limited to 1GB). On assembly, if manifest has encrypt_key, decrypt similarly. Final assembled file checksum should match source (decrypted).
+- `--parallel`: optional, int 1-32, default 4, number of concurrent upload workers. Must actually use goroutines (`go func`, `sync.WaitGroup`, channels, `sync.Mutex` for manifest). Sequential (1) must still work. Manifest must store `parallel` field.
+- `--retries`: optional, int 0-10, default 3, number of retries for failed chunk upload with exponential backoff: `backoff = 100ms * 2^attempt` (e.g., 100ms, 200ms, 400ms). Must retry on transient errors (e.g., temp file write failure, checksum mismatch). On each retry, print `RETRY: chunk X attempt Y backoff <duration>` to stderr (must contain `RETRY:`).
+- `--checksum`: optional, string `sha256` (default), `md5`, or `both`. If `md5`, file_checksum and chunk checksums are MD5 hex (32 chars). If `both`, manifest must store both SHA256 (64-char) in `file_checksum`/`checksum` and MD5 (32-char) in `file_checksum_md5`/`checksum_md5`. Final file verification checks both when algo=both.
+- `--encrypt-key`: optional, string key for XOR encryption. If provided, each chunk's bytes are XORed with key bytes cycling with chunk offset: `enc_byte[i] = orig[i] XOR key[(chunk_offset+i) % len(key)]` before writing to dest. Must be streaming with 1MB buffer. On assembly, if manifest has `encrypt_key`, decrypt similarly via XOR. Final assembled file checksum must match source (decrypted). If encrypt-key differs on resume, error `ERROR: encrypt key mismatch`.
+
+**Retry testing hook (documented for verification)**: For automated retry verification, honor env var `INJECT_FAIL_CHUNK`. When set to a chunk index (e.g., `INJECT_FAIL_CHUNK=0`), the upload of that chunk MUST fail on first attempt with synthetic transient error (e.g., `injected failure`), triggering retry+backoff and `RETRY:` log, then succeed on next attempt. This hook is part of retry feature and must be implemented to allow grading of retry logic without real I/O flakiness.
 
 Steps:
 1. Validate source file format (fail if invalid) - follow symlinks via os.Stat (which follows links by default)
@@ -163,9 +165,14 @@ Steps:
 10. After all chunks: assemble final file to `dest/<basename>` streaming
    - If encrypted, decrypt each chunk while assembling (XOR)
    - Use `io.Copy` with 1MB buffer, no loading all chunks
-11. Compute final checksum(s) of assembled file, compare to source checksum(s). If mismatch, fail `ERROR: final checksum mismatch`
-12. On success print: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <sha256> Chunks: <total> Parallel: <parallel> ChecksumAlgo: <algo>`
-    - If algo=both, include both checksums? Print at least sha256, but manifest has both.
+11. Compute final checksum(s) of assembled file streaming, compare to source checksum(s) based on algo. If mismatch, fail `ERROR: final checksum mismatch` (or `ERROR: final md5 mismatch` for md5).
+12. On success print:
+    - For algo=sha256: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <sha256> Chunks: <total> Parallel: <parallel> ChecksumAlgo: sha256`
+    - For algo=md5: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <md5> Chunks: <total> Parallel: <parallel> ChecksumAlgo: md5`
+    - For algo=both: `UPLOAD COMPLETE: <dest>/<filename> Size: <bytes> Checksum: <sha256> ChecksumMD5: <md5> Chunks: <total> Parallel: <parallel> ChecksumAlgo: both`
+    All fields must be present as specified; manifest must contain both checksums for both case.
+
+Resume capability: re-running upload with same args (including parallel, encrypt-key, checksum) should continue from where left, re-using manifest. Must handle parallel changes with WARN and checksum algo changes with WARN as defined in step 5.
 
 Resume capability: re-running upload with same args (including parallel, encrypt-key, checksum) should continue from where left.
 

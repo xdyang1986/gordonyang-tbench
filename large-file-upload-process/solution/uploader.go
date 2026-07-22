@@ -219,14 +219,14 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 
 				if encryptKey != "" {
 					var offsetInChunk int64 = 0
+					keyBytes := []byte(encryptKey)
 					for {
 						n, rerr := limited.Read(buf)
 						if n > 0 {
 							if writer != nil {
 								_, _ = writer.Write(buf[:n])
 							}
-							enc := XorEncryptDecrypt(buf[:n], encryptKey)
-							keyBytes := []byte(encryptKey)
+							enc := make([]byte, n)
 							for i := 0; i < n; i++ {
 								enc[i] = buf[i] ^ keyBytes[int((offsetInChunk+int64(i))%int64(len(keyBytes)))]
 							}
@@ -405,7 +405,11 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 		}
 	}
 
-	fmt.Printf("UPLOAD COMPLETE: %s Size: %d Checksum: %s Chunks: %d Parallel: %d ChecksumAlgo: %s\n", finalPath, sourceSize, fileChecksum, manifest.TotalChunks, parallel, checksumAlgo)
+	if checksumAlgo == "both" {
+		fmt.Printf("UPLOAD COMPLETE: %s Size: %d Checksum: %s ChecksumMD5: %s Chunks: %d Parallel: %d ChecksumAlgo: %s\n", finalPath, sourceSize, fileChecksum, fileChecksumMD5, manifest.TotalChunks, parallel, checksumAlgo)
+	} else {
+		fmt.Printf("UPLOAD COMPLETE: %s Size: %d Checksum: %s Chunks: %d Parallel: %d ChecksumAlgo: %s\n", finalPath, sourceSize, fileChecksum, manifest.TotalChunks, parallel, checksumAlgo)
+	}
 
 	return nil
 }
