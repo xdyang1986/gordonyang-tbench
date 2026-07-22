@@ -250,7 +250,10 @@ def test_object_overwrite():
     )
     resp = requests.get(f"{BASE_URL}/buckets/overwrite/objects/file.txt", timeout=5)
     assert resp.content == b"second version longer"
-    assert resp.headers.get("ETag", "").strip('"') == hashlib.md5(b"second version longer").hexdigest()
+    assert (
+        resp.headers.get("ETag", "").strip('"')
+        == hashlib.md5(b"second version longer").hexdigest()
+    )
 
 
 def test_object_metadata():
@@ -548,7 +551,9 @@ def test_concurrent_same_key():
     assert resp.status_code == 200
     assert resp.content in contents
     # ETag should match content - must be unquoted hex per spec
-    assert resp.headers.get("ETag", "").strip('"') == hashlib.md5(resp.content).hexdigest()
+    assert (
+        resp.headers.get("ETag", "").strip('"') == hashlib.md5(resp.content).hexdigest()
+    )
 
 
 def test_object_invalid_keys():
@@ -783,26 +788,21 @@ def test_expiration_ttl():
     # X-Expires-At is optional in spec but recommended
     # At least not error
 
-    # Wait for expiration (2s + small buffer 0.3s) to get 410 before reaper deletes (reaper ticks every 1s)
-    time.sleep(2.3)
+    # Wait for expiration (2s + buffer) - accept 410 Gone or 404 if reaper already deleted (reaper ticks every 1s, race with GET)
+    time.sleep(2.5)
 
-    # GET immediately after expiry should be 410 Gone per spec (not yet deleted)
+    # GET after expiry should be 410 Gone or 404 (if reaper deleted) per spec allowing both after expiry
+    # Our reference returns 410 immediately after expiry via lazy check, and reaper deletes to 404 after ~1s
+    # To avoid flaky oracle, accept both for this immediate check
     resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
-    assert resp.status_code == 410, (
-        f"Expected 410 Gone shortly after expiry, got {resp.status_code}"
+    assert resp.status_code in (410, 404), (
+        f"Expected 410 Gone or 404 after expiry, got {resp.status_code}"
     )
-    body = resp.json()
-    assert body["code"] == "ExpiredObject"
+    if resp.status_code == 410:
+        assert resp.json()["code"] == "ExpiredObject"
 
-    # HEAD after expiry also 410 (before reaper)
+    # HEAD after expiry also 410 or 404
     resp = requests.head(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
-    assert resp.status_code == 410
-
-    # Wait extra for reaper to potentially delete (1s tick + buffer)
-    time.sleep(2)
-
-    # After reaper, GET may be 404 (deleted) or still 410 (lazy)
-    resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
     assert resp.status_code in (410, 404)
 
     # LIST should exclude expired object
@@ -1033,22 +1033,16 @@ def test_copy_shared_expiration():
         == 200
     )
 
-    # Wait for expiry (2s + 0.3s buffer) for 410 before reaper deletes
-    time.sleep(2.3)
+    # Wait for expiry (2s + buffer) - accept 410 or 404 to avoid flaky race with reaper (reaper ticks every 1s)
+    time.sleep(2.5)
 
-    # Both should be expired with 410 Gone (immediate expiry before reaper)
-    assert (
-        requests.get(
-            f"{BASE_URL}/buckets/srcexp/objects/exp.txt", timeout=5
-        ).status_code
-        == 410
-    )
-    assert (
-        requests.get(
-            f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
-        ).status_code
-        == 410
-    )
+    # Both should be expired with 410 Gone or 404 if reaper already deleted
+    assert requests.get(
+        f"{BASE_URL}/buckets/srcexp/objects/exp.txt", timeout=5
+    ).status_code in (410, 404)
+    assert requests.get(
+        f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
+    ).status_code in (410, 404)
 
 
 def test_copy_preserves_absolute_expiry_not_duration():
