@@ -1435,6 +1435,7 @@ def test_wal_checksum_skip():
             "body": "",
             "tags": [],
         }
+        # Go's json.Marshal produces compact JSON without spaces, so use separators=(',',':') for exact match
         doc_json = json.dumps(doc_valid, separators=(",", ":")).encode()
         crc_val = binascii.crc32(doc_json) & 0xFFFFFFFF
         crc_hex = format(crc_val, "08x")
@@ -1445,7 +1446,7 @@ def test_wal_checksum_skip():
                 "checksum": crc_hex,
                 "ts": "2026-07-21T00:00:00Z",
             }
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
         # Craft doc with checksum of id only (wrong algorithm) — should be skipped (enforces CRC32 of doc, not id)
         doc_bad_algo = {"id": "bad_algo", "title": "bad algo", "body": "", "tags": []}
@@ -1459,7 +1460,7 @@ def test_wal_checksum_skip():
                 "checksum": bad_crc,
                 "ts": "2026-07-21T00:00:00Z",
             }
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
         # Append corrupted entry with obviously wrong checksum and invalid json
         with open(wal_file, "a") as f:

@@ -59,13 +59,13 @@ Per-field (title, body) positional inverted index (black-box verified via phrase
 BM25F with **non-standard parameters** (to reduce textbook memorization):
 
 - Constants `k1=1.65`, `b=0.68` (NOT standard 1.2/0.75)
-- IDF formula **non-standard**: `idf = log((N+1)/(df+0.5)) + 1` natural log with trailing +1, where `N=total docs`, `df=docs containing term in field (or union for default)`. This differs from standard `log(1+(N-df+0.5)/(df+0.5))` and includes +1.
+- IDF formula **non-standard**: `idf = log((N+1)/(df+0.5)) + 1` natural log with trailing +1, where `N=total docs`, `df=docs containing term in field f (per-field document frequency)`. Title field uses title df, body field uses body df. This differs from standard `log(1+(N-df+0.5)/(df+0.5))` and includes +1.
 - `fieldLen = tokens in field for doc after code-aware tokenization`, `avgFieldLen = total tokens in field across all docs / N` (minimum 1, per-field: avg title = total title tokens / N, avg body = total body tokens / N)
 - `scoreField = idf * (tf*(k1+1)) / (tf + k1*(1-b + b*fieldLen/avgFieldLen))`
-- For default (no field): `score = 2.0*scoreTitle + 1.0*scoreBody` — title weighted double (BM25F style, field boost). That is, title score multiplied by 2.0, body by 1.0, then sum.
-- For `title:`, `body:`: only that field's BM25F contributes (title or body).
+- For default (no field): `score = 2.0*scoreTitle + 1.0*scoreBody` — title weighted double (BM25F style). Title part uses title df and avgTitle, body part uses body df and avgBody, then combined.
+- For `title:` and `body:`: only that field's BM25F contributes (title uses title df/avg, body uses body df/avg).
 - For `tags:` and `namespace:`: fixed `1.0 * boost * recencyFactor`, no BM25.
-- For phrase, prefix, fuzzy, NEAR: sum expanded term BM25F scores within matching field(s) multiplied by boost.
+- For phrase, prefix, fuzzy, NEAR: sum expanded term BM25F scores within matching field(s) multiplied by boost, using per-field df as above.
 
 Recency decay — **novel**:
 
