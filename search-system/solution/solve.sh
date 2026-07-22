@@ -1302,32 +1302,36 @@ func (idx *Index) Search(rawQuery string, tagFilters []string, namespaceFilter s
 
 func highlightText(orig string, termsSet map[string]bool) string {
 	var sb strings.Builder
-	var buf strings.Builder
-	var bufOrig strings.Builder
-	flush := func() {
-		if buf.Len() == 0 {
+	var rawBuf strings.Builder
+
+	flushRaw := func() {
+		if rawBuf.Len() == 0 {
 			return
 		}
-		if termsSet[buf.String()] {
-			sb.WriteString("<em>")
-			sb.WriteString(bufOrig.String())
-			sb.WriteString("</em>")
-		} else {
-			sb.WriteString(bufOrig.String())
+		raw := rawBuf.String()
+		subs := splitCamelCase(raw)
+		for _, sub := range subs {
+			low := strings.ToLower(sub)
+			if termsSet[low] {
+				sb.WriteString("<em>")
+				sb.WriteString(sub)
+				sb.WriteString("</em>")
+			} else {
+				sb.WriteString(sub)
+			}
 		}
-		buf.Reset()
-		bufOrig.Reset()
+		rawBuf.Reset()
 	}
+
 	for _, r := range orig {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			buf.WriteRune(unicode.ToLower(r))
-			bufOrig.WriteRune(r)
+			rawBuf.WriteRune(r)
 		} else {
-			flush()
+			flushRaw()
 			sb.WriteRune(r)
 		}
 	}
-	flush()
+	flushRaw()
 	return sb.String()
 }
 GOENG
@@ -2158,7 +2162,7 @@ func (idx *Index) Stats() (int, int, float64, int) {
 		if ns == "" {
 			ns = "default"
 		}
-		nsSet[ns] = true
+		nsSet[strings.ToLower(ns)] = true
 	}
 	return docs, terms, avgdl, len(nsSet)
 }
@@ -2173,4 +2177,4 @@ GOMAIN
 
 go mod tidy
 go build -o /tmp/codimango/search-server .
-echo "novel oracle built — multi-tenant code search with recency, code-aware, NEAR, WAL, top-terms, namespaces"
+echo "novel oracle built — fixed highlight camelCase and namespace stats case-insensitive, 58 tests"

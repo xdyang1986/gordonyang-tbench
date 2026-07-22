@@ -1396,3 +1396,250 @@ def test_wal_checksum_skip():
             shutil.rmtree(custom_dir, ignore_errors=True)
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+def test_camelcase_acronym_highlighting(server):
+    base = server
+    post_doc(base, {"id":"cc_hl1","title":"GoSearchEngine","body":"Implements SearchEngine","tags":[]})
+    r = search_get(base, q="go", highlight=True)
+    assert r.status_code == 200 and r.json()["total"] == 1
+    hl = r.json()["results"][0].get("highlight", {})
+    assert "<em>" in json.dumps(hl), f"camelCase highlight for go should have <em>, got {hl}"
+
+    r = search_get(base, q="search", highlight=True)
+    hl = r.json()["results"][0].get("highlight", {})
+    assert "<em>" in json.dumps(hl)
+
+    r = search_get(base, q='"go search"', highlight=True)
+    hl = r.json()["results"][0].get("highlight", {})
+    assert json.dumps(hl).count("<em>") >= 2, f"phrase highlight should have >=2 <em>, got {hl}"
+
+    post_doc(base, {"id":"ac1","title":"IOError occurred","body":"","tags":[]})
+    r = search_get(base, q="io", highlight=True)
+    assert r.json()["total"] >= 1
+
+    post_doc(base, {"id":"ac2","title":"HTTPRequest handler","body":"","tags":[]})
+    r = search_get(base, q="http", highlight=True)
+    assert "ac2" in {x["id"] for x in r.json()["results"]}
+
+
+def test_namespace_stats_case_insensitive(server):
+    base = server
+    post_doc(base, {"id":"nsci1","title":"a","body":"","tags":[],"namespace":"Team-A"})
+    post_doc(base, {"id":"nsci2","title":"b","body":"","tags":[],"namespace":"team-a"})
+    post_doc(base, {"id":"nsci3","title":"c","body":"","tags":[],"namespace":"TEAM-B"})
+    r = requests.get(f"{base}/stats", timeout=5)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["docs"] == 3
+    assert j["namespaces"] == 2, f"Team-A and team-a should be one namespace, got {j['namespaces']}"
+
+
+def test_namespace_filtered_aggregations(server):
+    base = server
+    post_doc(base, {"id":"nfa1","title":"go","body":"","tags":["go"],"namespace":"team-a"})
+    post_doc(base, {"id":"nfa2","title":"go","body":"","tags":["java"],"namespace":"team-b"})
+    post_doc(base, {"id":"nfa3","title":"go","body":"","tags":["go","java"],"namespace":"team-a"})
+    r = requests.get(f"{base}/search", params={"q":"go","namespace":"team-a"}, timeout=5)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["total"] == 2
+    assert j.get("aggregations",{}).get("tags",{}).get("go") == 2
+    assert j.get("aggregations",{}).get("tags",{}).get("java") == 1
+    assert j.get("aggregations",{}).get("namespaces",{}).get("team-a") == 2
+    assert "team-b" not in j.get("aggregations",{}).get("namespaces",{})
+    r = requests.get(f"{base}/search", params={"q":"go"}, headers={"X-Namespace":"team-b"}, timeout=5)
+    assert r.json()["total"] == 1
+
+
+def test_wal_replay_delete_after_index_removal():
+    port = find_free_port()
+    custom_dir = "/tmp/wal_delete_test"
+    custom_file = os.path.join(custom_dir, "index.json")
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert wait_for_server(port, timeout=15)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        requests.post(f"{base}/documents", json={"id":"todel","title":"to delete","body":"","tags":[]}, timeout=5)
+        requests.delete(f"{base}/documents/todel", timeout=5)
+        time.sleep(0.5)
+        wal_file = os.path.join(custom_dir, "wal.log")
+        assert os.path.exists(wal_file)
+        os.remove(custom_file)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        port2 = find_free_port()
+        env2 = {**os.environ, "PORT": str(port2), "DATA_FILE": custom_file}
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port2, timeout=15)
+        base2 = f"http://127.0.0.1:{port2}"
+        r = requests.get(f"{base2}/documents/todel", timeout=5)
+        assert r.status_code == 404, f"deleted doc should stay deleted after WAL replay, got {r.status_code}"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_truncated_index_preserves_last_valid():
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert wait_for_server(port, timeout=15)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        for i in range(3):
+            requests.post(f"{base}/documents", json={"id":f"trunc{i}","title":f"valid doc {i}","body":"test","tags":[]}, timeout=5)
+        time.sleep(0.5)
+        data_file = os.path.join(DATA_DIR, "index.json")
+        assert os.path.exists(data_file)
+        with open(data_file, "r") as f:
+            content = f.read()
+        truncated = content[:-30]
+        with open(data_file, "w") as f:
+            f.write(truncated)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        port2 = find_free_port()
+        env2 = {**os.environ, "PORT": str(port2)}
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port2, timeout=15)
+        base2 = f"http://127.0.0.1:{port2}"
+        r = requests.get(f"{base2}/search", timeout=5)
+        assert r.status_code == 200
+        total = r.json().get("total",0)
+        assert total >= 1, f"truncated recovery should preserve at least 1 doc, got {total}"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_invalid_and_future_created_at(server):
+    base = server
+    post_doc(base, {"id":"inv1","title":"go","body":"","tags":[],"created_at":"not-a-date"})
+    post_doc(base, {"id":"future1","title":"go","body":"","tags":[],"created_at":"2099-12-31T23:59:59Z"})
+    post_doc(base, {"id":"valid1","title":"go","body":"","tags":[],"created_at":"2026-07-21T10:00:00Z"})
+    r = search_get(base, q="go")
+    assert r.status_code == 200
+    assert r.json()["total"] == 3
+    results = r.json()["results"]
+    scores = {x["id"]: x["score"] for x in results}
+    assert "inv1" in scores and "future1" in scores
+
+
+def test_post_body_overrides_get_params(server):
+    base = server
+    post_doc(base, {"id":"over1","title":"go search","body":"","tags":[],"namespace":"team-a"})
+    post_doc(base, {"id":"over2","title":"java search","body":"","tags":[],"namespace":"team-b"})
+    r = requests.get(f"{base}/search", params={"q":"java","namespace":"team-b"}, timeout=5)
+    assert r.json()["total"] == 1
+    resp = requests.post(f"{base}/search?q=java&namespace=team-b", json={"query":"go","namespace":"team-a"}, timeout=5)
+    assert resp.status_code == 200
+    j = resp.json()
+    assert j["total"] == 1 and j["results"][0]["id"] == "over1"
+
+
+def test_exact_response_keys(server):
+    base = server
+    post_doc(base, {"id":"key1","title":"go","body":"search","tags":["go"],"namespace":"default"})
+    r = search_get(base, q="go")
+    assert r.status_code == 200
+    j = r.json()
+    assert "total" in j and "results" in j and "aggregations" in j
+    res = j["results"][0]
+    for k in ["id","score","title","tags"]:
+        assert k in res
+    agg = j["aggregations"]
+    for k in ["tags","top_terms","namespaces"]:
+        assert k in agg
+    assert isinstance(res["score"], (int,float))
+
+
+def test_performance_scale(server):
+    base = server
+    n_docs = 500
+    for i in range(n_docs):
+        post_doc(base, {"id":f"scale{i}","title":f"doc {i} search engine go java","body":f"body content {i} with search term go","tags":["go","search"] if i%2==0 else ["java"]})
+    start = time.time()
+    for _ in range(100):
+        r = search_get(base, q="go search", limit=10)
+        assert r.status_code == 200
+    elapsed = time.time() - start
+    assert elapsed < 15, f"100 searches over 500 docs took {elapsed}s, too slow"
+    r = search_get(base, q="go", limit=100)
+    assert r.json()["total"] >= n_docs//2
+
+
+def test_regression_camelcase_highlight_subtokens(server):
+    base = server
+    post_doc(base, {"id":"reg_cc1","title":"GoSearchEngine","body":"","tags":[]})
+    r = search_get(base, q="go", highlight=True)
+    assert r.json()["total"] == 1
+    hl = r.json()["results"][0].get("highlight", {})
+    assert "<em>" in json.dumps(hl)
+
+    r = search_get(base, q='"go search"', highlight=True)
+    hl = r.json()["results"][0].get("highlight", {})
+    assert json.dumps(hl).count("<em>") >= 2
+
+
+def test_regression_namespace_stats_case_insensitive():
+    port = find_free_port()
+    custom_dir = "/tmp/ns_ci_test"
+    custom_file = os.path.join(custom_dir, "index.json")
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_file}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert wait_for_server(port, timeout=15)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        requests.post(f"{base}/documents", json={"id":"ns1","title":"a","body":"","tags":[],"namespace":"Team-A"}, timeout=5)
+        requests.post(f"{base}/documents", json={"id":"ns2","title":"b","body":"","tags":[],"namespace":"team-a"}, timeout=5)
+        time.sleep(0.5)
+        r = requests.get(f"{base}/stats", timeout=5)
+        assert r.status_code == 200
+        assert r.json()["namespaces"] == 1
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except:
+            pass
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
