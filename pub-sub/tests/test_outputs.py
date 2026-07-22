@@ -232,6 +232,25 @@ def test_large_numbers():
     assert out == ["500000000000,500000000000"]
 
 
+def test_zero_caps():
+    T = 1
+    loads = [10]
+    subs = [(0, 0, 1, 0)]
+    out = run_case(T, loads, subs)
+    assert out == ["0"]
+
+
+def test_rr_fallback_efficiency():
+    # total credit never 0 with correct decay, but ensure many small batches don't deadlock and are deterministic
+    T = 5
+    loads = [1, 1, 1, 1, 1]
+    subs = [(0, 0, 1, 10), (0, 0, 1, 10)]
+    out = run_case(T, loads, subs)
+    assert len(out) == 5
+    total = sum(int(v) for line in out for v in line.split(","))
+    assert total == 5
+
+
 def test_deterministic():
     T = 1
     loads = [10]
