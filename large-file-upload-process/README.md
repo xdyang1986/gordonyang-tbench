@@ -14,44 +14,27 @@ The starter skeleton compiles but panics with `TODO: implement...` for core logi
 
 **Why naive approach fails**: Loading a 100GB file via `os.ReadFile` OOMs. Using `int32` overflows at 2GB. Trusting extension without magic allows fake uploads. Without manifest atomic writes, resume corrupts. Without `Seek`, chunking reads entire file sequentially inefficiently.
 
-## Completion Rates
+## Completion Rates (online validation — commit 37aa7fa, 2026-07-22)
 
-Measured via `codimango bench run`:
+- **Oracle**: **3/3** — validated
+- **Opus 4.8 (agent)**: **1/5** — validated
+- **GPT-5.5 (codex)**: **1/5** — validated
+- **Avocado (metacode)**: **0/7** — failed
+- avgReward **0.43**, validation passing — a hard task; only Oracle solves it reliably.
 
-- **Oracle (reference solution)**: 3/3 passed (100%) – mean 1.0, ~3.5 min per trial (includes 20GB sparse upload)
-- **Sonnet 4.6 (claude-sonnet-4-6, 5 attempts)**: Estimated 1-2/5 pass – model often implements basic chunking but:
-  - Misses magic byte validation for all 10 formats (only checks extension)
-  - Fails to handle sparse files (uses ReadFile)
-  - Incorrect chunk size parsing (>1GB not rejected)
-  - Resume doesn't verify existing chunk checksums
-  - Forgets atomic manifest writes
-- **Opus (claude-opus-4-8, 5 attempts)**: Estimated 2-3/5 pass – better at magic bytes but still struggles with:
-  - Resume logic with corrupted manifest WARN handling
-  - Final checksum verification after assembly
-  - Accurate total chunks calculation for 5GB+ files with int64
-- **Avocado (meta/avocado_dvsc_tester, 5 attempts)**: Estimated 2/5 pass – similar to Opus, may miss edge cases like file exactly chunk size and 1-byte-larger.
+## Failure Analysis (latest run)
 
-Calibration target: Avocado or Opus should pass at least once AND fail at least once out of 5 – this task hits that sweet spot because resumable manifest logic and format detection are non-trivial but solvable.
+Derived from downloaded trial CTRF artifacts. Two distinct factors drive the low pass rates: genuine spec-compliance gaps and heavy infrastructure flakiness.
 
-## Model Analysis
+- **Infrastructure noise — the largest single factor.** A majority of non-passing trials across GPT-5.5 and Avocado were `status=error` (Daytona `ThrottlerException: Too Many Requests` / build-harness failures that score 0), not test failures. In their clean trials these models often passed, so the headline 1/5 and 0/7 overstate the true reasoning difficulty. Example: the GPT-5.5 validation job was 4× `status=error` + 1 clean pass; an Avocado job was 4× `status=error` + 3 clean passes.
 
-**Dominant failure modes observed in local experimentation (using manual skeleton)**:
+- **Opus 4.8 — genuine miss on the `assemble` output contract.** Both real completed failures failed *only* `test_assemble_command` (18/19). The model assembled the file correctly (right size 15,728,640 bytes, correct SHA256, 3 chunks) but printed `ASSEMBLED: <path> Size: ... Checksum: ... Chunks: 3` — the `UPLOAD COMPLETE` format — instead of the spec-mandated `ASSEMBLE COMPLETE: <output_path>` (instruction.md §138). A spec-reading / output-contract failure, not an algorithmic one.
 
-1. **Format validation incomplete (35% of failures)**: Model only checks file extension, not magic bytes. For example, returns VALID for `.mp4` file containing random data. Tests create fake files with correct magic for each of 10 formats and expect rejection when magic doesn't match.
+- **GPT-5.5 — genuine miss on the memory-efficiency scan.** Its one real completed failure failed *only* `test_memory_efficiency_code_scan` (16/17): the code tripped the forbidden whole-file-read check (`os.ReadFile` / `ioutil.ReadFile`) or lacked the required streaming patterns (`Seek`, `io.CopyBuffer`, `int64`).
 
-2. **Memory inefficiency (25% of failures)**: Using `os.ReadFile` or `io.ReadAll` on entire file. Our tests grep Go code for forbidden patterns and test with 5GB sparse file – if code tries to allocate file-size buffer, container OOMs or times out.
+- **Oracle — 3/3.** Reference solution passes every clean trial.
 
-3. **Chunk size parsing errors (15% of failures)**: Not handling `8MB` vs `8M` vs `512K` variations, or not rejecting `0`, `-5M`, `2G` (>1GB max) with required error message containing "invalid chunk size".
-
-4. **Resume / manifest bugs (15% of failures)**: Not verifying existing chunk checksums when resuming, not handling corrupted manifest JSON with WARN, not detecting source file size changed between resume attempts.
-
-5. **Assembly checksum mismatch (10% of failures)**: Forgetting to verify final assembled file SHA256 matches source, or failing to handle last chunk smaller than chunk size.
-
-**Why these are reasoning gaps, not setup issues**:
-- Format detection requires knowledge of binary signatures (EBML, RIFF, ftyp) – not in container hints
-- Streaming SHA256 requires understanding `io.CopyBuffer` + `sha256.New` + `io.LimitReader` + `Seek` composition
-- Sparse file handling requires using `Stat().Size()` and `Seek`, not reading to determine EOF
-- Tests are deterministic and oracle passes 3/3, so failures reflect implementation gaps.
+**Assessment:** the true discriminators observed are narrow (exact `assemble` success string; memory-efficiency code scan) rather than the deep streaming/format reasoning the task targets. Much of the low online pass rate is provisioning instability, not reasoning depth — the task is worth re-running to separate infra noise from real difficulty before treating 1/5–0/7 as its genuine hardness.
 
 ## Anti-Cheating Analysis
 
