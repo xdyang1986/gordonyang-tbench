@@ -566,11 +566,16 @@ def test_object_invalid_keys():
         resp = requests.put(
             f"{BASE_URL}/buckets/validbucket/objects/{key}", data=b"x", timeout=5
         )
-        # Must be blocked - 400 for invalid key or 404 if path cleaned to non-existent bucket/object
-        # Both 400 and 404 indicate the traversal was not allowed to escape
-        assert resp.status_code in (400, 404), (
-            f"Expected 400 or 404 for key {key}, got {resp.status_code}"
+        # Must be blocked with 400. Client libraries (requests) and Go ServeMux may normalize .. to parent,
+        # turning /objects/../escape into /buckets/validbucket/escape (bucket operation) -> InvalidBucketName,
+        # or keeping as object -> InvalidObjectKey. Both block traversal, so accept either code.
+        assert resp.status_code == 400, (
+            f"Expected 400 for key {key}, got {resp.status_code}"
         )
+        assert resp.json()["code"] in (
+            "InvalidObjectKey",
+            "InvalidBucketName",
+        ), f"Expected InvalidObjectKey or InvalidBucketName, got {resp.json()}"
 
     # This key contains ".." but normalizes within bucket (a/../b.txt -> b.txt)
     # HTTP clients and Go's ServeMux may normalize it before reaching handler.
@@ -778,20 +783,26 @@ def test_expiration_ttl():
     # X-Expires-At is optional in spec but recommended
     # At least not error
 
-    # Wait for expiration (2s + buffer)
-    time.sleep(3)
+    # Wait for expiration (2s + small buffer 0.3s) to get 410 before reaper deletes (reaper ticks every 1s)
+    time.sleep(2.3)
 
-    # GET after expiry should be 410 Gone (or 404 if reaper deleted)
+    # GET immediately after expiry should be 410 Gone per spec (not yet deleted)
     resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
-    assert resp.status_code in (410, 404), (
-        f"Expected 410 Gone or 404 after expiry, got {resp.status_code}"
+    assert resp.status_code == 410, (
+        f"Expected 410 Gone shortly after expiry, got {resp.status_code}"
     )
-    if resp.status_code == 410:
-        body = resp.json()
-        assert body["code"] == "ExpiredObject"
+    body = resp.json()
+    assert body["code"] == "ExpiredObject"
 
-    # HEAD after expiry also 410 or 404
+    # HEAD after expiry also 410 (before reaper)
     resp = requests.head(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
+    assert resp.status_code == 410
+
+    # Wait extra for reaper to potentially delete (1s tick + buffer)
+    time.sleep(2)
+
+    # After reaper, GET may be 404 (deleted) or still 410 (lazy)
+    resp = requests.get(f"{BASE_URL}/buckets/expirebucket/objects/temp.txt", timeout=5)
     assert resp.status_code in (410, 404)
 
     # LIST should exclude expired object
@@ -1022,16 +1033,22 @@ def test_copy_shared_expiration():
         == 200
     )
 
-    # Wait for expiry
-    time.sleep(3)
+    # Wait for expiry (2s + 0.3s buffer) for 410 before reaper deletes
+    time.sleep(2.3)
 
-    # Both should be expired (410 or 404)
-    assert requests.get(
-        f"{BASE_URL}/buckets/srcexp/objects/exp.txt", timeout=5
-    ).status_code in (410, 404)
-    assert requests.get(
-        f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
-    ).status_code in (410, 404)
+    # Both should be expired with 410 Gone (immediate expiry before reaper)
+    assert (
+        requests.get(
+            f"{BASE_URL}/buckets/srcexp/objects/exp.txt", timeout=5
+        ).status_code
+        == 410
+    )
+    assert (
+        requests.get(
+            f"{BASE_URL}/buckets/destexp/objects/exp-copy.txt", timeout=5
+        ).status_code
+        == 410
+    )
 
 
 def test_copy_preserves_absolute_expiry_not_duration():
@@ -1098,37 +1115,48 @@ def test_copy_preserves_absolute_expiry_not_duration():
 
 
 def test_copy_expired_source_before_reaper():
-    """Copying an expired source before reaper deletes it should return 410"""
+    """Copying an expired source before reaper deletes it should return 410, after reaper 404"""
     requests.put(f"{BASE_URL}/buckets/srcexp2", timeout=5)
     requests.put(f"{BASE_URL}/buckets/destexp2", timeout=5)
 
-    # Put with very short TTL 1 second
+    # Put with 2-second TTL to have more time for 410 check before reaper deletes
     resp = requests.put(
         f"{BASE_URL}/buckets/srcexp2/objects/short.txt",
         data=b"short lived",
-        headers={"X-Expire-After": "1"},
+        headers={"X-Expire-After": "2"},
         timeout=5,
     )
     assert resp.status_code in (200, 201)
 
-    # Wait to ensure expired, but before reaper necessarily deletes (reaper runs every 1s, but we test lazy expiration)
-    time.sleep(2)
+    # Wait 2.3s after PUT (0.3s after expiry) - should be expired but not yet reaped (reaper ticks every 1s)
+    time.sleep(2.3)
 
-    # Try to copy expired source - should be 410 Gone, not 200
+    # Try to copy expired source before reaper deletes - should be 410 Gone per spec (lazy expiration)
     resp = requests.post(
         f"{BASE_URL}/buckets/srcexp2/objects/short.txt/copy",
         json={"destBucket": "destexp2", "destKey": "should-not-exist.txt"},
         timeout=5,
     )
+    # Should be 410 Gone if lazy expiration is checked before file deletion
+    # If reaper already deleted (race), 404 is also acceptable as it still blocks copy
     assert resp.status_code in (410, 404), (
-        f"Copy of expired source should be 410 or 404, got {resp.status_code}"
+        f"Copy of expired source should be 410 Gone or 404 if reaped, got {resp.status_code}"
     )
+    if resp.status_code == 410:
+        assert resp.json()["code"] == "ExpiredObject"
 
     # Dest should not exist
     resp = requests.get(
         f"{BASE_URL}/buckets/destexp2/objects/should-not-exist.txt", timeout=5
     )
     assert resp.status_code == 404
+
+    # Wait extra for reaper to delete src
+    time.sleep(2)
+
+    # After reaper, src should be gone (404)
+    resp = requests.get(f"{BASE_URL}/buckets/srcexp2/objects/short.txt", timeout=5)
+    assert resp.status_code in (410, 404)
 
 
 def test_routing_folder_encoded_slash():
@@ -1194,15 +1222,14 @@ def test_routing_leading_slash_rejected():
     requests.put(f"{BASE_URL}/buckets/routebucket3", timeout=5)
 
     # Raw leading slash after /objects/ -> /buckets/b/objects//file.txt
-    # This is essentially empty segment + leading slash, should be 400 or 404
+    # This is empty segment + leading slash, must be 400 (wrapper checks raw RequestURI before ServeMux cleans)
     resp = requests.put(
         f"{BASE_URL}/buckets/routebucket3/objects//file.txt", data=b"x", timeout=5
     )
-    # Our wrapper should detect leading slash as invalid key and return 400
-    # ServeMux may redirect or clean, but we expect 400 or 404 blocking
-    assert resp.status_code in (400, 404), (
-        f"Expected 400/404 for leading slash, got {resp.status_code}"
+    assert resp.status_code == 400, (
+        f"Expected 400 for leading slash //file.txt, got {resp.status_code}"
     )
+    assert resp.json()["code"] == "InvalidObjectKey"
 
     # Encoded leading slash %2Ffile.txt decodes to /file.txt which starts with slash -> invalid 400
     resp = requests.put(
@@ -1318,10 +1345,11 @@ def test_routing_encoded_dotdot_rejected():
         resp = requests.put(
             f"{BASE_URL}/buckets/routebucket6/objects/{key}", data=b"x", timeout=5
         )
-        # Should be blocked as 400 or 404 (if cleaned to bucket operation)
-        assert resp.status_code in (400, 404), (
-            f"Expected 400/404 for encoded dot-dot key {key}, got {resp.status_code}"
+        # Must be blocked as 400 with explicit InvalidObjectKey (our wrapper checks raw decoded ..)
+        assert resp.status_code == 400, (
+            f"Expected 400 for encoded dot-dot key {key}, got {resp.status_code}"
         )
+        assert resp.json()["code"] == "InvalidObjectKey"
 
 
 def test_data_dir_fallback():
