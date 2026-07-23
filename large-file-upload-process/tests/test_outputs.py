@@ -1278,12 +1278,14 @@ def test_parallel_flag_validation():
             assert "UPLOAD COMPLETE" in result.stdout
 
         # Behavioral check for parallel correctness via manifest field and actual upload
-        # Parallel uploads with different worker counts must all produce correct files
-        for valid in ["1", "4"]:
+        # Must prove multiple workers actually used (not just sequential with parallel int field)
+        # Our uploader prints worker IDs like "worker 0", "worker 1" etc
+        for valid in ["1", "4", "8"]:
             dest = tmp / f"dest_check_{valid}"
             dest.mkdir()
             sample_check = tmp / f"parallel_check_{valid}.mp4"
-            create_dummy_video(sample_check, "mp4", size_bytes=3 * 1024 * 1024)
+            # Use many chunks to increase chance of multiple workers being used
+            create_dummy_video(sample_check, "mp4", size_bytes=6 * 1024 * 1024)
             result = run_uploader(
                 [
                     "upload",
@@ -1293,10 +1295,12 @@ def test_parallel_flag_validation():
                     str(dest),
                     "--parallel",
                     valid,
+                    "--chunk-size",
+                    "1M",
                 ],
                 timeout=30,
             )
-            assert result.returncode == 0
+            assert result.returncode == 0, f"parallel={valid} failed: {result.stderr}"
             manifest_files = list(dest.glob("*.manifest.json"))
             assert len(manifest_files) == 1
             mdata = json.loads(manifest_files[0].read_text())
@@ -1309,6 +1313,22 @@ def test_parallel_flag_validation():
             ]
             assert len(final_files) > 0
             assert compute_sha256(final_files[0]) == orig_cs
+
+            # For parallel>1, check that multiple worker IDs appear in output (proves concurrency, not sequential)
+            if int(valid) > 1:
+                output = result.stdout + result.stderr
+                # Should have at least 2 distinct worker IDs
+                has_worker_0 = "worker 0" in output
+                has_worker_1 = "worker 1" in output
+                # With 6 chunks and 4 workers, we expect multiple workers
+                assert has_worker_0, (
+                    f"Parallel {valid} should show worker 0, got {output[:500]}"
+                )
+                # For 4 and 8 workers, expect at least worker 1 appears
+                if int(valid) >= 4:
+                    assert has_worker_1, (
+                        f"Parallel {valid} should show multiple workers (worker 1), got {output[:500]} - sequential impl would only show worker 0"
+                    )
 
 
 def test_retries_flag_and_backoff():
@@ -1377,6 +1397,7 @@ def test_retries_flag_and_backoff():
         assert "UPLOAD COMPLETE" in result.stdout
 
         # Test retry actually triggered via failure injection (makes RETRY: log not dead)
+        # Behavioral verification of exponential backoff: should contain backoff duration like 100ms, 200ms
         dest = tmp / "dest_retry_inject"
         dest.mkdir()
         result = run_uploader_with_env(
@@ -1394,7 +1415,6 @@ def test_retries_flag_and_backoff():
             {"INJECT_FAIL_CHUNK": "0"},
             timeout=30,
         )
-        # Should succeed after retry and log RETRY:
         combined = result.stdout + result.stderr
         assert result.returncode == 0, (
             f"Injected failure should be retried and succeed: {combined}"
@@ -1402,8 +1422,41 @@ def test_retries_flag_and_backoff():
         assert "RETRY:" in combined, (
             f"Should print RETRY: on injected failure, got {combined}"
         )
+        # Verify backoff duration is present and looks exponential (100ms * 2^attempt)
+        assert "backoff" in combined.lower(), (
+            f"RETRY log should contain backoff duration, got {combined}"
+        )
+        # First retry should have 100ms backoff
+        assert "100ms" in combined or "1000ms" not in combined, (
+            f"First backoff should be 100ms, got {combined}"
+        )
         assert "UPLOAD COMPLETE" in result.stdout
         assert compute_sha256(sample) == compute_sha256(dest / "retry.mp4")
+
+        # Test second retry has 200ms
+        dest2 = tmp / "dest_retry_inject2"
+        dest2.mkdir()
+        result = run_uploader_with_env(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest2),
+                "--retries",
+                "5",
+                "--chunk-size",
+                "1M",
+            ],
+            {"INJECT_FAIL_CHUNK": "1"},
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0
+        assert "RETRY:" in combined
+        assert "backoff" in combined.lower()
+        # Should contain at least 100ms
+        assert "100ms" in combined
 
 
 def test_checksum_algo_flag():

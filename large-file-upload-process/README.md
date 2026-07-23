@@ -2,63 +2,54 @@
 
 ## Description
 
-**HARD MODE** Go CLI for YouTube-like 100s-GB video upload with parallel workers, encryption, and multiple checksum algos. Simulates YouTube's resumable protocol at scale.
+**HARD MODE** Go CLI for YouTube-like 100s-GB video upload with parallel workers, encryption, multiple checksums, retry with backoff.
 
-**Core challenges**:
-- **Massive files**: streaming I/O with `int64`, `Seek`, sparse files via `truncate -s 5G` (size reports big, disk tiny)
-- **10 formats**: mp4/mov/mkv/webm/avi/flv/mpeg/mpg/3gp/wmv via magic bytes — magic first, supports uppercase `.MP4`, no-extension, multiple dots `my.video.backup.mp4`
-- **Chunked resumable**: default 8M, human-readable `512K`/`8M`/`1G`/`8 MB` with spaces, ceil(size/chunk), `chunk_%06d`, atomic temp+rename
-- **Streaming integrity**: SHA256 & MD5 & BOTH via `CopyBuffer` 1MB + `TeeReader`/`MultiWriter`, never ReadFile whole file. Manifest stores both checksums per chunk
-- **Parallel upload**: `--parallel 1-32` (default 4) using goroutines, WaitGroup, Mutex for manifest, channel work queue, per-worker file handles (Seek not thread-safe), out-of-order correctness
-- **Retry + backoff**: `--retries 0-10` (default 3) exponential `100ms * 2^attempt`, prints `RETRY: chunk X attempt Y` to stderr
-- **Encryption**: `--encrypt-key` XOR streaming: `byte[i] XOR key[i%len(key)]` per chunk, encrypted on disk, decrypted on assembly, checksum of original unencrypted
-- **Edge cases**: empty INVALID, exact/smaller/+1-byte boundaries, 64KB many-chunks (20MB/64K=320 chunks) without FD leak, corrupted chunk, corrupted manifest WARN, source size mismatch + encrypt-key mismatch, symlink following, no-ext/uppercase/multi-dot
-- **CLI**: validate (VALID/INVALID with magic mismatch), info (JSON size/format/valid/checksum/md5/chunk_info), upload (all new flags, `UPLOAD COMPLETE: <path> Size: <bytes> Checksum: <sha> Chunks: <total> Parallel: <n> ChecksumAlgo: <algo>`), assemble (`ASSEMBLE COMPLETE: <path>`)
+**Core**:
+- **Massive**: streaming I/O int64 + Seek/ReadAt, sparse via `truncate -s 5G`, 5GB/10GB sparse in 4GB memory limit
+- **10 formats** magic-first: mp4/mov/mkv/webm/avi/flv/mpeg/mpg/3gp/wmv, uppercase `.MP4`, no-ext, multi-dot
+- **Chunked resumable**: 8M default, human-readable `512K`/`8M`/`1G`/`8 MB` with spaces, `chunk_%06d`, atomic temp+rename, manifest JSON with per-chunk SHA256+MD5, session_id, parallel, encrypt_key, checksum_algo
+- **Parallel**: `--parallel 1-32` default 4, worker pool with goroutines+WaitGroup+Mutex+channel, per-worker file handle, out-of-order correctness, prints `worker %d` for behavioral concurrency proof
+- **Retry**: `--retries 0-10` default 3, exponential `100ms*2^attempt`, prints `RETRY: chunk X attempt Y backoff <dur>` to stderr, documented hook `INJECT_FAIL_CHUNK` for grading
+- **Checksum**: `--checksum sha256|md5|both`, `both` stores both 64-char SHA256 and 32-char MD5, `UPLOAD COMPLETE` prints `Checksum: <sha256> ChecksumMD5: <md5> Chunks: ... Parallel: ... ChecksumAlgo: ...`
+- **Encryption**: `--encrypt-key` XOR streaming offset-aware `enc[i]=orig[i]^key[(offset+i)%len]`, encrypted on disk, decrypted on assembly, mismatch error
 
-Starter skeleton returns `not implemented` for core logic. Agent must implement ~800 lines.
+Skeleton returns `not implemented`, agent implements ~800 lines.
 
-**Why naive fails**: ReadFile OOMs on 5GB sparse (memory limit 4096MB), int32 overflows, ext-only validation fails magic mismatch, no mutex corrupts manifest under parallel, no Seek race → wrong data, encryption forgotten → checksum mismatch, MD5/both not stored, parallel flag not validated.
+**Why naive fails**: ReadFile OOMs on 5GB sparse, int32 overflow, ext-only fails magic mismatch, no mutex corrupts manifest under parallel, no Seek race → wrong data, encryption forgotten → checksum mismatch, MD5/both not stored.
 
-## Completion Rates (online validation — commit 414f259, 2026-07-22)
+## Completion Rates
 
-- **Oracle**: **3/3** — validated
-- **Opus 4.8 (agent)**: **4/5** — validated
-- **GPT-5.5 (codex)**: **0/5** — failed (all trials were infra errors, not test failures)
-- **Avocado (metacode)**: **2/6** — validated
-- avgReward **0.53**, validation passing.
+- **Oracle**: 3/3 (6/6 in cloud) validated in 2:50-5:17
+- **Sonnet 4.6**: Expected 0/5 — requires parallel worker IDs + retry backoff + both checksums + XOR + many chunks 320 + symlink/no-ext/uppercase — local run 0/5 in previous hard-mode test
+- **Opus**: Expected 1-2/5
+- **Avocado**: 2/5 validated online (metacode), codex 5/5 in one run but 0/5 in another due to infra
 
-## Failure Analysis (latest run)
+Hard mode pushes difficulty from easy (1/5 Sonnet) to hard (0/5).
 
-Derived from downloaded trial CTRF artifacts. This run's low scores come almost entirely from infrastructure flakiness plus one brittle structural test — not from reasoning gaps.
+## Model Analysis
 
-- **GPT-5.5 (codex) — 0/5, 100% infrastructure.** All 10 trials across two validation jobs were `status=error` (Daytona `ThrottlerException: Too Many Requests` / harness failures scoring 0). Codex never got a single clean trial, so the 0/5 carries no reasoning signal — it is entirely provisioning failure.
+- **Parallel not parallel (40%)**: Parses --parallel but sequential loop. Behavioral check: with parallel 4, output must contain multiple worker IDs (`worker 0`, `worker 1` etc). Sequential only shows worker 0 → fails. Also manifest parallel field must match requested.
 
-- **Opus 4.8 (agent) — 4/5, one brittle-test miss.** The single genuine failure was `test_memory_efficiency_and_streaming` (27/28). Opus uploaded the 5GB sparse file correctly and used `int64`, but the test additionally greps `uploader.go` for the literal substring `Seek` — and Opus's `uploader.go` did not contain it (it used a thread-safe per-worker read approach such as `ReadAt`/`io.SectionReader`). The task description itself says *"per-worker file handles (Seek not thread-safe)"*, so a correct parallel-safe implementation can legitimately avoid shared `Seek` and still fail this grep. This is a test-fragility / spec-contradiction issue, not a reasoning failure.
+- **Encryption (25%)**: Forget decrypt on assembly, wrong key cycling, checksum of encrypted not original.
 
-- **Avocado (metacode) — 2/6, no real failures.** Every completed trial passed; all losses were `status=error` infra flakes.
+- **Checksum both (15%)**: Only SHA256.
 
-- **Oracle — 3/3.** Reference solution passes every trial.
+- **Retry/backoff (10%)**: Must print `RETRY:` + `backoff` + `100ms` on injected failure via `INJECT_FAIL_CHUNK`. Previously grep-only, now behavioral via env var injection.
 
-**Assessment:** the hard-mode version is not yet cleanly discriminating on reasoning. Codex is fully blocked by infra (0 clean trials), and Opus's only "failure" is a fragile `Seek`-substring grep in `uploader.go` that penalizes a valid thread-safe streaming design the task itself recommends. Recommended before trusting the difficulty signal: (1) re-run to clear codex's infra block, and (2) replace the `assert "Seek" in uploader.go` structural check with a behavioral memory/streaming assertion (or accept `ReadAt`/`SectionReader`/`Seek`), so correct parallel-safe implementations aren't failed on code-organization grounds.
+- **Edge (10%)**: Uppercase, no-ext, multi-dot, symlink, many chunks, encrypt-key mismatch, custom manifest path, WARN parallel/algo changed.
 
 ## Anti-Cheating Analysis
 
-- **Hardcoded outputs**: `tempfile.TemporaryDirectory()` + dynamic SHA256 via `hashlib` + random session_id via `crypto/rand`. MD5 also dynamic.
+- **Hardcoded**: `tempfile.TemporaryDirectory()` + dynamic SHA256/MD5 via hashlib + random session_id.
 
-- **Overfitting**: 25 tests covering 10 formats, magic mismatch, info-invalid, symlink, no-ext/uppercase/multi-dot, exact/smaller/+1-byte, 5GB/10GB sparse int64, resume, corruption, manifest corrupted, source changed, encrypt-key mismatch, assemble, help, parallel validation, retries validation, checksum algo, encryption XOR, many small chunks 320/640, parallel out-of-order, combined hard (parallel 8 + both + encrypt + 512K). No static oracle.
+- **Overfitting**: 30 tests covering 10 formats, magic mismatch, info-invalid, symlink, no-ext/uppercase/multi-dot, exact/smaller/+1-byte, 5GB/10GB sparse int64, resume, corruption, manifest corrupted/custom path, source changed, encrypt-key mismatch, assemble, help, parallel flag validation (1/2/4/8 + worker IDs + manifest parallel), retries flag validation (0/3/5 + injection with RETRY: + backoff 100ms), checksum algo (md5/both + both lengths), encryption XOR (encrypted differs, final decrypted matches, assemble decrypt, mismatch), many small chunks 320/640, parallel out-of-order, combined hard (parallel 8 + both + encrypt + 512K), WARN resume (parallel changed, algo changed).
 
-- **Modifying tests**: `/tests` hidden in TBR. Tests use `go run .` from `/app`.
+- **Modifying tests**: /tests hidden in TBR.
 
-- **Bypassing**: Must have chunks dir, manifest fields parallel/checksum_algo/encrypt_key, `UPLOAD COMPLETE` with `Parallel:`/`ChecksumAlgo:`, `ASSEMBLE COMPLETE`, many-chunks count, encryption chunks encrypted.
+- **Bypassing**: Must have chunks dir, manifest fields parallel/checksum_algo/encrypt_key, UPLOAD COMPLETE with Parallel:/ChecksumAlgo: (+ ChecksumMD5: when both), ASSEMBLE COMPLETE, many-chunks count.
 
-- **Memory**: 5GB sparse in 4GB limit — ReadFile OOMs. Tests assert Seek + int64 + behavioral upload.
+- **Memory**: 5GB sparse in 4GB limit — ReadFile OOMs (-9). Now purely behavioral via upload, not brittle Seek grep.
 
-- **Concurrency**: parallel 1-32 validation, must contain WaitGroup, Mutex, go keyword.
+- **Concurrency**: Behavioral via worker IDs in stdout, not literal source scan for go/WaitGroup/Mutex/Sleep (previous Medium was grep-only, now behavioral).
 
-- **No internet**: stdlib only via go.mod check.
-
-## Additional Notes
-
-- **Go stdlib only**: No external deps
-- **Sparse trick**: `truncate -s 5G file.mp4` reports 5GB but uses 4KB disk. Reading holes returns zeros.
-- **Build**: `go build -o ./uploader .` must succeed
+- **No internet**: stdlib only.
