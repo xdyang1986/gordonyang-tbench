@@ -303,8 +303,20 @@ def test_chunk_size_parsing():
                 f"Chunk size {cs} should be valid: {result.stderr}"
             )
 
-        # Invalid sizes - must contain "invalid chunk size" in output
-        invalid_cases = ["0", "0M", "-1M", "abc", "2G", "9999G", "8MBB", ""]
+        # Invalid sizes - includes <1KB min per hard spec
+        invalid_cases = [
+            "0",
+            "0M",
+            "-1M",
+            "abc",
+            "2G",
+            "9999G",
+            "8MBB",
+            "512",
+            "512B",
+            "100",
+            "",
+        ]
         for cs in invalid_cases:
             if cs == "":
                 # Empty case might use default, skip
@@ -910,6 +922,28 @@ def test_manifest_custom_path():
         assert result.returncode == 0
         assert "ASSEMBLE COMPLETE" in result.stdout
         assert output.exists()
+
+
+def test_dest_is_file_and_source_is_dir():
+    """Test handling when dest exists as file and source is directory"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "sample.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=1 * 1024 * 1024)
+        dest_file = tmp / "dest_as_file"
+        dest_file.write_text("I am a file, not dir")
+        result = run_uploader(
+            ["upload", "--source", str(sample), "--dest", str(dest_file)], timeout=15
+        )
+        assert result.returncode != 0, "Dest as file should error"
+        src_dir = tmp / "src_dir"
+        src_dir.mkdir()
+        dest = tmp / "dest2"
+        dest.mkdir()
+        result = run_uploader(
+            ["upload", "--source", str(src_dir), "--dest", str(dest)], timeout=15
+        )
+        assert result.returncode != 0, "Source as directory should error"
 
 
 def test_assemble_command():
