@@ -29,25 +29,31 @@ Naive approach fails because:
 - No prefix/fuzzy distance param → `sarch~0` should be exact only, `sarch~2` should match.
 - Missing top_terms, WAL replay, highlight, bulk precedence.
 
-## Completion Rates (online validation — commit fe5d696, 2026-07-22)
+## Completion Rates (online validation — commit e97166d, 2026-07-23)
 
 - Oracle: **3/3** — validated
 - Opus 4.8 (agent): **4/5** — validated
-- GPT-5.5 (codex): **1/5** — validated
-- Avocado (metacode): **0/5** — failed
-- avgReward **0.53**, validation passing.
+- GPT-5.5 (codex): **3/5** — validated
+- Avocado (metacode): **1/5** — validated
+- avgReward **0.52**, validation passing — well-calibrated: all models land 1-4/5 on genuine reasoning failures (minimal infra noise this run).
 
 ## Failure Analysis (latest run)
 
-Derived from downloaded trial CTRF artifacts. The one clean, granular reasoning failure is Opus's; the GPT-5.5 and Avocado losses are dominated by infrastructure and a build failure.
+Derived from downloaded trial CTRF artifacts. This was a **clean run** — every failing trial was `status=completed` with real test failures (not infra), so the signal is genuine. All 7 failures across the four tracks cluster on three areas:
 
-- **Opus 4.8 (agent) — 4/5, one real edge miss (72/73).** The single genuine failure was `test_empty_phrase_should_400`: the server correctly returns 400 for an empty phrase `q='""'` and `q='title:""'`, but a **whitespace-only phrase** `q='body:"   "'` returned **200** instead of 400. It validates truly-empty phrases but not phrases that tokenize to nothing. Everything else (BM25F, camelCase, namespace, NEAR, fuzzy distance, WAL, aggregations) passed.
+- **`test_wal_checksum_skip` — the dominant discriminator (5 of 7 failing trials, hit by every model).** Opus, GPT-5.5, and Avocado each lost at least one trial to *only* this test (72/73). The WAL must use exact **CRC32-IEEE** over the canonical record serialization ("not any self-consistent hash"): the test crafts a WAL line with a Python `binascii.crc32` checksum and requires it to replay, and a wrong-checksum line to be skipped. Implementations that use a self-consistent scheme (own serialization / field order / polynomial) pass their own round-trip but reject the externally-valid line → fail. This is a cross-tool interoperability requirement, and it is the single most common miss.
 
-- **GPT-5.5 (codex) — 1/5, not a logic failure.** One clean trial passed all 73 tests; the other 4 losses were `status=error` infra flakes (Daytona `ThrottlerException` / harness errors). No granular test failures were produced.
+- **Boolean query precedence (GPT-5.5, 1 trial, 69/73).** Failed `test_search_boolean_with_explicit_operators`, `test_search_boolean_with_parentheses`, `test_search_bool_or_precedence`, and `test_complex_bool_field_phrase_prefix` — explicit AND/OR/NOT with parentheses and precedence (`NOT > NEAR = AND > OR`) not implemented correctly.
 
-- **Avocado (metacode) — 0/5, did not deliver code.** 4 trials were `status=error` infra; the one completed trial failed the build entirely — `go build failed: no Go files in /app` → 0/73. Avocado never produced a compilable solution this run.
+- **Input validation → 400 (Avocado, 1 trial, 68/73).** Failed `test_invalid_field_should_400`, `test_invalid_boost_should_400`, `test_invalid_near_should_400`, `test_invalid_fuzzy_distance_should_400`, and `test_empty_phrase_should_400` — malformed queries were not rejected with HTTP 400.
 
-- **Oracle — 3/3.** Reference solution passes every clean trial.
+**Per-model:**
+- **Opus 4.8 (agent) — 4/5.** Single loss: `test_wal_checksum_skip` only.
+- **GPT-5.5 (codex) — 3/5.** Two losses: one `test_wal_checksum_skip`, one boolean-precedence cluster.
+- **Avocado (metacode) — 1/5.** Four losses: three `test_wal_checksum_skip`, one 400-validation cluster.
+- **Oracle — 3/3.** Reference solution passes every trial.
+
+**Assessment:** this commit is well-calibrated (Oracle 3/3, models 1-4/5, real reasoning failures, little infra noise). The WAL CRC32-IEEE interoperability requirement is doing most of the discriminating work — legitimately, since it demands standard-conformant checksumming rather than a private hash.
 
 **Assessment:** the task discriminates well on real trials — Oracle solves it, and Opus's only miss is a legitimate spec edge (whitespace-only phrase → 400). But this run's headline avgReward (0.53) is depressed by infrastructure flakiness (GPT-5.5's 4 error trials) and Avocado's failure to emit code, not by reasoning difficulty. The narrowest genuine gap worth noting for hardening/spec-clarity is empty-vs-whitespace phrase validation.
 
