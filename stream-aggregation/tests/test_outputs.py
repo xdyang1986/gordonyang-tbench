@@ -1119,5 +1119,169 @@ QUERY w k0 0 103
     assert r.returncode == 0
     out = lines(r.stdout)
     assert out[0] == "OK"
-    # k0 gets values 0,5,10,...95 => 20 values sum = 5*(0+19)*20/2? Actually 0+5+...+95 =5*(0+...+19)=5*190=950
+    # k0 gets values 0,5,10,...95 => 20 values sum = 5*(0+...+19)*20/2? Actually 0+5+...+95 =5*(0+...+19)=5*190=950
     assert out[1] == "950"
+
+
+def test_allowed_lateness_basic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+SET_ALLOWED_LATENESS s 5 1
+INGEST s k 10 5 2
+ADVANCE_WATERMARK s 10 3
+QUERY w k 0 4
+INGEST s k 20 6 5
+QUERY w k 0 6
+INGEST s k 5 3 7
+QUERY w k 0 8
+"""
+    r = run(stdin)
+    # watermark 10 closes [0,10) sum10
+    # allowed lateness 5, so late boundary = wm - L = 10-5=5, et<=5 late
+    # ingest 6: 6>5 allowed late, updates closed window [0,10) sum becomes 30
+    # ingest 3: 3<=5 late -> LATE
+    assert lines(r.stdout) == ["OK", "10", "OK", "30", "LATE", "30"]
+
+
+def test_allowed_lateness_batch():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+SET_ALLOWED_LATENESS s 5 1
+INGEST s k 10 5 2
+ADVANCE_WATERMARK s 10 3
+INGEST_BATCH s 2 k 20 6 k 30 8 4
+QUERY w k 0 5
+INGEST_BATCH s 2 k 5 3 k 10 4 6
+QUERY w k 0 7
+"""
+    r = run(stdin)
+    # first batch: events 6,8 both >5 allowed -> OK sum 10+20+30=60
+    # second batch contains et 3 <=5 late -> whole batch LATE, none applied
+    assert lines(r.stdout) == ["OK", "OK", "60", "LATE", "60"]
+
+
+def test_allowed_lateness_persist(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_STREAM s 0\nDEFINE_TUMBLING_WINDOW w s 10 SUM 1\nSET_ALLOWED_LATENESS s 5 1\nINGEST s k 10 5 2\nADVANCE_WATERMARK s 10 3\n",
+        state_dir=d,
+    )
+    r = run("INGEST s k 20 6 4\nQUERY w k 0 5\n", state_dir=d)
+    assert lines(r.stdout) == ["OK", "30"]
+
+
+def test_allowed_lateness_sliding():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SLIDING_WINDOW w s 10 5 SUM 1
+SET_ALLOWED_LATENESS s 5 1
+INGEST s k 10 0 2
+ADVANCE_WATERMARK s 10 3
+INGEST s k 20 5 4
+QUERY w k 0 5
+QUERY w k 5 6
+"""
+    r = run(stdin)
+    # first event 0 in [0,10) sum10, wm10 closes [0,10)
+    # second event 5 with allowed lateness 5: W-L=5, et=5 <=5? 5<=5 late according to <=, so should be LATE? Our spec says <= W-L is late, so 5 <=5 late -> LATE not allowed. But we want 5 to be allowed? Let's check implementation: late if et <= W-L, so 5 <=5 true -> LATE. So second ingest should be LATE.
+    # To make it allowed, use et=6.
+    # This test uses et=5 which would be LATE with our <= definition, so we expect LATE and sums unchanged.
+    # For sliding, [0,10) remains 10, [5,15) not closed
+    assert lines(r.stdout) == ["OK", "LATE", "10", "NULL"]
+
+
+def test_purge_basic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST s k 10 1 1
+INGEST s k 20 11 2
+ADVANCE_WATERMARK s 20 3
+QUERY w k 0 4
+QUERY w k 10 5
+PURGE s 10 6
+QUERY w k 0 7
+QUERY w k 10 8
+LIST_STREAMS 9
+"""
+    r = run(stdin)
+    # after purge up_to 10: events <10? event 1 <10 removed, event 11 kept. Aggregates where end<=10: window [0,10) end10 <=10 purged -> NULL, window [10,20) end20 >10 kept -> 20
+    assert lines(r.stdout) == ["OK", "OK", "10", "20", "NULL", "20", "s"]
+
+
+def test_purge_session():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW w s 10 SUM 1
+INGEST s k 10 0 1
+INGEST s k 20 5 2
+INGEST s k 5 30 3
+ADVANCE_WATERMARK s 15 4
+QUERY w k 0 5
+PURGE s 10 6
+ADVANCE_WATERMARK s 40 7
+QUERY w k 0 8
+QUERY w k 30 9
+"""
+    r = run(stdin)
+    # session [0,15) sum30 (0:10,5:20), second [30,40) sum5
+    # purge up_to10 removes events <10 (0,5) and rebuilds: remaining event 30 only -> session [30,40) sum5, first gone, second not yet closed until wm40
+    assert lines(r.stdout) == ["OK", "OK", "OK", "30", "NULL", "5"]
+
+
+def test_purge_then_ingest():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST s k 10 5 1
+ADVANCE_WATERMARK s 20 2
+PURGE s 10 3
+INGEST s k 20 25 4
+ADVANCE_WATERMARK s 30 5
+QUERY w k 20 6
+"""
+    r = run(stdin)
+    # purge removes first event (5) and window0 (end10), second event 25 in window20 sum20
+    assert lines(r.stdout) == ["OK", "OK", "20"]
+
+
+def test_purge_persist(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_STREAM s 0\nDEFINE_TUMBLING_WINDOW w s 10 SUM 1\nINGEST s k 10 1 1\nINGEST s k 20 11 2\nADVANCE_WATERMARK s 20 3\nPURGE s 10 4\n",
+        state_dir=d,
+    )
+    r = run("QUERY w k 0 5\nQUERY w k 10 6\n", state_dir=d)
+    assert lines(r.stdout) == ["NULL", "20"]
+
+
+def test_compact_preserves_lateness_and_purge(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_STREAM s 0\nDEFINE_TUMBLING_WINDOW w s 10 SUM 1\nSET_ALLOWED_LATENESS s 5 1\nINGEST s k 10 5 2\nADVANCE_WATERMARK s 10 3\nINGEST s k 20 6 4\nPURGE s 5 5\n",
+        state_dir=d,
+    )
+    # events: 5 at time5, but purge up_to5 removes events <5 (none, since 5 not <5), so both events remain? Actually 5 stays, 6 stays
+    # after purge, window0 should have both 10+20=30? Let's see: purge up_to5 deletes events <5 none, but aggregates where end<=5 none (window [0,10) end10>5)
+    # So query should be 30 after compact
+    run("COMPACT 6\n", state_dir=d)
+    r = run("QUERY w k 0 7\n", state_dir=d)
+    assert lines(r.stdout) == ["30"]
+
+
+def test_invalid_allowed_lateness():
+    cases = [
+        "SET_ALLOWED_LATENESS s -1 0\n",
+        "SET_ALLOWED_LATENESS s 10 -1\n",
+        "SET_ALLOWED_LATENESS missing 5 0\n",
+        "PURGE s -1 0\n",
+        "PURGE missing 10 0\n",
+    ]
+    for stdin in cases:
+        # first two are invalid input (negative), should exit non-zero
+        # last three: missing stream -> ERROR except negative which is invalid
+        if "missing" in stdin and "-1" not in stdin:
+            r = run(stdin)
+            assert r.returncode == 0
+            assert lines(r.stdout) == ["ERROR"]
+        else:
+            r = run(stdin)
+            # negative lateness/up_to is invalid input
+            if "-1" in stdin:
+                assert r.returncode != 0, f"expected non-zero for {stdin!r}"

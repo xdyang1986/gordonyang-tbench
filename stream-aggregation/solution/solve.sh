@@ -31,6 +31,7 @@ const (
 	minValue     = -1000000000000
 	maxValue     = 1000000000000
 	maxSize      = 1000000000
+	maxLateness  = 1000000000
 )
 
 type Event struct {
@@ -40,8 +41,9 @@ type Event struct {
 }
 
 type Stream struct {
-	watermark int64
-	events    []Event
+	watermark       int64
+	allowedLateness int64
+	events          []Event
 }
 
 type WindowType int
@@ -56,9 +58,9 @@ type WindowDef struct {
 	id     string
 	stream string
 	typ    WindowType
-	size   int64 // tumbling/sliding
-	slide  int64 // sliding
-	gap    int64 // session
+	size   int64
+	slide  int64
+	gap    int64
 	agg    string
 }
 
@@ -103,9 +105,9 @@ var (
 	streams       = make(map[string]*Stream)
 	windows       = make(map[string]*WindowDef)
 	streamWindows = make(map[string][]string)
-	aggregates    = make(map[string]map[string]map[int64]*Agg)  // windowID -> key -> windowStart -> Agg
-	sessionEnds   = make(map[string]map[string]map[int64]int64) // windowID -> key -> sessionStart -> sessionEnd
-	sessionEvents = make(map[string]map[string][]Event)         // stream -> key -> sorted events
+	aggregates    = make(map[string]map[string]map[int64]*Agg)
+	sessionEnds   = make(map[string]map[string]map[int64]int64)
+	sessionEvents = make(map[string]map[string][]Event)
 
 	stateDir string
 	logPath  string
@@ -185,27 +187,12 @@ func getOrCreateAgg(windowID, key string, ws int64) *Agg {
 	}
 	return a
 }
-func getOrCreateSessionEnd(windowID, key string, ws int64) {
-	// ensures map exists
-	m1, ok := sessionEnds[windowID]
-	if !ok {
-		m1 = make(map[string]map[int64]int64)
-		sessionEnds[windowID] = m1
-	}
-	m2, ok := m1[key]
-	if !ok {
-		m2 = make(map[int64]int64)
-		m1[key] = m2
-	}
-	// value set by caller
-	_ = m2
-}
 
 func doCreateStream(name string) bool {
 	if _, ok := streams[name]; ok {
 		return false
 	}
-	streams[name] = &Stream{watermark: -1}
+	streams[name] = &Stream{watermark: -1, allowedLateness: 0}
 	if _, ok := sessionEvents[name]; !ok {
 		sessionEvents[name] = make(map[string][]Event)
 	}
@@ -240,7 +227,7 @@ func doDefineTumbling(wid, stream string, size int64, agg string) bool {
 	streamWindows[stream] = append(streamWindows[stream], wid)
 	if st, ok := streams[stream]; ok {
 		for _, ev := range st.events {
-			if st.watermark != -1 && ev.eventTime <= st.watermark {
+			if st.watermark != -1 && ev.eventTime <= st.watermark-st.allowedLateness {
 				continue
 			}
 			ws := (ev.eventTime / size) * size
@@ -259,7 +246,7 @@ func doDefineSliding(wid, stream string, size, slide int64, agg string) bool {
 	streamWindows[stream] = append(streamWindows[stream], wid)
 	if st, ok := streams[stream]; ok {
 		for _, ev := range st.events {
-			if st.watermark != -1 && ev.eventTime <= st.watermark {
+			if st.watermark != -1 && ev.eventTime <= st.watermark-st.allowedLateness {
 				continue
 			}
 			latest := (ev.eventTime / slide) * slide
@@ -278,7 +265,6 @@ func doDefineSession(wid, stream string, gap int64, agg string) bool {
 	w := &WindowDef{id: wid, stream: stream, typ: Session, gap: gap, agg: agg}
 	windows[wid] = w
 	streamWindows[stream] = append(streamWindows[stream], wid)
-	// retroactive: build sessions from existing per-key events
 	if perKey, ok := sessionEvents[stream]; ok {
 		for key := range perKey {
 			rebuildSessionsForKey(wid, stream, key)
@@ -308,19 +294,15 @@ func doDeleteWindow(wid string) bool {
 	}
 	return true
 }
-
-// session handling
 func ensureSessionEventsMap(stream string) {
 	if _, ok := sessionEvents[stream]; !ok {
 		sessionEvents[stream] = make(map[string][]Event)
 	}
 }
-
 func insertSessionEvent(stream, key string, ev Event) {
 	ensureSessionEventsMap(stream)
 	list := sessionEvents[stream][key]
 	list = append(list, ev)
-	// sort by eventTime, then value for determinism
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].eventTime != list[j].eventTime {
 			return list[i].eventTime < list[j].eventTime
@@ -332,17 +314,14 @@ func insertSessionEvent(stream, key string, ev Event) {
 	})
 	sessionEvents[stream][key] = list
 }
-
 func rebuildSessionsForKey(windowID, stream, key string) {
 	wdef, ok := windows[windowID]
 	if !ok || wdef.typ != Session {
 		return
 	}
 	gap := wdef.gap
-	// get events for this key
 	perKeyMap, ok := sessionEvents[stream]
 	if !ok {
-		// no events, clear
 		if m1, ok := aggregates[windowID]; ok {
 			delete(m1, key)
 		}
@@ -361,24 +340,20 @@ func rebuildSessionsForKey(windowID, stream, key string) {
 		}
 		return
 	}
-	// clear old
 	if m1, ok := aggregates[windowID]; ok {
 		delete(m1, key)
 	}
 	if m1, ok := sessionEnds[windowID]; ok {
 		delete(m1, key)
 	}
-
-	// Build sessions
-	var curStart int64 = events[0].eventTime
-	var curLast int64 = events[0].eventTime
+	var curStart = events[0].eventTime
+	var curLast = events[0].eventTime
 	curAgg := newAgg()
 	updateAgg(curAgg, events[0].value)
 
 	flush := func(start, last int64, agg *Agg) {
 		end := last + gap
 		a := getOrCreateAgg(windowID, key, start)
-		// copy agg into a
 		a.sum = agg.sum
 		a.count = agg.count
 		a.min = agg.min
@@ -394,7 +369,6 @@ func rebuildSessionsForKey(windowID, stream, key string) {
 		for k, v := range agg.distinct {
 			a.distinct[k] = v
 		}
-		// session end
 		m1, ok := sessionEnds[windowID]
 		if !ok {
 			m1 = make(map[string]map[int64]int64)
@@ -423,16 +397,57 @@ func rebuildSessionsForKey(windowID, stream, key string) {
 	}
 	flush(curStart, curLast, curAgg)
 }
+func isLate(stream string, et int64) bool {
+	st, ok := streams[stream]
+	if !ok {
+		return false
+	}
+	if st.watermark == -1 {
+		return false
+	}
+	// For session windows we treat allowed lateness as not applicable for late check? Spec says applies only to tumbling/sliding.
+	// But we need to decide: if there exists at least one tumbling/sliding window on stream, use allowed lateness, else strict.
+	// Simpler: if any session window exists, still use allowed lateness? We will implement uniform using allowedLateness but with strict fallback for session-only? Let's check if stream has any non-session window.
+	hasNonSession := false
+	for _, wid := range streamWindows[stream] {
+		if w, ok := windows[wid]; ok && w.typ != Session {
+			hasNonSession = true
+			break
+		}
+	}
+	if hasNonSession {
+		// use allowed lateness
+		return et <= st.watermark-st.allowedLateness
+	}
+	// session-only: strict
+	return et <= st.watermark
+}
 
 func doIngest(stream, key string, value, et int64) bool {
 	st, ok := streams[stream]
 	if !ok {
 		return false
 	}
-	if st.watermark != -1 && et <= st.watermark {
-		return false
+	// late check with allowed lateness for non-session
+	if st.watermark != -1 {
+		// determine if there is non-session window for allowed lateness
+		hasNonSession := false
+		for _, wid := range streamWindows[stream] {
+			if w, ok := windows[wid]; ok && w.typ != Session {
+				hasNonSession = true
+				break
+			}
+		}
+		if hasNonSession {
+			if et <= st.watermark-st.allowedLateness {
+				return false
+			}
+		} else {
+			if et <= st.watermark {
+				return false
+			}
+		}
 	}
-	// update tumbling/sliding
 	for _, wid := range streamWindows[stream] {
 		wdef, ok := windows[wid]
 		if !ok {
@@ -450,53 +465,54 @@ func doIngest(stream, key string, value, et int64) bool {
 			}
 		}
 	}
-	// insert into stream.events and sessionEvents
 	st.events = append(st.events, Event{key: key, value: value, eventTime: et})
 	insertSessionEvent(stream, key, Event{key: key, value: value, eventTime: et})
-	// rebuild session windows for this key
 	for _, wid := range streamWindows[stream] {
-		wdef, ok := windows[wid]
-		if !ok {
-			continue
-		}
-		if wdef.typ == Session {
+		if w, ok := windows[wid]; ok && w.typ == Session {
 			rebuildSessionsForKey(wid, stream, key)
 		}
 	}
 	return true
 }
-
 func doIngestBatch(stream string, batch []Event) (bool, bool) {
-	// returns (ok, isLate) where ok false means stream missing -> ERROR, isLate true means LATE
 	st, ok := streams[stream]
 	if !ok {
 		return false, false
 	}
-	// check any late
-	for _, ev := range batch {
-		if st.watermark != -1 && ev.eventTime <= st.watermark {
-			return false, true
+	hasNonSession := false
+	for _, wid := range streamWindows[stream] {
+		if w, ok := windows[wid]; ok && w.typ != Session {
+			hasNonSession = true
+			break
 		}
 	}
-	// all ok, apply
-	// group by key for session rebuilding
+	for _, ev := range batch {
+		if st.watermark != -1 {
+			if hasNonSession {
+				if ev.eventTime <= st.watermark-st.allowedLateness {
+					return false, true
+				}
+			} else {
+				if ev.eventTime <= st.watermark {
+					return false, true
+				}
+			}
+		}
+	}
 	affectedKeys := make(map[string]bool)
 	for _, ev := range batch {
-		// tumbling/sliding
 		for _, wid := range streamWindows[stream] {
-			wdef, ok := windows[wid]
-			if !ok {
-				continue
-			}
-			if wdef.typ == Tumbling {
-				ws := (ev.eventTime / wdef.size) * wdef.size
-				a := getOrCreateAgg(wid, ev.key, ws)
-				updateAgg(a, ev.value)
-			} else if wdef.typ == Sliding {
-				latest := (ev.eventTime / wdef.slide) * wdef.slide
-				for s := latest; s >= 0 && s > ev.eventTime-wdef.size; s -= wdef.slide {
-					a := getOrCreateAgg(wid, ev.key, s)
+			if wdef, ok := windows[wid]; ok {
+				if wdef.typ == Tumbling {
+					ws := (ev.eventTime / wdef.size) * wdef.size
+					a := getOrCreateAgg(wid, ev.key, ws)
 					updateAgg(a, ev.value)
+				} else if wdef.typ == Sliding {
+					latest := (ev.eventTime / wdef.slide) * wdef.slide
+					for s := latest; s >= 0 && s > ev.eventTime-wdef.size; s -= wdef.slide {
+						a := getOrCreateAgg(wid, ev.key, s)
+						updateAgg(a, ev.value)
+					}
 				}
 			}
 		}
@@ -504,21 +520,15 @@ func doIngestBatch(stream string, batch []Event) (bool, bool) {
 		insertSessionEvent(stream, ev.key, ev)
 		affectedKeys[ev.key] = true
 	}
-	// rebuild session windows for affected keys
 	for key := range affectedKeys {
 		for _, wid := range streamWindows[stream] {
-			wdef, ok := windows[wid]
-			if !ok {
-				continue
-			}
-			if wdef.typ == Session {
+			if w, ok := windows[wid]; ok && w.typ == Session {
 				rebuildSessionsForKey(wid, stream, key)
 			}
 		}
 	}
 	return true, false
 }
-
 func doAdvanceWatermark(stream string, wm int64) (bool, bool) {
 	st, ok := streams[stream]
 	if !ok {
@@ -532,6 +542,119 @@ func doAdvanceWatermark(stream string, wm int64) (bool, bool) {
 	}
 	st.watermark = wm
 	return true, true
+}
+func doSetAllowedLateness(stream string, l int64) (bool, bool) {
+	st, ok := streams[stream]
+	if !ok {
+		return false, false
+	}
+	if st.allowedLateness == l {
+		return false, true
+	}
+	st.allowedLateness = l
+	return true, true
+}
+func doPurge(stream string, upTo int64) bool {
+	st, ok := streams[stream]
+	if !ok {
+		return false
+	}
+	changed := false
+	// filter events
+	newEvents := make([]Event, 0, len(st.events))
+	for _, ev := range st.events {
+		if ev.eventTime < upTo {
+			changed = true
+			continue
+		}
+		newEvents = append(newEvents, ev)
+	}
+	st.events = newEvents
+	// filter sessionEvents
+	if perKey, ok := sessionEvents[stream]; ok {
+		for key, evs := range perKey {
+			newList := make([]Event, 0, len(evs))
+			for _, ev := range evs {
+				if ev.eventTime < upTo {
+					changed = true
+					continue
+				}
+				newList = append(newList, ev)
+			}
+			if len(newList) == 0 {
+				delete(perKey, key)
+				changed = true
+			} else {
+				if len(newList) != len(evs) {
+					changed = true
+				}
+				perKey[key] = newList
+			}
+		}
+	}
+	// for tumbling/sliding, delete aggregates where end <= upTo
+	for _, wid := range streamWindows[stream] {
+		wdef, ok := windows[wid]
+		if !ok {
+			continue
+		}
+		if wdef.typ == Tumbling || wdef.typ == Sliding {
+			if m1, ok := aggregates[wid]; ok {
+				for key, m2 := range m1 {
+					for ws := range m2 {
+						if ws+wdef.size <= upTo {
+							delete(m2, ws)
+							changed = true
+						}
+					}
+					if len(m2) == 0 {
+						delete(m1, key)
+					}
+				}
+			}
+		}
+	}
+	// for session, rebuild from remaining events (purge old sessions)
+	if perKey, ok := sessionEvents[stream]; ok {
+		for key := range perKey {
+			for _, wid := range streamWindows[stream] {
+				if w, ok := windows[wid]; ok && w.typ == Session {
+					// before rebuild, capture if any session will be removed
+					// we consider changed if rebuild will remove old sessions
+					rebuildSessionsForKey(wid, stream, key)
+					changed = true
+				}
+			}
+		}
+		// also need to handle keys that had session windows but now no events: their aggregates already cleared via rebuild? Actually rebuild handles empty.
+		// For keys that had aggregates but now no events in sessionEvents, we need to clear.
+		// We'll iterate all session windows
+		for _, wid := range streamWindows[stream] {
+			if w, ok := windows[wid]; ok && w.typ == Session {
+				if m1, ok := aggregates[wid]; ok {
+					for k := range m1 {
+						if _, exists := perKey[k]; !exists {
+							delete(m1, k)
+							changed = true
+							if m2, ok := sessionEnds[wid]; ok {
+								delete(m2, k)
+							}
+						}
+					}
+				}
+			}
+		}
+	} else {
+		// no perKey left, clear all session aggregates for this stream
+		for _, wid := range streamWindows[stream] {
+			if w, ok := windows[wid]; ok && w.typ == Session {
+				delete(aggregates, wid)
+				delete(sessionEnds, wid)
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func replay(payload string) {
@@ -631,6 +754,26 @@ func replay(payload string) {
 			return
 		}
 		doAdvanceWatermark(stream, wm)
+	case "SET_ALLOWED_LATENESS":
+		if len(parts) != 4 {
+			return
+		}
+		stream := parts[1]
+		l, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return
+		}
+		doSetAllowedLateness(stream, l)
+	case "PURGE":
+		if len(parts) != 4 {
+			return
+		}
+		stream := parts[1]
+		up, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return
+		}
+		doPurge(stream, up)
 	}
 }
 
@@ -679,6 +822,12 @@ func compact() {
 	var buf bytes.Buffer
 	for _, s := range snames {
 		writeRecordToBuf(&buf, fmt.Sprintf("CREATE_STREAM %s 0", s))
+	}
+	// allowed lateness
+	for _, s := range snames {
+		if st, ok := streams[s]; ok && st.allowedLateness != 0 {
+			writeRecordToBuf(&buf, fmt.Sprintf("SET_ALLOWED_LATENESS %s %d 0", s, st.allowedLateness))
+		}
 	}
 	for _, wid := range wids {
 		w := windows[wid]
@@ -900,9 +1049,25 @@ func main() {
 				continue
 			}
 			st := streams[parts[1]]
-			if st.watermark != -1 && et <= st.watermark {
-				fmt.Fprintln(out, "LATE")
-				continue
+			hasNonSession := false
+			for _, wid := range streamWindows[parts[1]] {
+				if w, ok := windows[wid]; ok && w.typ != Session {
+					hasNonSession = true
+					break
+				}
+			}
+			if st.watermark != -1 {
+				if hasNonSession {
+					if et <= st.watermark-st.allowedLateness {
+						fmt.Fprintln(out, "LATE")
+						continue
+					}
+				} else {
+					if et <= st.watermark {
+						fmt.Fprintln(out, "LATE")
+						continue
+					}
+				}
 			}
 			doIngest(parts[1], parts[2], val, et)
 			fmt.Fprintln(out, "OK")
@@ -927,13 +1092,7 @@ func main() {
 			if _, ok := parseTS(tsStr); !ok {
 				die("invalid ts")
 			}
-			type triple struct {
-				key   string
-				value int64
-				et    int64
-			}
 			batch := make([]Event, 0, count)
-			valid := true
 			for i := 0; i < count; i++ {
 				base := 3 + i*3
 				k := parts[base]
@@ -951,18 +1110,33 @@ func main() {
 					die("invalid et in batch")
 				}
 				batch = append(batch, Event{key: k, value: v, eventTime: et})
-				_ = valid
 			}
 			if _, ok := streams[sname]; !ok {
 				fmt.Fprintln(out, "ERROR")
 				continue
 			}
 			st := streams[sname]
+			hasNonSession := false
+			for _, wid := range streamWindows[sname] {
+				if w, ok := windows[wid]; ok && w.typ != Session {
+					hasNonSession = true
+					break
+				}
+			}
 			isLate := false
 			for _, ev := range batch {
-				if st.watermark != -1 && ev.eventTime <= st.watermark {
-					isLate = true
-					break
+				if st.watermark != -1 {
+					if hasNonSession {
+						if ev.eventTime <= st.watermark-st.allowedLateness {
+							isLate = true
+							break
+						}
+					} else {
+						if ev.eventTime <= st.watermark {
+							isLate = true
+							break
+						}
+					}
 				}
 			}
 			if isLate {
@@ -979,7 +1153,6 @@ func main() {
 				continue
 			}
 			fmt.Fprintln(out, "OK")
-			// log each as individual INGEST for recovery
 			for _, ev := range batch {
 				appendRecord(fmt.Sprintf("INGEST %s %s %d %d %s", sname, ev.key, ev.value, ev.eventTime, tsStr))
 			}
@@ -1007,6 +1180,53 @@ func main() {
 				continue
 			}
 			if changed {
+				appendRecord(strings.Join(parts, " "))
+			}
+		case "SET_ALLOWED_LATENESS":
+			if len(parts) != 4 {
+				die("SET_ALLOWED_LATENESS arity")
+			}
+			if !isValidStreamName(parts[1]) {
+				die("invalid stream")
+			}
+			l, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil || l < 0 || l > maxLateness {
+				die("invalid lateness")
+			}
+			if _, ok := parseTS(parts[3]); !ok {
+				die("invalid ts")
+			}
+			if _, ok := streams[parts[1]]; !ok {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			changed, valid := doSetAllowedLateness(parts[1], l)
+			if !valid {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			if changed {
+				appendRecord(strings.Join(parts, " "))
+			}
+		case "PURGE":
+			if len(parts) != 4 {
+				die("PURGE arity")
+			}
+			if !isValidStreamName(parts[1]) {
+				die("invalid stream")
+			}
+			up, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil || up < 0 {
+				die("invalid up_to")
+			}
+			if _, ok := parseTS(parts[3]); !ok {
+				die("invalid ts")
+			}
+			if _, ok := streams[parts[1]]; !ok {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			if doPurge(parts[1], up) {
 				appendRecord(strings.Join(parts, " "))
 			}
 		case "QUERY":
@@ -1039,14 +1259,12 @@ func main() {
 					continue
 				}
 			}
-			// session: no alignment error, any ws allowed, but if not a session start -> NULL (handled below)
 			st, ok := streams[wdef.stream]
 			if !ok {
 				fmt.Fprintln(out, "ERROR")
 				continue
 			}
 			if wdef.typ == Session {
-				// need session end
 				m1, ok := sessionEnds[wdef.id]
 				if !ok {
 					fmt.Fprintln(out, "NULL")
@@ -1101,7 +1319,6 @@ func main() {
 				}
 				continue
 			}
-			// tumbling/sliding
 			if st.watermark == -1 || st.watermark < ws+wdef.size {
 				fmt.Fprintln(out, "NULL")
 				continue

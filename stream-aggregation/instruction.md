@@ -73,20 +73,28 @@ Removes window + aggregates + session ends. No-op if missing. Logged only when e
 
 **`INGEST <stream> <key> <value> <event_time> <timestamp>`**
 - Missing stream → `ERROR`.
-- `event_time <= watermark` → `LATE`, drop, not logged.
-- Else update all windows on stream (tumbling/sliding incremental, session via rebuild for that key), append event to stream's raw log for compaction, output `OK`, log original line.
+- Late check with allowed lateness: stream has `allowed_lateness` (default 0, set via `SET_ALLOWED_LATENESS`). If watermark != -1:
+  - If stream has any tumbling/sliding window: late if `event_time <= watermark - allowed_lateness` → `LATE`, drop, not logged.
+  - If stream has only session windows (or no windows): strict late if `event_time <= watermark` → `LATE`.
+  - If no watermark yet (-1) → never late.
+- Else update all windows (tumbling/sliding incremental, session via rebuild for that key), append event to raw log for compaction, output `OK`, log original line.
 
 **`INGEST_BATCH <stream> <count> <key1> <value1> <event_time1> <key2> <value2> <event_time2> ... <timestamp>`**
-- Atomic batch: `count` triples, then final processing timestamp. Total tokens `4+3*count`. `count` 1..100 else invalid input.
-- Validation: each key valid, each value in range, each event_time >=0 else invalid input. Arity mismatch → invalid input.
+- Atomic batch: `count` triples, then final processing timestamp. Tokens `4+3*count`. `count` 1..100 else invalid input. Each key/value/event_time validated else invalid input. Arity mismatch → invalid input.
 - If stream missing → `ERROR`, none applied.
-- If any event would be late (`event_time <= watermark`) → entire batch `LATE`, none applied, not logged.
-- Else atomic success: apply all events in given order (for tumbling/sliding aggregates incremental, for session rebuild per affected key once after all insertions), append all to stream's raw events, output single `OK`, log as individual `INGEST <stream> <key> <value> <event_time> <timestamp>` records (one per event, same batch timestamp) for recovery (mirrors `PRODUCE_BATCH` → individual `PRODUCE` logging).
+- Late atomic: check all events against same late rule as `INGEST` (with allowed lateness). If any would be late → entire batch `LATE`, none applied, not logged.
+- Else atomic success: apply all in given order (tumbling/sliding incremental, session rebuild per affected key once after all insertions), append all to raw events, output single `OK`, log as individual `INGEST <stream> <key> <value> <event_time> <timestamp>` records (same batch timestamp) for recovery.
 - Queries never logged.
 
 **`ADVANCE_WATERMARK <stream> <watermark> <timestamp>`**
 - Missing stream → `ERROR`. Decreasing (`watermark < current` when current !=-1) → `ERROR`. Equal → no-op no log.
 - On increase, set watermark, no output, fires windows where `end <= watermark`. Logged only on increase.
+
+**`SET_ALLOWED_LATENESS <stream> <lateness> <timestamp>`**
+- Sets per-stream allowed lateness for tumbling/sliding windows (default 0). `lateness` >=0 <=1e9 else invalid input. If stream missing → `ERROR`. If same as current → no-op no log. Else sets, no output, logged only when changes. During replay, must be applied in order. Affects late check: late if `event_time <= watermark - lateness` (for streams with any tumbling/sliding window); session-only streams ignore lateness for late check (strict). Allows late events within grace to update already-closed windows.
+
+**`PURGE <stream> <up_to> <timestamp>`**
+- Deletes state older than `up_to`: removes all raw events with `event_time < up_to` from stream's log and per-key session state, deletes tumbling/sliding aggregates where `window_end = start+size <= up_to`, and rebuilds session windows from remaining events (so sessions whose events were all purged disappear). If stream missing → `ERROR`. If nothing deleted → no-op no log. Else no output, logged only when actually deletes. Does **not** advance watermark.
 
 **`COMPACT <timestamp>`**
 Durable mode rewrites to minimal deterministic set via tmp + atomic rename. In-memory no-op.
@@ -130,16 +138,21 @@ When `STREAM_STATE_DIR` set.
 **Log format `stream.log`:** `uint32 LE len | uint32 LE crc32 IEEE(payload) | payload bytes UTF-8`. Valid only if 8 header + len present and CRC matches.
 
 **What is logged, in order, only when state changes:**
-- `CREATE_STREAM`, `DELETE_STREAM`, `DEFINE_TUMBLING_WINDOW`, `DEFINE_SLIDING_WINDOW`, `DEFINE_SESSION_WINDOW`, `DELETE_WINDOW`, `INGEST` (only `OK`), `ADVANCE_WATERMARK` (only increase). For `INGEST_BATCH` success, log as individual `INGEST` records with same batch timestamp. Queries/`COMPACT` never logged.
+- `CREATE_STREAM`, `DELETE_STREAM`, `DEFINE_TUMBLING_WINDOW`, `DEFINE_SLIDING_WINDOW`, `DEFINE_SESSION_WINDOW`, `DELETE_WINDOW`, `INGEST` (only `OK`), `ADVANCE_WATERMARK` (only increase), `SET_ALLOWED_LATENESS` (only when changes), `PURGE` (only when actually deletes). For `INGEST_BATCH` success, log as individual `INGEST` records with same batch timestamp. Queries/`COMPACT` never logged.
 
-**Startup recovery:** create dir, replay `stream.log` in order reconstructing state exactly. For `INGEST`, apply same late-check (`event_time <= watermark` → drop). For normal logs late never appears because late not logged. For compacted logs all `INGEST` are before final `ADVANCE_WATERMARK`, so watermark=-1 during replay → no late, final watermark closes windows preserving closed aggregates. Stop at first incomplete/corrupt record, discard tail, truncate file to valid prefix. Empty log clean.
+**Startup recovery:** create dir, replay `stream.log` in order reconstructing state exactly.
+
+- Process records in log order. For `INGEST`, apply same late-check as online with allowed lateness: if stream has any tumbling/sliding window, late if `event_time <= watermark - allowed_lateness`; else (session-only) late if `event_time <= watermark`. For normal logs late never appears because late not logged and watermarks/lateness logged in order. For compacted logs all `INGEST` are before final `ADVANCE_WATERMARK`, so watermark=-1 during replay → no late, final watermark closes windows preserving closed aggregates. For `SET_ALLOWED_LATENESS` and `PURGE`, replay same as online (purge deletes old events/aggregates).
+
+- Stop at first incomplete/corrupt record (truncated header/payload or CRC mismatch); discard tail, truncate file to valid prefix. Never fail on torn tail. Empty log clean.
 
 **Best-effort durability:** each append should `Sync()`/fsync. Informational test scans for `Sync()`.
 
 **Compaction:** writes `$STREAM_STATE_DIR/stream.log.tmp` minimal deterministic:
 - Streams sorted asc: `CREATE_STREAM <s> 0`
+- Allowed lateness sorted asc where `lateness !=0`: `SET_ALLOWED_LATENESS <s> <lateness> 0`
 - Windows sorted asc by id: `DEFINE_TUMBLING_WINDOW <id> <stream> <size> <agg> 0`, `DEFINE_SLIDING_WINDOW <id> <stream> <size> <slide> <agg> 0`, `DEFINE_SESSION_WINDOW <id> <stream> <gap> <agg> 0`
-- For each stream sorted, events sorted by `(event_time asc, key asc, value asc)`: `INGEST <stream> <key> <value> <event_time> 0` — emit **all** logged events (including those whose windows already closed) excluding deleted streams, to preserve closed aggregates.
+- For each stream sorted, events sorted by `(event_time asc, key asc, value asc)`: `INGEST <stream> <key> <value> <event_time> 0` — emit **all** logged events (including those whose windows already closed) excluding deleted streams/purged events, to preserve closed aggregates.
 - Watermarks sorted: `ADVANCE_WATERMARK <stream> <wm> 0` where `wm!=-1`
 Atomic rename over `stream.log`, ignore stray `.tmp`.
 
@@ -147,17 +160,18 @@ Atomic rename over `stream.log`, ignore stray `.tmp`.
 
 ## Functional Requirements Summary (hard)
 
-1. Watermark -1 initially, monotonic advance.
-2. Tumbling `[floor(t/size)*size,...+size)`, sliding `[start in [t-size+1,t], start%slide==0]`, session per-key `[first, last+gap)` with merge on `diff<=gap`, sorted event_time, out-of-order rebuild.
-3. Retroactive DEFINE must aggregate prior non-late events (tumbling/sliding/session).
-4. Per-key aggregates `SUM COUNT MIN MAX AVG COUNT_DISTINCT` (distinct via set).
-5. `INGEST` OK if `et>wm` else LATE; atomic `INGEST_BATCH` (count 1..100) all late → LATE none applied, missing stream → ERROR, success → OK.
-6. Watermark closes windows `end<=wm`, query open → NULL, no data → NULL, misalignment (tumbling/sliding) → ERROR.
-7. Session query: no alignment error, start must equal session start else NULL, end=last+gap, closed when `wm>=end`.
-8. Delete stream cascades windows+events+session state; delete window removes aggregates.
-9. List sorted, filtered LIST_WINDOWS.
-10. Durable WAL CRC framing, torn-tail truncation, atomic minimal compaction preserving all aggregates via events+final watermark, no-op suppression (duplicate CREATE, same watermark not logged).
-11. Deterministic, stdlib only, invalid input → non-zero exit.
+1. Watermark -1 initially, monotonic advance; allowed lateness per stream default 0, set via SET_ALLOWED_LATENESS, logged only on change, affects late check for tumbling/sliding: late if `et <= watermark - allowed_lateness`, session-only uses strict `et <= watermark`.
+2. Tumbling `[floor(t/size)*size,...+size)`, sliding `[start in [t-size+1,t], start%slide==0]`, session per-key `[first, last+gap)` with merge on `diff<=gap`, sorted event_time, out-of-order rebuild that can merge/split.
+3. Retroactive DEFINE must aggregate prior non-late events (tumbling/sliding/session) — verified by test_define_includes_past_events.
+4. Per-key aggregates `SUM COUNT MIN MAX AVG COUNT_DISTINCT` (distinct via set). COUNT_DISTINCT counts distinct values.
+5. `INGEST` OK if not late else LATE; atomic `INGEST_BATCH` count 1..100, 3*count triples + ts, all late → LATE none applied, missing stream → ERROR, success → OK, logs as individual INGEST.
+6. Watermark closes windows `end<=wm`, query open → NULL, no data or no session → NULL, misalignment (tumbling/sliding) → ERROR, session no alignment error.
+7. Session query: start must equal session start else NULL, end=last+gap, closed when `wm>=end`, remains closed but can be updated by allowed late events (for non-session windows, late allowed updates closed windows).
+8. `PURGE <stream> <up_to>`: deletes events with `event_time < up_to`, deletes tumbling/sliding aggregates where `end <= up_to`, rebuilds session windows from remaining events, no-op if nothing deleted, logged only when deletes.
+9. Delete stream cascades windows+events+session state+allowed lateness; delete window removes aggregates+session ends.
+10. List sorted, filtered LIST_WINDOWS ERROR if stream missing.
+11. Durable WAL CRC framing (LE len+crc), torn-tail truncation to valid prefix, stray tmp ignored, empty log clean, atomic minimal compaction with sorted CREATE, SET_ALLOWED_LATENESS (non-zero), DEFINE_*, sorted INGEST of all remaining events, final watermark, temp file + rename, strictly smaller after compaction when duplicates existed, no-op suppression (duplicate CREATE, same watermark, same lateness not logged).
+12. Deterministic, stdlib only, invalid input (negative ts, bad names, size/slide/gap/count/lateness out of range) → non-zero exit; app errors → ERROR/LATE/NULL.
 
 ---
 
@@ -315,4 +329,52 @@ OK
 LATE
 ```
 
-Build at `/app`. Tests cover all including session merge/out-of-order, distinct, batch atomicity, durability.
+### Allowed lateness
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+SET_ALLOWED_LATENESS s 5 1
+INGEST s k 10 5 2
+ADVANCE_WATERMARK s 10 3
+INGEST s k 20 6 4
+QUERY w k 0 5
+```
+
+- Watermark 10 closes [0,10) sum10.
+- Allowed lateness 5, so late boundary = 10-5=5. Event time 6 >5 allowed late, updates closed window to 30.
+
+Output:
+```
+OK
+OK
+30
+```
+
+### Purge (state TTL)
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST s k 10 1 1
+INGEST s k 20 11 2
+ADVANCE_WATERMARK s 20 3
+PURGE s 10 4
+QUERY w k 0 5
+QUERY w k 10 6
+```
+
+- Purge up_to 10 deletes events with event_time <10 (event 1) and aggregates where end <=10 (window [0,10) end10).
+- Window [10,20) with sum20 remains.
+
+Output:
+```
+OK
+OK
+NULL
+20
+```
+
+Build at `/app`. Tests cover all including session merge/out-of-order, distinct, batch atomicity, allowed lateness, purge, durability, large sliding perf.
