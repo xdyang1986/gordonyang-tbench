@@ -19,36 +19,27 @@ Starter skeleton returns `not implemented` for core logic. Agent must implement 
 
 **Why naive fails**: ReadFile OOMs on 5GB sparse (memory limit 4096MB), int32 overflows, ext-only validation fails magic mismatch, no mutex corrupts manifest under parallel, no Seek race → wrong data, encryption forgotten → checksum mismatch, MD5/both not stored, parallel flag not validated.
 
-## Completion Rates
+## Completion Rates (online validation — commit 414f259, 2026-07-22)
 
-- **Oracle**: 3/3 passed (100%) in ~5m17s (hard mode, includes 5GB sparse + 10GB sparse + 320 chunks + encryption+parallel)
-- **Sonnet 4.6 (5 attempts)**: Expected 0/5 to 1/5 — hardest parts:
-  - Parallel worker pool with WaitGroup+Mutex+channel + per-worker file handle
-  - Retry with exponential backoff + RETRY: log
-  - Both checksums: manifest must have file_checksum (64) + file_checksum_md5 (32) + per-chunk both
-  - XOR encryption streaming with correct key cycling across buffer boundaries and decrypt-then-verify
-  - Many small chunks (64K) 320 files without FD leak
-  - Symlink + no-ext + uppercase
-- **Opus (5)**: Expected 1/5 to 2/5 — better at magic bytes but struggles with parallel order preservation and encryption+checksum interaction
-- **Avocado (5)**: Expected 0/5 to 1/5
+- **Oracle**: **3/3** — validated
+- **Opus 4.8 (agent)**: **4/5** — validated
+- **GPT-5.5 (codex)**: **0/5** — failed (all trials were infra errors, not test failures)
+- **Avocado (metacode)**: **2/6** — validated
+- avgReward **0.53**, validation passing.
 
-Previous easy version was 1/5 Sonnet, 3/5 Opus. Hard mode pushes Sonnet to 0/5.
+## Failure Analysis (latest run)
 
-## Model Analysis
+Derived from downloaded trial CTRF artifacts. This run's low scores come almost entirely from infrastructure flakiness plus one brittle structural test — not from reasoning gaps.
 
-Dominant failures for hard mode:
+- **GPT-5.5 (codex) — 0/5, 100% infrastructure.** All 10 trials across two validation jobs were `status=error` (Daytona `ThrottlerException: Too Many Requests` / harness failures scoring 0). Codex never got a single clean trial, so the 0/5 carries no reasoning signal — it is entirely provisioning failure.
 
-1. **Parallel not parallel (40%)**: Model parses --parallel but sequential loop. Tests check code contains `go` + `WaitGroup` + `Mutex` and run parallel 8 upload of 320 chunks. Out-of-order assembly bug → final checksum mismatch.
+- **Opus 4.8 (agent) — 4/5, one brittle-test miss.** The single genuine failure was `test_memory_efficiency_and_streaming` (27/28). Opus uploaded the 5GB sparse file correctly and used `int64`, but the test additionally greps `uploader.go` for the literal substring `Seek` — and Opus's `uploader.go` did not contain it (it used a thread-safe per-worker read approach such as `ReadAt`/`io.SectionReader`). The task description itself says *"per-worker file handles (Seek not thread-safe)"*, so a correct parallel-safe implementation can legitimately avoid shared `Seek` and still fail this grep. This is a test-fragility / spec-contradiction issue, not a reasoning failure.
 
-2. **Encryption bugs (25%)**: Forget decrypt on assembly, wrong offset for key cycling, storing checksum of encrypted not original → mismatch. Tests: chunk file differs from original (encrypted), final decrypted matches.
+- **Avocado (metacode) — 2/6, no real failures.** Every completed trial passed; all losses were `status=error` infra flakes.
 
-3. **Checksum both (15%)**: Only SHA256, ignoring MD5.
+- **Oracle — 3/3.** Reference solution passes every trial.
 
-4. **Retry/backoff missing (10%)**: No RETRY: or Sleep backoff.
-
-5. **Edge cases (10%)**: Uppercase, no-ext, multi-dot, symlink, many chunks, encrypt-key mismatch.
-
-Reasoning gaps: concurrency safety, streaming crypto, multi-algo require integration, not setup. Oracle 3/3 deterministic.
+**Assessment:** the hard-mode version is not yet cleanly discriminating on reasoning. Codex is fully blocked by infra (0 clean trials), and Opus's only "failure" is a fragile `Seek`-substring grep in `uploader.go` that penalizes a valid thread-safe streaming design the task itself recommends. Recommended before trusting the difficulty signal: (1) re-run to clear codex's infra block, and (2) replace the `assert "Seek" in uploader.go` structural check with a behavioral memory/streaming assertion (or accept `ReadAt`/`SectionReader`/`Seek`), so correct parallel-safe implementations aren't failed on code-organization grounds.
 
 ## Anti-Cheating Analysis
 
