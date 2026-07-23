@@ -62,8 +62,12 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 			}
 			if loaded.ChecksumAlgo != checksumAlgo {
 				fmt.Fprintf(os.Stderr, "WARN: checksum algo changed from %s to %s, using new algo but re-verifying\n", loaded.ChecksumAlgo, checksumAlgo)
-				// On algo change, we need to reset uploaded flags because old checksums don't match new algo
-				// For simplicity, keep manifest but will re-verify and re-upload missing checksums
+				// Reset per-chunk checksums to force re-upload with new algo
+				for i := range loaded.Chunks {
+					loaded.Chunks[i].Checksum = ""
+					loaded.Chunks[i].ChecksumMD5 = ""
+					loaded.Chunks[i].Uploaded = false
+				}
 			}
 			if loaded.EncryptKey != encryptKey {
 				return fmt.Errorf("encrypt key mismatch: manifest has key %q vs provided %q", loaded.EncryptKey, encryptKey)
@@ -223,6 +227,7 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 				if encryptKey != "" {
 					var offsetInChunk int64 = 0
 					keyBytes := []byte(encryptKey)
+					globalChunkOffset := manifest.Chunks[chunkIdx].Offset
 					for {
 						n, rerr := limited.Read(buf)
 						if n > 0 {
@@ -231,7 +236,8 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 							}
 							enc := make([]byte, n)
 							for i := 0; i < n; i++ {
-								enc[i] = buf[i] ^ keyBytes[int((offsetInChunk+int64(i))%int64(len(keyBytes)))]
+								// Use global chunk offset for key cycling: key[(chunk_offset+i)%len(key)]
+								enc[i] = buf[i] ^ keyBytes[int((globalChunkOffset+offsetInChunk+int64(i))%int64(len(keyBytes)))]
 							}
 							written, werr := tmpFile.Write(enc[:n])
 							totalWritten += int64(written)
@@ -293,9 +299,10 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 					continue
 				}
 
-				// Verify written chunk after rename
+				// Verify written chunk after rename - must include Offset for global encryption
 				ok, err := VerifyChunkFile(destDir, ChunkInfo{
 					Index:       chunkIdx,
+					Offset:      manifest.Chunks[chunkIdx].Offset,
 					Size:        size,
 					Checksum:    chunkSHA,
 					ChecksumMD5: chunkMD5,
@@ -435,11 +442,28 @@ func assembleFileFromManifest(manifest *Manifest, outputPath string) error {
 		}
 
 		if manifest.EncryptKey != "" {
-			// Decrypt while copying
-			_, err = StreamingXor(f, outFile, manifest.EncryptKey, buf)
-			if err != nil {
-				f.Close()
-				return fmt.Errorf("decrypt and copy chunk %d failed: %w", chunk.Index, err)
+			// Decrypt with global chunk offset: key[(chunk.Offset+i)%len]
+			keyBytes := []byte(manifest.EncryptKey)
+			var offsetInChunk int64 = 0
+			for {
+				n, rerr := f.Read(buf)
+				if n > 0 {
+					for i := 0; i < n; i++ {
+						buf[i] = buf[i] ^ keyBytes[int((chunk.Offset+offsetInChunk+int64(i))%int64(len(keyBytes)))]
+					}
+					if _, werr := outFile.Write(buf[:n]); werr != nil {
+						f.Close()
+						return fmt.Errorf("write chunk %d failed: %w", chunk.Index, werr)
+					}
+					offsetInChunk += int64(n)
+				}
+				if rerr == io.EOF {
+					break
+				}
+				if rerr != nil {
+					f.Close()
+					return fmt.Errorf("read chunk %d failed: %w", chunk.Index, rerr)
+				}
 			}
 		} else {
 			if _, err := io.CopyBuffer(outFile, f, buf); err != nil {

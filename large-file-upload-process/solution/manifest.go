@@ -174,7 +174,8 @@ func VerifyChunkFile(destDir string, chunk ChunkInfo, encryptKey string, checksu
 		md5H = md5.New()
 	}
 
-	var offset int64 = 0
+	// Use global chunk offset for XOR key cycling per spec: key[(chunk_offset+i)%len]
+	var offset int64 = chunk.Offset
 	keyBytes := []byte(encryptKey)
 
 	for {

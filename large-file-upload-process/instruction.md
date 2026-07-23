@@ -57,10 +57,10 @@ Must parse human-readable sizes:
 - `512K` or `512KB` or `512k` => 512*1024
 - `8M` or `8MB` or `8m` => 8*1024*1024
 - `1G` or `1GB` => 1*1024*1024*1024
-- Plain number => bytes
+- Plain number => bytes (e.g., `1`, `512`, `1024` are valid plain byte sizes up to 1GB)
 - Case-insensitive, optional `B` suffix
 - Support spaces: `8 MB` should also parse (trim spaces)
-- Reject: zero, negative, > 1GB chunk (max 1GB), non-numeric. Error message must contain "invalid chunk size"
+- Reject: zero, negative, >1GB chunk (max 1GB), non-numeric, float like `8.5M`. Error message must contain "invalid chunk size"
 
 Default chunk size: `8M` (8388608 bytes).
 

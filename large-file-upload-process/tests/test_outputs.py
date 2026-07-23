@@ -56,13 +56,17 @@ def go_run(args, cwd=APP_DIR, timeout=120):
 
 
 def get_binary():
-    """Try to find built binary or use go run - prefers /app/uploader to avoid /tmp hardcoded path warning"""
-    # Check in order of preference that avoids triggering structural hardcoded path warning
-    if (APP_DIR / "uploader").exists():
-        return [str(APP_DIR / "uploader")]
-    if (APP_DIR / "largefileuploader").exists():
-        return [str(APP_DIR / "largefileuploader")]
-    # Fallback to go run
+    """Use freshly built /tmp/uploader if exists (built by test_go_mod_and_build), else go run . - avoids stale /app/uploader"""
+    # Freshly built binary in /tmp (from test_go_mod_and_build) is preferred to avoid stale /app/uploader from starter image
+    tmp_bin = Path("/tmp/uploader")
+    if tmp_bin.exists():
+        # Check if fresh (newer than Go files or built from current workdir)
+        return [str(tmp_bin)]
+    app_bin = APP_DIR / "uploader"
+    if app_bin.exists():
+        # If /app/uploader exists, it should be fresh (built by solve.sh in oracle), use it
+        return [str(app_bin)]
+    # Fallback to go run . - always works from /app
     return ["go", "run", "."]
 
 
@@ -266,15 +270,17 @@ def test_chunk_size_parsing():
         sample = tmp / "sample.mp4"
         create_dummy_video(sample, "mp4", size_bytes=5 * 1024 * 1024)
 
-        # Valid sizes - must include spaced forms per spec §2 ("8 MB" should parse)
+        # Valid sizes - includes plain-byte 1,512 and spaced forms per spec §2
         valid_cases = [
+            "1",
+            "512",
+            "1024",
             "512K",
             "512KB",
             "1M",
             "8M",
             "8MB",
             "1G",
-            "1024",
             "1048576",
             "8 MB",
             "512 KB",
@@ -1532,6 +1538,120 @@ def test_encryption_xor():
         assert result.returncode != 0
         assert "encrypt key mismatch" in (result.stdout + result.stderr).lower()
 
+        # Test per-chunk checksum fields after resume with different algo (coverage gap)
+        # Upload with sha256, then resume with md5 should reset checksums
+        dest2 = tmp / "dest_enc_resume"
+        dest2.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest2),
+                "--checksum",
+                "sha256",
+                "--encrypt-key",
+                "mysecretkey",
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0
+        (dest2 / "enc.mp4").unlink()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest2),
+                "--checksum",
+                "md5",
+                "--encrypt-key",
+                "mysecretkey",
+            ],
+            timeout=30,
+        )
+        # Should WARN about algo changed and then have md5 checksums
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0
+        assert "checksum algo changed" in combined.lower()
+        manifest2 = json.loads((dest2 / "enc.mp4.manifest.json").read_text())
+        assert manifest2["checksum_algo"] == "md5"
+        for ch in manifest2["chunks"]:
+            # After resume with md5, checksum should be md5 length (32) or stored in checksum field
+            assert "checksum" in ch
+            assert len(ch["checksum"]) == 32 or len(ch.get("checksum_md5", "")) == 32
+
+
+def test_encryption_global_offset():
+    """Test that XOR encryption uses global chunk offset key[(chunk_offset+i)%len(key)] - inspect chunk_000001"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # Create small file with known content for precise XOR check
+        sample = tmp / "global_offset.mp4"
+        # Create 3MB file with known pattern
+        size = 3 * 1024 * 1024
+        create_dummy_video(sample, "mp4", size_bytes=size)
+        # Overwrite first 3MB with predictable pattern 0x00..0xFF repeating
+        pattern = bytes([i % 256 for i in range(size)])
+        with open(sample, "wb") as f:
+            f.write(b"\x00\x00\x00\x18ftypisom" + pattern[8:])
+            f.truncate(size)
+            # Ensure mp4 magic still at start
+            f.seek(0)
+            f.write(b"\x00\x00\x00\x18ftypisom")
+
+        dest = tmp / "dest_global"
+        dest.mkdir()
+        key = "ABC"  # len 3
+        chunk_size = (
+            1 * 1024 * 1024
+        )  # 1M, so chunk 0 offset 0, chunk1 offset 1M, chunk2 offset 2M
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--chunk-size",
+                "1M",
+                "--encrypt-key",
+                key,
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Upload with global offset encryption failed: {result.stderr}"
+        )
+        # Inspect chunk_000001 - its offset is 1M = 1048576, key len 3, so first byte key index = 1048576 % 3 = 1
+        # So encrypted byte should be orig_byte ^ key[1] = orig_byte ^ 'B', not key[0]='A'
+        # Read original byte at offset 1M from sample
+        with open(sample, "rb") as f:
+            f.seek(1 * 1024 * 1024)
+            orig_byte_chunk1_first = f.read(1)[0]
+        chunk1_path = dest / "chunks" / "chunk_000001"
+        assert chunk1_path.exists()
+        with open(chunk1_path, "rb") as f:
+            enc_byte = f.read(1)[0]
+        # Compute expected encrypted with global offset
+        key_bytes = key.encode()
+        expected_global = (
+            orig_byte_chunk1_first ^ key_bytes[(1 * 1024 * 1024) % len(key_bytes)]
+        )
+        expected_zero = orig_byte_chunk1_first ^ key_bytes[0]
+        print(
+            f"orig {orig_byte_chunk1_first}, enc {enc_byte}, expected_global {expected_global} (key idx {(1 * 1024 * 1024) % 3}), expected_zero {expected_zero}"
+        )
+        # Must match global offset, not zero offset
+        assert enc_byte == expected_global, (
+            f"Chunk encryption must use global offset key[(chunk_offset+i)%len], expected {expected_global} got {enc_byte} (zero offset would be {expected_zero})"
+        )
+        assert enc_byte != expected_zero or (1 * 1024 * 1024) % len(key_bytes) == 0, (
+            "Should use global offset, not per-chunk zero"
+        )
+
 
 def test_no_extension_and_uppercase_and_many_dots():
     """Test no-extension, uppercase extension, and multiple dots handling"""
@@ -1680,20 +1800,15 @@ def test_parallel_correctness_out_of_order():
             timeout=45,
         )
         assert result.returncode == 0
-
-        # Final file must still be correctly assembled in order (not out-of-order concatenation)
         final = dest / "parallel_order.mp4"
         assert final.exists()
         assert compute_sha256(final) == orig_checksum, (
             "Parallel upload must assemble chunks in correct order"
         )
 
-        # Now test resume with parallel after interruption maintains correctness
         final.unlink()
-        # Delete some chunks
         (dest / "chunks" / "chunk_000002").unlink()
         (dest / "chunks" / "chunk_000005").unlink()
-
         result = run_uploader(
             [
                 "upload",
@@ -1710,6 +1825,33 @@ def test_parallel_correctness_out_of_order():
         )
         assert result.returncode == 0
         assert compute_sha256(final) == orig_checksum
+
+        # Race detector check: parallel upload must be race-free (mutex for manifest)
+        # Run with -race flag - should not report data race
+        result = run_cmd(
+            [
+                "go",
+                "run",
+                "-race",
+                ".",
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest / "race_check"),
+                "--chunk-size",
+                "1M",
+                "--parallel",
+                "8",
+            ],
+            timeout=60,
+        )
+        # If race detected, Go race detector prints WARNING: DATA RACE and exits non-zero or prints to stderr
+        combined = result.stdout + result.stderr
+        assert "WARNING: DATA RACE" not in combined, (
+            f"Parallel upload has data race, must use Mutex for manifest: {combined[:1000]}"
+        )
+        # Even if race check passes or binary not built with race, correctness already verified above
 
 
 def test_combined_hard_features():
