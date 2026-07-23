@@ -66,9 +66,6 @@ func ParseChunkSize(s string) (int64, error) {
 	if size <= 0 {
 		return 0, fmt.Errorf("invalid chunk size: must be positive, got %s", s)
 	}
-	if size < 1024 {
-		return 0, fmt.Errorf("invalid chunk size: must be at least 1KB, got %s", s)
-	}
 	if size > 1024*1024*1024 {
 		return 0, fmt.Errorf("invalid chunk size: exceeds 1GB max, got %s", s)
 	}

@@ -151,16 +151,16 @@ Steps:
    - Start `parallel` workers (goroutines) with `sync.WaitGroup`
    - Each worker:
      - For each chunk index from channel, attempt upload with retries:
-       - Seek source file: use per-worker file handle via separate `os.Open` per worker (Seek is not thread-safe) or mutex around Seek
+       - Seek source file (need per-worker file handle or mutex around Seek, because os.File Seek is not thread-safe - use separate file handle per worker or mutex)
        - Read chunk via LimitReader
-       - Compute checksum(s) of original data streaming
-       - If encrypt-key: XOR encrypt the chunk data with offset-aware key cycling before writing
+       - Compute checksum(s) of original data
+       - If encrypt-key: XOR encrypt the chunk data with key
        - Write chunk atomically to `dest/chunks/chunk_%06d` (temp file + rename) with retry+backoff
-       - Verify written chunk after rename: decrypt if needed, compute checksum(s), compare
-       - On failure, retry up to `retries` times with exponential backoff, print `RETRY: chunk X attempt Y backoff <duration>` to stderr (must contain `RETRY:` and `backoff`)
-       - On success, update manifest thread-safely: lock mutex, mark uploaded, store checksums, SaveManifest atomically (temp+rename), unlock
-       - Print progress thread-safely: `Uploading chunk X/Y (Z%)` per chunk. For parallel>1, chunk completions may appear out-of-order due to concurrency (e.g., chunk 2 completes before chunk 1). You MAY optionally include worker ID like `worker N` in progress line, but not required. Tests verify parallelism via out-of-order completion and manifest `parallel` field, not via literal worker token.
-   - Wait for all workers via WaitGroup, return first error if any
+       - Verify written chunk: read back, if encrypted decrypt, compute checksum, compare
+       - On failure, retry up to `retries` times with exponential backoff, print `RETRY: chunk X attempt Y` to stderr
+       - On success, update manifest: mark uploaded, store checksums, update timestamp, save atomically with mutex protection
+       - Print progress thread-safely: `Uploading chunk X/Y (Z%)` 
+   - Wait for all workers via WaitGroup
    - Must handle many chunks (320+ with 64KB size) without leaking file descriptors
 10. After all chunks: assemble final file to `dest/<basename>` streaming
    - If encrypted, decrypt each chunk while assembling (XOR)
