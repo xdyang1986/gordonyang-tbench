@@ -821,3 +821,303 @@ def test_fuzz_random():
     # should have only OK, NULL, numbers, ERROR, LATE lines, no crash
     out = lines(r.stdout)
     assert len(out) > 0
+
+
+# --------------------------------------------------------------------------
+# Hard mode: session windows, COUNT_DISTINCT, INGEST_BATCH
+# --------------------------------------------------------------------------
+
+
+def test_session_window_basic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 10 SUM 1
+INGEST s k 10 0 2
+INGEST s k 20 5 3
+INGEST s k 5 20 4
+ADVANCE_WATERMARK s 15 5
+QUERY sess k 0 6
+ADVANCE_WATERMARK s 30 7
+QUERY sess k 0 8
+QUERY sess k 20 9
+"""
+    r = run(stdin)
+    assert r.returncode == 0, r.stderr
+    # first session [0,15) sum 30, second [20,30) sum 5
+    assert lines(r.stdout) == ["OK", "OK", "OK", "30", "30", "5"]
+
+
+def test_session_window_gap_merge():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 10 SUM 1
+INGEST s k 10 0 2
+INGEST s k 5 25 3
+QUERY sess k 0 4
+QUERY sess k 25 5
+ADVANCE_WATERMARK s 15 6
+QUERY sess k 0 7
+ADVANCE_WATERMARK s 35 8
+QUERY sess k 25 9
+"""
+    r = run(stdin)
+    # gap 10, events 0 and 25 diff 25>10 => two sessions [0,10) sum10, [25,35) sum5
+    # before watermark 15, first closed, second open
+    assert lines(r.stdout) == ["OK", "OK", "NULL", "NULL", "10", "5"]
+
+
+def test_session_window_out_of_order_merge():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 15 SUM 1
+INGEST s k 10 0 2
+INGEST s k 10 30 3
+INGEST s k 10 12 4
+ADVANCE_WATERMARK s 20 5
+QUERY sess k 0 6
+ADVANCE_WATERMARK s 45 7
+QUERY sess k 0 8
+"""
+    r = run(stdin)
+    # gap 15: events 0,30 diff 30>15 => two sessions [0,15) sum10, [30,45) sum10
+    # add event 12 diff 12-0=12 <=15 merges into first session => first session now [0,27) (last 12+15=27) sum20
+    # watermark 20 -> first still open? end 27 >20 => NULL
+    # watermark 45 closes both: first sum20, second sum10
+    assert lines(r.stdout) == ["OK", "OK", "OK", "NULL", "20"]
+
+
+def test_session_window_retroactive():
+    stdin = """CREATE_STREAM s 0
+INGEST s k 10 0 1
+INGEST s k 20 5 2
+DEFINE_SESSION_WINDOW sess s 10 SUM 3
+ADVANCE_WATERMARK s 15 4
+QUERY sess k 0 5
+"""
+    r = run(stdin)
+    # retroactive: events 0 and 5 diff 5 <=10 same session [0,15) sum30
+    assert lines(r.stdout) == ["OK", "OK", "30"]
+
+
+def test_session_window_late_handling():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 10 SUM 1
+INGEST s k 10 5 2
+ADVANCE_WATERMARK s 15 3
+INGEST s k 20 5 4
+INGEST s k 30 20 5
+ADVANCE_WATERMARK s 35 6
+QUERY sess k 5 7
+QUERY sess k 20 8
+"""
+    r = run(stdin)
+    # first event 5 creates session [5,15) sum10, watermark15 closes it (start 5)
+    # second ingest 5 late -> LATE
+    # third 20 creates [20,30) sum30, watermark 35 closes
+    assert lines(r.stdout) == ["OK", "LATE", "OK", "10", "30"]
+
+
+def test_count_distinct_tumbling():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 COUNT_DISTINCT 1
+INGEST s k 5 1 2
+INGEST s k 5 2 3
+INGEST s k 7 3 4
+INGEST s k 5 8 5
+ADVANCE_WATERMARK s 10 6
+QUERY w k 0 7
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "OK", "OK", "OK", "2"]
+
+
+def test_count_distinct_sliding():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SLIDING_WINDOW w s 10 5 COUNT_DISTINCT 1
+INGEST s k 5 0 2
+INGEST s k 5 4 3
+INGEST s k 7 6 4
+ADVANCE_WATERMARK s 15 5
+QUERY w k 0 6
+QUERY w k 5 7
+"""
+    r = run(stdin)
+    # window [0,10): values 5,5,7 => distinct 2
+    # [5,10?) actually [5,15): values 7? Wait events: 0-> [0,10), 4->[0,10), 6->[0,10) and [5,15) => [0,10) has 5,5,7 distinct2, [5,15) has 7 distinct1
+    assert lines(r.stdout) == ["OK", "OK", "OK", "2", "1"]
+
+
+def test_count_distinct_session():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW w s 10 COUNT_DISTINCT 1
+INGEST s k 5 0 2
+INGEST s k 5 5 3
+INGEST s k 7 6 4
+ADVANCE_WATERMARK s 20 5
+QUERY w k 0 6
+"""
+    r = run(stdin)
+    # single session [0,16) gap10, events 0,5,6 diff chain <=10 same session distinct 2
+    assert lines(r.stdout) == ["OK", "OK", "OK", "2"]
+
+
+def test_ingest_batch_basic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST_BATCH s 2 k1 10 5 k2 20 6 2
+ADVANCE_WATERMARK s 10 3
+QUERY w k1 0 4
+QUERY w k2 0 5
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "10", "20"]
+
+
+def test_ingest_batch_late_atomic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST s k 10 5 1
+ADVANCE_WATERMARK s 10 2
+INGEST_BATCH s 2 k 20 5 k 30 15 3
+QUERY w k 0 4
+INGEST_BATCH s 2 k 20 15 k 30 20 5
+ADVANCE_WATERMARK s 20 6
+QUERY w k 10 7
+"""
+    r = run(stdin)
+    # first batch after watermark 10 includes event time5 late -> whole batch LATE none applied, window0 still 10
+    # second batch: 15 in window10 sum20, 20 in window20 sum30, so query window10 after wm20 => 20
+    assert lines(r.stdout) == ["OK", "LATE", "10", "OK", "20"]
+
+
+def test_ingest_batch_error_missing_stream():
+    stdin = """INGEST_BATCH missing 1 k 5 10 0
+CREATE_STREAM s 1
+INGEST_BATCH s 1 k 5 10 2
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["ERROR", "OK"]
+
+
+def test_ingest_batch_distinct():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 COUNT_DISTINCT 1
+INGEST_BATCH s 3 k 5 1 k 5 2 k 7 3 4
+ADVANCE_WATERMARK s 10 5
+QUERY w k 0 6
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "2"]
+
+
+def test_ingest_batch_session_merge():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 10 SUM 1
+INGEST_BATCH s 3 k 10 0 k 20 5 k 5 20 2
+ADVANCE_WATERMARK s 15 3
+QUERY sess k 0 4
+ADVANCE_WATERMARK s 30 5
+QUERY sess k 20 6
+"""
+    r = run(stdin)
+    # batch 0,5 same session [0,15) sum30, 20 separate [20,30) sum5
+    assert lines(r.stdout) == ["OK", "30", "5"]
+
+
+def test_ingest_batch_persist(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_STREAM s 0\nDEFINE_TUMBLING_WINDOW w s 10 SUM 1\nINGEST_BATCH s 2 k 10 1 k 20 2 3\nADVANCE_WATERMARK s 10 4\n",
+        state_dir=d,
+    )
+    r = run("QUERY w k 0 5\n", state_dir=d)
+    # batch events 1 and 2 both in window0 sum 30
+    assert lines(r.stdout) == ["30"]
+
+
+def test_session_compact_preserves(tmp_path):
+    d = str(tmp_path)
+    run(
+        "CREATE_STREAM s 0\nDEFINE_SESSION_WINDOW w s 10 SUM 1\nINGEST s k 10 0 1\nINGEST s k 20 5 2\nADVANCE_WATERMARK s 15 3\n",
+        state_dir=d,
+    )
+    before = os.path.getsize(os.path.join(d, "stream.log"))
+    run("COMPACT 4\n", state_dir=d)
+    after = os.path.getsize(os.path.join(d, "stream.log"))
+    assert after <= before
+    r = run("QUERY w k 0 5\n", state_dir=d)
+    assert lines(r.stdout) == ["30"]
+
+
+def test_mixed_window_types_same_stream():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW wt s 10 SUM 1
+DEFINE_SLIDING_WINDOW ws s 10 5 SUM 2
+DEFINE_SESSION_WINDOW wse s 5 SUM 3
+INGEST s k 10 0 4
+INGEST s k 20 3 5
+INGEST s k 30 7 6
+ADVANCE_WATERMARK s 15 7
+QUERY wt k 0 8
+QUERY ws k 0 9
+QUERY ws k 5 10
+QUERY wse k 0 11
+ADVANCE_WATERMARK s 30 12
+QUERY wse k 0 13
+"""
+    r = run(stdin)
+    assert r.returncode == 0, r.stderr
+    out = lines(r.stdout)
+    # wt [0,10): events 0,3,7 sum 60, closed watermark15 => 60
+    # ws [0,10): same 60, [5,15): events 7 only? Actually 7 belongs to [0,10) and [5,15): event 0 not in [5,15), 3 not, 7 yes => 30? Wait also? Let's compute:
+    # Event 0: [0,10) only
+    # Event 3: [0,10) only? Slide5: windows start0,5... Event3 in [0,10) only (since 3>=5? 3<5? Actually start5: 5<=3? No 5<=3 false, so only start0)
+    # Event7: start0 (0<=7<10) yes, start5 (5<=7<15) yes => 30? Value 30 in second window
+    # So ws 0 => 10+20+30=60, ws5 =>30
+    # session gap5: events 0 and3 diff3<=5 same session [0,8) (3+5=8), event7 diff 4 from 3 <=5 same session extended to [0,12) sum60, closed watermark15 => session start0 sum60, but after watermark15 still open? Actually end12 <=15 so closed => query should return 60 at watermark15, but our test queries wse k0 at watermark15, should be 60. However we have only one session [0,12) sum60.
+    # After more events? No more. So second query after 30 still same session.
+    assert out[3] == "60"  # wt 0
+    assert out[4] == "60"  # ws 0
+    assert out[5] == "30"  # ws 5
+    assert out[6] == "60"  # wse 0 at wm15
+    assert out[7] == "60"  # wse 0 at wm30 still
+
+
+def test_large_sliding_performance():
+    # size 100 slide 1 => 100 windows per event, 100 events => 10k updates
+    cmds = ["CREATE_STREAM s 0", "DEFINE_SLIDING_WINDOW w s 100 1 SUM 1"]
+    for i in range(100):
+        cmds.append(f"INGEST s k 1 {i} {i + 2}")
+    cmds.append("ADVANCE_WATERMARK s 100 200")
+    cmds.append("QUERY w k 0 201")
+    r = run("\n".join(cmds), timeout=10)
+    assert r.returncode == 0
+    out = lines(r.stdout)
+    # window [0,100): 100 events sum 100
+    assert out[100] == "100"
+
+
+def test_query_session_not_exist_returns_null():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW w s 10 SUM 1
+INGEST s k 10 0 1
+ADVANCE_WATERMARK s 15 2
+QUERY w k 5 3
+QUERY w k 0 4
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "NULL", "10"]
+
+
+def test_batch_count_boundaries():
+    # count 100 max allowed
+    many = " ".join([f"k{i % 5} {i} {i}" for i in range(100)])
+    stdin = f"""CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 1000 SUM 1
+INGEST_BATCH s 100 {many} 101
+ADVANCE_WATERMARK s 1000 102
+QUERY w k0 0 103
+"""
+    r = run(stdin, timeout=10)
+    assert r.returncode == 0
+    out = lines(r.stdout)
+    assert out[0] == "OK"
+    # k0 gets values 0,5,10,...95 => 20 values sum = 5*(0+19)*20/2? Actually 0+5+...+95 =5*(0+...+19)=5*190=950
+    assert out[1] == "950"

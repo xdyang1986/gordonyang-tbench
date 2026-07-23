@@ -1,6 +1,6 @@
-# Flink-like Stream Aggregation Engine
+# Flink-like Stream Aggregation Engine — Hard Mode
 
-Build a Flink-inspired keyed stream aggregation engine in Go at `/app`. It supports multiple streams, event-time windows (tumbling and sliding), per-key aggregations, watermark-based triggering, late-event handling, and optional crash-consistent durable persistence with compaction.
+Build a Flink-inspired keyed stream aggregation engine in Go at `/app`. It supports multiple streams, event-time windows (tumbling, sliding, **session**), per-key aggregations (including **COUNT_DISTINCT**), **atomic batch ingestion**, watermark-based triggering, late-event handling, and optional crash-consistent durable persistence with compaction.
 
 You will implement a single `package main` binary. It reads commands from stdin, updates in-memory state, optionally appends to a durable log, and writes one line of output per query to stdout.
 
@@ -25,182 +25,139 @@ Blank lines (empty or whitespace-only) are ignored.
 ## Naming and Value Validation
 
 - **Stream / Window ID / Key name**: length 1..255 for stream and window, 1..128 for key, characters only `[A-Za-z0-9._-]`, not `.` nor `..`.
-- **Value**: signed integer `int64`, allowed range `[-1e12, 1e12]` (outside range is invalid input). Parser must accept normal decimal representation (optional leading `-`).
-- **Event time, Watermark, Window size, Slide, Timestamp (processing time)**: integer `>=0`. Value `0` is allowed. Negative values are **invalid input** and must cause non-zero exit.
-- **Window size**: integer `>=1 && <= 1e9`.
-- **Slide**: integer `>=1 && <= 1e9`.
-- **Agg function**: one of `SUM COUNT MIN MAX AVG` (uppercase only).
+- **Value**: signed integer `int64`, allowed range `[-1e12, 1e12]` (outside range is invalid input).
+- **Event time, Watermark, Window size, Slide, Gap, Timestamp**: integer `>=0`. Negative → invalid input → non-zero exit.
+- **Window size / Slide / Gap**: `>=1 && <= 1e9`.
+- **Batch count**: `>=1 && <=100`.
+- **Agg function**: one of `SUM COUNT MIN MAX AVG COUNT_DISTINCT` (uppercase only).
 - **Window start** in query: integer `>=0`.
 
 ---
 
 ## Command Stream
 
-After start, each non-blank line is one command. Tokens are space-separated (no quoted strings). On **invalid input** (malformed line, unknown command, wrong arity, non-integer where integer expected, invalid name, value out of allowed range, timestamp negative, size/slide out of range, agg unknown), the engine must exit with non-zero status. Output is unspecified in that case.
+Each non-blank line is one command, tokens space-separated. On **invalid input** (malformed, unknown command, wrong arity, non-integer where int expected, invalid name, value/size/slide/gap/count out of range, agg unknown, timestamp negative), exit non-zero. Application errors (stream/window missing, alignment error, watermark decreasing, late) produce `ERROR`/`LATE`/`NULL` and continue.
 
-Application-level errors (e.g., stream does not exist, window does not exist, window_start not aligned, watermark decreasing) are **not** invalid input: they produce a single line `ERROR` and continue, except where specified (`LATE`, `NULL`).
-
-### State-changing commands — no output on success, `ERROR` on application error unless stated
+### State-changing — no output on success unless stated
 
 **`CREATE_STREAM <stream> <timestamp>`**
-Create stream with empty watermark (`-1` = no watermark yet, so no late events). If stream already exists, idempotent: no-op, nothing logged. Logged in durable mode only when it actually creates.
+Watermark `-1` initially. Idempotent. Logged only when creates.
 
 **`DELETE_STREAM <stream> <timestamp>`**
-Delete stream and all its windows and all aggregates and events related to that stream. If stream does not exist, no-op. Logged only when stream existed. Cascades: all window definitions whose stream equals deleted stream are removed.
+Deletes stream + all its windows + aggregates + events + per-key session state. No-op if missing. Logged only when existed.
 
 **`DEFINE_TUMBLING_WINDOW <window_id> <stream> <window_size> <agg_func> <timestamp>`**
-Define a tumbling window aggregation per key on `stream` with size `window_size`. Aggregation per key per window.
-- Tumbling window assignment: for event with `event_time`, `window_start = floor(event_time / window_size) * window_size`, `window_end = window_start + window_size`, window is `[start, end)`.
-- **Retroactive aggregation (required):** When a window is defined, it must immediately aggregate all prior ingested events for its stream that are not late (`event_time > current_watermark` or watermark is `-1`). This makes the window immediately queryable if its end <= watermark, otherwise it becomes visible after future watermark advances. Without retroactive aggregation, tests like `test_define_includes_past_events` would fail. Only events ingested *after* the window definition are also aggregated going forward.
-- If stream does not exist → output `ERROR`.
-- If `window_id` already exists → output `ERROR` (even if same definition).
-- If size invalid (already checked as invalid input if <1) → invalid input, but if agg invalid → invalid input.
-- Aggregators:
-  - `SUM`: sum of values
-  - `COUNT`: count of events (value ignored)
-  - `MIN`: minimum value
-  - `MAX`: maximum value
-  - `AVG`: integer division `sum / count` truncated toward zero (Go int64 division). If count=0 result is considered empty.
-- On success, no output. Logged only on success.
+- Assignment: `window_start = floor(event_time / size) * size`, `window_end = start + size`, `[start,end)`.
+- **Retroactive (required):** Must immediately aggregate all prior non-late events for its stream. Verified by `test_define_includes_past_events`. Without it compaction that emits DEFINE before INGEST diverges.
+- Error if stream missing → `ERROR`, if window_id exists → `ERROR`. Logged only on success.
 
 **`DEFINE_SLIDING_WINDOW <window_id> <stream> <window_size> <slide> <agg_func> <timestamp>`**
-Define sliding window.
-- Sliding windows start every `slide`: start values `0, slide, 2*slide,...`. Event at time `t` belongs to all windows where `start <= t < start+size` and `start % slide == 0`.
-- Number of windows per event is at most `ceil(size/slide)`. Implementation must iterate: latest start `= floor(t / slide)*slide`, then walk backwards while `start > t - size`.
-- **Retroactive aggregation (required):** Same as tumbling — upon definition, the window must aggregate all prior non-late events for its stream across all overlapping window starts. This is verified by `test_define_includes_past_events` adapted for sliding semantics.
-- Same error handling as tumbling, plus `slide` validation. If stream missing → `ERROR`. If window_id exists → `ERROR`.
-- Logged only on success.
+- Starts every `slide`: `[0, slide, 2*slide...]`. Event `t` belongs to all where `start <= t < start+size` and `start%slide==0`. Iterate `latest = floor(t/slide)*slide` backwards while `start > t-size`.
+- Retroactive same as tumbling. Error handling same. Logged only on success.
+
+**`DEFINE_SESSION_WINDOW <window_id> <stream> <gap> <agg_func> <timestamp>`**
+- **Session windows — hard:** Per-key dynamic sessions.
+  - Per key, maintain events sorted by `event_time`. Build sessions by scanning sorted events: start session at first event, `curLast = event_time`. For next event `ev`, if `ev.event_time - curLast <= gap` → same session (extend `curLast = ev.event_time`, aggregate `ev`), else close previous session `[curStart, curLast+gap)` and start new `[ev.event_time, ev.event_time+gap)`.
+  - Each session has `start = first event time`, `end = last event time + gap`, `[start,end)`. Gap = inactivity timeout.
+  - Out-of-order ingestion must rebuild sessions for that key from scratch (merge/split possible). If gap=10, events at 0 and 25 → two sessions [0,10) and [25,35). Adding event at 12 → 0 alone, 12 alone, 25 alone (since 12-0=12>10). If gap=15, events 0,12,25 → one session [0,40) (0,12 same, 12,25 diff 13 <=15 same).
+  - Watermark closes session when `watermark >= session_end`.
+  - Retroactive: upon definition, build sessions from all prior non-late per-key events.
+  - Query checks session existence, not alignment.
+- Error if stream missing → `ERROR`, window_id exists → `ERROR`, gap invalid → invalid input. Logged only on success.
+
+- Aggregators for all window types:
+  - `SUM`, `COUNT` (ignores value), `MIN`, `MAX`, `AVG` (sum/count trunc toward zero), `COUNT_DISTINCT` (distinct values count).
 
 **`DELETE_WINDOW <window_id> <timestamp>`**
-Delete window definition and its aggregates. If window does not exist, no-op. Logged only when existed.
+Removes window + aggregates + session ends. No-op if missing. Logged only when existed.
 
 **`INGEST <stream> <key> <value> <event_time> <timestamp>`**
-Ingest event.
-- If stream missing → output `ERROR`.
-- If `event_time <= current_watermark[stream]` (watermark != -1) → event is **late**: output `LATE`, drop event, do not log.
-- Otherwise, for each window defined on that stream, compute belonging window_start(s) and update aggregate for that key.
-  - For each belonging window, maintain per-key state: sum, count, min, max.
-  - Update: `sum += value`, `count +=1`, `min = min(old min, value)`, `max = max(old max, value)`.
-  - On success output `OK`.
-  - Logged only on `OK` (not LATE, not ERROR). In durable mode log the original command line exactly.
+- Missing stream → `ERROR`.
+- `event_time <= watermark` → `LATE`, drop, not logged.
+- Else update all windows on stream (tumbling/sliding incremental, session via rebuild for that key), append event to stream's raw log for compaction, output `OK`, log original line.
+
+**`INGEST_BATCH <stream> <count> <key1> <value1> <event_time1> <key2> <value2> <event_time2> ... <timestamp>`**
+- Atomic batch: `count` triples, then final processing timestamp. Total tokens `4+3*count`. `count` 1..100 else invalid input.
+- Validation: each key valid, each value in range, each event_time >=0 else invalid input. Arity mismatch → invalid input.
+- If stream missing → `ERROR`, none applied.
+- If any event would be late (`event_time <= watermark`) → entire batch `LATE`, none applied, not logged.
+- Else atomic success: apply all events in given order (for tumbling/sliding aggregates incremental, for session rebuild per affected key once after all insertions), append all to stream's raw events, output single `OK`, log as individual `INGEST <stream> <key> <value> <event_time> <timestamp>` records (one per event, same batch timestamp) for recovery (mirrors `PRODUCE_BATCH` → individual `PRODUCE` logging).
+- Queries never logged.
 
 **`ADVANCE_WATERMARK <stream> <watermark> <timestamp>`**
-Advance event-time watermark for stream.
-- If stream missing → `ERROR`.
-- If `watermark < current_watermark` → `ERROR` (decreasing not allowed). Current watermark is `-1` initially, so any `>=0` is allowed first time.
-- If `watermark == current` → no-op (no log).
-- On success, set watermark to new value, no output.
-- Fires windows: windows with `window_end <= watermark` become **closed** and their aggregates become queryable. Windows with end > watermark remain open (query returns NULL).
-- Logged only when watermark actually increases.
+- Missing stream → `ERROR`. Decreasing (`watermark < current` when current !=-1) → `ERROR`. Equal → no-op no log.
+- On increase, set watermark, no output, fires windows where `end <= watermark`. Logged only on increase.
 
 **`COMPACT <timestamp>`**
-In durable mode, rewrite log to minimal record set that reconstructs current state exactly via temp file + atomic rename. In-memory mode: no-op. No output.
+Durable mode rewrites to minimal deterministic set via tmp + atomic rename. In-memory no-op.
 
-### Query commands — one output line each
+### Query — one output line each
 
 **`QUERY <window_id> <key> <window_start> <timestamp>`**
-Query aggregated result for a specific window instance and key.
-- If window_id does not exist (or its stream was deleted) → output `ERROR`.
-- If key invalid name? Invalid name is invalid input → non-zero exit, not ERROR. Assume key validated.
-- If `window_start` negative → invalid input → non-zero exit.
-- If alignment invalid:
-  - tumbling: `window_start % window_size != 0` → `ERROR`
-  - sliding: `window_start % slide != 0` → `ERROR`
-- Else if stream's watermark < window_start+size (i.e., window not yet closed) → output `NULL` (not ready).
-- Else (closed): look up aggregate for key and window_start. If no events for that key in that window → `NULL`. Else output aggregation result as decimal string:
+- Window missing → `ERROR`.
+- Tumbling alignment: `window_start % size !=0` → `ERROR`; sliding: `window_start % slide !=0` → `ERROR`; session: no alignment error — any `>=0` allowed, but if no session with that start for key → `NULL`.
+- Stream deleted (window should have been cascade-deleted) → `ERROR`.
+- If watermark < window_end → `NULL` (not closed). For tumbling/sliding `window_end = start+size`, for session `window_end = session_end` (looked up, if no session → `NULL`).
+- If closed but no events for key in that window/session → `NULL`.
+- Else result:
   - `SUM` → sum
   - `COUNT` → count
-  - `MIN` → min
-  - `MAX` → max
-  - `AVG` → sum / count truncated toward zero (integer).
-- `NULL` and `ERROR` are uppercase.
+  - `COUNT_DISTINCT` → distinct values count
+  - `MIN`, `MAX` → min/max
+  - `AVG` → sum/count trunc toward zero
+- Uppercase `NULL`/`ERROR`.
 
-**`LIST_STREAMS <timestamp>`**
-Sorted (lexicographic) comma-separated stream names, or `NONE` if none.
-
-**`LIST_WINDOWS <timestamp>`**
-Sorted comma-separated window IDs (all windows across streams), or `NONE`.
-
-Additionally, to support per-stream window listing for tests, we support optional filtered variant:
-
-**`LIST_WINDOWS <stream> <timestamp>`**
-If two tokens after command (stream + ts) and first token is a valid stream name that exists, treat as filtered list: list windows belonging to that stream sorted, or `NONE`. If stream name does not exist → `ERROR`. This overload is distinguished by arity: 2 tokens (ts only) = global list, 3 tokens (stream + ts) = filtered. Implemented as same command name with variable arity (both allowed).
-
-Note: The tests use both variants; ensure you handle both.
+**`LIST_STREAMS <timestamp>`** → sorted comma or `NONE`.
+**`LIST_WINDOWS <timestamp>`** → global sorted or `NONE`.
+**`LIST_WINDOWS <stream> <timestamp>`** → filtered for stream sorted or `NONE`, `ERROR` if stream missing (arity overload: 2 tokens global, 3 tokens filtered).
 
 ---
 
 ## Output Format
 
-- For each command that produces output (`INGEST`, `QUERY`, `LIST_*`) write exactly one line in input order.
-- `INGEST` → `OK`, `LATE`, or `ERROR`.
-- `QUERY` → result string, `NULL`, or `ERROR`.
-- `LIST_*` → `NONE`, comma list, or `ERROR`.
-- No extra spaces. Flush and exit 0 on valid input.
-- On invalid input, exit non-zero.
+- One line per output-producing command in input order.
+- `INGEST`/`INGEST_BATCH` → `OK`, `LATE`, `ERROR`.
+- `QUERY` → result, `NULL`, `ERROR`.
+- `LIST_*` → `NONE`, comma list, `ERROR`.
+- No extra spaces, flush, exit 0.
 
 ---
 
 ## Durable Persistence
 
-Only when `STREAM_STATE_DIR` is set.
+When `STREAM_STATE_DIR` set.
 
-**Log format** — `stream.log`:
-Sequence of records, each:
-```
-uint32 little-endian payload_len
-uint32 little-endian crc32 IEEE of payload
-payload_len bytes UTF-8 payload
-```
-Payload is command text exactly as logged, e.g., `CREATE_STREAM orders 0`, `INGEST orders mykey 5 100 1`. A record is valid only if 8 header bytes plus payload_len bytes are present and CRC matches.
+**Log format `stream.log`:** `uint32 LE len | uint32 LE crc32 IEEE(payload) | payload bytes UTF-8`. Valid only if 8 header + len present and CRC matches.
 
-**What is logged, in order, only when it changes state:**
-- `CREATE_STREAM` → only when creates new.
-- `DELETE_STREAM` → only when deletes existing.
-- `DEFINE_TUMBLING_WINDOW` / `DEFINE_SLIDING_WINDOW` → only on success (new window).
-- `DELETE_WINDOW` → only when existed.
-- `INGEST` → only when `OK` (not late, not error). Log original line as received.
-- `ADVANCE_WATERMARK` → only when watermark increases.
-Queries and `COMPACT` are never appended as payloads; `COMPACT` rewrites file.
+**What is logged, in order, only when state changes:**
+- `CREATE_STREAM`, `DELETE_STREAM`, `DEFINE_TUMBLING_WINDOW`, `DEFINE_SLIDING_WINDOW`, `DEFINE_SESSION_WINDOW`, `DELETE_WINDOW`, `INGEST` (only `OK`), `ADVANCE_WATERMARK` (only increase). For `INGEST_BATCH` success, log as individual `INGEST` records with same batch timestamp. Queries/`COMPACT` never logged.
 
-**Startup recovery:** create directory if needed. Before reading stdin, replay `$STREAM_STATE_DIR/stream.log` record by record in order, reconstructing state exactly as originally processed.
+**Startup recovery:** create dir, replay `stream.log` in order reconstructing state exactly. For `INGEST`, apply same late-check (`event_time <= watermark` → drop). For normal logs late never appears because late not logged. For compacted logs all `INGEST` are before final `ADVANCE_WATERMARK`, so watermark=-1 during replay → no late, final watermark closes windows preserving closed aggregates. Stop at first incomplete/corrupt record, discard tail, truncate file to valid prefix. Empty log clean.
 
-- Process records in log order. For `INGEST`, apply the same late-check as online (`event_time <= current_watermark` → drop). For normal logs this never triggers because late events were never logged and watermarks were logged in order. For compacted logs, all `INGEST` records are emitted before the final `ADVANCE_WATERMARK` records, so watermark is still `-1` during event replay, therefore no event is considered late, and the final watermark advance closes windows exactly as before — preserving all closed-window aggregates.
+**Best-effort durability:** each append should `Sync()`/fsync. Informational test scans for `Sync()`.
 
-- Stop at first incomplete or corrupt record (truncated header/payload or CRC mismatch); discard it and all following bytes; truncate the log file to the valid prefix so later appends are clean. Never fail startup due to torn tail.
-
-- An empty log file recovers cleanly (no streams, no windows, watermark `-1`).
-
-**Durability (best-effort):** Each append should be made durable before continuing (e.g., via file sync / fsync). This is a best-effort guideline — not strictly required for functional tests, but static check scans source for `Sync()` / `fsync` call.
-
-**Compaction:** `COMPACT` writes new temp file `$STREAM_STATE_DIR/stream.log.tmp` containing minimal records that replay to same final state:
-
-- For each stream sorted asc: `CREATE_STREAM <stream> 0`
-- For each window sorted asc by window_id: respective DEFINE record with timestamp 0, preserving original stream, size, slide, agg.
-  - `DEFINE_TUMBLING_WINDOW <id> <stream> <size> <agg> 0`
-  - `DEFINE_SLIDING_WINDOW <id> <stream> <size> <slide> <agg> 0`
-- For each stream sorted asc, each ingested event that was logged (i.e., not late) sorted by `(stream asc, event_time asc, key asc, value asc)` and then by original ingestion order as tie-breaker to be deterministic: `INGEST <stream> <key> <value> <event_time> 0`
-  - Important: Must emit **all** events that contribute to final state, including those whose windows are already closed, because closed window aggregates are derived from them. So emit all logged events (excluding those for deleted streams/windows, since those streams/windows no longer exist). If a stream was deleted, its events should not be emitted.
-- For each stream sorted asc where watermark != -1 (i.e., watermark exists): `ADVANCE_WATERMARK <stream> <watermark> 0`
-
-Deterministic sorted order required. Then atomic rename over `stream.log`. Ignore any stray `.tmp` files on recovery.
+**Compaction:** writes `$STREAM_STATE_DIR/stream.log.tmp` minimal deterministic:
+- Streams sorted asc: `CREATE_STREAM <s> 0`
+- Windows sorted asc by id: `DEFINE_TUMBLING_WINDOW <id> <stream> <size> <agg> 0`, `DEFINE_SLIDING_WINDOW <id> <stream> <size> <slide> <agg> 0`, `DEFINE_SESSION_WINDOW <id> <stream> <gap> <agg> 0`
+- For each stream sorted, events sorted by `(event_time asc, key asc, value asc)`: `INGEST <stream> <key> <value> <event_time> 0` — emit **all** logged events (including those whose windows already closed) excluding deleted streams, to preserve closed aggregates.
+- Watermarks sorted: `ADVANCE_WATERMARK <stream> <wm> 0` where `wm!=-1`
+Atomic rename over `stream.log`, ignore stray `.tmp`.
 
 ---
 
-## Functional Requirements Summary
+## Functional Requirements Summary (hard)
 
-1. Streams with per-stream watermark (`-1` initially). Advance monotonically.
-2. Tumbling windows: `[floor(t/size)*size, floor(t/size)*size + size)`.
-3. Sliding windows: all starts `k*slide` with `start in [t-size+1, t]` inclusive, `start>=0`.
-4. Per-key aggregates SUM, COUNT, MIN, MAX, AVG (avg = sum/count trunc toward zero).
-5. Ingest OK if event_time > watermark else LATE; ERROR if stream missing.
-6. Watermark advancing closes windows whose end <= watermark; queries for open windows return NULL.
-7. Query returns NULL if no data for key in closed window, ERROR if window missing or alignment invalid.
-8. Deleting stream cascades windows; deleting window removes its aggregates.
-9. List streams/windows sorted.
-10. Durable mode survives restarts with crash-consistent recovery and atomic compaction preserving all aggregates via events + final watermark.
-11. Deterministic output; no randomness.
-12. Go stdlib only; invalid input (negative timestamp, malformed, invalid names) → non-zero exit; application errors → ERROR/LATE/NULL line.
+1. Watermark -1 initially, monotonic advance.
+2. Tumbling `[floor(t/size)*size,...+size)`, sliding `[start in [t-size+1,t], start%slide==0]`, session per-key `[first, last+gap)` with merge on `diff<=gap`, sorted event_time, out-of-order rebuild.
+3. Retroactive DEFINE must aggregate prior non-late events (tumbling/sliding/session).
+4. Per-key aggregates `SUM COUNT MIN MAX AVG COUNT_DISTINCT` (distinct via set).
+5. `INGEST` OK if `et>wm` else LATE; atomic `INGEST_BATCH` (count 1..100) all late → LATE none applied, missing stream → ERROR, success → OK.
+6. Watermark closes windows `end<=wm`, query open → NULL, no data → NULL, misalignment (tumbling/sliding) → ERROR.
+7. Session query: no alignment error, start must equal session start else NULL, end=last+gap, closed when `wm>=end`.
+8. Delete stream cascades windows+events+session state; delete window removes aggregates.
+9. List sorted, filtered LIST_WINDOWS.
+10. Durable WAL CRC framing, torn-tail truncation, atomic minimal compaction preserving all aggregates via events+final watermark, no-op suppression (duplicate CREATE, same watermark not logged).
+11. Deterministic, stdlib only, invalid input → non-zero exit.
 
 ---
 
@@ -219,14 +176,7 @@ ADVANCE_WATERMARK orders 10 5
 QUERY w1 alice 0 6
 QUERY w1 bob 0 7
 QUERY w1 bob 10 8
-LIST_STREAMS 9
-LIST_WINDOWS 10
 ```
-
-Explanation:
-- Window size 10: window `[0,10)` contains event times 2 and 8 for alice, sum=12.
-- bob event time 12 is in window `[10,20)` not yet closed (watermark 10, window end 20 >10) → query returns NULL.
-- After watermark 10, window `[0,10)` closed.
 
 Output:
 ```
@@ -236,23 +186,9 @@ OK
 12
 NULL
 NULL
-orders
-w1
 ```
 
-Note: bob query for start 0 → no data in `[0,10)` → NULL. bob query for start 10 → window not closed → NULL.
-
-If we advance watermark to 20 and query again:
-```
-ADVANCE_WATERMARK orders 20 11
-QUERY w1 bob 10 12
-```
-Output:
-```
-3
-```
-
-### Sliding window COUNT
+### Sliding COUNT
 
 Input:
 ```
@@ -266,12 +202,6 @@ QUERY win k 0 6
 QUERY win k 5 7
 QUERY win k 10 8
 ```
-
-- size 10 slide 5: windows `[0,10)`, `[5,15)`, `[10,20)`.
-- Event 2 → windows `[0,10)` only (since start 0: 0<=2<10, start -5 would be -5 invalid)
-- Event 7 → windows `[0,10)` and `[5,15)`
-- Event 12 → windows `[5,15)` and `[10,20)`
-- Watermark 15: windows ending <=15 are `[0,10)` (end10) and `[5,15)` (end15) closed, `[10,20)` end20 not closed.
 
 Output:
 ```
@@ -298,12 +228,6 @@ QUERY w k 0 7
 QUERY w k 10 8
 ```
 
-- First ingest time5 OK, sum in `[0,10)` =10.
-- Watermark to 10 closes `[0,10)`.
-- Second ingest time5 <= watermark 10 → LATE (dropped).
-- Third ingest time15 >10 OK, in window `[10,20)` sum=30.
-- Watermark to 20 closes `[10,20)`.
-
 Output:
 ```
 OK
@@ -313,4 +237,82 @@ OK
 30
 ```
 
-Build your implementation at `/app`. The test harness builds your binary and drives via stdin, and restarts with shared `STREAM_STATE_DIR` to verify durability.
+### Session window (gap=10)
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW sess s 10 SUM 1
+INGEST s k 10 0 2
+INGEST s k 20 5 3
+INGEST s k 5 20 4
+ADVANCE_WATERMARK s 15 5
+QUERY sess k 0 6
+ADVANCE_WATERMARK s 30 7
+QUERY sess k 0 8
+QUERY sess k 20 9
+```
+
+Explanation:
+- Events 0 and 5 diff 5 <=10 → same session [0, 5+10=15)
+- Event 20 diff 15 >10 from last 5 → new session [20,30)
+- Watermark 15 closes first session (end 15), second still open.
+- Watermark 30 closes second.
+
+Output:
+```
+OK
+OK
+OK
+30
+30
+5
+```
+
+### COUNT_DISTINCT
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 COUNT_DISTINCT 1
+INGEST s k 5 1 2
+INGEST s k 5 2 3
+INGEST s k 7 3 4
+ADVANCE_WATERMARK s 10 5
+QUERY w k 0 6
+```
+
+Two distinct values 5,7 → count 2.
+
+Output:
+```
+OK
+OK
+OK
+2
+```
+
+### INGEST_BATCH atomic
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 SUM 1
+INGEST_BATCH s 2 k1 10 5 k2 20 6 2
+ADVANCE_WATERMARK s 10 3
+QUERY w k1 0 4
+QUERY w k2 0 5
+INGEST_BATCH s 2 k1 5 5 k1 10 15 6
+```
+
+Second batch contains event time 5 which is <= watermark 10 → LATE, whole batch dropped.
+
+Output:
+```
+OK
+10
+20
+LATE
+```
+
+Build at `/app`. Tests cover all including session merge/out-of-order, distinct, batch atomicity, durability.
