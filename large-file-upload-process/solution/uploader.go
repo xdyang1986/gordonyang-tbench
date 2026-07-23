@@ -72,6 +72,9 @@ func UploadFile(sourceFile string, destDir string, chunkSize int64, manifestPath
 				fmt.Fprintf(os.Stderr, "WARN: chunk size changed from %d to %d, using manifest's chunk size\n", loaded.ChunkSize, chunkSize)
 				chunkSize = loaded.ChunkSize
 			}
+			if loaded.Parallel != parallel {
+				fmt.Fprintf(os.Stderr, "WARN: parallel changed from %d to %d, using new\n", loaded.Parallel, parallel)
+			}
 
 			fmt.Fprintf(os.Stderr, "Resuming upload session %s with %d workers, verifying existing chunks...\n", loaded.SessionID, parallel)
 			for i := range loaded.Chunks {
