@@ -1,0 +1,1 @@
+# codimango/stream-aggregation
