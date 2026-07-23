@@ -770,14 +770,19 @@ def test_stdlib_only():
 
 
 def test_fsync_best_effort():
-    """Best-effort static check for durability: fsync/Sync should be present.
+    """Best-effort static check for durability: fsync/Sync/O_SYNC.
 
-    The spec's per-append fsync is not strictly testable via black-box I/O
-    (R06 gap). This test is marked as best-effort: it checks that the Go
-    source contains a Sync() call, encouraging correct practice without being
-    a hard correctness gate. Our reference solution has Sync() in append and
-    compact paths.
+    The spec previously required per-append fsync, which is not strictly testable
+    via black-box I/O (R06 gap). Per latest review, the spec now says durability
+    via sync is a best-effort guideline and implementations that omit sync still
+    pass functional tests. This test is informational only and does NOT affect
+    reward — it always passes but logs if no Sync/O_SYNC found.
+
+    This fixes the previous contradiction where a test labeled best-effort acted
+    as a hard gate and would reject valid solutions using O_SYNC file flag.
     """
+    import sys
+
     go_files = []
     for root, _dirs, files in os.walk(APP):
         for f in files:
@@ -785,29 +790,24 @@ def test_fsync_best_effort():
                 go_files.append(os.path.join(root, f))
     if not go_files:
         pytest.skip("no go files")
-    # Look for 'Sync()' or 'fsync' in any go file (best-effort)
     found = False
     for gf in go_files:
         content = open(gf).read()
-        if "Sync()" in content or "fsync" in content.lower():
+        if (
+            "Sync()" in content
+            or "O_SYNC" in content
+            or "O_DSYNC" in content
+            or "fsync" in content.lower()
+        ):
             found = True
             break
-    # This is best-effort, not a hard fail for grading, but we assert with clear message
-    # If missing, we still allow pass for functional correctness, but flag as low-severity
-    # For our reference, it should be present
     if not found:
-        # Instead of hard failing, we skip with warning to avoid penalizing correct but non-durable impls
-        # The reviewer asked to either remove fsync from graded spec or add best-effort check marked as such.
-        # We keep spec mentioning it as best-effort and this test as best-effort; we assert with xfail-like behavior
-        # but for oracle it must pass, so we make it pass if not found? Actually we want oracle to pass, so we check
-        # but if not found we don't fail the suite heavily? We'll make it a soft assertion that still passes for oracle
-        # but documents the gap. For now, we assert True with explanation that missing fsync is allowed but not ideal.
-        # To satisfy R06, we will not fail the test suite if Sync missing, but we will print a note.
-        # We implement as a check that passes if found, otherwise passes with warning (so it doesn't cause too-easy failure).
-        # For validation, we want reference to have Sync, so we assert.
-        assert found, (
-            "Best-effort durability check: no Sync()/fsync found in Go source — per-append fsync is recommended for crash safety (see instruction Durability best-effort)"
+        print(
+            "WARNING: Best-effort durability: no Sync()/O_SYNC/O_DSYNC/fsync found — per-append fsync/O_SYNC is recommended but not required for functional correctness (see instruction Durability best-effort)",
+            file=sys.stderr,
         )
+    # Always pass — do not gate reward on fsync presence (spec says skipping still passes)
+    assert True
 
 
 # --------------------------------------------------------------------------
