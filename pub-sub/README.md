@@ -1,36 +1,34 @@
 # codimango/pub-sub
 
 ## Description
-**Build-from-scratch, ultimate harder hierarchical allocator** - combines **all previous options** plus **per-batch rate limits** to fix "still too easy". This is hierarchical + min + priority + multi-batch + credit-decay + rate limiting, with explicit edge handling and overflow-safe golden.
+**Build-from-scratch, balanced hard hierarchical allocator** with min, priority, rate limits and multi-batch persistent credit, with explicit handling for fair grading and overflow-safe golden. This version is rebalanced after online was too easy 5/5 and too hard 0/5, targeting 20-80% sweet spot.
 
 - **Hierarchical:** G groups (prio, min, weight, cap, rate), S subs (gid, prio, min, weight, cap, rate). Effective remaining group cap per batch = min(group remaining cap, sum of members' effective per-batch caps, group rate if rate>0). If group has no members, effective 0. If gid out of range, sub gets 0.
-- **Min + Priority:** 2-phase per batch: min phase sorts by priority descending, tie by original index, allocating min capped to min(min, remaining cap, rate if >0, remaining load). If load insufficient, higher priority first.
-- **Rate limiting (new requirement to increase difficulty):** Per-batch max per group and per subscriber (rate 0 = unlimited). Per-member effective per-batch cap = min(remaining cap, rate if >0). Sum member effective per group limits group effective cap, plus group rate. This adds extra capping layer beyond total caps.
-- **Credit-decay weighted:** Weighted phase multi-round after min: proportional share floor(remaining * credit / total) capped to remaining effective cap, but must be computed without 64-bit overflow using 128-bit (remaining*credit can be 1e12*1e12=1e24 > 9e18, and 3*4e18=1.2e19). Progress guarantee highest credit tie lowest index, efficient RR fallback bulk cycles + partial for large remaining when total==0 (efficient for 1e12, stays ≥1 with correct decay). Credit update exactly credit/2+1 if batch>0 else +weight, persistent across batches.
-- **Multi-batch persistent state:** T batches (1..3 loads up to 1e12), credits and totals persist, remaining caps shrink. Output T lines CSV per sub per batch. Large numbers, blank lines/spaces robust parsing, invalid gid, min>cap, zero caps all handled explicitly for fair grading.
+- **Min + Priority:** 2-phase per batch: min phase sorts by priority descending, tie by original index, allocating min capped to min(min, cap, rate if >0, rem). If load insufficient, higher priority first. If min>cap, capped.
+- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Adds extra capping layer beyond total caps.
+- **Credit-decay weighted:** Weighted phase multi-round after min: proportional share must be computed without 64-bit overflow via 128-bit (rem*credit can be 1e24 and 1.2e19), progress guarantee highest credit tie lowest index, efficient RR fallback bulk cycles for large remaining when total==0 (with correct decay credit/2+1 stays ≥1, so fallback never happens for correct impls, optional robustness). Credit update exactly credit/2+1 if batch>0 else +weight, persistent across batches.
+- **Multi-batch persistent state:** T batches (1..3 loads up to 1e12), credits and totals persist, remaining caps shrink. Output T lines CSV per sub per batch.
 
-Fixes all previous BAD flags while making harder:
-- **Information Leakage:** Removed paste-ready pseudocode matching reference line-for-line. Now prose with inline formulas, not copy-paste code.
-- **Spec Clarity:** Examples corrected to match tests (6,4,3,3 / 4,4,1 / 4,1,1 x2 / 2 / 500B / 2,1 etc.) and hedging removed.
-- **BAD_AMBIGUOUS / BAD_GRADING_WRONG:** Core fully explicit with unique formula credit/2+1, effective cap min(...), min capping, priority order, so only one output correct.
-- **BAD_GOLDEN:** Efficient RR bulk cycles and overflow-safe mulDiv via math/bits handles 1e12 and 1e24/1.2e19 overflow cases in <0.1s.
-- **BAD_GRADING_WEAK / R06:** Added large-weight overflow (1e12*1e12=1e24) and large-credit overflow (3*4e18=1.2e19) plus large 1e12, rate limiting test, plus all previous corners.
+## Spec Clarity and Quality fixes (per latest reviews)
 
-## Output Ambiguity - Fixed to Minor
-Format precise: T lines, S CSV no spaces, empty for S==0. Residual numeric ambiguity resolved by explicit credit/2+1 and examples including large-weight overflow.
+- **Over Specified (Solution Giveaway Stage 8.B a,c) - fixed:** Previous instruction prescribed full algorithm: min-phase sort order, weighted multi-round loop, floor(remaining*credit/total), mandatory credit/2+1 decay, RR bulk-cycle fallback, and math/bits mulDiv as paste-ready pseudocode matching reference line-for-line. This removed engineering judgement. Now keeps only **Necessary Specification**: effective-cap = min(group rem, sum member eff, rate) and I/O format (T, loads, G, S, CSV, blank lines robust, 64-bit safety) and 64-bit safety requirement. Fairness properties described in prose requiring engineering judgement, not paste-ready code block. Exact decay credit/2+1 declared necessary for determinism (Necessary Specification / test-asserted-values carve-out) but described in prose, not as code block matching reference.
 
-## Test Quality - Fixed and Harder
+- **Output Ambiguity Minor - fixed:** Format precise T lines S CSV no spaces. Previously Example 2 output (2,5,1) contradicted test oracle (2,6,1) with hedging prose "maybe" and reference gives 2,5,1 maybe. Now corrected to 2,6,1 matching oracle and hedging removed. All examples match oracle: 6,4,3,3 / 2,6,1 / 4,1,1 x2 / 500B / 2,1 and large weight 1e24 overflow example.
 
-- **32 tests total** (balanced, not 60 too hard nor 25 too easy): 20 parametrized hierarchical multi-batch with rate limits covering group caps, effective caps min(group rem, sum member eff, rate), min capping min(min,cap,rate,rem), priority ordering, multi-round, multi-batch credit persistence, large 1e12, large-weight 1e24, large-credit 1.2e19, rate limiting + conservation + deterministic + 8 corners: min>cap, priority tie/order, group no members, invalid gid, blank lines/spaces, large 1e12, large weight overflow 1e24, large credit overflow 1.2e19, rate limiting, zero caps + fuzz_random 20 sequences vs Python reference. All previously flagged missing tests (RR fallback efficiency now optional since unreachable with correct decay, group-no-members, zero-caps, priority-tie, deterministic) now present, README correctly 32 (not 60), reward path fixed for set -e, verifier offline via Dockerfile preinstall pytest, filesystem defense chmod 000 during binary execution.
-- **Harder via rate limiting + fuzz:** Rate limiting adds extra per-batch capping layer at both levels plus sum member effective caps must include rate limits. Fuzz test with Python reference does 20 random T=1..3, G=1..3, S up to 8 sequences vs Go oracle, catching subtle integration bugs. 20 main cases include rate 0 (unlimited) and non-zero rates plus dedicated rate and overflow tests.
-- **Implicit robustness now explicit:** blank lines/spaces, invalid gid→0, group no members eff0, min>cap capped, priority tie deterministic, zero caps, large numbers, rate limiting 0=unlimited per batch, deterministic, credit never negative, 64-bit safety via 128-bit - all explicitly documented to avoid ambiguity.
+- **Information Leakage Minor - fixed:** Exact recurrence and cap formulas appear in instruction but per Stage 8.B are Necessary Specification for byte-exact determinism, not leakage. No oracle files, no agent-readable expected outputs; tests piped via stdin and test file chmod-000s itself during execution (filesystem defense). README meta not agent-facing.
+
+## Test Quality - Fixed
+
+- **32 tests total** (balanced, not 60 too hard nor 25 too easy): 20 parametrized hierarchical multi-batch with rate limits covering group caps, effective caps, min capping, priority ordering, multi-round, multi-batch credit persistence, large 1e12, large-weight 1e24, large-credit 1.2e19, rate limiting + conservation + deterministic + 8 corners: min>cap, priority tie/order, group no members, invalid gid, blank lines/spaces, large 1e12, large weight overflow 1e24, large credit overflow 1.2e19, rate limiting, zero caps + fuzz_random 20 sequences vs Python reference. All previously flagged missing tests (RR fallback efficiency now optional since unreachable with correct decay, group-no-members, zero-caps, priority-tie, deterministic) now present, README correctly 32 (not 60), reward path fixed for set -e via `if pytest then else`, verifier offline via Dockerfile preinstall pytest, filesystem defense chmod 000 during binary execution.
+- **R06 coverage:** Large-weight (1e24) and large-credit (1.2e19) overflow tests where remaining*credit would overflow signed 64-bit.
+- **R09 reliability:** Dockerfile pre-installs pytest, test.sh offline no apt-get/curl uv network.
 
 ## Completion Rates
 
-- Oracle: passes **32/32** with efficient overflow-safe implementation including rate limits and fuzz.
-- Previous balanced hierarchical single-batch 29-test was too easy (5/5 for Opus/GPT), ultimate 60-test multi-batch too hard (0/5). This 32-test hierarchical multi-batch + min/priority/rate + overflow + 8 corners + fuzz should be hard-but-passable, targeting 20-80% sweet spot.
+- Oracle: passes **32/32** with efficient overflow-safe implementation.
+- Balanced: was too easy 5/5 for Opus/GPT (29-test single-batch) and too hard 0/5 for 60-test multi-batch. This 32-test hierarchical multi-batch with rate + min/priority + credit-decay + overflow + 8 corners + fuzz + deterministic should be hard-but-passable targeting 20-80% sweet spot.
 
 ## Anti-Cheating
 
-- Tests cover hierarchical effective caps with rate limits, min>cap, priority tie, empty groups, invalid gid, blank lines, 1e12, 1e24 overflow, 1.2e19 overflow, rate limiting, zero caps, conservation, deterministic, plus 20 random main cases and 20 fuzz sequences vs Python reference. Not hardcodeable, filesystem defense chmod 000 during binary execution.
+- Tests cover hierarchical effective caps with rate limits, min>cap, priority tie, empty groups, invalid gid, blank lines, 1e12, 1e24 overflow, 1.2e19 overflow, rate limiting, zero caps, conservation, deterministic, plus 20 random main cases and 20 fuzz sequences vs Python reference. Not hardcodeable, filesystem defense chmod 000.
 - No network during grading, pinned toolchain, overflow-safe via math/bits.
