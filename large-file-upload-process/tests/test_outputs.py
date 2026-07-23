@@ -164,9 +164,7 @@ def test_go_mod_and_build():
 
 
 def test_memory_efficiency_and_streaming():
-    """Test that implementation handles large files without OOM via streaming behavior"""
-    # Behavioral check: upload a 5GB sparse file should work without OOM and use streaming
-    # This proves streaming rather than just grepping source
+    """Test that implementation handles large files without OOM via streaming behavior (purely behavioral)"""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         huge = tmp / "stream_test.mp4"
@@ -174,23 +172,7 @@ def test_memory_efficiency_and_streaming():
         dest = tmp / "dest_stream"
         dest.mkdir()
 
-        # Verify code uses int64 and Seek (light structural check combined with behavior)
-        go_files = list(APP_DIR.glob("*.go"))
-        assert len(go_files) > 0
-        has_int64 = any(
-            "int64" in (APP_DIR / f).read_text()
-            for f in ["chunk.go", "manifest.go", "uploader.go"]
-            if (APP_DIR / f).exists()
-        )
-        assert has_int64, "Must use int64 for large file support"
-
-        uploader_content = (APP_DIR / "uploader.go").read_text()
-        assert "Seek" in uploader_content, "uploader must use Seek for chunked reading"
-
-        chunk_content = (APP_DIR / "chunk.go").read_text()
-        assert "ParseChunkSize" in chunk_content
-
-        # Behavioral: upload 5GB sparse file with 1G chunks - should not OOM
+        # Behavioral: upload 5GB sparse file with 1G chunks - should not OOM and preserve int64 size
         result = run_uploader(
             [
                 "upload",
@@ -765,6 +747,121 @@ def test_source_changed_detection():
             "source file changed" in combined.lower()
             or "size mismatch" in combined.lower()
         )
+
+
+def test_resume_warn_messages():
+    """Test WARN for parallel and checksum algo changes on resume"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "warn_test.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=8 * 1024 * 1024)
+        dest = tmp / "dest_warn"
+        dest.mkdir()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--parallel",
+                "2",
+                "--checksum",
+                "sha256",
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0
+        manifest_path = dest / "warn_test.mp4.manifest.json"
+        assert manifest_path.exists()
+        (dest / "warn_test.mp4").unlink()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--parallel",
+                "4",
+                "--checksum",
+                "sha256",
+            ],
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0
+        assert "WARN" in combined and "parallel changed" in combined.lower()
+        if (dest / "warn_test.mp4").exists():
+            (dest / "warn_test.mp4").unlink()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--parallel",
+                "4",
+                "--checksum",
+                "md5",
+            ],
+            timeout=30,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0
+        assert "WARN" in combined and "checksum algo changed" in combined.lower()
+
+
+def test_manifest_custom_path():
+    """Test --manifest custom path flag"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        sample = tmp / "custom_manifest.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=4 * 1024 * 1024)
+        dest = tmp / "dest_custom"
+        dest.mkdir()
+        custom_manifest = tmp / "my_custom" / "manifest.json"
+        custom_manifest.parent.mkdir(parents=True, exist_ok=True)
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--manifest",
+                str(custom_manifest),
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0
+        assert custom_manifest.exists()
+        assert "UPLOAD COMPLETE" in result.stdout
+        data = json.loads(custom_manifest.read_text())
+        assert data["source_file"] == str(sample)
+        (dest / "custom_manifest.mp4").unlink()
+        result = run_uploader(
+            [
+                "upload",
+                "--source",
+                str(sample),
+                "--dest",
+                str(dest),
+                "--manifest",
+                str(custom_manifest),
+            ],
+            timeout=30,
+        )
+        assert result.returncode == 0
+        output = tmp / "assembled_custom.mp4"
+        (dest / "custom_manifest.mp4").unlink()
+        result = run_uploader(
+            ["assemble", "--manifest", str(custom_manifest), "--output", str(output)],
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert "ASSEMBLE COMPLETE" in result.stdout
 
 
 def test_assemble_command():
