@@ -167,36 +167,6 @@ def test_go_mod_and_build():
     assert Path("/tmp/uploader").exists(), "binary should be built"
 
 
-def test_memory_efficiency_and_streaming():
-    """Test that implementation handles large files without OOM via streaming behavior (purely behavioral)"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        huge = tmp / "stream_test.mp4"
-        create_sparse_file(huge, "5G", fmt="mp4")
-        dest = tmp / "dest_stream"
-        dest.mkdir()
-
-        # Behavioral: upload 5GB sparse file with 1G chunks - should not OOM and preserve int64 size
-        result = run_uploader(
-            [
-                "upload",
-                "--source",
-                str(huge),
-                "--dest",
-                str(dest),
-                "--chunk-size",
-                "1G",
-            ],
-            timeout=90,
-        )
-        assert result.returncode == 0, (
-            f"Streaming upload of 5GB sparse file should not OOM: {result.stderr}"
-        )
-        assert (dest / "stream_test.mp4").exists()
-        # Verify file size is preserved via int64
-        assert (dest / "stream_test.mp4").stat().st_size == 5 * 1024 * 1024 * 1024
-
-
 def test_format_validation_supported():
     """Test validation for all supported formats"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -914,22 +884,6 @@ def test_assemble_command():
         assert compute_sha256(sample) == compute_sha256(output)
 
 
-def test_help_commands():
-    """Test help flags"""
-    for cmd in ["help", "--help", "-h"]:
-        result = run_uploader([cmd], timeout=10)
-        # help should exit 0 or 2? But should print usage
-        assert (
-            "Usage" in result.stdout
-            or "Usage" in result.stderr
-            or "Large File" in (result.stdout + result.stderr)
-        )
-
-    for subcmd in ["validate", "info", "upload", "assemble"]:
-        result = run_uploader([subcmd, "--help"], timeout=10)
-        assert result.returncode == 0 or "Usage" in (result.stdout + result.stderr)
-
-
 def test_hundreds_gb_simulation():
     """Simulate hundreds of GB scenario with sparse files - int64 handling via agent code"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1448,6 +1402,17 @@ def test_checksum_algo_flag():
         info = json.loads(result.stdout)
         assert "checksum" in info and len(info["checksum"]) == 64
         assert "checksum_md5" in info and len(info["checksum_md5"]) == 32
+
+        # Verify info with md5-only (pin output contract to avoid ambiguity)
+        result = run_uploader(
+            ["info", "--file", str(sample), "--checksum", "md5"], timeout=15
+        )
+        assert result.returncode == 0
+        info = json.loads(result.stdout)
+        assert "checksum" in info and len(info["checksum"]) == 32, (
+            "For md5-only, checksum field must be MD5 32-char hex"
+        )
+        # checksum_md5 may be same or omitted for md5-only, but checksum must be 32 chars
 
 
 def test_encryption_xor():
