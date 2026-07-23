@@ -3,18 +3,32 @@ schema_version = "1.1"
 [task]
 name = "codimango/stream-aggregation"
 description = "Flink-like keyed stream aggregation engine in Go with tumbling/sliding windows, watermark-based triggering, late-event handling, and crash-consistent durable persistence with compaction."
-authors = []
+format = "terminal_bench_single_turn"
+workstream = "swe_public_repo"
 keywords = ["flink", "streaming", "aggregation", "windowing", "watermark", "go", "event-time"]
 
+[[task.authors]]
+name = "Gordon Yang"
+email = "gordonyang@meta.com"
+
 [metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
 difficulty = "hard"
-category = "distributed-systems"
+category = "software-engineering"
+category_usecase = "handle_events"
+category_subdomain = "distributed_systems"
+reward_type = "binary"
+languages = ["go"]
+tags = ["flink", "streaming", "aggregation", "windowing", "watermark", "go", "event-time", "durability"]
+expert_time_estimate_min = 90.0
+junior_time_estimate_min = 180.0
 
 [verifier]
 timeout_sec = 600.0
 
 [agent]
-timeout_sec = 600.0
+timeout_sec = 1200.0
 
 [environment]
 build_timeout_sec = 600.0

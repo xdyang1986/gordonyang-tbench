@@ -289,27 +289,22 @@ INGEST s k 20 5 4
 INGEST s k 30 15 5
 ADVANCE_WATERMARK s 20 6
 QUERY w k 0 7
+QUERY w k 10 8
 ```
 
-- First ingest time5 OK.
+- First ingest time5 OK, sum in `[0,10)` =10.
 - Watermark to 10 closes `[0,10)`.
-- Second ingest time5 <= watermark 10 → LATE.
-- Third ingest time15 >10 OK, in window `[10,20)`.
+- Second ingest time5 <= watermark 10 → LATE (dropped).
+- Third ingest time15 >10 OK, in window `[10,20)` sum=30.
 - Watermark to 20 closes `[10,20)`.
 
 Output:
 ```
 OK
-OK
 LATE
 OK
+10
 30
 ```
-
-Wait first query? Let's trace: after watermark 10, window [0,10) sum=10. Second query after watermark 20, window [0,10) still 10. The example shows 30? Actually after all, query w k 0 returns 10, not 30. The example output above shows 30 incorrectly? Let's recalc: The command list: after third ingest, watermark 20, query w k 0 -> should be 10. Need adjust example.
-
-Correct example output for last query would be 10. If we queried window start10, sum=30.
-
-Implementation must handle these.
 
 Build your implementation at `/app`. The test harness builds your binary and drives via stdin, and restarts with shared `STREAM_STATE_DIR` to verify durability.
