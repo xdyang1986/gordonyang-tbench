@@ -1265,6 +1265,111 @@ def test_compact_preserves_lateness_and_purge(tmp_path):
     assert lines(r.stdout) == ["30"]
 
 
+def test_cumulative_window_basic():
+    stdin = """CREATE_STREAM s 0
+DEFINE_CUMULATIVE_WINDOW cum s 30 10 SUM 1
+INGEST s k 10 5 2
+INGEST s k 20 15 3
+INGEST s k 30 25 4
+ADVANCE_WATERMARK s 10 5
+QUERY cum k 10 6
+QUERY cum k 20 7
+ADVANCE_WATERMARK s 20 8
+QUERY cum k 20 9
+QUERY cum k 30 10
+ADVANCE_WATERMARK s 30 11
+QUERY cum k 30 12
+"""
+    r = run(stdin)
+    # cumulative windows [0,10) sum10, [0,20) sum30, [0,30) sum60
+    # wm10 closes [0,10) only, wm20 closes [0,20), wm30 closes [0,30)
+    assert lines(r.stdout) == ["OK", "OK", "OK", "10", "NULL", "30", "NULL", "60"]
+
+
+def test_cumulative_window_out_of_order():
+    stdin = """CREATE_STREAM s 0
+DEFINE_CUMULATIVE_WINDOW cum s 20 10 SUM 1
+INGEST s k 5 15 2
+INGEST s k 10 5 3
+ADVANCE_WATERMARK s 20 4
+QUERY cum k 10 5
+QUERY cum k 20 6
+"""
+    r = run(stdin)
+    # events 15 and 5: [0,10) contains 5 sum10, [0,20) contains 5 and15 sum15
+    assert lines(r.stdout) == ["OK", "OK", "10", "15"]
+
+
+def test_top_k_tumbling():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 TOP_2 1
+INGEST s k 5 1 2
+INGEST s k 1 2 3
+INGEST s k 10 3 4
+INGEST s k 7 4 5
+ADVANCE_WATERMARK s 10 6
+QUERY w k 0 7
+"""
+    r = run(stdin)
+    # values 5,1,10,7 sorted desc 10,7,5,1 top2 => 10,7
+    assert lines(r.stdout) == ["OK", "OK", "OK", "OK", "10,7"]
+
+
+def test_top_k_sliding():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SLIDING_WINDOW w s 10 5 TOP_3 1
+INGEST s k 10 0 2
+INGEST s k 20 6 3
+INGEST s k 5 7 4
+ADVANCE_WATERMARK s 15 5
+QUERY w k 0 6
+QUERY w k 5 7
+"""
+    r = run(stdin)
+    # [0,10): values 10,20,5? Actually event 7 value5 at time7 in [0,10) and [5,15): [0,10) has 10,20,5 => top3 descending 20,10,5 => 20,10,5
+    # [5,15): values 20,5 => top3 20,5
+    assert lines(r.stdout) == ["OK", "OK", "OK", "20,10,5", "20,5"]
+
+
+def test_top_k_session():
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW w s 10 TOP_2 1
+INGEST s k 3 0 2
+INGEST s k 8 5 3
+INGEST s k 5 6 4
+ADVANCE_WATERMARK s 20 5
+QUERY w k 0 6
+"""
+    r = run(stdin)
+    # single session [0,16) gap10 values 3,8,5 sorted 8,5,3 top2 8,5
+    assert lines(r.stdout) == ["OK", "OK", "OK", "8,5"]
+
+
+def test_top_k_batch_and_distinct():
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 TOP_2 1
+INGEST_BATCH s 3 k 5 1 k 5 2 k 10 3 4
+ADVANCE_WATERMARK s 10 5
+QUERY w k 0 6
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "10,5"]
+
+
+def test_cumulative_batch():
+    stdin = """CREATE_STREAM s 0
+DEFINE_CUMULATIVE_WINDOW cum s 30 10 SUM 1
+INGEST_BATCH s 3 k 10 5 k 20 15 k 30 25 2
+ADVANCE_WATERMARK s 30 3
+QUERY cum k 10 4
+QUERY cum k 20 5
+QUERY cum k 30 6
+"""
+    r = run(stdin)
+    # batch events 5,15,25: [0,10) sum10, [0,20) sum30, [0,30) sum60
+    assert lines(r.stdout) == ["OK", "10", "30", "60"]
+
+
 def test_invalid_allowed_lateness():
     cases = [
         "SET_ALLOWED_LATENESS s -1 0\n",
@@ -1272,16 +1377,21 @@ def test_invalid_allowed_lateness():
         "SET_ALLOWED_LATENESS missing 5 0\n",
         "PURGE s -1 0\n",
         "PURGE missing 10 0\n",
+        "DEFINE_CUMULATIVE_WINDOW w s 30 7 SUM 0\n",  # 30%7 !=0 invalid input
+        "DEFINE_SESSION_WINDOW w s 0 SUM 0\n",  # gap 0 invalid
+        "DEFINE_TUMBLING_WINDOW w s 10 TOP_0 0\n",  # top 0 invalid
+        "DEFINE_TUMBLING_WINDOW w s 10 TOP_101 0\n",  # top >100 invalid
     ]
     for stdin in cases:
-        # first two are invalid input (negative), should exit non-zero
-        # last three: missing stream -> ERROR except negative which is invalid
+        # first set are invalid input (negative), should exit non-zero
+        # missing stream -> ERROR except negative which is invalid
         if "missing" in stdin and "-1" not in stdin:
             r = run(stdin)
             assert r.returncode == 0
             assert lines(r.stdout) == ["ERROR"]
         else:
             r = run(stdin)
-            # negative lateness/up_to is invalid input
-            if "-1" in stdin:
-                assert r.returncode != 0, f"expected non-zero for {stdin!r}"
+            # negative lateness/up_to or gap 0 or top 0/101 or cumulative not multiple -> invalid input
+            assert r.returncode != 0, (
+                f"expected non-zero for {stdin!r} got {r.stdout} {r.stderr}"
+            )

@@ -1,6 +1,6 @@
-# Flink-like Stream Aggregation Engine — Hard Mode
+# Flink-like Stream Aggregation Engine — Extremely Hard Mode
 
-Build a Flink-inspired keyed stream aggregation engine in Go at `/app`. It supports multiple streams, event-time windows (tumbling, sliding, **session**), per-key aggregations (including **COUNT_DISTINCT**), **atomic batch ingestion**, watermark-based triggering, late-event handling, and optional crash-consistent durable persistence with compaction.
+Build a Flink-inspired keyed stream aggregation engine in Go at `/app`. It supports multiple streams, event-time windows (tumbling, sliding, **session**, **cumulative**), per-key aggregations (including **COUNT_DISTINCT** and **TOP_K**), **atomic batch ingestion**, **allowed lateness**, **purge TTL**, watermark-based triggering, late-event handling, and optional crash-consistent durable persistence with compaction.
 
 You will implement a single `package main` binary. It reads commands from stdin, updates in-memory state, optionally appends to a durable log, and writes one line of output per query to stdout.
 
@@ -26,17 +26,18 @@ Blank lines (empty or whitespace-only) are ignored.
 
 - **Stream / Window ID / Key name**: length 1..255 for stream and window, 1..128 for key, characters only `[A-Za-z0-9._-]`, not `.` nor `..`.
 - **Value**: signed integer `int64`, allowed range `[-1e12, 1e12]` (outside range is invalid input).
-- **Event time, Watermark, Window size, Slide, Gap, Timestamp**: integer `>=0`. Negative → invalid input → non-zero exit.
-- **Window size / Slide / Gap**: `>=1 && <= 1e9`.
+- **Event time, Watermark, Window size, Slide, Gap, MaxSize, Lateness, UpTo, Timestamp**: integer `>=0`. Negative → invalid input → non-zero exit.
+- **Window size / Slide / Gap / MaxSize / Lateness**: `>=1 && <= 1e9` (except lateness `>=0`).
 - **Batch count**: `>=1 && <=100`.
-- **Agg function**: one of `SUM COUNT MIN MAX AVG COUNT_DISTINCT` (uppercase only).
-- **Window start** in query: integer `>=0`.
+- **TopK K**: `>=1 && <=100`.
+- **Agg function**: one of `SUM COUNT MIN MAX AVG COUNT_DISTINCT` or `TOP_K` where `TOP_1`..`TOP_100` (e.g., `TOP_2`, `TOP_10`). Uppercase only.
+- **Window start / end** in query: integer `>=0`.
 
 ---
 
 ## Command Stream
 
-Each non-blank line is one command, tokens space-separated. On **invalid input** (malformed, unknown command, wrong arity, non-integer where int expected, invalid name, value/size/slide/gap/count out of range, agg unknown, timestamp negative), exit non-zero. Application errors (stream/window missing, alignment error, watermark decreasing, late) produce `ERROR`/`LATE`/`NULL` and continue.
+Each non-blank line is one command, tokens space-separated. On **invalid input** (malformed, unknown command, wrong arity, non-integer where int expected, invalid name, value/size/slide/gap/maxSize/lateness/upTo/count/topK out of range, agg unknown, timestamp negative, cumulative maxSize not multiple of slide), exit non-zero. Application errors (stream/window missing, alignment error, watermark decreasing, late) produce `ERROR`/`LATE`/`NULL` and continue.
 
 ### State-changing — no output on success unless stated
 
@@ -65,8 +66,14 @@ Deletes stream + all its windows + aggregates + events + per-key session state. 
   - Query checks session existence, not alignment.
 - Error if stream missing → `ERROR`, window_id exists → `ERROR`, gap invalid → invalid input. Logged only on success.
 
+**`DEFINE_CUMULATIVE_WINDOW <window_id> <stream> <max_size> <slide> <agg_func> <timestamp>`**
+- **Cumulative windows — extremely hard:** Windows all start at 0, ends are `slide, 2*slide, ..., max_size`. Must have `max_size % slide ==0` else invalid input. Event at time `t` belongs to all cumulative windows where `end > t` and `end <= max_size`. Example max=30 slide=10: windows `[0,10)`, `[0,20)`, `[0,30)`. Event t=5 belongs to all three, t=15 belongs to `[0,20)` and `[0,30)`, t=25 belongs to `[0,30)` only. First end > t is `(floor(t/slide)+1)*slide`.
+- Retroactive same as others: upon definition aggregate all prior non-late events across all qualifying ends.
+- Query uses `window_start` parameter as `window_end`: must satisfy `end % slide==0`, `0 < end <= max_size` else `ERROR`. Closes when `watermark >= end`.
+- Logged only on success. Purge deletes aggregates where `end <= up_to`.
+
 - Aggregators for all window types:
-  - `SUM`, `COUNT` (ignores value), `MIN`, `MAX`, `AVG` (sum/count trunc toward zero), `COUNT_DISTINCT` (distinct values count).
+  - `SUM`, `COUNT` (ignores value), `MIN`, `MAX`, `AVG` (sum/count trunc toward zero), `COUNT_DISTINCT` (distinct values count), `TOP_K` where K=1..100 e.g., `TOP_2`, `TOP_10` returns top K values descending comma-separated (e.g., `10,7`). If fewer values than K returns all sorted.
 
 **`DELETE_WINDOW <window_id> <timestamp>`**
 Removes window + aggregates + session ends. No-op if missing. Logged only when existed.
@@ -103,9 +110,13 @@ Durable mode rewrites to minimal deterministic set via tmp + atomic rename. In-m
 
 **`QUERY <window_id> <key> <window_start> <timestamp>`**
 - Window missing → `ERROR`.
-- Tumbling alignment: `window_start % size !=0` → `ERROR`; sliding: `window_start % slide !=0` → `ERROR`; session: no alignment error — any `>=0` allowed, but if no session with that start for key → `NULL`.
-- Stream deleted (window should have been cascade-deleted) → `ERROR`.
-- If watermark < window_end → `NULL` (not closed). For tumbling/sliding `window_end = start+size`, for session `window_end = session_end` (looked up, if no session → `NULL`).
+- Alignment:
+  - Tumbling: `window_start % size !=0` → `ERROR`
+  - Sliding: `window_start % slide !=0` → `ERROR`
+  - Cumulative: `window_start` is actually `window_end` – must satisfy `end % slide==0`, `0<end<=max_size` else `ERROR`
+  - Session: no alignment error — any `>=0` allowed, but if no session with that start for key → `NULL`.
+- Stream deleted (window cascade-deleted) → `ERROR`.
+- If watermark < window_end → `NULL` (not closed). For tumbling/sliding `window_end = start+size`, for cumulative `window_end = start` (which is end), for session `window_end = session_end` looked up.
 - If closed but no events for key in that window/session → `NULL`.
 - Else result:
   - `SUM` → sum
@@ -113,6 +124,7 @@ Durable mode rewrites to minimal deterministic set via tmp + atomic rename. In-m
   - `COUNT_DISTINCT` → distinct values count
   - `MIN`, `MAX` → min/max
   - `AVG` → sum/count trunc toward zero
+  - `TOP_K` (`TOP_2` etc) → top K values descending comma-separated (e.g., `10,7`), if fewer than K returns all sorted; `NULL` if no data
 - Uppercase `NULL`/`ERROR`.
 
 **`LIST_STREAMS <timestamp>`** → sorted comma or `NONE`.
@@ -377,4 +389,58 @@ NULL
 20
 ```
 
-Build at `/app`. Tests cover all including session merge/out-of-order, distinct, batch atomicity, allowed lateness, purge, durability, large sliding perf.
+### Cumulative window
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_CUMULATIVE_WINDOW cum s 30 10 SUM 1
+INGEST s k 10 5 2
+INGEST s k 20 15 3
+INGEST s k 30 25 4
+ADVANCE_WATERMARK s 10 5
+QUERY cum k 10 6
+ADVANCE_WATERMARK s 20 7
+QUERY cum k 20 8
+ADVANCE_WATERMARK s 30 9
+QUERY cum k 30 10
+```
+
+- Windows [0,10) sum10, [0,20) sum30, [0,30) sum60. Each closes when watermark >= end.
+
+Output:
+```
+OK
+OK
+OK
+10
+30
+60
+```
+
+### TOP_K
+
+Input:
+```
+CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 TOP_2 1
+INGEST s k 5 1 2
+INGEST s k 1 2 3
+INGEST s k 10 3 4
+INGEST s k 7 4 5
+ADVANCE_WATERMARK s 10 6
+QUERY w k 0 7
+```
+
+Values 5,1,10,7 sorted descending 10,7,5,1 top2 → 10,7.
+
+Output:
+```
+OK
+OK
+OK
+OK
+10,7
+```
+
+Build at `/app`. Tests cover all including tumbling/sliding/session/cumulative, SUM/COUNT/MIN/MAX/AVG/COUNT_DISTINCT/TOP_K, batch atomic, allowed lateness, purge TTL, durability, large sliding perf (100 windows/event).
