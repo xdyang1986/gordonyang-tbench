@@ -1314,20 +1314,21 @@ def test_parallel_flag_validation():
             assert len(final_files) > 0
             assert compute_sha256(final_files[0]) == orig_cs
 
-            # For parallel>1, check that multiple worker IDs appear in output (proves concurrency, not sequential)
+            # For parallel>1, check that multiple distinct worker IDs appear (proves concurrency)
             if int(valid) > 1:
+                import re
+
                 output = result.stdout + result.stderr
-                # Should have at least 2 distinct worker IDs
-                has_worker_0 = "worker 0" in output
-                has_worker_1 = "worker 1" in output
-                # With 6 chunks and 4 workers, we expect multiple workers
-                assert has_worker_0, (
-                    f"Parallel {valid} should show worker 0, got {output[:500]}"
+                worker_ids = set(re.findall(r"worker (\d+)", output))
+                # With parallel>1 and multiple chunks, should see at least 2 distinct workers
+                # Sequential impl would only ever show one worker ID
+                assert len(worker_ids) >= 2, (
+                    f"Parallel {valid} should show at least 2 distinct workers, got {worker_ids} in {output[:600]}. "
+                    "Sequential impl would only show one worker."
                 )
-                # For 4 and 8 workers, expect at least worker 1 appears
-                if int(valid) >= 4:
-                    assert has_worker_1, (
-                        f"Parallel {valid} should show multiple workers (worker 1), got {output[:500]} - sequential impl would only show worker 0"
+                for wid in worker_ids:
+                    assert int(wid) < int(valid), (
+                        f"Worker ID {wid} should be < parallel {valid}"
                     )
 
 
