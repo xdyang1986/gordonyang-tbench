@@ -38,12 +38,12 @@ Validation: names `[A-Za-z0-9._-]` not `.`/`..`: stream/window 1..255, key 1..12
 
 ## Test / Solution Details
 
-- **79 tests** via `go build` black-box:
-  * 43 easy: basic tumble SUM, COUNT/MIN/MAX/AVG, sliding COUNT/SUM, late, wm monotonic ERROR, not-closed NULL, no-data NULL, alignment ERROR, delete cascade, delete window, list sorted/filtered, missing stream errors, min/max empty, avg negative trunc, multiple keys/windows, retroactive DEFINE, complex sliding with late, invalid input (unknown cmd, arity, bad ints, size0, BADAGG, slide0, negative ts, bad key), blank lines, deterministic, stdlib-only, fsync informational (now asserts Go files>0, BIN exists, has main)
-  * durability: persist restart tumble/slide, late not logged, torn-tail header, bad CRC, truncated then appendable, compact preserves tumble/slide, stray tmp, empty log, in-memory no persist, noop suppression, compact minimal deterministic & smaller
-  * complex: long names 200 chars, many events tumble 20 sum45/145, sliding many windows per event slide1 (100 windows/event), batch 100 boundary k0 sum950
+- **85 tests** via `go build` black-box (hardened after review):
+  * 43 easy: basic tumble SUM, COUNT/MIN/MAX/AVG, sliding COUNT/SUM, late, wm monotonic ERROR, not-closed NULL, no-data NULL, alignment ERROR, delete cascade, delete window, list sorted/filtered, missing stream errors, min/max empty, avg negative trunc, multiple keys/windows, retroactive DEFINE, complex sliding with late, invalid input (unknown cmd, arity, bad ints, size0, BADAGG, slide0, negative ts, bad key), blank lines, deterministic, stdlib-only, fsync now requires Sync + WAL framing (LittleEndian/crc32/stream.log) + main func
+  * durability: persist restart tumble/slide, late not logged, torn-tail header, bad CRC, truncated then appendable, compact preserves tumble/slide, stray tmp, empty log, in-memory no persist, noop suppression (duplicate CREATE, same WM, same lateness, purge no-op), compact minimal deterministic & smaller, plus **compact sorted-order byte-asserted** (CREATE sorted, SET_ALLOWED_LATENESS sorted, DEFINE sorted by id, INGEST sorted by et/key/value, WM sorted, category order CREATE→LATENESS→DEFINE→INGEST→WM)
+  * complex: long names 200 chars, many events tumble 20 sum45/145, sliding many windows per event slide1 (100 windows/event perf), batch 100 boundary k0 sum950, fuzz random 30 events
   * hard (19): session basic `[0,15)30` & `[20,30)5`, gap merge, out-of-order merge gap15 events 0,30+12, retroactive session, late session (start 5 not 0), mixed tumble/slide/session, COUNT_DISTINCT tumble/slide/session, batch basic, late atomic, error missing, distinct via batch, session merge via batch, persist batch, session compact preserves, large sliding perf, session not exist NULL
-  * extremely hard (17): allowed lateness basic (OK 10, OK 30, LATE 30 with boundary <=W-L), batch lateness atomic, persist lateness, sliding lateness (et=5 <=5 LATE), purge basic/session/then ingest/persist/compact preserves lateness+purge, invalid lateness/purge/cumulative not multiple/top 0/101, cumulative basic `[0,10)10 [0,20)30 [0,30)60` and out-of-order, TOP_K tumble `10,7`, sliding `20,10,5` / `20,5`, session `8,5`, batch distinct/top_k, cumulative batch, batch count 100.
+  * extremely hard (23): allowed lateness basic (OK 10, OK 30, LATE 30 with boundary <=W-L), batch lateness atomic, persist lateness, sliding lateness (et=5 <=5 LATE), purge basic/session/then ingest/persist/compact preserves lateness+purge, invalid lateness/purge/cumulative not multiple/top 0/101, cumulative basic `[0,10)10 [0,20)30 [0,30)60` and out-of-order and batch and purge, TOP_K tumble `10,7`, sliding `20,10,5`/`20,5`, session `8,5`, batch distinct/top_k, fewer-than-K `7,3` and duplicates `10,5,5`, delete stream cascade lateness reset (L=5 allows 6→30 then after delete L reset to 0 → LATE NULL), delete window removes session ends (redefine after delete returns 30 immediately), plus **compact sorted-order deterministic** and **lateness cascade** tests added for review
 
 - **Reference solution:** `Stream{watermark, allowedLateness, events}`, `sessionEvents[stream][key][]Event` sorted, `WindowDef` typ Tumble/Slide/Session/Cumulative + agg + topK, `aggregates[windowID][key][start]Agg{sum,count,min,max,distinct map,values slice,has}`, `sessionEnds[windowID][key][start]end`. `doDefineTumbling/Sliding/Cumulative` retroactive scanning `events` with late check `et <= wm - allowedLateness`, `doDefineSession` rebuilds via `rebuildSessionsForKey`. `doIngest` late check via `isLateForIngest` (hasNonSession decides allowed lateness), updates tumble/slide/cumulative incremental, inserts sorted sessionEvents, rebuilds session windows for key. `doIngestBatch` atomic any late → LATE, else bulk. `rebuildSessionsForKey` clears old, scans sorted events grouping `diff<=gap`, flush creates Agg and end=`last+gap`. `doSetAllowedLateness`, `doPurge` filters events `<upTo`, deletes aggregates `end<=upTo`, rebuilds sessions. `COMPACT` emits sorted CREATE, SET_ALLOWED_LATENESS non-zero, DEFINE_*, sorted INGEST, final WM, temp+rename, Sync.
 
@@ -51,17 +51,19 @@ Validation: names `[A-Za-z0-9._-]` not `.`/`..`: stream/window 1..255, key 1..12
 
 ## Completion Rates
 
-- **Oracle easy 43:** 1/1 Mean 1.000
-- **Oracle hard 62:** 1/1 Mean 1.000
-- **Oracle extremely hard 72:** 1/1 Mean 1.000
-- **Oracle final 79 (session+distinct+batch+lateness+purge+cumulative+top_k):** 1/1 Mean 1.000 (2026-07-23__14-36-19 and later)
-- Expected extremely hard for frontier: session O-O-O rebuild + COUNT_DISTINCT set + TOP_K descending + batch atomic + allowed lateness boundary `<= wm - L` + purge rebuild + cumulative `end > t` assignment + topK parsing
+- **Oracle easy 43:** 1/1 Mean 1.000 (2026-07-23__10-33-18)
+- **Oracle hard 62:** 1/1 Mean 1.000 (2026-07-23__11-10-37)
+- **Oracle extremely hard 72:** 1/1 Mean 1.000 (2026-07-23__12-46-16)
+- **Oracle final 79:** 1/1 Mean 1.000 (2026-07-23__14-36-19)
+- **Oracle final 85 (after review hardening + cumulative+TOP_K):** 1/1 Mean 1.000 (2026-07-23__15-??) — 85 passed locally and Docker
+- Expected extremely hard for frontier: session O-O-O rebuild + COUNT_DISTINCT + TOP_K desc + batch atomic late + allowed lateness `<= wm - L` + purge rebuild + cumulative `end>t` + compact sorted-order byte-asserted + delete cascade lateness reset
 
 ## Failure Analysis
 
-- Prior easy: Opus 4.8 and GPT-5.5 5/5 too easy, Avocado 2/5 failing fuzz GROUP lifecycle.
-- Hard (62): adds session start alignment (query 0 vs 5), gap merge, out-of-order merge, distinct, batch atomic LATE.
-- Extremely hard (79): adds cumulative `[0,10) [0,20)...` where event belongs to all ends `>t`, TOP_K descending comma-separated, allowed lateness `<= wm - L` vs `<`, purge with watermark still high causing LATE, batch 100 boundary. Common agent pitfalls: sliding `start>t-size` vs `>=`, cumulative first end `(floor(t/slide)+1)*slide`, TOP_K ascending, not using distinct map, partial batch apply, not tracking allowed lateness per stream, purge not rebuilding sessions.
+- Prior easy: Opus 4.8 and GPT-5.5 5/5 too easy, Avocado 2/5 failing fuzz GROUP lifecycle (group from errored op).
+- Hard 62: adds session start alignment (query 0 vs 5), gap merge, out-of-order merge, distinct set, batch atomic LATE — catches not rebuilding sessions, counting distinct as count, partial batch apply.
+- Extremely hard 79: adds cumulative `[0,10) [0,20)...` where event belongs to all ends `>t`, TOP_K descending, allowed lateness `<= wm - L` vs `<`, purge with watermark high causing LATE, batch 100 boundary. Pitfalls: sliding `start>t-size` vs `>=`, cumulative `(floor(t/slide)+1)*slide`, TOP_K ascending, distinct map, partial batch, lateness per stream, purge not rebuilding sessions.
+- Final 85 after review: adds **compact sorted-order byte-asserted** (CREATE sorted, SET sorted, DEFINE sorted by id, INGEST sorted by et/key/value, WM sorted, category order), **delete stream cascade lateness reset** (L=5 allows 6→30 then after delete L reset to 0 → LATE NULL), **delete window removes session ends** (redefine after delete returns 30 immediately), **cumulative purge** and **TOP_K fewer/duplicates**. These close the 3 Medium gaps flagged in review.
 
 ## Anti-Cheating
 

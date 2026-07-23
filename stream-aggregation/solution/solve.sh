@@ -589,7 +589,10 @@ func doPurge(stream string, upTo int64) bool {
 	if !ok {
 		return false
 	}
+	// Track whether anything changes
 	changed := false
+
+	// Filter raw events
 	newEvents := make([]Event, 0, len(st.events))
 	for _, ev := range st.events {
 		if ev.eventTime < upTo {
@@ -598,8 +601,8 @@ func doPurge(stream string, upTo int64) bool {
 		}
 		newEvents = append(newEvents, ev)
 	}
-	st.events = newEvents
 
+	// Filter per-key session events
 	if perKey, ok := sessionEvents[stream]; ok {
 		for key, evs := range perKey {
 			newList := make([]Event, 0, len(evs))
@@ -622,76 +625,117 @@ func doPurge(stream string, upTo int64) bool {
 		}
 	}
 
-	for _, wid := range streamWindows[stream] {
-		wdef, ok := windows[wid]
-		if !ok {
-			continue
-		}
-		if wdef.typ == Tumbling || wdef.typ == Sliding {
-			if m1, ok := aggregates[wid]; ok {
-				for key, m2 := range m1 {
-					for ws := range m2 {
-						if ws+wdef.size <= upTo {
-							delete(m2, ws)
-							changed = true
+	// If no events removed, we still need to check if any aggregate has end <= upTo to purge
+	if !changed {
+		for _, wid := range streamWindows[stream] {
+			wdef, ok := windows[wid]
+			if !ok {
+				continue
+			}
+			if wdef.typ == Tumbling || wdef.typ == Sliding {
+				if m1, ok := aggregates[wid]; ok {
+					for _, m2 := range m1 {
+						for ws := range m2 {
+							if ws+wdef.size <= upTo {
+								changed = true
+								break
+							}
+						}
+						if changed {
+							break
 						}
 					}
-					if len(m2) == 0 {
-						delete(m1, key)
+				}
+			} else if wdef.typ == Cumulative {
+				if m1, ok := aggregates[wid]; ok {
+					for _, m2 := range m1 {
+						for end := range m2 {
+							if end <= upTo {
+								changed = true
+								break
+							}
+						}
+						if changed {
+							break
+						}
+					}
+				}
+			} else if wdef.typ == Session {
+				if m1, ok := sessionEnds[wid]; ok {
+					for _, m2 := range m1 {
+						for _, end := range m2 {
+							if end <= upTo {
+								changed = true
+								break
+							}
+						}
+						if changed {
+							break
+						}
 					}
 				}
 			}
-		} else if wdef.typ == Cumulative {
-			if m1, ok := aggregates[wid]; ok {
-				for key, m2 := range m1 {
-					for end := range m2 {
-						if end <= upTo {
-							delete(m2, end)
-							changed = true
-						}
-					}
-					if len(m2) == 0 {
-						delete(m1, key)
+			if changed {
+				break
+			}
+		}
+	}
+
+	if !changed {
+		return false
+	}
+
+	// Keep filtered raw events
+	st.events = newEvents
+
+	// Clear all aggregates for this stream's windows to rebuild from remaining events
+	for _, wid := range streamWindows[stream] {
+		delete(aggregates, wid)
+		delete(sessionEnds, wid)
+	}
+
+	// Rebuild tumbling / sliding / cumulative from remaining events
+	for _, ev := range st.events {
+		for _, wid := range streamWindows[stream] {
+			wdef, ok := windows[wid]
+			if !ok {
+				continue
+			}
+			switch wdef.typ {
+			case Tumbling:
+				ws := (ev.eventTime / wdef.size) * wdef.size
+				a := getOrCreateAgg(wid, ev.key, ws)
+				updateAgg(a, ev.value)
+			case Sliding:
+				latest := (ev.eventTime / wdef.slide) * wdef.slide
+				for s := latest; s >= 0 && s > ev.eventTime-wdef.size; s -= wdef.slide {
+					a := getOrCreateAgg(wid, ev.key, s)
+					updateAgg(a, ev.value)
+				}
+			case Cumulative:
+				first := (ev.eventTime/wdef.slide + 1) * wdef.slide
+				for end := first; end <= wdef.size; end += wdef.slide {
+					if end > ev.eventTime {
+						a := getOrCreateAgg(wid, ev.key, end)
+						updateAgg(a, ev.value)
 					}
 				}
 			}
 		}
 	}
 
+	// Rebuild session windows from per-key remaining events
 	if perKey, ok := sessionEvents[stream]; ok {
 		for key := range perKey {
 			for _, wid := range streamWindows[stream] {
 				if w, ok := windows[wid]; ok && w.typ == Session {
 					rebuildSessionsForKey(wid, stream, key)
-					changed = true
 				}
-			}
-		}
-		for _, wid := range streamWindows[stream] {
-			if w, ok := windows[wid]; ok && w.typ == Session {
-				if m1, ok := aggregates[wid]; ok {
-					for k := range m1 {
-						if _, exists := perKey[k]; !exists {
-							delete(m1, k)
-							changed = true
-							if m2, ok := sessionEnds[wid]; ok {
-								delete(m2, k)
-							}
-						}
-					}
-				}
-			}
-		}
-	} else {
-		for _, wid := range streamWindows[stream] {
-			if w, ok := windows[wid]; ok && w.typ == Session {
-				delete(aggregates, wid)
-				delete(sessionEnds, wid)
-				changed = true
 			}
 		}
 	}
-	return changed
+
+	return true
 }
 
 func replay(payload string) {

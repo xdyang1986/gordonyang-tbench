@@ -1395,3 +1395,203 @@ def test_invalid_allowed_lateness():
             assert r.returncode != 0, (
                 f"expected non-zero for {stdin!r} got {r.stdout} {r.stderr}"
             )
+
+
+def test_compact_sorted_order_deterministic(tmp_path):
+    """Spec §11 mandates exact sorted order after COMPACT: byte-asserted."""
+
+    def read_payloads(log_path):
+        data = open(log_path, "rb").read()
+        off = 0
+        payloads = []
+        while off + 8 <= len(data):
+            plen = struct.unpack("<I", data[off : off + 4])[0]
+            want = struct.unpack("<I", data[off + 4 : off + 8])[0]
+            if off + 8 + plen > len(data):
+                break
+            pl = data[off + 8 : off + 8 + plen]
+            if zlib.crc32(pl) & 0xFFFFFFFF != want:
+                break
+            payloads.append(pl.decode())
+            off += 8 + plen
+        return payloads
+
+    d = str(tmp_path)
+    # Create unsorted inputs to verify compaction sorts
+    cmds = [
+        "CREATE_STREAM z 0",
+        "CREATE_STREAM a 0",
+        "CREATE_STREAM m 0",
+        "SET_ALLOWED_LATENESS z 10 1",
+        "SET_ALLOWED_LATENESS a 5 2",
+        "DEFINE_TUMBLING_WINDOW wz z 10 SUM 3",
+        "DEFINE_TUMBLING_WINDOW wa a 10 SUM 4",
+        "DEFINE_SLIDING_WINDOW wm m 20 10 COUNT 5",
+        "DEFINE_SESSION_WINDOW wse a 5 SUM 6",
+        "DEFINE_CUMULATIVE_WINDOW wc m 20 10 SUM 7",
+        # unsorted events
+        "INGEST z k1 100 20 8",
+        "INGEST a k2 1 20 9",
+        "INGEST a k1 2 5 10",
+        "INGEST m k1 3 15 11",
+        "INGEST a k1 1 5 12",
+        "ADVANCE_WATERMARK z 30 13",
+        "ADVANCE_WATERMARK a 20 14",
+        "ADVANCE_WATERMARK m 25 15",
+    ]
+    run("\n".join(cmds), state_dir=d)
+    run("COMPACT 16\n", state_dir=d)
+
+    log_path = os.path.join(d, "stream.log")
+    payloads = read_payloads(log_path)
+
+    # Expected categories in order
+    creates = [p for p in payloads if p.startswith("CREATE_STREAM")]
+    lateness = [p for p in payloads if p.startswith("SET_ALLOWED_LATENESS")]
+    defines = [p for p in payloads if p.startswith("DEFINE_")]
+    ingests = [p for p in payloads if p.startswith("INGEST ")]
+    watermarks = [p for p in payloads if p.startswith("ADVANCE_WATERMARK")]
+
+    # CREATE sorted asc
+    assert creates == sorted(creates), f"CREATE not sorted: {creates}"
+    assert creates == ["CREATE_STREAM a 0", "CREATE_STREAM m 0", "CREATE_STREAM z 0"]
+
+    # SET_ALLOWED_LATENESS sorted asc where non-zero
+    assert lateness == sorted(lateness), f"lateness not sorted: {lateness}"
+    assert lateness == ["SET_ALLOWED_LATENESS a 5 0", "SET_ALLOWED_LATENESS z 10 0"]
+
+    # DEFINE sorted asc by window_id
+    define_ids = [p.split()[1] for p in defines]
+    assert define_ids == sorted(define_ids), f"DEFINE not sorted by id: {define_ids}"
+    # should be wa, wc, wm, wse, wz
+    assert define_ids == ["wa", "wc", "wm", "wse", "wz"]
+
+    # INGEST sorted by (stream asc, event_time asc, key asc, value asc)
+    expected_ingests = [
+        "INGEST a k1 1 5 0",
+        "INGEST a k1 2 5 0",
+        "INGEST a k2 1 20 0",
+        "INGEST m k1 3 15 0",
+        "INGEST z k1 100 20 0",
+    ]
+    assert ingests == expected_ingests, (
+        f"INGEST not sorted as spec: got {ingests} expected {expected_ingests}"
+    )
+
+    # Watermarks sorted asc by stream
+    assert watermarks == sorted(watermarks), f"watermarks not sorted: {watermarks}"
+    assert watermarks == [
+        "ADVANCE_WATERMARK a 20 0",
+        "ADVANCE_WATERMARK m 25 0",
+        "ADVANCE_WATERMARK z 30 0",
+    ]
+
+    # Full order: CREATE, SET, DEFINE, INGEST, WATERMARK
+    full_order = []
+    for p in payloads:
+        if p.startswith("CREATE_STREAM"):
+            full_order.append("CREATE")
+        elif p.startswith("SET_ALLOWED_LATENESS"):
+            full_order.append("LATENESS")
+        elif p.startswith("DEFINE_"):
+            full_order.append("DEFINE")
+        elif p.startswith("INGEST"):
+            full_order.append("INGEST")
+        elif p.startswith("ADVANCE_WATERMARK"):
+            full_order.append("WM")
+    seen = []
+    for cat in full_order:
+        if not seen or seen[-1] != cat:
+            seen.append(cat)
+    assert seen == ["CREATE", "LATENESS", "DEFINE", "INGEST", "WM"], (
+        f"categories out of order: {seen} full={payloads}"
+    )
+
+
+def test_delete_stream_cascade_lateness():
+    """DELETE_STREAM must cascade allowed_lateness reset to default 0."""
+    stdin = """CREATE_STREAM s 0
+SET_ALLOWED_LATENESS s 5 1
+DEFINE_TUMBLING_WINDOW w s 10 SUM 2
+INGEST s k 10 5 3
+ADVANCE_WATERMARK s 10 4
+QUERY w k 0 5
+INGEST s k 20 6 6
+QUERY w k 0 7
+DELETE_STREAM s 8
+CREATE_STREAM s 9
+DEFINE_TUMBLING_WINDOW w s 10 SUM 10
+ADVANCE_WATERMARK s 10 11
+INGEST s k 20 6 12
+QUERY w k 0 13
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "10", "OK", "30", "LATE", "NULL"]
+
+
+def test_delete_window_removes_session_ends():
+    """DELETE_WINDOW must remove session aggregates and session ends."""
+    stdin = """CREATE_STREAM s 0
+DEFINE_SESSION_WINDOW w s 10 SUM 1
+INGEST s k 10 0 2
+INGEST s k 20 5 3
+ADVANCE_WATERMARK s 20 4
+QUERY w k 0 5
+DELETE_WINDOW w 6
+LIST_WINDOWS 7
+QUERY w k 0 8
+DEFINE_SESSION_WINDOW w s 10 SUM 9
+QUERY w k 0 10
+ADVANCE_WATERMARK s 20 11
+QUERY w k 0 12
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "OK", "30", "NONE", "ERROR", "30", "30"]
+
+
+def test_cumulative_purge():
+    """Cumulative window PURGE with end<=up_to."""
+    stdin = """CREATE_STREAM s 0
+DEFINE_CUMULATIVE_WINDOW cum s 30 10 SUM 1
+INGEST s k 10 5 2
+INGEST s k 20 15 3
+INGEST s k 30 25 4
+ADVANCE_WATERMARK s 30 5
+QUERY cum k 10 6
+QUERY cum k 20 7
+QUERY cum k 30 8
+PURGE s 20 9
+QUERY cum k 10 10
+QUERY cum k 20 11
+QUERY cum k 30 12
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "OK", "OK", "10", "30", "60", "NULL", "NULL", "30"]
+
+
+def test_top_k_fewer_than_k():
+    """TOP_K with fewer values than K returns all sorted."""
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 TOP_5 1
+INGEST s k 3 1 2
+INGEST s k 7 2 3
+ADVANCE_WATERMARK s 10 4
+QUERY w k 0 5
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "OK", "7,3"]
+
+
+def test_top_k_with_duplicates():
+    """TOP_K includes duplicates and sorts descending."""
+    stdin = """CREATE_STREAM s 0
+DEFINE_TUMBLING_WINDOW w s 10 TOP_3 1
+INGEST s k 5 1 2
+INGEST s k 5 2 3
+INGEST s k 5 3 4
+INGEST s k 10 4 5
+ADVANCE_WATERMARK s 10 6
+QUERY w k 0 7
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["OK", "OK", "OK", "OK", "10,5,5"]
