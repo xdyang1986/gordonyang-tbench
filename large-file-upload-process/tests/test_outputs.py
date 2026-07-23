@@ -1792,7 +1792,7 @@ def test_parallel_correctness_out_of_order():
         assert compute_sha256(final) == orig_checksum
 
         # Race detector check: parallel upload must be race-free (mutex for manifest)
-        # Run with -race flag - should not report data race
+        # Run with -race flag - should not report data race. Increase timeout to 120s because race instrumentation is 5-10x slower
         result = run_cmd(
             [
                 "go",
@@ -1809,14 +1809,12 @@ def test_parallel_correctness_out_of_order():
                 "--parallel",
                 "8",
             ],
-            timeout=60,
+            timeout=120,
         )
-        # If race detected, Go race detector prints WARNING: DATA RACE and exits non-zero or prints to stderr
         combined = result.stdout + result.stderr
         assert "WARNING: DATA RACE" not in combined, (
             f"Parallel upload has data race, must use Mutex for manifest: {combined[:1000]}"
         )
-        # Even if race check passes or binary not built with race, correctness already verified above
 
 
 def test_combined_hard_features():
