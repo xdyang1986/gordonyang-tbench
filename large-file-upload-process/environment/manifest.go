@@ -2,6 +2,12 @@ package main
 
 import "fmt"
 
+// TODO: Manifest tracks upload progress with thread-safety
+// CreateManifest: generate session_id via crypto/rand, calculate total chunks, create chunks slice with offset/size/path
+// SaveManifest: update UpdatedAt RFC3339, atomic write via temp+rename, ensure dir exists
+// LoadManifest: read file (small), unmarshal JSON, validate fields, error if corrupted JSON -> caller warns and starts fresh
+// VerifyChunkFile: check file exists and size matches, then streaming verification: read chunk file in 1MB buffer, decrypt via XOR if encryptKey present (key cycling with offset), compute SHA256 and/or MD5 and compare to manifest's stored checksums (original unencrypted)
+// Must handle both algos: sha256 field checksum len 64, md5 32, both stores both
 type ChunkInfo struct {
 	Index       int64  `json:"index"`
 	Offset      int64  `json:"offset"`
