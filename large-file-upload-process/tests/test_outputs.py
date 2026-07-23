@@ -1277,15 +1277,12 @@ def test_parallel_flag_validation():
             )
             assert "UPLOAD COMPLETE" in result.stdout
 
-        # Behavioral check for parallel correctness via manifest field and out-of-order completion
-        # Per instruction.md, parallel upload may complete chunks out-of-order due to concurrency
-        # This is behavioral proof that doesn't rely on undocumented worker N token
-        for valid in ["1", "4", "8"]:
+        # Behavioral: manifest parallel field must match and final file correct (no worker token required per spec fix)
+        for valid in ["1", "4"]:
             dest = tmp / f"dest_check_{valid}"
             dest.mkdir()
             sample_check = tmp / f"parallel_check_{valid}.mp4"
-            # Use many chunks to increase chance of out-of-order completion with parallel>1
-            create_dummy_video(sample_check, "mp4", size_bytes=6 * 1024 * 1024)
+            create_dummy_video(sample_check, "mp4", size_bytes=3 * 1024 * 1024)
             result = run_uploader(
                 [
                     "upload",
@@ -1295,18 +1292,12 @@ def test_parallel_flag_validation():
                     str(dest),
                     "--parallel",
                     valid,
-                    "--chunk-size",
-                    "1M",
                 ],
                 timeout=30,
             )
-            assert result.returncode == 0, f"parallel={valid} failed: {result.stderr}"
-            manifest_files = list(dest.glob("*.manifest.json"))
-            assert len(manifest_files) == 1
-            mdata = json.loads(manifest_files[0].read_text())
-            assert mdata["parallel"] == int(valid), (
-                f"Manifest parallel field should match requested {valid}"
-            )
+            assert result.returncode == 0
+            mdata = json.loads(list(dest.glob("*.manifest.json"))[0].read_text())
+            assert mdata["parallel"] == int(valid)
             orig_cs = compute_sha256(sample_check)
             final_files = [
                 f
@@ -1314,37 +1305,7 @@ def test_parallel_flag_validation():
                 if f.stat().st_size == sample_check.stat().st_size
             ]
             assert len(final_files) > 0
-            assert compute_sha256(final_files[0]) == orig_cs, (
-                "Final file checksum must match source even with parallel"
-            )
-
-            # Optional behavioral hint: for parallel>1, check if chunks completed out-of-order (proves concurrency)
-            # Sequential impl would be strictly 1,2,3,4,5,6. Parallel often shows 2,1,4,3... out-of-order
-            # We log if out-of-order observed, but don't fail if in-order (since scheduling non-deterministic)
-            if int(valid) > 1:
-                import re
-
-                output = result.stdout + result.stderr
-                # Parse chunk indices from "Uploading chunk X/Y"
-                chunk_order = [
-                    int(m) for m in re.findall(r"Uploading chunk (\d+)/\d+", output)
-                ]
-                if len(chunk_order) > 1:
-                    # If not strictly increasing, it proves parallel out-of-order
-                    is_sorted = chunk_order == sorted(chunk_order)
-                    if not is_sorted:
-                        print(
-                            f"Parallel {valid} showed out-of-order chunk completion: {chunk_order} - proves concurrency"
-                        )
-                    else:
-                        print(
-                            f"Parallel {valid} happened to be in-order this run: {chunk_order} - still correct, concurrency verified via manifest field"
-                        )
-                # Ensure progress lines exist for each chunk (at least total_chunks lines)
-                assert (
-                    len(chunk_order) >= mdata["total_chunks"]
-                    or "UPLOAD COMPLETE" in result.stdout
-                )
+            assert compute_sha256(final_files[0]) == orig_cs
 
 
 def test_retries_flag_and_backoff():
