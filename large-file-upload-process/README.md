@@ -29,9 +29,9 @@ Starter skeleton returns `not implemented` for core logic. Agent must implement 
 
 ## Failure Analysis (latest run)
 
-Derived from downloaded trial CTRF artifacts. The earlier brittle tests that caused artificial 0/5 (the `worker N` stdout grep in `test_parallel_flag_validation`, and the `512`-byte chunk-size hang in `test_chunk_size_parsing`) are **gone** — this commit's failures are all on legitimate content.
+Derived from downloaded trial CTRF artifacts.
 
-- **Avocado (metacode) — 3/7, one genuine, consistent reasoning failure.** 3 completed trials passed; 2 real completed failures each failed *only* the memory cluster `test_large_sparse_file_handling` + `test_hundreds_gb_simulation` (27/29); 2 trials were `status=error` infra. **Root cause (both failures): OOM.** Uploading a 5GB (and 10GB) file with `--chunk-size 1G` returned `-9` (SIGKILL / OOM-killed) in the 4GB-limited container — the implementation allocates a full **1GB chunk-sized buffer** instead of streaming each chunk with a small fixed buffer (e.g. 1MB `CopyBuffer`). This is the core "stream massive files without loading into memory" requirement, so it is a **legitimate discriminator** (and it reproduced identically on the prior commit).
+- **Avocado (metacode) — 3/7, one genuine reasoning failure.** 3 completed trials passed; 2 real completed failures each failed *only* the memory cluster `test_large_sparse_file_handling` + `test_hundreds_gb_simulation` (27/29); 2 trials were `status=error` infra. **Root cause (both failures): OOM.** Uploading a 5GB (and 10GB) file with `--chunk-size 1G` returned `-9` (SIGKILL / OOM-killed) in the 4GB-limited container — the implementation allocates a full **1GB chunk-sized buffer** instead of streaming each chunk with a small fixed buffer (e.g. 1MB `CopyBuffer`). This is the core "stream massive files without loading into memory" requirement, so it is a **legitimate discriminator**.
 
 - **GPT-5.5 (codex) — 1/5, no reasoning signal.** 1 clean trial passed; the other 4 were all `status=error` (Daytona `ThrottlerException` / harness). Codex is systematically infra-blocked on this task, so 1/5 understates capability — it needs a clean re-run.
 
