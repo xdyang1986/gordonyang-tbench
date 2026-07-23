@@ -17,26 +17,31 @@ Skeleton returns `not implemented`, agent implements ~800 lines.
 
 **Why naive fails**: ReadFile OOMs on 5GB sparse, int32 overflow, ext-only fails magic mismatch, no mutex corrupts manifest under parallel, no Seek race → wrong data, encryption forgotten → checksum mismatch, MD5/both not stored.
 
-## Completion Rates
+## Completion Rates (online validation — commit 0cf5c73, 2026-07-23)
 
-- **Oracle**: 3/3 (6/6 in cloud) validated in 2:50-5:17
-- **Sonnet 4.6**: Expected 0/5 — requires parallel worker IDs + retry backoff + both checksums + XOR + many chunks 320 + symlink/no-ext/uppercase — local run 0/5 in previous hard-mode test
-- **Opus**: Expected 1-2/5
-- **Avocado**: 2/5 validated online (metacode), codex 5/5 in one run but 0/5 in another due to infra
+- **Oracle**: **3/3** — validated
+- **Opus 4.8 (agent)**: **3/5** — validated
+- **GPT-5.5 (codex)**: **0/5** — failed
+- **Avocado (metacode)**: **0/5** — failed
+- avgReward **0.50**, validation passing.
 
-Hard mode pushes difficulty from easy (1/5 Sonnet) to hard (0/5).
+## Failure Analysis (latest run)
 
-## Model Analysis
+Derived from downloaded trial CTRF artifacts. This was a **clean run** (every failing trial was `status=completed`, no infra errors), and the signal is unusually sharp: **all 12 failing trials failed the same single test — `test_parallel_flag_validation`** — and 11 of them failed *only* that test (29/30).
 
-- **Parallel not parallel (40%)**: Parses --parallel but sequential loop. Behavioral check: with parallel 4, output must contain multiple worker IDs (`worker 0`, `worker 1` etc). Sequential only shows worker 0 → fails. Also manifest parallel field must match requested.
+- **Root cause — an undocumented output-string requirement, not a reasoning gap.** `test_parallel_flag_validation` runs a behavioral check that greps stdout for `worker <N>` tokens and asserts at least 2 distinct ones ("Parallel N should show at least 2 distinct workers"). But **instruction.md never documents that the uploader must print `worker N`** — it only requires goroutines/`WaitGroup`/`Mutex`, a manifest `parallel` field, and the `UPLOAD COMPLETE ... Parallel: <n>` line. The failing models *did* implement real parallelism: their output shows chunks completing **out of order** (`0, 2, 1, 3, 5, 4`) with a correct `Parallel: 4` manifest — but because they print `Uploading chunk X/N` instead of the magic `worker N` string, the regex returns `set()` → fail. This is the same brittle-test class as the previously-removed `Seek`-substring grep.
 
-- **Encryption (25%)**: Forget decrypt on assembly, wrong key cycling, checksum of encrypted not original.
+- **This single hidden requirement produced the 0/5 scores.** GPT-5.5 (0/5) and Avocado (0/5) each failed *only* `test_parallel_flag_validation` in every trial (29/30). Opus was 3/5 — it happens to print worker IDs in some runs and not others, so it passed 3 and failed 2 on the same test. So pass/fail here is essentially "did the model happen to log worker IDs", not whether it parallelized correctly.
 
-- **Checksum both (15%)**: Only SHA256.
+- **Secondary:** one GPT-5.5 trial (28/30) also failed `test_checksum_algo_flag`.
 
-- **Retry/backoff (10%)**: Must print `RETRY:` + `backoff` + `100ms` on injected failure via `INJECT_FAIL_CHUNK`. Previously grep-only, now behavioral via env var injection.
+**Per-model:**
+- **Oracle — 3/3** (reference prints `worker %d`, so it passes its own check).
+- **Opus 4.8 (agent) — 3/5**; the 2 losses were `test_parallel_flag_validation` only.
+- **GPT-5.5 (codex) — 0/5**; every loss `test_parallel_flag_validation` (one also `test_checksum_algo_flag`).
+- **Avocado (metacode) — 0/5**; every loss `test_parallel_flag_validation` only.
 
-- **Edge (10%)**: Uppercase, no-ext, multi-dot, symlink, many chunks, encrypt-key mismatch, custom manifest path, WARN parallel/algo changed.
+**Assessment:** the current 0/5 scores are a **test-quality artifact**, not difficulty. `test_parallel_flag_validation` demands an undocumented `worker N` stdout convention that only the reference solution emits, so correct parallel implementations fail on formatting. Fix before trusting the difficulty signal: either (1) document the `worker N` output contract in instruction.md, or (2) prove parallelism without a magic string — e.g. accept the out-of-order chunk completion the outputs already exhibit, or check the manifest `parallel` field plus a timing/interleaving signal.
 
 ## Anti-Cheating Analysis
 
