@@ -303,7 +303,7 @@ def test_chunk_size_parsing():
                 f"Chunk size {cs} should be valid: {result.stderr}"
             )
 
-        # Invalid sizes - includes <1KB min per hard spec
+        # Invalid sizes - includes <1KB min per hard spec - test via info to fail fast on parse, not heavy upload
         invalid_cases = [
             "0",
             "0M",
@@ -319,18 +319,9 @@ def test_chunk_size_parsing():
         ]
         for cs in invalid_cases:
             if cs == "":
-                # Empty case might use default, skip
                 continue
             result = run_uploader(
-                [
-                    "upload",
-                    "--source",
-                    str(sample),
-                    "--dest",
-                    str(tmp / f"dest_{cs}"),
-                    "--chunk-size",
-                    cs,
-                ],
+                ["info", "--file", str(sample), "--chunk-size", cs],
                 timeout=15,
             )
             # Should fail with invalid chunk size message
