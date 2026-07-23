@@ -51,6 +51,7 @@ Delete stream and all its windows and all aggregates and events related to that 
 **`DEFINE_TUMBLING_WINDOW <window_id> <stream> <window_size> <agg_func> <timestamp>`**
 Define a tumbling window aggregation per key on `stream` with size `window_size`. Aggregation per key per window.
 - Tumbling window assignment: for event with `event_time`, `window_start = floor(event_time / window_size) * window_size`, `window_end = window_start + window_size`, window is `[start, end)`.
+- **Retroactive aggregation (required):** When a window is defined, it must immediately aggregate all prior ingested events for its stream that are not late (`event_time > current_watermark` or watermark is `-1`). This makes the window immediately queryable if its end <= watermark, otherwise it becomes visible after future watermark advances. Without retroactive aggregation, tests like `test_define_includes_past_events` would fail. Only events ingested *after* the window definition are also aggregated going forward.
 - If stream does not exist → output `ERROR`.
 - If `window_id` already exists → output `ERROR` (even if same definition).
 - If size invalid (already checked as invalid input if <1) → invalid input, but if agg invalid → invalid input.
@@ -66,6 +67,7 @@ Define a tumbling window aggregation per key on `stream` with size `window_size`
 Define sliding window.
 - Sliding windows start every `slide`: start values `0, slide, 2*slide,...`. Event at time `t` belongs to all windows where `start <= t < start+size` and `start % slide == 0`.
 - Number of windows per event is at most `ceil(size/slide)`. Implementation must iterate: latest start `= floor(t / slide)*slide`, then walk backwards while `start > t - size`.
+- **Retroactive aggregation (required):** Same as tumbling — upon definition, the window must aggregate all prior non-late events for its stream across all overlapping window starts. This is verified by `test_define_includes_past_events` adapted for sliding semantics.
 - Same error handling as tumbling, plus `slide` validation. If stream missing → `ERROR`. If window_id exists → `ERROR`.
 - Logged only on success.
 
@@ -161,9 +163,13 @@ Payload is command text exactly as logged, e.g., `CREATE_STREAM orders 0`, `INGE
 - `ADVANCE_WATERMARK` → only when watermark increases.
 Queries and `COMPACT` are never appended as payloads; `COMPACT` rewrites file.
 
-**Startup recovery:** create directory if needed. Before reading stdin, replay `$STREAM_STATE_DIR/stream.log` record by record in order. Each record must reconstruct state exactly as originally processed, preserving aggregates (since aggregates are derived from ingested events and watermark). For replay of `INGEST`, do NOT emit `LATE` logic based on current watermark during replay? Actually watermark replay must interleave: if during original run watermark advanced to 10, then later ingested event with event_time 5 was considered LATE and not logged. So during replay, only non-late events exist in log, so they will all be considered not late if replayed before watermark advancement. To ensure late detection matches, replay must process records in log order exactly as originally processed, using same late-check logic: when replaying an `INGEST` record, if its event_time <= current watermark at replay time, it would be considered late and should be dropped (but this should not happen if log only contains non-late events and watermark records are in correct order). However for safety, during replay skip late check? But better to keep late check: if during replay an event appears late relative to watermark, drop it (should not happen for valid compacted logs unless log was compacted and watermark emitted after events – see compaction spec). For compacted logs, we deliberately emit all events before final watermark, so events with event_time <= final watermark would be considered not late during replay if watermark is still -1, then later watermark advancement closes windows. That matches intended compaction: all events before watermark are not late. So during replay, for simplicity, if log is from compaction, events should be before watermark, so they are not late. For normal logs, events are already ordered such that any event with event_time <= watermark at that time would not have been logged, so replay will also not encounter late.
+**Startup recovery:** create directory if needed. Before reading stdin, replay `$STREAM_STATE_DIR/stream.log` record by record in order, reconstructing state exactly as originally processed.
 
-Stop at first incomplete or corrupt record (truncated header/payload or CRC mismatch); discard it and all following bytes; truncate log to valid prefix so later appends are clean. Never fail startup due to torn tail. An empty log file recovers cleanly.
+- Process records in log order. For `INGEST`, apply the same late-check as online (`event_time <= current_watermark` → drop). For normal logs this never triggers because late events were never logged and watermarks were logged in order. For compacted logs, all `INGEST` records are emitted before the final `ADVANCE_WATERMARK` records, so watermark is still `-1` during event replay, therefore no event is considered late, and the final watermark advance closes windows exactly as before — preserving all closed-window aggregates.
+
+- Stop at first incomplete or corrupt record (truncated header/payload or CRC mismatch); discard it and all following bytes; truncate the log file to the valid prefix so later appends are clean. Never fail startup due to torn tail.
+
+- An empty log file recovers cleanly (no streams, no windows, watermark `-1`).
 
 **Durability (best-effort):** Each append should be made durable before continuing (e.g., via file sync / fsync). This is a best-effort guideline — not strictly required for functional tests, but static check scans source for `Sync()` / `fsync` call.
 

@@ -677,6 +677,7 @@ def test_stdlib_only():
 
 
 def test_fsync_best_effort():
+    """Best-effort durability check — informational, not gating reward."""
     import sys
 
     go_files = []
@@ -684,8 +685,9 @@ def test_fsync_best_effort():
         for f in files:
             if f.endswith(".go"):
                 go_files.append(os.path.join(root, f))
-    if not go_files:
-        pytest.skip("no go files")
+    assert len(go_files) > 0, "no Go files found for fsync check"
+    assert os.path.exists(BIN), "binary not built for durability check"
+
     found = False
     for gf in go_files:
         content = open(gf).read()
@@ -699,10 +701,12 @@ def test_fsync_best_effort():
             break
     if not found:
         print(
-            "WARNING: no Sync()/O_SYNC found — per-append fsync is recommended but not required",
+            "WARNING: no Sync()/O_SYNC found — per-append fsync is recommended but not required for correctness",
             file=sys.stderr,
         )
-    assert True
+    # Check that Go source contains at least package main and main func
+    has_main = any("func main(" in open(gf).read() for gf in go_files)
+    assert has_main, "no func main found in Go files"
 
 
 # --------------------------------------------------------------------------
@@ -777,11 +781,6 @@ def test_compact_minimal_deterministic_and_smaller(tmp_path):
     # second window 10..19 has no events, but we have events up to 9 only, so NULL? Wait events 0..9 inclusive, window10 starts at10 includes events 10? No events 0..9, second window 10 has none => NULL
     assert lines(r.stdout)[0] == "45"
     assert lines(r.stdout)[1] == "NULL"
-
-
-def test_produce_auto_logged_as_normalized_produce():
-    # ensure log contains normalized records? For this task, INGEST logged as original, so just check compaction deterministic
-    pass
 
 
 def test_noop_does_not_append_records(tmp_path):
