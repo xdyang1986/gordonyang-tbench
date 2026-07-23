@@ -49,21 +49,26 @@ Validation: names `[A-Za-z0-9._-]` not `.`/`..`: stream/window 1..255, key 1..12
 
 - **Environment:** `golang:1.26.2-bookworm`, WORKDIR /app, `allow_internet=true`, pytest pre-installed, `tests/test.sh` captures STATUS directly (fixed prior high bug).
 
-## Completion Rates
+## Completion Rates (online validation — commit d2a3fda, 85 tests, 2026-07-23)
 
-- **Oracle easy 43:** 1/1 Mean 1.000 (2026-07-23__10-33-18)
-- **Oracle hard 62:** 1/1 Mean 1.000 (2026-07-23__11-10-37)
-- **Oracle extremely hard 72:** 1/1 Mean 1.000 (2026-07-23__12-46-16)
-- **Oracle final 79:** 1/1 Mean 1.000 (2026-07-23__14-36-19)
-- **Oracle final 85 (after review hardening + cumulative+TOP_K):** 1/1 Mean 1.000 (2026-07-23__15-??) — 85 passed locally and Docker
-- Expected extremely hard for frontier: session O-O-O rebuild + COUNT_DISTINCT + TOP_K desc + batch atomic late + allowed lateness `<= wm - L` + purge rebuild + cumulative `end>t` + compact sorted-order byte-asserted + delete cascade lateness reset
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **3/5** — validated
+- GPT-5.5 (codex): **5/5** — failed (solved every trial → too easy for this model)
+- Avocado (metacode): **2/5** — validated
+- avgReward **0.92**, validation passing — balanced: Oracle solves it, Opus and Avocado land in the 1-4/5 band on genuine failures.
 
-## Failure Analysis
+## Failure Analysis (latest run)
 
-- Prior easy: Opus 4.8 and GPT-5.5 5/5 too easy, Avocado 2/5 failing fuzz GROUP lifecycle (group from errored op).
-- Hard 62: adds session start alignment (query 0 vs 5), gap merge, out-of-order merge, distinct set, batch atomic LATE — catches not rebuilding sessions, counting distinct as count, partial batch apply.
-- Extremely hard 79: adds cumulative `[0,10) [0,20)...` where event belongs to all ends `>t`, TOP_K descending, allowed lateness `<= wm - L` vs `<`, purge with watermark high causing LATE, batch 100 boundary. Pitfalls: sliding `start>t-size` vs `>=`, cumulative `(floor(t/slide)+1)*slide`, TOP_K ascending, distinct map, partial batch, lateness per stream, purge not rebuilding sessions.
-- Final 85 after review: adds **compact sorted-order byte-asserted** (CREATE sorted, SET sorted, DEFINE sorted by id, INGEST sorted by et/key/value, WM sorted, category order), **delete stream cascade lateness reset** (L=5 allows 6→30 then after delete L reset to 0 → LATE NULL), **delete window removes session ends** (redefine after delete returns 30 immediately), **cumulative purge** and **TOP_K fewer/duplicates**. These close the 3 Medium gaps flagged in review.
+Derived from downloaded trial CTRF artifacts. This run had **real completed test failures** (not infra), and they converge on a single discriminator.
+
+- **`test_cumulative_purge` — the sole discriminator (4 of 4 real failures, both Opus and Avocado).** Each failing trial failed *only* this test (84/85). It checks cumulative-window `PURGE` semantics: after `PURGE s 20` (purge events with timestamp ≤ 20), subsequent `QUERY cum k 10` and `QUERY cum k 20` must return `NULL`, and `QUERY cum k 30` → `30`. The failing models returned the stale cumulative value (`10`) at index 6 instead of `NULL` — i.e. they don't rebuild/invalidate cumulative window state after a purge. A legitimate behavioral correctness check with a clear expected output (not a brittle grep or undocumented convention).
+
+- **Opus 4.8 (agent) — 3/5.** 3 clean passes; 2 genuine failures, both `test_cumulative_purge` only.
+- **GPT-5.5 (codex) — 5/5.** All clean passes; too easy for this model.
+- **Avocado (metacode) — 2/5.** 2 clean passes; 2 genuine failures (`test_cumulative_purge`) + 1 `status=error` infra.
+- **Oracle — 3/3.** Reference solution passes.
+
+**Assessment:** valid, well-calibrated task. Oracle solves it, the failures are real (not infra) and land on a genuine correctness edge (cumulative PURGE must invalidate purged data → NULL), and Opus/Avocado sit in the 1-4/5 band. Only caveat: GPT-5.5 is 5/5 (too easy for that single model); purge/rebuild-style edges are the lever if you want it to bite the strongest models too.
 
 ## Anti-Cheating
 
