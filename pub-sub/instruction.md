@@ -1,6 +1,6 @@
-# Build the hierarchical broker allocator with dynamic weights, global rebalancing, min, priority, rate limits and persistent credit
+# Build the ultimate hierarchical broker allocator with burst, dynamic weights, negative rebalancing, min, priority, rate limits and persistent credit
 
-Implement a Go program at `/app/main.go` that fairly distributes messages across subscribers grouped into groups, with per-batch minimum guarantees, priority, per-batch rate limits, dynamic weight evolution, global rebalancing of unused capacity, and persistent credit-based fairness across batches. The allocator must also report final cumulative totals and final credits.
+Implement a Go program at `/app/main.go` that fairly distributes messages across subscribers grouped into groups, handling per-batch minimum guarantees, priority, per-batch rate limits with one-time burst allowances, dynamic weight evolution, global rebalancing of unused capacity, negative loads (deallocation), and persistent credit-based fairness across batches. Must also report final cumulative totals, final credits and final burst remaining.
 
 ## Input format
 
@@ -10,117 +10,128 @@ load_1
 ...
 load_T
 G
-g_prio g_min g_weight g_cap g_rate   (G lines, groups 0..G-1 in input order)
+g_prio g_min g_weight g_cap g_rate g_burst   (G lines, groups 0..G-1 in input order)
 S
-gid prio min weight cap rate         (S lines, subs 0..S-1 in input order)
+gid prio min weight cap rate burst           (S lines, subs 0..S-1 in input order)
 ```
 
-- `T` batches (≥1), each load ≥0, up to 1e12 (you may assume non-negative for this task; robust handling of zero is required)
-- Groups: priority int (higher = higher), min ≥0 per-batch, weight ≥1, cap ≥0 total, rate ≥0 per-batch max (0 = unlimited)
-- Subscribers: gid ideally in [0,G-1], priority int, min ≥0 per-batch, weight ≥1, cap ≥0 total, rate ≥0 per-batch max (0 = unlimited)
+- `T` batches (≥1), each load may be positive, zero, or negative (negative means deallocation, returns capacity), up to ±1e12. Must handle zero correctly.
+- Groups: priority int (higher = higher), min ≥0 per-batch minimum, weight ≥1, cap ≥0 total across batches, rate ≥0 per-batch max (0 = unlimited), burst ≥0 one-time extra allowance that can be used to exceed rate, not replenished.
+- Subscribers: gid ideally in [0,G-1], priority int, min ≥0 per-batch, weight ≥1, cap ≥0 total, rate ≥0 per-batch max (0 = unlimited), burst ≥0 one-time extra.
 - Input may contain blank lines and extra spaces - parse robustly.
 
 ## Output format
 
-Exactly `T+4` lines, no spaces, no trailing spaces:
+Exactly `T+6` lines, no spaces, no trailing spaces, in input order:
 
-- First `T` lines: each line `S` comma-separated ints in input order for that batch (per-subscriber batch allocation). Cumulative allocations never exceed caps.
-- Line `T+1`: `G` comma-separated ints per-group cumulative totals after all batches.
-- Line `T+2`: `S` comma-separated ints per-subscriber cumulative totals.
-- Line `T+3`: `G` comma-separated ints per-group final persistent credits after all batches.
-- Line `T+4`: `S` comma-separated ints per-subscriber final persistent credits.
+- First `T` lines: per-subscriber batch allocation for that batch (positive for allocation, negative for deallocation) as `S` comma-separated ints.
+- Line `T+1`: per-group cumulative totals after all batches as `G` CSV.
+- Line `T+2`: per-subscriber cumulative totals as `S` CSV.
+- Line `T+3`: per-group final persistent credits after all batches as `G` CSV.
+- Line `T+4`: per-subscriber final persistent credits as `S` CSV.
+- Line `T+5`: per-group final burst remaining as `G` CSV.
+- Line `T+6`: per-subscriber final burst remaining as `S` CSV.
 
-Build: `cd /app && go build -o /app/allocator .` Stdlib only.
+Cumulative totals never exceed caps and never go below 0 (deallocation respects totals). Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 ## Necessary specification
 
-- **Effective group caps (necessary for feasibility):** Per-member effective per-batch cap is `min(remaining total cap, per-batch rate if rate>0)`. Sum those per group as `sum_member_eff`. Effective remaining group cap is `min(group remaining total cap, sum_member_eff, group per-batch rate if rate>0, 0 if group has no members)`. If gid out of range, subscriber gets 0 and does not contribute. This is legitimate necessary spec.
+- **Effective group caps (necessary):** Per-member effective per-batch cap is `min(remaining total cap, rate+burst_rem if rate>0 else remaining)`. Sum those per group as `sum_member_eff`. Effective remaining group cap is `min(group remaining total cap, sum_member_eff, rate+burst_rem if rate>0 else group remaining, 0 if group has no members)`. If gid out of range, subscriber gets 0 and does not contribute.
 
-- **I/O, persistence and 64-bit safety (necessary):** `T` loads, `G` groups, `S` subs, `T+4` lines output CSV in input order, state (cumulative totals, credits, weights) persists across batches. Credits start at weight, weights start at input weight. Loads, caps, weights and products like `remaining * credit` can be `1e12*1e12=1e24` and `3*4e18=1.2e19`, which overflow signed 64-bit. Proportional shares must be computed without 64-bit overflow using 128-bit techniques (e.g., `math/bits.Mul64`/`Div64` or equivalent mulDiv). This is necessary for overflow cases.
+- **I/O, persistence and 64-bit safety (necessary):** `T` loads, `G`, `S`, `T+6` lines output, state (totals, credits, weights, burst_rem) persists across batches. Credits start at weight, weights start at input weight, burst_rem starts at burst. Products like `remaining * credit` can be `1e12*1e12=1e24` and `3*4e18=1.2e19`, overflow signed 64-bit. Must use 128-bit mulDiv.
 
-- **Min-phase deterministic order (necessary):** Minimums are allocated in priority order: higher priority first, tie by original input order (lower index wins). Each min allocation is capped to `min(min, effective cap remaining for that entity, load remaining, and also per-batch rate if rate>0)`. If load insufficient for all mins, higher priority gets its min first. If min>cap or min>rate, capped. Zero caps and rates produce zero allocation.
+- **Min-phase deterministic order (necessary):** Minimums allocated in priority order: higher priority first, tie by original index. Each min capped to `min(min, effective cap remaining, load remaining)`. If load insufficient, higher priority first. If min>cap or min>rate+burst_rem, capped. Zero caps/rates produce zero.
 
-- **Weighted fair-share deterministic loop (necessary for byte-exact output):** After mins, remaining load is distributed in a multi-round loop. This exact loop is necessary to remove leftover/rounding ambiguity.
+- **Weighted fair-share deterministic loop (necessary):** After mins, remaining load distributed multi-round:
 
-  - Maintain per-entity temporary credits, initialized to the persistent credits at start of batch.
-  - Active set = entities where `allocated_in_weighted_phase < effective_remaining_cap_after_mins`.
-  - Let `rem` be remaining load for this level, `total = sum(temp_credit[active])`.
-  - If `total == 0`: (should never occur with correct decay because credits stay ≥1, but required for robustness/termination) perform bulk round-robin: find `minRem = min_{active} (cap - alloc)`, `cycles = min(minRem, rem // len(active))`. If cycles>0 allocate to all active. Then allocate 1 by 1 in input order while rem>0.
-  - Else, for each active, compute proportional share `share = floor(rem * temp_credit / total)` using overflow-safe 128-bit mulDiv, capped to `cap - alloc`. Sum shares to `used`.
-  - If `used == 0`: progress guarantee – select entity with highest temp_credit, tie by lowest original index, give it 1.
-  - Subtract `used` from `rem`.
-  - Update temporary credits for this round: if entity received >0 in this round then `temp_credit = floor(temp_credit/2)+1`, else `temp_credit += weight` where weight is current persistent weight at start of batch (not yet evolved).
-  - Repeat until `rem==0` or no active.
+  - Temp credits initialized to persistent credits at start of batch (or start of outer iteration for global rebalancing, but spec requires persistent credits at batch start for first iteration).
+  - Active = `alloc < effective_remaining_cap_after_mins`.
+  - `rem` = remaining load, `total = sum(temp_credit[active])`.
+  - If `total==0`: bulk RR fallback: `minRem = min cap-alloc`, `cycles = min(minRem, rem//len(active))`, allocate cycles to all active, then 1-by-1 input order.
+  - Else share = `floor(rem * temp_credit / total)` via overflow-safe mulDiv capped to `cap-alloc`. `used=sum share`. If `used==0`: give 1 to highest temp_credit tie lowest idx.
+  - `rem -= used`, update temp credits: if `delta>0` then `temp= temp/2+1` else `temp+=weight` (weight = current persistent weight at batch start).
+  - Repeat until rem==0 or no active.
 
-- **Dynamic weight evolution (necessary for multi-batch fairness):** In addition to credits, persistent weights evolve deterministically:
+- **Dynamic weight evolution (necessary):** After each batch, for any entity whose effective cap at batch start >0 (or for deallocation, whose total before batch >0):
 
-  - `weight` starts at input weight.
-  - After each batch, for any entity whose effective cap at batch start was >0:
-    - If its total allocation in batch (mins+weighted) >0: `weight = max(1, floor(weight * 0.9))`
-    - Else: `weight = weight + 1`
-  - This exact formula is necessary for determinism; weight affects future credit growth (when not receiving, credit grows by weight).
+  - If allocation in batch !=0: `weight = max(1, floor(weight*0.9))` (integer `weight*9/10`).
+  - Else: `weight = weight+1`.
+  This formula is necessary for determinism.
 
-- **Persistent credit update (necessary):** After each batch, for any entity whose effective cap at batch start was >0:
-  - If allocation >0: `credit = floor(credit/2)+1`
-  - Else: `credit = credit + weight_old` where `weight_old` is weight at start of batch before evolution.
-  Credits stay ≥1 for correct implementation.
+- **Persistent credit update (necessary):** After each batch, for any eligible entity:
 
-- **Global rebalancing loop (necessary for feasibility):** For each batch with load `L`:
+  - If allocation !=0: `credit = floor(credit/2)+1`
+  - Else: `credit = credit + weight_old` where `weight_old` is weight at start of batch.
+  Credits stay ≥1.
+
+- **Burst consumption (necessary):** Burst_rem is one-time extra to exceed rate. For positive allocation batches, after final batch allocation per entity is determined, if `rate>0` and `batch_alloc > rate`, then `excess = batch_alloc - rate`, consume `min(excess, burst_rem)`, `burst_rem -= consumed`. Burst not replenished, not affected by deallocation. Effective cap already includes `rate+burst_rem`, so burst allows exceeding rate up to that.
+
+- **Global rebalancing loop (necessary):** For each positive batch load L:
 
   ```
-  remaining = L
-  group_batch = 0 per group, sub_batch = 0 per sub for this batch
-  loop:
-    recompute remaining effective caps for this batch:
-      g_rem = group_cap - group_total - group_batch
-      s_rem = sub_cap - sub_total - sub_batch
-      s_eff = min(s_rem, rate if rate>0 else s_rem)
-      sum_member_eff per group = sum s_eff
-      eff_g_rem = min(g_rem, sum_member_eff, rate if rate>0 else g_rem), 0 if no members
-      eff_g_iter = eff_g_rem (already remaining)
-      s_eff_iter = s_eff (already remaining after sub_batch)
-    if sum eff_g_iter ==0: break
-    allocate remaining via primitive allocate_batch(remaining, groups with caps eff_g_iter) -> group_iter
-    for each group with group_iter>0:
-      allocate group_iter[g] to its members via primitive allocate_batch(group_iter[g], member caps s_eff_iter)
-      actually_allocated = sum member allocs for that group
-      group_batch[g] += actually_allocated
-      sub_batch[subs in group] += member allocs
-      remaining -= actually_allocated
-    if no progress (actually_allocated total ==0): break
-  discard any remaining unallocated load
+  remaining = L, group_batch=0, sub_batch=0, firstIter=true
+  for iter 0..9 while remaining>0:
+    g_rem = cap - total - group_batch
+    s_rem = cap - total - sub_batch
+    s_eff = min(s_rem, rate+burst_rem - sub_batch if rate>0 else s_rem) with floor 0
+    sum_member_eff per group = sum s_eff
+    eff_g = min(g_rem, sum_member_eff, rate+burst_rem - group_batch if rate>0 else g_rem), 0 if no members
+    if sum eff_g ==0 break
+    groupItems caps eff_g, mins = groupMin if firstIter else 0, credits = persistent credits, weights
+    groupIter = primitive(remaining, groupItems)  (returns per-group share for this iter)
+    totalThisIter=0
+    for each group with groupIter>0:
+      members of group, s_eff_iter = s_eff for those members
+      mItems caps s_eff_iter, mins = subMin if firstIter else 0
+      subIter = primitive(groupIter[g], mItems)
+      sumSub = sum subIter
+      group_batch[g] += sumSub
+      sub_batch[member] += subIter
+      totalThisIter += sumSub
+    remaining -= totalThisIter
+    firstIter=false
+    if totalThisIter==0 break
+  discard remaining
   ```
 
-  After loop, `group_total += group_batch`, `sub_total += sub_batch`. Then evolve credits and weights. This loop ensures unused capacity due to member caps is returned and reallocated.
+  After loop, update totals, then burst consumption, then credit/weight evolution. This ensures unused capacity due to member caps is reallocated.
 
-- **Hierarchical order (necessary):** For each batch, first allocate to groups using effective caps and the above primitive+rebalancing, then per group to its subscribers in input order. Group-then-member order is required.
+- **Negative loads (deallocation) (necessary):** If load <0, let N=-load to deallocate. Deallocate by priority:
 
-- **Determinism and efficiency (necessary):** All tie-breaking deterministic by original input order (lower wins), stable across batches. Must handle 1e12 scale and overflow cases efficiently.
+  - Order groups by priority desc tie idx.
+  - For each group, remaining deallocatable = `groupTotal + groupBatch` (groupBatch negative, so this is still available to deallocate).
+  - Collect its members ordered by priority desc tie idx.
+  - For each member, `sPossible = subTotal + subBatch`, dealloc = `min(sPossible, remaining, groupTotal+groupBatch)`, apply negative to subBatch and groupBatch, `remaining -= dealloc`.
+  - Any leftover N that cannot be deallocated due to totals already 0 is discarded (totals never <0).
+  - Burst not affected.
+  - Credit/weight evolution counts deallocation as activity (alloc !=0).
 
-## Fairness properties (requires engineering judgement)
+- **Hierarchical order (necessary):** Group level then per-group members, input order deterministic.
 
-- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Effective caps incorporate rate limits.
+- **Determinism and efficiency (necessary):** Tie-breaking lower original index wins, stable, must handle 1e12 and overflow efficiently.
 
-- **Credit-decay + dynamic weight intuition:** Credits decay when served, grow by weight when not. Weights decay 10% when served else grow +1, making long-starved entities heavier. Combined yields fair share with memory, but exact formulas above are pinned for determinism.
+## Fairness properties (engineering judgement)
 
-- **Conservation:** Cumulative totals never exceed caps, per-batch never exceeds effective caps.
+- Rate limiting with burst is token-bucket-like but one-time, not replenished. Effective caps already include burst.
+- Dynamic weight makes long-unserved entities heavier, served lighter, plus credit decay yields fair share with memory.
+- Conservation: totals respect caps and never negative.
 
 ## Examples (all matching oracle, no hedging)
 
-### Example 1 - hierarchical basic, rate unlimited (T+4 lines)
+### Example 1 - basic hierarchical with burst 0
 
 Input:
 ```
 1
 16
 2
-10 0 5 10 0
-5 0 3 10 0
+10 0 5 10 0 0
+5 0 3 10 0 0
 4
-0 10 0 5 6 0
-0 5 0 3 9 0
-1 5 0 4 3 0
-1 1 0 1 12 0
+0 10 0 5 6 0 0
+0 5 0 3 9 0 0
+1 5 0 4 3 0 0
+1 1 0 1 12 0 0
 ```
 Output:
 ```
@@ -129,22 +140,23 @@ Output:
 6,4,3,3
 3,2
 3,2,3,1
+0,0
+0,0,0,0
 ```
-Explanation: group totals 10,6, sub totals 6,4,3,3, final credits groups 3,2 subs 3,2,3,1.
 
-### Example 2 - min and priority with rate limiting
+### Example 2 - min, priority, rate limiting with burst
 
 Input:
 ```
 1
 9
 2
-0 0 5 10 0
-0 0 6 10 0
+0 0 5 10 0 0
+0 0 6 10 0 0
 3
-0 10 2 5 10 2
-0 5 1 6 10 10
-1 1 0 6 1 0
+0 10 2 5 10 2 0
+0 5 1 6 10 10 0
+1 1 0 6 1 0 0
 ```
 Output:
 ```
@@ -153,8 +165,9 @@ Output:
 2,6,1
 3,4
 3,4,4
+0,0
+0,0,0
 ```
-Group totals 8,1 (effective caps limited by sum member eff and rate), sub totals same as batch, final credits reflect decay.
 
 ### Example 3 - multi-batch persistent credit + dynamic weight
 
@@ -164,12 +177,12 @@ Input:
 6
 6
 2
-0 0 4 11 0
-0 0 1 6 0
+0 0 4 11 0 0
+0 0 1 6 0 0
 3
-0 5 0 4 11 0
-0 1 0 1 6 0
-1 10 0 2 5 0
+0 5 0 4 11 0 0
+0 1 0 1 6 0 0
+1 10 0 2 5 0 0
 ```
 Output:
 ```
@@ -179,19 +192,71 @@ Output:
 8,2,2
 2,1
 2,1,2
+0,0
+0,0,0
 ```
 
-### Example 4 - large weight overflow (64-bit safety)
+### Example 4 - burst exceeds rate
+
+Input:
+```
+1
+5
+1
+0 0 1 10 2 3
+2
+0 0 0 1 10 2 3
+0 0 0 1 10 0 0
+```
+Output:
+```
+3,2
+5
+3,2
+1
+1,1
+0
+2,0
+```
+Explanation: group rate 2 burst 3 allows up to 5, so load 5 fully allocated. Sub0 rate2 burst3 allows 5 but cap limited to 3 due to fair share? Actually sub0 gets 3 (2 rate +1 burst consumed), sub1 gets 2 (rate limited). Final burst remaining: group burst 3 consumed 3 (excess 3) ->0, sub0 burst 3 consumed1 ->2, sub1 burst0 ->0.
+
+### Example 5 - negative load deallocation
+
+Input:
+```
+2
+6
+-4
+1
+0 0 2 10 0 0
+2
+0 5 0 2 10 0 0
+0 1 0 2 10 0 0
+```
+Output:
+```
+3,3
+-3,-1
+2
+0,2
+2
+2,2
+0
+0,0
+```
+First batch allocates 3,3 (fair share with equal weight/credit), second deallocates -3,-1 (higher priority first deallocates more), final totals 0,2 (sub0 deallocated fully to 0, sub1 has 2 remaining), group total 2.
+
+### Example 6 - large overflow + burst
 
 Input:
 ```
 1
 1000000000000
 1
-0 0 1000000000000 1000000000000 0
+0 0 1000000000000 1000000000000 0 0
 2
-0 0 0 1000000000000 500000000000 0
-0 0 0 1000000000000 500000000000 0
+0 0 0 1000000000000 500000000000 0 0
+0 0 0 1000000000000 500000000000 0 0
 ```
 Output:
 ```
@@ -200,10 +265,11 @@ Output:
 500000000000,500000000000
 500000000001
 500000000001,500000000001
+0
+0,0
 ```
-Group total 1e12, sub totals same as batch, final credits 500000000001 each (overflow-safe mulDiv required because 1e12*1e12=1e24).
 
-### Example 5 - blank lines robust
+### Example 7 - blank lines robust
 
 Input:
 ```
@@ -212,13 +278,13 @@ Input:
 16
 
 2
-10 0 5 10 0
-5 0 3 10 0
+10 0 5 10 0 0
+5 0 3 10 0 0
 4
-0 10 0 5 6 0
-  0 5 0 3 9 0
-1 5 0 4 3 0
-1 1 0 1 12 0
+0 10 0 5 6 0 0
+  0 5 0 3 9 0 0
+1 5 0 4 3 0 0
+1 1 0 1 12 0 0
 
 ```
 Output:
@@ -228,4 +294,6 @@ Output:
 6,4,3,3
 3,2
 3,2,3,1
+0,0
+0,0,0,0
 ```

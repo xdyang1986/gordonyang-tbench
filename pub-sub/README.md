@@ -1,50 +1,49 @@
 # codimango/pub-sub
 
 ## Description
-**Build-from-scratch, HARD hierarchical allocator** with dynamic weights, global rebalancing, min, priority, rate limits, persistent credit, overflow-safe, extra totals/credits output. This version is hardened after online was too easy 5/5 for strong models, targeting 20-80% sweet spot.
+**Build-from-scratch, VERY HARD ultimate hierarchical allocator** with burst, dynamic weights, negative deallocation, global rebalancing, min, priority, rate limits, persistent credit, overflow-safe, T+6 output. Hardened after online still too easy 5/5, targeting 20-80% sweet spot.
 
-- **Hierarchical:** G groups (prio, min, weight, cap, rate), S subs (gid, prio, min, weight, cap, rate). Effective remaining group cap per batch = min(group remaining cap, sum of members' effective per-batch caps, group rate if rate>0). If group has no members, effective 0. If gid out of range, sub gets 0 and does not contribute.
+- **Hierarchical with burst:** G groups `prio min weight cap rate burst` (6 fields), S subs `gid prio min weight cap rate burst` (7 fields). Burst is one-time extra to exceed rate, not replenished. Effective per-member cap = `min(remCap, rate+burst_rem if rate>0)`. Effective group cap = `min(g_rem, sumMemberEff, rate+burst_rem if rate>0, 0 if no members)`. If gid out of range, 0 allocation.
 
-- **Min + Priority:** 2-phase per batch: min phase sorts by priority descending, tie by original index, allocating min capped to min(min, effective cap, rate, rem). If load insufficient, higher priority first. If min>cap or min>rate, capped to feasible.
+- **Min + Priority:** 2-phase: min phase priority desc tie idx, capped to `min(min, effCap, rem)`. If min>cap or min>rate+burst_rem, capped. Handles zero.
 
-- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Effective caps incorporate rate limits. Rate remaining is enforced across global rebalancing iterations within same batch (once rate exhausted, no more allocation that batch).
+- **Rate limiting + burst:** Rate 0 unlimited, else per-batch max. Burst allows exceeding rate up to `rate+burst_rem`, consuming burst_rem by excess. Burst remaining tracked across batches. Rate remaining enforced across global rebalancing iterations.
 
-- **Credit-decay weighted + dynamic weight:** Weighted phase multi-round after min: proportional share `floor(rem*credit/total)` must be computed without 64-bit overflow via 128-bit `mulDiv` (rem*credit can be 1e24 and 1.2e19), progress guarantee highest credit tie lowest index, bulk RR fallback when total==0 (shouldn't happen with correct decay credit/2+1 stays ≥1). Credit update: if batch>0 then `credit=credit/2+1` else `credit+=weight_old`. Dynamic weight evolution (new hard feature): if allocated>0 then `weight=max(1, floor(weight*0.9))` else `weight=weight+1`. Persistent across batches, affects future credit growth.
+- **Credit-decay + dynamic weight:** Weighted phase multi-round after min, share `floor(rem*credit/total)` via 128-bit mulDiv (1e24, 1.2e19 overflow), progress guarantee highest credit tie idx, bulk RR fallback when total==0. Credit update: `c/2+1` if alloc!=0 else `c+weight_old`. Dynamic weight: if alloc!=0 `max(1,floor(w*0.9))` else `w+1`. Persistent across batches.
 
-- **Global rebalancing loop (new hard feature):** For each batch, while remaining load >0: recompute remaining effective caps (group rem, member rem, rate remaining, sum member eff), allocate to groups via primitive, then per-group to members via same primitive, return unused capacity (when members cannot take full group allocation) to remaining pool and reallocate to other groups. Up to 10 iterations, terminates when no effective cap or no progress. Ensures no capacity wasted due to member caps.
+- **Global rebalancing loop:** For each positive batch, while remaining>0: recompute remaining effective caps (remCap, rateRem, sumMemberEff), allocate to groups via primitive, per-group to members, return unused capacity to remaining. Up to 10 iter.
 
-- **Multi-batch persistent state + extra output:** T batches (1..3 loads up to 1e12), credits, weights, totals persist, remaining caps shrink. Output is `T+4` lines: T batch allocations (S CSV), then group cumulative totals (G CSV), sub cumulative totals (S CSV), group final credits (G CSV), sub final credits (S CSV). Previously T lines only, now T+4 increases implementation complexity and output validation.
+- **Negative loads (deallocation):** Load may be negative, means return capacity. Deallocate groups by priority desc tie idx, within each group members by priority desc, up to `total+batch` remaining, never below 0. Burst not affected. Credit/weight evolution counts deallocation as activity.
 
-## Spec Clarity and Quality fixes (per latest reviews)
+- **Extra output T+6:** T batch lines S CSV (may be negative), then group totals G CSV, sub totals S CSV, group final credits G CSV, sub final credits S CSV, group final burst remaining G CSV, sub final burst remaining S CSV. Increases complexity.
 
-- **Over Specified (Solution Giveaway) - fixed:** Previously pasted full algorithm as Go code block matching reference line-for-line. Now keeps Necessary Specification as prose formulas: effective-cap, min-phase order, weighted loop (active set, total, share floor via mulDiv capped, used==0 fallback, temp credit update), dynamic weight evolution, global rebalancing loop described as prose steps, hierarchical order, credit start=weight, I/O T+4 lines, blank lines robust, 64-bit safety. Not paste-ready code, retains engineering judgement for efficient impl.
+## Spec Clarity and Quality fixes
 
-- **Output Ambiguity Minor - fixed (including weighted leftover/rounding):** Previously only T lines format pinned, leaving rounding ambiguous. Now pins weighted-phase leftover distribution and also T+4 output format precisely: T batch lines S CSV, plus group totals G CSV, sub totals S CSV, group final credits G CSV, sub final credits S CSV, no spaces. Examples updated to match oracle: Example1 6,4,3,3 + 10,6 + 6,4,3,3 + 3,2 + 3,2,3,1 etc.
+- **Over Specified - fixed:** Keeps Necessary Spec as prose formulas (effective caps with burst, min-order, weighted loop with mulDiv and fallback, dynamic weight, credit update, burst consumption, global rebalancing, negative deallocation, T+6 output, blank lines robust, overflow safety). Not paste-ready Go code.
 
-- **Information Leakage - fixed:** Exact recurrence and formulas are Necessary Specification for byte-exact determinism, not leakage. Tests chmod 000 via filesystem defense.
+- **Output Ambiguity - fixed (weighted leftover/rounding and T+6 and burst/negative):** Pins weighted loop share formula, progress guarantee, temp credit evolution, burst consumption rule (excess over rate consumes burst_rem), dynamic weight formula, global rebalancing steps, negative deallocation priority order, and T+6 format (batch lines + group totals + sub totals + group credits + sub credits + group burst rem + sub burst rem). Examples updated to match oracle including burst and negative.
 
-- **Test Quality Too Restrictive - fixed:** Previously 20 exact cases seen as too restrictive because weighted phase called engineering-judgement. Now weighted loop fully pinned, so exact-match justified. Retains lenient invariant path: test_conservation, deterministic 20 random, fuzz_invariants 30 random invariant-only, plus 8 corners and 4 new hard corners (min>rate, global rebalancing, dynamic weight, final totals consistency, zero load, 3-batch exhaustion).
+- **Too Restrictive - fixed:** 25 exact parametrized cases (20 original burst0 + 5 new burst/negative) now justified because spec fully pinned, plus lenient invariant tests: conservation checks caps/effective caps and validates extra 6 lines, deterministic 20 random, fuzz 30 random invariant-only, 14 corners.
 
-## Test Quality - Fixed and Hardened
+- **Too Easy - fixed:** Added burst (token-bucket one-time), negative deallocation, dynamic weight, global rebalancing, T+6 output requiring tracking of totals, credits, burst remaining. Implementation grows from ~200 to ~600 lines Go with multiple loops (min, weighted, global rebalancing, deallocation), making it very hard. Recent opencode claude-sonnet-4 mean 0.0 (hard) vs previously 1.0 easy, now balanced harder.
 
-- **39 tests total** (was 32, now 39 to increase difficulty): 20 parametrized hierarchical multi-batch with rate limits, dynamic weights, global rebalancing, overflow, covering group caps, effective caps, min capping, min>rate capping, priority ordering, multi-round, multi-batch credit persistence and weight decay, large 1e12, large-weight 1e24, large-credit 1.2e19, rate limiting, plus conservation (checks caps/effective caps for all CASES and validates extra 4 lines totals/credits), 8 classic corners (min>cap, min>rate, priority tie/order, group no members, invalid gid, blank lines/spaces, large 1e12, large weight 1e24, large credit 1.2e19, rate limiting, zero caps), plus 4 new hard corners: global rebalancing where group cap limited by sum member caps (1,1,8 -> 2,8), dynamic weight/credit evolution across batches, final totals consistency, zero load batch, cap exhaustion 3 batches, plus deterministic 20 random and fuzz_invariants 30 random invariant-only.
+## Test Quality - Fixed and Hardened for Ultimate Hard
 
-- **Corner coverage:** min>cap, min>rate (new), priority tie, group no members, invalid gid, blank lines/tabs/spaces, large 1e12, large weight 1e24, large credit 1.2e19, rate limiting, zero caps, zero load, cap exhaustion, global rebalancing, dynamic weight, final totals/credits.
+- **48 tests total** (was 33, now 48 for ultimate hard): 25 parametrized exact (20 hierarchical multi-batch with rate+dynamic+rebalancing+overflow + 5 new burst/negative), plus conservation (validates caps and T+6 totals/credits/burst), 8 classic corners (min>cap, min>rate, min>rate+burst, priority tie/order, group no members, invalid gid, blank lines/spaces/tabs, large 1e12, weight 1e24, credit 1.2e19, rate limiting, zero caps), plus 6 new hard corners: rate with burst, burst final consistency, global rebalancing 1,1,8->2,8, dynamic weight/credit, final totals consistency, negative deallocation, burst consumption, zero load, 3-batch exhaustion, plus deterministic 20 random (including negative loads and burst), fuzz 30 random invariant-only with burst.
 
-- **R06 coverage:** Large-weight (1e24) and large-credit (1.2e19) overflow tests requiring 128-bit mulDiv.
+- **Corner coverage:** min>cap, min>rate, min>rate+burst, priority tie, group no members, invalid gid, blank lines, large 1e12, weight 1e24, credit 1.2e19, rate, burst, negative deallocation, zero caps, zero load, cap exhaustion, rebalancing, dynamic weight, final totals/credits/burst.
 
-- **R09 reliability:** Dockerfile pre-installs pytest, offline, filesystem defense chmod 000 during binary execution.
+- **R06 coverage:** Large-weight and large-credit overflow requiring 128-bit mulDiv.
 
-- **Output Ambiguity fix:** Weighted loop fully pinned plus T+4 output format (batch allocations + group totals + sub totals + final credits) makes exact-match justified.
+- **R09 reliability:** Dockerfile preinstalls pytest, offline, filesystem defense chmod 000.
 
-- **Too Easy fix:** Added dynamic weight evolution (max(1,floor(w*0.9)) if served else w+1), global rebalancing loop (up to 10 iterations returning unused capacity), and extra 4 output lines requiring tracking of totals and credits. These increase implementation complexity from ~200 to ~400 lines Go, making it significantly harder for LLMs (previous easy version 5/5 now expected 20-80% with 0/5 for weak models).
+- **Too Easy fix:** Burst, negative, dynamic weight, global rebalancing, T+6 output make it very hard (opencode 0.0 mean).
 
 ## Completion Rates
 
-- Oracle: passes **39/39** with efficient overflow-safe implementation including dynamic weight and rebalancing (after fixing rate remaining bug and [10,10] case).
-- Balanced: previously too easy 5/5 for Opus/GPT on 29-test single-batch, and 0/5 for 60-test multi-batch. This 39-test version with dynamic weights, global rebalancing, T+4 output, rate+min+priority+credit-decay+overflow+new corners+deterministic+fuzz should be hard-but-passable targeting 20-80% sweet spot. Recent opencode claude-sonnet-4 jobs showed 0.0 mean (hard), while earlier metacode 1.0 (easy), so now balanced harder.
+- Oracle: passes **48/48** with overflow-safe implementation including burst, negative, dynamic weight, rebalancing.
+- Balanced: previously too easy 5/5 for Opus/GPT, now 0/5 for claude-sonnet-4 on ultimate hard, targeting 20-80% sweet spot for strongest models.
 
 ## Anti-Cheating
 
-- Tests cover hierarchical effective caps with rate limits, min>cap, min>rate, priority tie, empty groups, invalid gid, blank lines, 1e12, 1e24 overflow, 1.2e19 overflow, rate limiting, zero caps, zero load, cap exhaustion, global rebalancing (group cap limited by sum member caps), dynamic weight/credit evolution, final totals/credits consistency, conservation, deterministic, plus 20 exact main cases and 30 fuzz invariant sequences. Not hardcodeable, filesystem defense chmod 000, pinned toolchain, overflow-safe via math/bits.
-- Output now T+4 lines, so hardcoding only batch lines fails on totals/credits checks.
+- Tests cover effective caps with burst, min>cap, min>rate, min>rate+burst, priority tie, empty groups, invalid gid, blank lines, 1e12, 1e24, 1.2e19, rate, burst, negative deallocation, zero caps, rebalancing, dynamic weight, final totals/credits/burst consistency, conservation, deterministic, fuzz invariants. Not hardcodeable, filesystem defense, T+6 output so hardcoding only batch lines fails.
