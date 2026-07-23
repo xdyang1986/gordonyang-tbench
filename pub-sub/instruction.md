@@ -28,21 +28,38 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 ## Necessary specification
 
-- **Effective group caps:** A group's remaining allocation in a batch cannot exceed what its members can still take in that batch. Per-member effective per-batch cap is min(remaining total cap, per-batch rate if rate>0). Sum those per group. Effective remaining group cap is min(group remaining total cap, sum of members' effective per-batch caps, group per-batch rate if rate>0, and 0 if group has no members). If gid out of range, subscriber gets 0 and does not contribute. This is legitimate necessary spec.
+- **Effective group caps (necessary for feasibility):** A group's remaining allocation in a batch cannot exceed what its members can still take in that batch. Per-member effective per-batch cap is `min(remaining total cap, per-batch rate if rate>0)`. Sum those per group. Effective remaining group cap is `min(group remaining total cap, sum of members' effective per-batch caps, group per-batch rate if rate>0, 0 if group has no members)`. If gid out of range, subscriber gets 0 and does not contribute. This is legitimate necessary spec.
 
-- **I/O, persistence and 64-bit safety:** T loads, G groups, S subs, T lines output CSV in input order, state (cumulative totals and credits) persists across batches, credits start at weight. Loads, caps, weights and products like remaining * credit can be 1e12*1e12=1e24 and 3*4e18=1.2e19, which overflow signed 64-bit. Proportional shares must be computed without 64-bit overflow using 128-bit techniques.
+- **I/O, persistence and 64-bit safety (necessary):** T loads, G groups, S subs, T lines output CSV in input order, state (cumulative totals and credits) persists across batches, credits start at weight. Loads, caps, weights and products like `remaining * credit` can be `1e12*1e12=1e24` and `3*4e18=1.2e19`, which overflow signed 64-bit. Proportional shares must be computed without 64-bit overflow using 128-bit techniques (e.g., `math/bits.Mul64`/`Div64` or equivalent mulDiv). This is necessary for overflow cases.
 
-## Fairness properties (requires engineering judgement, examples uniquely determine correct behavior)
+- **Min-phase deterministic order (necessary):** Minimums are allocated in priority order: higher priority first, tie by original input order (lower index wins). Each min allocation is capped to `min(min, effective cap remaining for that entity, load remaining)`. If load insufficient for all mins, higher priority gets its min first. If min>cap, capped. Zero caps and rates produce zero allocation. This ordering is necessary for determinism.
 
-- **Min guarantees + Priority:** Each batch must first satisfy minimums. Minimums are allocated in priority order (higher priority first, tie by original input order). If load insufficient for all mins, higher priority gets its min first, with min sensibly capped to feasible amount. Zero caps and rates handled.
+- **Weighted fair-share deterministic loop (necessary for byte-exact output):** After mins, remaining load is distributed in a multi-round loop. This exact loop is necessary to remove leftover/rounding ambiguity and make the expected CSV byte-exact.
 
-- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Effective caps incorporate rate limits as described.
+  - Maintain per-entity temporary credits, initialized to the persistent credits at start of batch.
+  - Active set = entities where `allocated_in_weighted_phase < effective_remaining_cap_after_mins` (i.e., still can take).
+  - Let `rem` be remaining load for this level (groups, or per-group member groups), `total = sum(temp_credit[active])`.
+  - If `total == 0`: (should never occur with correct decay because credits stay ≥1, but required for robustness and termination) perform bulk round-robin: find `minRem = min_{active} (cap - alloc)`, `cycles = min(minRem, rem // len(active))`. If cycles>0 allocate it to all active. Then allocate 1 by 1 in input order while rem>0 and active remains. This ensures progress.
+  - Else, for each active, compute proportional share `share = floor(rem * temp_credit / total)` using overflow-safe 128-bit mulDiv, capped to `cap - alloc`. Sum shares to `used`.
+  - If `used == 0`: progress guarantee – select entity with highest temp_credit, tie by lowest original index, give it 1 (delta=1, used=1). This avoids starvation when flooring yields 0.
+  - Subtract `used` from `rem`.
+  - Update temporary credits for this round: if entity received >0 in this round (`delta>0`) then `temp_credit = floor(temp_credit/2)+1`, else `temp_credit += weight` (weight is per-entity weight at that level).
+  - Repeat until `rem==0` or no active.
+  - Persistent credit update at end of batch (including mins): if entity's total allocation in batch (mins+weighted) >0 and its effective cap at batch start was >0, then `persistent = floor(persistent/2)+1`, else `persistent += weight`. This exact recurrence `floor(c/2)+1` if received else `+weight` is necessary for multi-batch determinism and keeps credits ≥1.
 
-- **Credit-decay weighted fair share:** After mins, remaining load is distributed fairly based on persistent credits. Exact recurrence required for determinism: when an entity receives any messages in a batch (including min phase), its credit for next batch becomes floor(credit/2)+1, otherwise it grows by weight. With this formula credits stay ≥1, so zero-credit total never occurs for correct implementation. You must implement the surrounding multi-round fairness loop yourself with proportional allocation, progress guarantee, and deterministic tie-breaking.
+  This loop pins leftover/rounding distribution and ensures deterministic tie-breaking by original index. Implementing this specific round structure is required; high-level idea of "proportional fair" alone would leave ambiguity.
 
-- **Hierarchical order:** For each batch, first allocate to groups using effective caps, then per group to its subscribers in input order. This group-then-member order is required.
+- **Hierarchical order (necessary):** For each batch, first allocate to groups using effective caps and the above primitive, then per group allocate its granted load to its subscribers using the same primitive in input order. Group-then-member order is required.
 
-- **Determinism and efficiency:** All tie-breaking deterministic by original index (lower wins), stable across batches. Must handle 1e12 scale and overflow cases efficiently.
+- **Determinism and efficiency (necessary):** All tie-breaking deterministic by original input order (lower wins), stable across batches. Must handle 1e12 scale and overflow efficiently.
+
+## Fairness properties (requires engineering judgement)
+
+- **Rate limiting:** Per-batch max per group and per subscriber (rate 0 = unlimited). Effective caps incorporate rate limits as described above.
+
+- **Credit-decay intuition:** Credits reward entities that did not receive messages by growing with weight, and decay those that did receive via `floor(c/2)+1`. Combined with proportional sharing this yields weighted fair share with persistent memory across batches, but exact decay formula and loop are pinned above for determinism.
+
+- **Conservation:** Cumulative allocations never exceed total caps, per-batch allocations never exceed effective caps (which already include rate limits and member feasibility).
 
 ## Examples (all matching oracle, no hedging)
 
