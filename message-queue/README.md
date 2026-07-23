@@ -48,37 +48,24 @@ Payloads: single tokens no spaces no commas 1..1024, topic/group names `[A-Za-z0
 
 - **Environment:** `golang:1.26.2-bookworm`, WORKDIR /app, `allow_internet=true` (Go stdlib pre-bundled, no pip/apt needed; third-party rejected via import check).
 
-## Completion Rates
+## Completion Rates (online validation — commit 6d13bc5, 76 tests, 2026-07-23)
 
-**Latest online validation after review fixes (commit `3248edd`, 76 tests, 2026-07-22):**
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **5/5** — failed (solved every trial → too easy for this model)
+- GPT-5.5 (codex): **5/5** — failed (too easy for this model)
+- Avocado (metacode): **2/5** — validated
+- avgReward **0.80**, validation passing.
 
-Online dashboard raw: `oracle 3/3, Opus (claude-opus-4-8) 4/5, Avocado (meta/avocado-5.14-code) 0/5, codex (gpt-5.5) 3/5, avgReward 0.80, validation passing` — but these numbers **include infrastructure/harness failures counted as failures**, not genuine test failures.
+## Failure Analysis (latest run)
 
-**Trial-level analysis for commit `732d919` (76 tests, same code as 3248edd, 12 completed trials):**
-- **12 of 12 completed trials passed all 76 tests — zero genuine test failures.**
-- All other trials (e.g., Avocado 9 attempts, Opus 1 attempt, Codex 2 attempts) errored **before tests ran**: `DaytonaAuthenticationError: ThrottlerException: Too Many Requests` and `EnvironmentStartTimeoutError: Environment start timed out after 600s` due to Daytona rate-limiting, plus one codex agent process exit. These are infra errors, not reasoning gaps.
-- **Avocado:** 1 real run completed and **passed all 76 tests** including `test_compact_minimal_deterministic_and_smaller` and `test_persist_seek_position`; other 9 attempts were infra throttling. So `0/5` in dashboard is throttling counted as failure.
-- **Opus:** 5 real runs completed and passed all 76; 1 was infra throttling → dashboard shows 4/5 but all clean runs passed.
-- **Codex:** Similar — completed trials passed.
-- Therefore previous README claim of Avocado failing 0/5 with near-misses 73-74/75 on SEEK-0/compaction edge is **inaccurate** for current code; current code does not produce those failures.
+Derived from downloaded trial CTRF artifacts. This run's only genuine completed failures came from Avocado; both frontier models solved every trial.
 
-**Local calibration after hardening:**
-```
-harbor run -p message-queue -a oracle → 1.000 (76 passed)
-harbor run -p message-queue -a opencode -m anthropic/claude-sonnet-4 -k 3 → 0.000 (0/3) — TRIM+BATCH+fuzz hard for weaker models
-```
-Online for commit `d41c9f4` (before extra tests): codex 1/5 (0.2) vs 5/5 before TRIM — difficulty increased.
+- **Opus 4.8 (agent) — 5/5.** All clean passes; too easy for this model.
+- **GPT-5.5 (codex) — 5/5.** All clean passes; too easy for this model.
+- **Avocado (metacode) — 2/5, one real reasoning edge.** 2 completed trials passed; 2 genuine failures were on `test_fuzz_random` only (75/76), and 1 trial produced no test output (build/no-run, reward 0). The fuzz failure is a real divergence from the Python reference on `LIST_GROUPS`: Avocado returned `g0,g1,g2` where the reference returns `g0,g2` — it registered group `g1` that was only touched by an **errored** `SEEK g1 t0 2 4 2`, whereas the reference does not create a consumer group from an invalid operation. Group-lifecycle edge: an errored SEEK must not leave the group registered.
+- **Oracle — 3/3.** Reference solution passes.
 
-**Structural / taxonomy checks (latest):**
-- 9/9 structural pass, task.toml valid (authors, format=terminal_bench_single_turn, workstream=swe_public_repo, subdomain=distributed_systems, usecase=handle_events, allow_internet=true with stdlib import check)
-- AI assessment Accept (Low 1: README vs allow_internet wording, now fixed to consistent)
-- Contamination Risk LOW (was MEDIUM)
-- Provenance clean
-- Difficulty still **TOO_EASY** in some runs due to 5/5 passes when infra not throttling — further hardening via BATCH+fuzz aims for 20-80% sweet spot, but current strongest models (Opus, Codex) still solve 5/5 when not throttled; task is strong on spec/tests, main remaining issue was over-pinning + fsync gate, now fixed.
-
-## Model Analysis
-
-Task requires integrating ~19 commands with interacting low/high watermarks, atomic batch validation, and Python-reference-checked fuzz (20×100 random). After fixing over-pinning (compact len==12 → len>=7 + after exact + size shrink) and making fsync best-effort informational (always passes, accepts O_SYNC), failures are now only infra throttling, not logic, indicating current implementation is robust. To increase difficulty beyond TOO_EASY, batch atomicity and fuzz random already added; further hardening could add idempotent producer dedup or transaction support if still 5/5.
+**Assessment:** the task is on the easy side this run — both frontier models are 5/5. The only genuine discriminator is `test_fuzz_random`, which catches Avocado's group-lifecycle bug (errored consumer ops must not auto-create the group). To move off TOO_EASY for the frontier models, the task needs further hardening (e.g. idempotent-producer dedup or transactional semantics).
 
 ## Anti-Cheating Analysis
 
