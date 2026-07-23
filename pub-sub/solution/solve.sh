@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"math/bits"
 	"os"
 	"sort"
 	"strconv"
@@ -29,13 +30,35 @@ type item struct {
 	credit   int
 }
 
+func mulDiv(a, b, c int) int {
+	if c == 0 {
+		return 0
+	}
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	if hi == 0 {
+		return int(lo / uint64(c))
+	}
+	if hi >= uint64(c) {
+		return 1 << 60
+	}
+	q, _ := bits.Div64(hi, lo, uint64(c))
+	return int(q)
+}
+
 func allocateBatch(load int, items []*item) []int {
 	n := len(items)
 	batch := make([]int, n)
-	if n == 0 || load <= 0 {
+	if n == 0 {
 		return batch
 	}
-	// order for min phase: priority desc, idx asc
+	if load <= 0 {
+		for i := 0; i < n; i++ {
+			if items[i].cap > 0 {
+				items[i].credit += items[i].weight
+			}
+		}
+		return batch
+	}
 	order := make([]int, n)
 	for i := range order {
 		order[i] = i
@@ -51,13 +74,12 @@ func allocateBatch(load int, items []*item) []int {
 		if rem == 0 {
 			break
 		}
-		it := items[oi]
-		if it.cap <= 0 {
+		if items[oi].cap <= 0 {
 			continue
 		}
-		give := it.min
-		if give > it.cap {
-			give = it.cap
+		give := items[oi].min
+		if give > items[oi].cap {
+			give = items[oi].cap
 		}
 		if give > rem {
 			give = rem
@@ -65,7 +87,6 @@ func allocateBatch(load int, items []*item) []int {
 		batch[oi] += give
 		rem -= give
 	}
-	// remaining caps after min
 	remCap := make([]int, n)
 	for i := 0; i < n; i++ {
 		remCap[i] = items[i].cap - batch[i]
@@ -73,7 +94,6 @@ func allocateBatch(load int, items []*item) []int {
 			remCap[i] = 0
 		}
 	}
-	// weighted phase with credit-decay
 	allocW := make([]int, n)
 	creditTmp := make([]int, n)
 	for i := 0; i < n; i++ {
@@ -142,7 +162,7 @@ func allocateBatch(load int, items []*item) []int {
 		delta := make([]int, n)
 		used := 0
 		for _, i := range active {
-			share := (remW * creditTmp[i]) / total
+			share := mulDiv(remW, creditTmp[i], total)
 			if share > remCap[i]-allocW[i] {
 				share = remCap[i] - allocW[i]
 			}
@@ -173,7 +193,6 @@ func allocateBatch(load int, items []*item) []int {
 	for i := 0; i < n; i++ {
 		batch[i] += allocW[i]
 	}
-	// credit update for next batch based on total batch
 	for i := 0; i < n; i++ {
 		if items[i].cap > 0 {
 			if batch[i] > 0 {
@@ -226,6 +245,7 @@ func main() {
 	groupMin := make([]int, G)
 	groupW := make([]int, G)
 	groupC := make([]int, G)
+	groupRate := make([]int, G)
 	groupCredit := make([]int, G)
 	for g := 0; g < G; g++ {
 		if pos >= len(lines) {
@@ -234,7 +254,7 @@ func main() {
 		}
 		f := strings.Fields(lines[pos])
 		pos++
-		if len(f) != 4 {
+		if len(f) != 5 {
 			fmt.Fprintln(os.Stderr, "bad group line")
 			os.Exit(1)
 		}
@@ -242,10 +262,12 @@ func main() {
 		mn, _ := strconv.Atoi(f[1])
 		w, _ := strconv.Atoi(f[2])
 		c, _ := strconv.Atoi(f[3])
+		ra, _ := strconv.Atoi(f[4])
 		groupP[g] = p
 		groupMin[g] = mn
 		groupW[g] = w
 		groupC[g] = c
+		groupRate[g] = ra
 		groupCredit[g] = w
 	}
 	if pos >= len(lines) {
@@ -258,6 +280,7 @@ func main() {
 	subMin := make([]int, S)
 	subW := make([]int, S)
 	subC := make([]int, S)
+	subRate := make([]int, S)
 	subCredit := make([]int, S)
 	for s := 0; s < S; s++ {
 		if pos >= len(lines) {
@@ -266,7 +289,7 @@ func main() {
 		}
 		f := strings.Fields(lines[pos])
 		pos++
-		if len(f) != 5 {
+		if len(f) != 6 {
 			fmt.Fprintln(os.Stderr, "bad sub line")
 			os.Exit(1)
 		}
@@ -275,20 +298,19 @@ func main() {
 		mn, _ := strconv.Atoi(f[2])
 		w, _ := strconv.Atoi(f[3])
 		c, _ := strconv.Atoi(f[4])
+		ra, _ := strconv.Atoi(f[5])
 		subG[s] = gid
 		subP[s] = p
 		subMin[s] = mn
 		subW[s] = w
 		subC[s] = c
+		subRate[s] = ra
 		subCredit[s] = w
 	}
-
 	groupTotal := make([]int, G)
 	subTotal := make([]int, S)
-
 	for t := 0; t < T; t++ {
 		load := loads[t]
-		// remaining caps
 		gRemCap := make([]int, G)
 		for g := 0; g < G; g++ {
 			rem := groupC[g] - groupTotal[g]
@@ -305,22 +327,34 @@ func main() {
 			}
 			sRemCap[s] = rem
 		}
-		sumMemberRem := make([]int, G)
+		sEffCap := make([]int, S)
+		for s := 0; s < S; s++ {
+			c := sRemCap[s]
+			ra := subRate[s]
+			if ra > 0 && ra < c {
+				c = ra
+			}
+			sEffCap[s] = c
+		}
+		sumMemberEff := make([]int, G)
 		for s := 0; s < S; s++ {
 			gid := subG[s]
 			if gid >= 0 && gid < G {
-				sumMemberRem[gid] += sRemCap[s]
+				sumMemberEff[gid] += sEffCap[s]
 			}
 		}
 		effGRem := make([]int, G)
 		for g := 0; g < G; g++ {
-			if gRemCap[g] < sumMemberRem[g] {
-				effGRem[g] = gRemCap[g]
-			} else {
-				effGRem[g] = sumMemberRem[g]
+			c := gRemCap[g]
+			if sumMemberEff[g] < c {
+				c = sumMemberEff[g]
 			}
+			ra := groupRate[g]
+			if ra > 0 && ra < c {
+				c = ra
+			}
+			effGRem[g] = c
 		}
-		// group level items
 		gItems := make([]*item, G)
 		for g := 0; g < G; g++ {
 			gItems[g] = &item{idx: g, priority: groupP[g], min: groupMin[g], weight: groupW[g], cap: effGRem[g], credit: groupCredit[g]}
@@ -330,10 +364,8 @@ func main() {
 			groupCredit[g] = gItems[g].credit
 			groupTotal[g] += groupBatch[g]
 		}
-		// per-group subscriber allocation
 		subBatch := make([]int, S)
 		for g := 0; g < G; g++ {
-			// collect subscribers in this group
 			idxs := []int{}
 			for s := 0; s < S; s++ {
 				if subG[s] == g {
@@ -347,9 +379,11 @@ func main() {
 			if gl <= 0 {
 				continue
 			}
+			// caps for members already limited by sEffCap, but also need to respect sRemCap for cumulative? Actually sEffCap already min(sRem, rate)
+			// For within-group, remaining caps after min? We'll recompute per member rem caps as sEffCap (which includes rate limit per batch)
 			mItems := make([]*item, len(idxs))
 			for i, sIdx := range idxs {
-				mItems[i] = &item{idx: sIdx, priority: subP[sIdx], min: subMin[sIdx], weight: subW[sIdx], cap: sRemCap[sIdx], credit: subCredit[sIdx]}
+				mItems[i] = &item{idx: sIdx, priority: subP[sIdx], min: subMin[sIdx], weight: subW[sIdx], cap: sEffCap[sIdx], credit: subCredit[sIdx]}
 			}
 			allocInGroup := allocateBatch(gl, mItems)
 			for i, sIdx := range idxs {
@@ -360,7 +394,6 @@ func main() {
 		for s := 0; s < S; s++ {
 			subTotal[s] += subBatch[s]
 		}
-		// output this batch
 		out := make([]string, S)
 		for s := 0; s < S; s++ {
 			out[s] = strconv.Itoa(subBatch[s])
