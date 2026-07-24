@@ -1651,7 +1651,7 @@ def test_fuzz_random():
     import random
 
     random.seed(12345)
-    for _ in range(20):
+    for _ in range(50):
         topics = {}
         cmds = []
         # create 1-3 topics with 1-3 partitions
@@ -1661,7 +1661,7 @@ def test_fuzz_random():
             topics[tname] = parts
             cmds.append(f"CREATE_TOPIC {tname} {parts} {len(cmds)}")
         # produce random messages
-        for _ in range(100):
+        for _ in range(200):
             op = random.choice(
                 [
                     "PRODUCE",
@@ -1809,6 +1809,44 @@ def test_topic_name_255_boundary():
 
     r2 = run(f"CREATE_TOPIC {long_bad} 1 0\n")
     assert r2.returncode != 0
+
+
+def test_stress_1k_produces_and_trim():
+    cmds = ["CREATE_TOPIC t 1 0"]
+    for i in range(1000):
+        cmds.append(f"PRODUCE t 0 m{i} {i + 1}")
+    cmds.append("TRIM t 0 500 1001")
+    cmds.append("PARTITION_INFO t 0 1002")
+    cmds.append("FETCH t 0 499 1003")
+    cmds.append("FETCH t 0 500 1004")
+    cmds.append("TOPIC_INFO t 1005")
+    r = run("\n".join(cmds))
+    out = lines(r.stdout)
+    # first 1000 produces offsets 0..999, partition info 500 1000, fetch 499 NONE (trimmed), fetch 500 m500, topic info 1 500
+    assert out[1000] == "500 1000"
+    assert out[1001] == "NONE"
+    assert out[1002] == "m500"
+    assert out[1003] == "1 500"
+
+
+def test_idempotent_many_dedup_and_trim():
+    cmds = ["CREATE_TOPIC t 1 0"]
+    # produce 10 different dedup ids
+    for i in range(10):
+        cmds.append(f"PRODUCE_IDEMPOTENT t 0 id{i} payload{i} {i + 1}")
+    # duplicate 5 of them
+    for i in range(5):
+        cmds.append(f"PRODUCE_IDEMPOTENT t 0 id{i} payload{i} {11 + i}")
+    cmds.append("TOPIC_INFO t 16")
+    cmds.append("TRIM t 0 5 17")
+    cmds.append("PRODUCE_IDEMPOTENT t 0 id0 payload0_new 18")
+    cmds.append("FETCH t 0 5 19")
+    r = run("\n".join(cmds))
+    out = lines(r.stdout)
+    # 10 produces 0..9, 5 dups 0..4, topic_info 1 10, trim no out, produce id0 new at 10, fetch payload5
+    assert out[15] == "1 10"
+    assert out[16] == "10"
+    assert out[17] == "payload5"
 
 
 def parse_log_payloads(log_path):
