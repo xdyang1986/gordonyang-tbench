@@ -19,27 +19,27 @@ Starter skeleton returns `not implemented` for core logic. Agent must implement 
 
 **Why naive fails**: ReadFile OOMs on 5GB sparse (memory limit 4096MB), int32 overflows, ext-only validation fails magic mismatch, no mutex corrupts manifest under parallel, no Seek race → wrong data, encryption forgotten → checksum mismatch, MD5/both not stored, parallel flag not validated.
 
-## Completion Rates (online validation — commit 2fcf1c64, 29 tests, 2026-07-23)
+## Completion Rates (online validation — commit a898d4ea, 30 tests, 2026-07-24)
 
 - **Oracle**: **3/3** — validated
 - **Opus 4.8 (agent)**: **5/5** — failed (solved every trial → too easy for this model)
-- **GPT-5.5 (codex)**: **1/5** — validated (4 losses were infra errors, not test failures)
-- **Avocado (metacode)**: **3/7** — validated
-- avgReward **0.55**, validation passing.
+- **GPT-5.5 (codex)**: **5/5** — failed (solved every trial → too easy for this model)
+- **Avocado (metacode)**: **3/5** — validated
+- avgReward **0.57**, validation passing.
 
 ## Failure Analysis (latest run)
 
-Derived from downloaded trial CTRF artifacts.
+Derived from downloaded trial CTRF artifacts. This was a **clean run** (all failing trials `status=completed`, no infra). Both frontier models solved every trial; the only failures came from Avocado.
 
-- **Avocado (metacode) — 3/7, one genuine reasoning failure.** 3 completed trials passed; 2 real completed failures each failed *only* the memory cluster `test_large_sparse_file_handling` + `test_hundreds_gb_simulation` (27/29); 2 trials were `status=error` infra. **Root cause (both failures): OOM.** Uploading a 5GB (and 10GB) file with `--chunk-size 1G` returned `-9` (SIGKILL / OOM-killed) in the 4GB-limited container — the implementation allocates a full **1GB chunk-sized buffer** instead of streaming each chunk with a small fixed buffer (e.g. 1MB `CopyBuffer`). This is the core "stream massive files without loading into memory" requirement, so it is a **legitimate discriminator**.
+- **Opus 4.8 (agent) — 5/5** and **GPT-5.5 (codex) — 5/5.** All clean passes; too easy for both frontier models.
 
-- **GPT-5.5 (codex) — 1/5, no reasoning signal.** 1 clean trial passed; the other 4 were all `status=error` (Daytona `ThrottlerException` / harness). Codex is systematically infra-blocked on this task, so 1/5 understates capability — it needs a clean re-run.
+- **Avocado (metacode) — 3/5, two failures of different kinds:**
+  - **One genuine reasoning failure** (29/30): failed *only* `test_hundreds_gb_simulation` — uploading a 10GB file with `--chunk-size 1G` exited with **returncode 1** (errored instead of succeeding). The large-file / 1G-chunk memory-streaming path remains the discriminating edge (consistent with prior runs).
+  - **One incomplete implementation** (3/30): the agent left the skeleton stubbed — `validate` returned `INVALID: not implemented`, chunk parsing returned `ERROR: invalid chunk size: not implemented`. Only build/help/invalid-format passed. This is a non-delivery (agent didn't finish), not a task-quality issue.
 
-- **Opus 4.8 (agent) — 5/5.** All clean passes; too easy for this model.
+- **Oracle — 3/3.** Reference solution passes.
 
-- **Oracle — 3/3.** Reference solution streams with a small fixed buffer and passes.
-
-**Assessment:** the task now discriminates on a real reasoning gap — memory-efficient streaming must use a small fixed buffer independent of `--chunk-size`; using the chunk size as the buffer OOMs on 1G chunks. Avocado fails it (2/7); Opus and Oracle handle it. Two caveats: Opus is 5/5 (too easy for the strongest model), and codex's 1/5 is infra noise, not difficulty. To tighten calibration, hardening should target the strongest model (Opus) while codex needs infra relief for a valid reading.
+**Assessment:** the task has drifted back toward **too easy** — both Opus and GPT-5.5 are 5/5. The only difficulty signal comes from Avocado, and half of that is an unfinished implementation rather than a reasoning gap. The single genuine discriminator remaining is the large-file 1G-chunk streaming path (`test_hundreds_gb_simulation`). To restore balance for the frontier models, hardening should deepen the memory-streaming / large-file requirements (or add an adversarial case both Opus and GPT currently pass).
 
 ## Anti-Cheating Analysis
 
