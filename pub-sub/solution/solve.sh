@@ -217,7 +217,7 @@ func main() {
 	}
 	G, _ := strconv.Atoi(lines[pos])
 	pos++
-	groupPBase := make([]int, G)
+	groupP := make([]int, G)
 	groupMin := make([]int, G)
 	groupW := make([]int, G)
 	groupC := make([]int, G)
@@ -225,18 +225,16 @@ func main() {
 	groupBurst := make([]int, G)
 	groupCredit := make([]int, G)
 	groupBurstRem := make([]int, G)
-	groupStreak := make([]int, G)
 	for g := 0; g < G; g++ {
 		f := strings.Fields(lines[pos])
 		pos++
 		if len(f) == 5 {
-			// old format without burst
 			p, _ := strconv.Atoi(f[0])
 			mn, _ := strconv.Atoi(f[1])
 			w, _ := strconv.Atoi(f[2])
 			c, _ := strconv.Atoi(f[3])
 			ra, _ := strconv.Atoi(f[4])
-			groupPBase[g] = p
+			groupP[g] = p
 			groupMin[g] = mn
 			groupW[g] = w
 			groupC[g] = c
@@ -251,7 +249,7 @@ func main() {
 			c, _ := strconv.Atoi(f[3])
 			ra, _ := strconv.Atoi(f[4])
 			bu, _ := strconv.Atoi(f[5])
-			groupPBase[g] = p
+			groupP[g] = p
 			groupMin[g] = mn
 			groupW[g] = w
 			groupC[g] = c
@@ -270,7 +268,7 @@ func main() {
 	S, _ := strconv.Atoi(lines[pos])
 	pos++
 	subG := make([]int, S)
-	subPBase := make([]int, S)
+	subP := make([]int, S)
 	subMin := make([]int, S)
 	subW := make([]int, S)
 	subC := make([]int, S)
@@ -279,13 +277,11 @@ func main() {
 	subCost := make([]int, S)
 	subCredit := make([]int, S)
 	subBurstRem := make([]int, S)
-	subStreak := make([]int, S)
 	for s := 0; s < S; s++ {
 		f := strings.Fields(lines[pos])
 		pos++
 		var gid, p, mn, w, c, ra, bu, co int
 		if len(f) == 6 {
-			// old: gid prio min weight cap rate
 			gid, _ = strconv.Atoi(f[0])
 			p, _ = strconv.Atoi(f[1])
 			mn, _ = strconv.Atoi(f[2])
@@ -295,7 +291,6 @@ func main() {
 			bu = 0
 			co = 1
 		} else if len(f) == 7 {
-			// with burst, cost=1
 			gid, _ = strconv.Atoi(f[0])
 			p, _ = strconv.Atoi(f[1])
 			mn, _ = strconv.Atoi(f[2])
@@ -318,7 +313,7 @@ func main() {
 			os.Exit(1)
 		}
 		subG[s] = gid
-		subPBase[s] = p
+		subP[s] = p
 		subMin[s] = mn
 		subW[s] = w
 		subC[s] = c
@@ -334,16 +329,6 @@ func main() {
 
 	for t := 0; t < T; t++ {
 		load := loads[t]
-
-		// effective priority with aging
-		groupPEff := make([]int, G)
-		for g := 0; g < G; g++ {
-			groupPEff[g] = groupPBase[g] + groupStreak[g]/2
-		}
-		subPEff := make([]int, S)
-		for s := 0; s < S; s++ {
-			subPEff[s] = subPBase[s] + subStreak[s]/2
-		}
 
 		gRemCostStart := make([]int, G)
 		for g := 0; g < G; g++ {
@@ -437,8 +422,8 @@ func main() {
 				gOrder[i] = i
 			}
 			sort.Slice(gOrder, func(a, b int) bool {
-				if groupPEff[gOrder[a]] != groupPEff[gOrder[b]] {
-					return groupPEff[gOrder[a]] > groupPEff[gOrder[b]]
+				if groupP[gOrder[a]] != groupP[gOrder[b]] {
+					return groupP[gOrder[a]] > groupP[gOrder[b]]
 				}
 				return gOrder[a] < gOrder[b]
 			})
@@ -453,8 +438,8 @@ func main() {
 					}
 				}
 				sort.Slice(idxs, func(a, b int) bool {
-					if subPEff[idxs[a]] != subPEff[idxs[b]] {
-						return subPEff[idxs[a]] > subPEff[idxs[b]]
+					if subP[idxs[a]] != subP[idxs[b]] {
+						return subP[idxs[a]] > subP[idxs[b]]
 					}
 					return idxs[a] < idxs[b]
 				})
@@ -593,7 +578,7 @@ func main() {
 					}
 					gItems[g] = &item{
 						idx:      g,
-						priority: groupPEff[g],
+						priority: groupP[g],
 						min:      minVal,
 						weight:   groupW[g],
 						cap:      effGCountIter[g],
@@ -624,7 +609,7 @@ func main() {
 						}
 						mItems[i] = &item{
 							idx:      sIdx,
-							priority: subPEff[sIdx],
+							priority: subP[sIdx],
 							min:      minVal,
 							weight:   subW[sIdx],
 							cap:      sEffCountIter[sIdx],
@@ -687,16 +672,14 @@ func main() {
 			wOld := groupW[g]
 			if groupBatchCount[g] != 0 {
 				groupCredit[g] = groupCredit[g]/2 + 1
-				newW := wOld * 9 / 10
+				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
 				}
 				groupW[g] = newW
-				groupStreak[g] = 0
 			} else {
 				groupCredit[g] = groupCredit[g] + wOld
 				groupW[g] = wOld + 1
-				groupStreak[g]++
 			}
 		}
 		for s := 0; s < S; s++ {
@@ -711,16 +694,14 @@ func main() {
 			wOld := subW[s]
 			if subBatchCount[s] != 0 {
 				subCredit[s] = subCredit[s]/2 + 1
-				newW := wOld * 9 / 10
+				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
 				}
 				subW[s] = newW
-				subStreak[s] = 0
 			} else {
 				subCredit[s] = subCredit[s] + wOld
 				subW[s] = wOld + 1
-				subStreak[s]++
 			}
 		}
 
@@ -730,64 +711,8 @@ func main() {
 		}
 		fmt.Println(strings.Join(out, ","))
 	}
-	// T+8
-	{
-		out := make([]string, G)
-		for g := 0; g < G; g++ {
-			out[g] = strconv.Itoa(groupTotalCost[g])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, S)
-		for s := 0; s < S; s++ {
-			out[s] = strconv.Itoa(subTotalCost[s])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, G)
-		for g := 0; g < G; g++ {
-			out[g] = strconv.Itoa(groupCredit[g])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, S)
-		for s := 0; s < S; s++ {
-			out[s] = strconv.Itoa(subCredit[s])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, G)
-		for g := 0; g < G; g++ {
-			out[g] = strconv.Itoa(groupBurstRem[g])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, S)
-		for s := 0; s < S; s++ {
-			out[s] = strconv.Itoa(subBurstRem[s])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, G)
-		for g := 0; g < G; g++ {
-			out[g] = strconv.Itoa(groupW[g])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
-	{
-		out := make([]string, S)
-		for s := 0; s < S; s++ {
-			out[s] = strconv.Itoa(subW[s])
-		}
-		fmt.Println(strings.Join(out, ","))
-	}
 }
+
 EOF
 
 echo "Solution installed at /app/main.go"
