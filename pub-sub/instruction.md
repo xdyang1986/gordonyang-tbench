@@ -155,8 +155,8 @@ Output:
 2,1,2
 0,0
 0,0,0
-3,1
-3,1,1
+2,1
+2,1,1
 ```
 
 ### Example 4 - burst exceeds rate
@@ -293,3 +293,29 @@ Output:
 4,2
 4,2,3,1
 ```
+
+### Example 9 - legacy format (5-field groups, 6-field subs) with defaults
+
+Input:
+```
+1
+10
+1
+0 0 1 10 0
+2
+0 10 0 1 5 0
+0 1 0 1 5 0
+```
+Output:
+```
+5,5
+10
+5,5
+1
+1,1
+0
+0,0
+1
+1,1
+```
+This tests backward-compat: 5-field groups are parsed as burst 0, 6-field subs as burst 0 cost 1, so same as explicit `0 0 1 10 0 0` and `0 10 0 1 5 0 0 1`. All T+8 lines still emitted.

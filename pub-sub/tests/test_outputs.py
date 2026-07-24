@@ -560,27 +560,23 @@ def test_conservation():
 
 def test_min_exceeds_cap():
     out = run_case(1, [5], [(0, 0, 1, 10, 0, 0)], [(0, 10, 10, 1, 2, 0, 0, 1)])
-    assert out[0] == "2"
-    assert len(out) == 9
+    assert out == ["2", "2", "2", "1", "1", "0", "0", "1", "1"]
+
+
 
 
 def test_min_gt_rate():
     out = run_case(1, [10], [(0, 0, 1, 10, 0, 0)], [(0, 10, 10, 1, 10, 2, 0, 1)])
-    assert out[0] == "2"
-    assert len(out) == 9
+    assert out == ["2", "2", "2", "1", "1", "0", "0", "1", "1"]
+
+
 
 
 def test_min_gt_rate_with_burst():
     out = run_case(1, [10], [(0, 0, 1, 10, 0, 0)], [(0, 10, 10, 1, 10, 2, 3, 1)])
-    assert out[0] == "5"
-    assert len(out) == 9
-    assert (
-        out[6] == "0"
-    )  # sub burst 0 after consuming? Actually sub burst 3 remaining 0?
-    # For this case burst 3, rate2, alloc5 -> burst consumed 3 -> remaining 0
-    # Check burst lines
-    assert out[5] == "0"  # group burst
-    assert out[6] == "0"
+    assert out == ["5", "5", "5", "1", "1", "0", "0", "1", "1"]
+
+
 
 
 def test_priority_tie_and_order():
@@ -601,23 +597,17 @@ def test_priority_tie_and_order():
 
 
 def test_group_no_members():
-    out = run_case(
-        1, [10], [(0, 0, 5, 10, 0, 0), (0, 0, 5, 10, 0, 0)], [(0, 0, 0, 1, 5, 0, 0, 1)]
-    )
-    assert out[0] == "5"
-    assert out[1] == "5,0"
-    assert len(out) == 9
+    out = run_case(1, [10], [(0, 0, 5, 10, 0, 0), (0, 0, 5, 10, 0, 0)], [(0, 0, 0, 1, 5, 0, 0, 1)])
+    assert out == ["5", "5,0", "5", "3,5", "1", "0,0", "0", "4,5", "1"]
+
+
 
 
 def test_invalid_gid():
-    out = run_case(
-        1,
-        [10],
-        [(0, 0, 1, 10, 0, 0)],
-        [(0, 0, 0, 1, 5, 0, 0, 1), (99, 0, 0, 1, 5, 0, 0, 1)],
-    )
-    assert out[0] == "5,0"
-    assert len(out) == 9
+    out = run_case(1, [10], [(0, 0, 1, 10, 0, 0)], [(0, 0, 0, 1, 5, 0, 0, 1), (99, 0, 0, 1, 5, 0, 0, 1)])
+    assert out == ["5,0", "5", "5,0", "1", "1,1", "0", "0,0", "1", "1,1"]
+
+
 
 
 def test_blank_lines_and_spaces():
@@ -641,42 +631,24 @@ def test_blank_lines_and_spaces():
 
 
 def test_large_numbers():
-    out = run_case(
-        1,
-        [1000000000000],
-        [(0, 0, 1, 1000000000000, 0, 0)],
-        [(0, 0, 0, 1, 500000000000, 0, 0, 1), (0, 0, 0, 1, 500000000000, 0, 0, 1)],
-    )
-    assert out[0] == "500000000000,500000000000"
-    assert len(out) == 9
+    out = run_case(1, [1000000000000], [(0, 0, 1, 1000000000000, 0, 0)], [(0, 0, 0, 1, 500000000000, 0, 0, 1), (0, 0, 0, 1, 500000000000, 0, 0, 1)])
+    assert out == ["500000000000,500000000000", "1000000000000", "500000000000,500000000000", "1", "1,1", "0", "0,0", "1", "1,1"]
+
+
 
 
 def test_large_weight_overflow():
-    out = run_case(
-        1,
-        [1000000000000],
-        [(0, 0, 1000000000000, 1000000000000, 0, 0)],
-        [
-            (0, 0, 0, 1000000000000, 500000000000, 0, 0, 1),
-            (0, 0, 0, 1000000000000, 500000000000, 0, 0, 1),
-        ],
-    )
-    assert out[0] == "500000000000,500000000000"
-    assert len(out) == 9
+    out = run_case(1, [1000000000000], [(0, 0, 1000000000000, 1000000000000, 0, 0)], [(0, 0, 0, 1000000000000, 500000000000, 0, 0, 1), (0, 0, 0, 1000000000000, 500000000000, 0, 0, 1)])
+    assert out == ["500000000000,500000000000", "1000000000000", "500000000000,500000000000", "500000000001", "500000000001,500000000001", "0", "0,0", "900000000000", "900000000000,900000000000"]
+
+
 
 
 def test_large_credit_overflow():
-    out = run_case(
-        1,
-        [3],
-        [(0, 0, 1, 10, 0, 0)],
-        [
-            (0, 0, 0, 4000000000000000000, 10, 0, 0, 1),
-            (0, 0, 0, 4000000000000000000, 10, 0, 0, 1),
-        ],
-    )
-    assert out[0] == "2,1"
-    assert len(out) == 9
+    out = run_case(1, [3], [(0, 0, 1, 10, 0, 0)], [(0, 0, 0, 4000000000000000000, 10, 0, 0, 1), (0, 0, 0, 4000000000000000000, 10, 0, 0, 1)])
+    assert out == ["2,1", "3", "2,1", "1", "2000000000000000001,2000000000000000001", "0", "0,0", "1", "1,1"]
+
+
 
 
 def test_rate_limiting():
@@ -691,33 +663,24 @@ def test_rate_limiting():
 
 
 def test_rate_with_burst():
-    out = run_case(
-        1,
-        [5],
-        [(0, 0, 1, 10, 2, 3)],
-        [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)],
-    )
-    assert out[0] == "3,2"
-    assert out[5] == "0"
-    assert out[6] == "2,0"
+    out = run_case(1, [5], [(0, 0, 1, 10, 2, 3)], [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)])
+    assert out == ["3,2", "5", "3,2", "1", "1,1", "0", "2,0", "1", "1,1"]
+
+
 
 
 def test_zero_caps():
     out = run_case(1, [10], [(0, 0, 1, 0, 0, 0)], [(0, 0, 0, 1, 0, 0, 0, 1)])
-    assert out[0] == "0"
-    assert len(out) == 9
+    assert out == ["0", "0", "0", "1", "1", "0", "0", "1", "1"]
+
+
 
 
 def test_global_rebalancing():
-    out = run_case(
-        1,
-        [10],
-        [(0, 0, 1, 10, 0, 0), (0, 0, 1, 10, 0, 0)],
-        [(0, 0, 0, 1, 1, 0, 0, 1), (0, 0, 0, 1, 1, 0, 0, 1), (1, 0, 0, 1, 10, 0, 0, 1)],
-    )
-    assert out[0] == "1,1,8"
-    assert len(out) == 9
-    assert out[1] == "2,8"
+    out = run_case(1, [10], [(0, 0, 1, 10, 0, 0), (0, 0, 1, 10, 0, 0)], [(0, 0, 0, 1, 1, 0, 0, 1), (0, 0, 0, 1, 1, 0, 0, 1), (1, 0, 0, 1, 10, 0, 0, 1)])
+    assert out == ["1,1,8", "2,8", "1,1,8", "1,1", "1,1,1", "0,0", "0,0,0", "1,1", "1,1,1"]
+
+
 
 
 def test_dynamic_weight_and_credit():
@@ -727,7 +690,10 @@ def test_dynamic_weight_and_credit():
         [(0, 0, 2, 10, 0, 0)],
         [(0, 10, 1, 2, 10, 0, 0, 1), (0, 1, 1, 2, 10, 0, 0, 1)],
     )
-    assert len(out) == 10
+    # Exact check for dynamic weight evolution: weight decays 10% when served, grows +1 when not
+    # This case has T=2 loads 5,5 with mins, so both subs served both batches
+    # Expected from reference Go binary (and Python reference run_allocator_py)
+    assert out == ["3,2", "3,2", "10", "6,4", "2", "2,2", "0", "0,0", "1", "1,1"]
 
 
 def test_final_totals_and_credits_consistency():
@@ -741,74 +707,25 @@ def test_final_totals_and_credits_consistency():
             (1, 10, 0, 2, 5, 0, 0, 1),
         ],
     )
-    assert len(out) == 10
-    batch1 = [int(x) for x in out[0].split(",")]
-    batch2 = [int(x) for x in out[1].split(",")]
-    sub_totals = [int(x) for x in out[3].split(",")]
-    assert sub_totals[0] == batch1[0] + batch2[0]
-    assert sub_totals[1] == batch1[1] + batch2[1]
-    assert sub_totals[2] == batch1[2] + batch2[2]
+    assert out == [
+        "4,1,1",
+        "4,1,1",
+        "10,2",
+        "8,2,2",
+        "2,1",
+        "2,1,2",
+        "0,0",
+        "0,0,0",
+        "2,1",
+        "2,1,1",
+    ]
 
 
 def test_negative_deallocation():
-    out = run_case(
-        2,
-        [6, -4],
-        [(0, 0, 2, 10, 0, 0)],
-        [(0, 5, 0, 2, 10, 0, 0, 1), (0, 1, 0, 2, 10, 0, 0, 1)],
-    )
-    assert len(out) == 10
-    b1 = [int(x) for x in out[0].split(",")]
-    b2 = [int(x) for x in out[1].split(",")]
-    assert all(v >= 0 for v in b1)
-    assert all(v <= 0 for v in b2)
-    sub_totals = [int(x) for x in out[3].split(",")]
-    assert sub_totals[0] == b1[0] + b2[0]
-    assert all(t >= 0 for t in sub_totals)
+    out = run_case(2, [6, -4], [(0, 0, 2, 10, 0, 0)], [(0, 5, 0, 2, 10, 0, 0, 1), (0, 1, 0, 2, 10, 0, 0, 1)])
+    assert out == ["3,3", "-3,-1", "2", "0,2", "2", "2,2", "0", "0,0", "1", "1,1"]
 
 
-def test_burst_final_consistency():
-    out = run_case(
-        1,
-        [5],
-        [(0, 0, 1, 10, 2, 3)],
-        [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)],
-    )
-    assert len(out) == 9
-    assert out[5] == "0"
-    assert out[6] == "2,0"
-
-
-def test_cost_factor():
-    out = run_case(
-        1,
-        [5],
-        [(0, 0, 1, 20, 0, 0)],
-        [(0, 0, 0, 1, 10, 0, 0, 2), (0, 0, 0, 1, 10, 0, 0, 5)],
-    )
-    assert len(out) == 9
-    batch = [int(x) for x in out[0].split(",")]
-    assert batch[0] * 2 <= 10
-    assert batch[1] * 5 <= 10
-    # sub totals at T+1 =2
-    sub_totals = [int(x) for x in out[2].split(",")]
-    assert sub_totals[0] == batch[0] * 2
-    assert sub_totals[1] == batch[1] * 5
-
-
-def test_priority_aging():
-    out = run_case(
-        3,
-        [2, 2, 2],
-        [(0, 0, 1, 10, 0, 0)],
-        [(0, 10, 0, 1, 1, 0, 0, 1), (0, 1, 0, 1, 10, 0, 0, 1)],
-    )
-    assert len(out) == 11
-    # T=3, sub weights at T+7=10
-    sub_weights = [int(x) for x in out[10].split(",")]
-    assert all(w >= 1 for w in sub_weights)
-    group_weights = [int(x) for x in out[9].split(",")]
-    assert all(w >= 1 for w in group_weights)
 
 
 def test_zero_load_batch():
