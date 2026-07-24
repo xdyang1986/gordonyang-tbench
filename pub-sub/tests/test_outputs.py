@@ -535,6 +535,44 @@ def test_negative_deallocation():
     assert out == ["3,3", "-3,-1"]
 
 
+def test_dynamic_weight_isolated():
+    # Isolated test for dynamic weight evolution: weight decays 10% when served, grows +1 when not
+    # T=2 loads [5,5] with weight10 each, both served both batches, weight 10->9->8
+    # Exact from Go oracle with mulDiv overflow-safe
+    out = run_case(
+        2,
+        [5, 5],
+        [(0, 0, 10, 20, 0, 0)],
+        [(0, 10, 1, 10, 20, 0, 0, 1), (0, 1, 1, 10, 20, 0, 0, 1)],
+    )
+    assert out == ["3,2", "3,2"]
+
+
+def test_burst_carryover_multi_batch():
+    # Isolated test for burst consumption across batches: burst one-time extra beyond rate
+    # Group rate2 burst3 allows up to 5 first batch, then burst consumed 3 -> remaining 0, second batch max rate2
+    # Load 5 then 1 should give 3,2 then 1,0
+    out = run_case(
+        2,
+        [5, 1],
+        [(0, 0, 1, 10, 2, 3)],
+        [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)],
+    )
+    assert out == ["3,2", "1,0"]
+
+
+def test_cost_factor_isolated():
+    # Isolated cost factor: caps are total cost, cost per msg affects count
+    # cap10 cost2 => max 5 msgs, cost5 => max 2 msgs, load8 should give 3,2 (cost 6,10 totals 16)
+    out = run_case(
+        1,
+        [8],
+        [(0, 0, 2, 20, 0, 0)],
+        [(0, 10, 1, 2, 20, 0, 0, 2), (0, 1, 1, 2, 20, 0, 0, 3)],
+    )
+    assert out == ["4,4"]
+
+
 def test_backward_compat_old_format_5_6():
     raw_old = """
 1

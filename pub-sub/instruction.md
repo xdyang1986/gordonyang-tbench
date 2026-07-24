@@ -36,13 +36,41 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 - **Min-phase order:** Priority desc tie original idx asc. Each min capped to `min(min, effCap, rem)`.
 
-- **Weighted deterministic loop:** After mins, multi-round: temp credits = persistent credits at batch start, active = `alloc < effCap`, total = sum credits, if total==0 bulk RR fallback (minRem, cycles, 1-by-1 input order), else share `floor(rem*credit/total)` via mulDiv capped, used==0 fallback highest credit tie lowest idx, update temp credits `c/2+1` if delta>0 else `+weight`, repeat until rem==0 or no active. Persistent credit update after batch: if alloc!=0 `credit=credit/2+1` else `credit+=weight_old`.
+- **Weighted deterministic loop (necessary for byte-exact):**
+  - After satisfying mins, remaining load goes to a multi-round weighted phase.
+  - Maintain temporary credits, initially equal to persistent credits at batch start.
+  - Active set = entities where allocated in this phase < effective count cap remaining after mins.
+  - Each round:
+    - `total = sum(tempCredit[active])`.
+    - If `total==0`: bulk round-robin fallback – find smallest remaining per active, allocate full cycles `min(minRem, rem // len(active))` to all active, then 1-by-1 in input order.
+    - Else: for each active, `share = floor(rem * tempCredit / total)` using overflow-safe `mulDiv` (handles 1e24 and 1.2e19), capped to remaining cap. `used = sum(share)`.
+    - If `used==0`: progress guarantee – give 1 to entity with highest temp credit, tie lowest original index.
+    - Subtract used from remaining.
+    - Update temp credits for this round: if delta>0, `temp = floor(temp/2)+1`, else `temp += weight` (weight at batch start).
+  - Repeat until remaining==0 or no active.
+  - Persistent credit update after whole batch: if total batch allocation !=0, `credit = floor(credit/2)+1`, else `credit += weight_old`.
 
-- **Dynamic weight:** After each batch, if eligible and alloc!=0 `weight = max(1, floor(mulDiv(weight,9,10)))` else if eligible and alloc==0 `weight = weight+1`. Exact `*9/10` must be overflow-safe via mulDiv to handle large weights up to 4e18 (weight*9=3.6e19 > MaxInt64), not `weight*9/10` signed overflow.
+- **Dynamic weight evolution (necessary):**
+  - Weight persists across batches, starts at input weight.
+  - After each batch, if entity was eligible (effective count at batch start >0) and got allocation !=0 in batch: `weight = max(1, floor(mulDiv(weight,9,10)))` – i.e., `weight*9/10` floor, overflow-safe via mulDiv, then at least 1.
+  - Else if eligible and allocation==0: `weight = weight+1`.
+  - This exact recurrence is required; weight affects future credit growth.
 
-- **Burst consumption:** After positive batch, if rate>0 and batchCount>rate, excess consumes burst_rem.
+- **Burst consumption (necessary):**
+  - `burst_rem` starts at input burst, is one-time extra count beyond rate, not replenished.
+  - Effective per-batch count cap includes `rate+burst_rem` when rate>0.
+  - After positive batch, if `batchCount > rate` and `rate>0`, `excess = batchCount - rate`, consume `min(excess, burst_rem)`, `burst_rem -= consumed`.
+  - Single-batch burst tests cover capping, but multi-batch carryover (remaining burst used in next batch) must also be implemented.
 
-- **Global rebalancing:** For positive load, while remaining>0 up to 10 iter: recompute remaining cost caps and count caps with rate remaining `rate+burst_rem - batch`, sumMemberEff, effG, allocate groups via primitive, per-group members via primitive, return unused to remaining.
+- **Global rebalancing (necessary):**
+  - For positive loads, use an outer loop up to 10 iterations while remaining>0:
+    - Recompute remaining cost caps `gRemCost = groupCap - totalCost - sum(subBatch*cost)` and `sRemCost = subCap - totalCost - subBatch*cost`.
+    - Convert to count: `sEffCount = floor(sRemCost/cost)` capped by `rate+burst_rem - subBatch` when rate>0.
+    - `sumMemberEff` per group = sum `sEffCount`, `effG = min(gRemCount, sumMemberEff, rate+burst_rem - groupBatch)`, 0 if no members.
+    - If sum eff==0 break.
+    - Allocate remaining to groups via primitive, then per-group to members via same primitive.
+    - If group allocation cannot be fully taken by members (sum member alloc < group alloc), leftover returns to remaining and is reallocated to other groups next iteration.
+  - This loop is tested via `test_global_rebalancing` (1,1,8 → 2,8).
 
 - **Negative loads:** If load<0, N=-load dealloc by priority desc groups then members, respecting totals never <0, burst unaffected, counts as activity.
 
