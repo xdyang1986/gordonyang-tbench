@@ -24,8 +24,11 @@ import (
 )
 
 type Partition struct {
-	msgs []string
-	low  int64 // earliest retained offset
+	msgs  []string
+	low   int64 // earliest retained offset
+	dedup map[string]int64 // dedup_id -> offset (only for retained and also for untrimmed? we keep for retained, trimmed removed)
+	// reverse map offset -> dedup_id for compaction
+	revDedup map[int64]string
 }
 
 type Topic struct {
@@ -126,7 +129,7 @@ func doCreateTopic(name string, numPartitions int) bool {
 	}
 	partitions := make([]*Partition, numPartitions)
 	for i := 0; i < numPartitions; i++ {
-		partitions[i] = &Partition{low: 0}
+		partitions[i] = &Partition{low: 0, dedup: make(map[string]int64), revDedup: make(map[int64]string)}
 	}
 	topics[name] = &Topic{name: name, numPartitions: numPartitions, partitions: partitions}
 	return true
@@ -169,6 +172,40 @@ func doProduce(topicName string, partition int, payload string) (int64, bool) {
 	return off, true
 }
 
+func doProduceIdempotent(topicName string, partition int, dedupId string, payload string) (int64, bool, bool) {
+	// returns (offset, isNew, valid)
+	// isNew false means duplicate, offset is existing
+	// valid false means topic/partition invalid
+	t, ok := topics[topicName]
+	if !ok {
+		return 0, false, false
+	}
+	if partition < 0 || partition >= t.numPartitions {
+		return 0, false, false
+	}
+	p := t.partitions[partition]
+	if p.dedup == nil {
+		p.dedup = make(map[string]int64)
+	}
+	if p.revDedup == nil {
+		p.revDedup = make(map[int64]string)
+	}
+	// Check if dedup_id exists and its offset >= low (still retained)
+	if existingOff, exists := p.dedup[dedupId]; exists {
+		if existingOff >= p.low {
+			return existingOff, false, true // duplicate, return existing offset
+		}
+		// If trimmed, allow re-create (remove old mapping)
+		delete(p.dedup, dedupId)
+		delete(p.revDedup, existingOff)
+	}
+	off := int64(len(p.msgs))
+	p.msgs = append(p.msgs, payload)
+	p.dedup[dedupId] = off
+	p.revDedup[off] = dedupId
+	return off, true, true
+}
+
 func doTrim(topicName string, partition int, offset int64) (bool, bool) {
 	// returns (changed, valid)
 	t, ok := topics[topicName]
@@ -190,6 +227,13 @@ func doTrim(topicName string, partition int, offset int64) (bool, bool) {
 		return false, true // no-op, valid
 	}
 	p.low = offset
+	// Clear dedup ids whose offset < new low
+	for dedupId, off := range p.dedup {
+		if off < offset {
+			delete(p.dedup, dedupId)
+			delete(p.revDedup, off)
+		}
+	}
 	// If any group's committed < low, clear it (trimmed)
 	// and if position < low, advance to low
 	for _, g := range groups {
@@ -350,6 +394,41 @@ func replay(payload string) {
 		}
 		pl := parts[3]
 		doProduce(topic, part, pl)
+	case "PRODUCE_IDEMPOTENT":
+		if len(parts) != 6 {
+			return
+		}
+		topic := parts[1]
+		part, err1 := strconv.Atoi(parts[2])
+		dedupId := parts[3]
+		payload := parts[4]
+		if err1 != nil {
+			return
+		}
+		if _, dedupExists := topics[topic]; !dedupExists {
+			return
+		}
+		// Replay idempotent produce: if dedup already exists and not trimmed, skip
+		t, ok := topics[topic]
+		if !ok || part < 0 || part >= t.numPartitions {
+			return
+		}
+		p := t.partitions[part]
+		if p.dedup == nil {
+			p.dedup = make(map[string]int64)
+			p.revDedup = make(map[int64]string)
+		}
+		if existingOff, exists := p.dedup[dedupId]; exists {
+			if existingOff >= p.low {
+				return // duplicate, skip
+			}
+			delete(p.dedup, dedupId)
+			delete(p.revDedup, existingOff)
+		}
+		off := int64(len(p.msgs))
+		p.msgs = append(p.msgs, payload)
+		p.dedup[dedupId] = off
+		p.revDedup[off] = dedupId
 	case "TRIM":
 		if len(parts) != 5 {
 			return
@@ -474,8 +553,12 @@ func compact() {
 		t := topics[tn]
 		for pi := 0; pi < t.numPartitions; pi++ {
 			part := t.partitions[pi]
-			for _, msg := range part.msgs {
-				writeRecord(&buf, fmt.Sprintf("PRODUCE %s %d %s 0", tn, pi, msg))
+			for off, msg := range part.msgs {
+				if dedupId, ok := part.revDedup[int64(off)]; ok {
+					writeRecord(&buf, fmt.Sprintf("PRODUCE_IDEMPOTENT %s %d %s %s 0", tn, pi, dedupId, msg))
+				} else {
+					writeRecord(&buf, fmt.Sprintf("PRODUCE %s %d %s 0", tn, pi, msg))
+				}
 			}
 		}
 	}
@@ -715,6 +798,45 @@ func main() {
 			}
 			fmt.Fprintf(out, "%d %d\n", chosen, off)
 			appendRecord(fmt.Sprintf("PRODUCE %s %d %s %s", topic, chosen, payload, tsStr))
+		case "PRODUCE_IDEMPOTENT":
+			if len(parts) != 6 {
+				die("PRODUCE_IDEMPOTENT needs 5 args")
+			}
+			topic := parts[1]
+			partStr := parts[2]
+			dedupId := parts[3]
+			payload := parts[4]
+			tsStr := parts[5]
+			if !isValidName(topic) {
+				die("invalid topic name")
+			}
+			if !isValidPayload(dedupId) {
+				die("invalid dedup_id")
+			}
+			if !isValidPayload(payload) {
+				die("invalid payload")
+			}
+			part, err := strconv.Atoi(partStr)
+			if err != nil {
+				die("invalid partition")
+			}
+			tv, err := strconv.ParseInt(tsStr, 10, 64)
+			if err != nil || tv < 0 {
+				die("invalid timestamp")
+			}
+			if part < 0 {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			off, isNew, valid := doProduceIdempotent(topic, part, dedupId, payload)
+			if !valid {
+				fmt.Fprintln(out, "ERROR")
+				continue
+			}
+			fmt.Fprintln(out, off)
+			if isNew {
+				appendRecord(strings.Join(parts, " "))
+			}
 		case "TRIM":
 			if len(parts) != 5 {
 				die("TRIM needs 4 args")

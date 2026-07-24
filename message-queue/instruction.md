@@ -53,6 +53,15 @@ Append `payload` to topic-partition log. Offset assigned is current log length (
 **`PRODUCE_AUTO <topic> <payload> <timestamp>`**
 Auto-partitioned produce, Kafka-like. Partition is chosen deterministically as `sum(byte values of payload) % num_partitions`. Offset assigned similarly. On success output `<partition> <offset>` (two tokens). On topic missing, output `ERROR`. In durable mode the broker must log this as a normalized `PRODUCE <topic> <chosen_partition> <payload> <timestamp>` record so replay is simple.
 
+**`PRODUCE_IDEMPOTENT <topic> <partition> <dedup_id> <payload> <timestamp>`**
+Idempotent producer with deduplication, harder edge. `dedup_id` is a token (no spaces, no comma, 1..1024, same validation as payload) that acts as deduplication key per topic-partition.
+- If topic/partition invalid → `ERROR`
+- If `dedup_id` already seen for that topic-partition and its message is still retained (offset >= low), do NOT append a new message; return the existing offset (first occurrence) for that dedup_id, no log append (idempotent).
+- Otherwise (new id) append payload as new message at current high offset, store `dedup_id → offset` mapping, return new offset, log as `PRODUCE_IDEMPOTENT <topic> <partition> <dedup_id> <payload> <timestamp>` only when it actually appends (duplicate produces log nothing).
+- On `TRIM`, when low increases, any dedup_ids whose offset < new low are removed (so future produce with same dedup_id can create new message).
+- On `DELETE_TOPIC`, dedup state for that topic is removed.
+- For `COMPACT`, to preserve dedup mapping for retained messages, emit `PRODUCE_IDEMPOTENT` for messages that had a dedup_id and `PRODUCE` otherwise, in offset order, then `TRIM` records. This ensures replay rebuilds same dedup map and same offsets.
+
 **`JOIN_GROUP <group> <topic> <timestamp>`**
 Create consumer group if not exists, subscribe it to topic. Idempotent: subscribing twice to same topic is no-op.
 - If topic does not exist → output `ERROR` and group is **NOT** created.

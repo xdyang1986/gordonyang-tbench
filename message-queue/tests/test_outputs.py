@@ -1188,6 +1188,76 @@ PARTITION_INFO t 0 5
 
 
 # --------------------------------------------------------------------------
+# PRODUCE_IDEMPOTENT (makes task much harder)
+# --------------------------------------------------------------------------
+
+
+def test_idempotent_basic():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_IDEMPOTENT t 0 id1 hello 1
+PRODUCE_IDEMPOTENT t 0 id1 hello 2
+FETCH t 0 0 3
+FETCH t 0 1 4
+TOPIC_INFO t 5
+"""
+    r = run(stdin)
+    # first produce offset 0, second duplicate returns same offset 0, no new message, fetch 1 NONE
+    assert lines(r.stdout) == ["0", "0", "hello", "NONE", "1 1"]
+
+
+def test_idempotent_different_ids():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_IDEMPOTENT t 0 id1 a 1
+PRODUCE_IDEMPOTENT t 0 id2 b 2
+FETCH_RANGE t 0 0 2 3
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["0", "1", "a,b"]
+
+
+def test_idempotent_after_trim_allows_recreate():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_IDEMPOTENT t 0 id1 a 1
+TRIM t 0 1 2
+PRODUCE_IDEMPOTENT t 0 id1 b 3
+FETCH t 0 0 4
+FETCH t 0 1 5
+"""
+    r = run(stdin)
+    # first id1 offset0, trim removes it, second id1 can create new message at offset1
+    assert lines(r.stdout) == ["0", "1", "NONE", "b"]
+
+
+def test_idempotent_persist(tmp_path):
+    d = str(tmp_path)
+    run("CREATE_TOPIC t 1 0\nPRODUCE_IDEMPOTENT t 0 id1 hello 1\n", state_dir=d)
+    r = run("PRODUCE_IDEMPOTENT t 0 id1 hello 2\nFETCH t 0 0 3\n", state_dir=d)
+    # second produce should be duplicate even after restart, returns 0
+    assert lines(r.stdout) == ["0", "hello"]
+
+
+def test_idempotent_batch_interaction():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_IDEMPOTENT t 0 id1 a 1
+PRODUCE_BATCH t 2 0 b 0 c 2
+PRODUCE_IDEMPOTENT t 0 id1 a 3
+FETCH_RANGE t 0 0 10 4
+"""
+    r = run(stdin)
+    # id1 offset0, batch offsets 1,2, second id1 duplicate returns 0, range a,b,c
+    assert lines(r.stdout) == ["0", "1,2", "0", "a,b,c"]
+
+
+def test_idempotent_error_cases():
+    stdin = """CREATE_TOPIC t 1 0
+PRODUCE_IDEMPOTENT missing 0 id1 x 0
+PRODUCE_IDEMPOTENT t 1 id1 y 1
+"""
+    r = run(stdin)
+    assert lines(r.stdout) == ["ERROR", "ERROR"]
+
+
+# --------------------------------------------------------------------------
 # Fuzz with Python reference (hard)
 # --------------------------------------------------------------------------
 
@@ -1196,6 +1266,8 @@ class PyPartition:
     def __init__(self):
         self.msgs = []
         self.low = 0
+        self.dedup = {}  # dedup_id -> offset
+        self.rev = {}  # offset -> dedup_id
 
     @property
     def high(self):
@@ -1302,6 +1374,32 @@ def py_run(commands):
                 p.msgs.append(pay)
                 offs.append(str(off))
             out.append(",".join(offs))
+        elif cmd == "PRODUCE_IDEMPOTENT":
+            topic = parts[1]
+            part = int(parts[2])
+            dedup_id = parts[3]
+            payload = parts[4]
+            if topic not in topics:
+                out.append("ERROR")
+                continue
+            t = topics[topic]
+            if part < 0 or part >= t.num:
+                out.append("ERROR")
+                continue
+            p = t.parts[part]
+            if dedup_id in p.dedup:
+                existing = p.dedup[dedup_id]
+                if existing >= p.low:
+                    out.append(str(existing))
+                    continue
+                # trimmed, allow recreate
+                del p.dedup[dedup_id]
+                p.rev.pop(existing, None)
+            off = p.high
+            p.msgs.append(payload)
+            p.dedup[dedup_id] = off
+            p.rev[off] = dedup_id
+            out.append(str(off))
         elif cmd == "TRIM":
             topic = parts[1]
             part = int(parts[2])
@@ -1321,6 +1419,11 @@ def py_run(commands):
             if off <= p.low:
                 continue
             p.low = off
+            # clear dedup ids whose offset < low
+            for did, o in list(p.dedup.items()):
+                if o < off:
+                    del p.dedup[did]
+                    p.rev.pop(o, None)
             for g in groups.values():
                 key = (topic, part)
                 if key in g.committed and g.committed[key] < off:
@@ -1564,6 +1667,7 @@ def test_fuzz_random():
                     "PRODUCE",
                     "PRODUCE_AUTO",
                     "PRODUCE_BATCH",
+                    "PRODUCE_IDEMPOTENT",
                     "FETCH",
                     "FETCH_RANGE",
                     "POLL",
@@ -1598,6 +1702,12 @@ def test_fuzz_random():
                     tokens.append(pay)
                 tokens.append(str(len(cmds)))
                 cmds.append(" ".join(tokens))
+            elif op == "PRODUCE_IDEMPOTENT":
+                t = random.choice(list(topics.keys()))
+                p = random.randint(0, topics[t] - 1)
+                did = f"id{random.randint(0, 5)}"  # reuse ids to test dedup
+                pay = f"imsg{random.randint(0, 1000)}"
+                cmds.append(f"PRODUCE_IDEMPOTENT {t} {p} {did} {pay} {len(cmds)}")
             elif op == "FETCH":
                 t = random.choice(list(topics.keys()))
                 p = random.randint(0, topics[t] - 1)

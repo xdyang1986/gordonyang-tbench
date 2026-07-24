@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/message-queue"
-description = "Kafka-like partitioned message queue broker with producer/consumer groups and durable WAL recovery. Agent implements Go binary reading stdin commands (CREATE_TOPIC, PRODUCE, PRODUCE_AUTO, FETCH, FETCH_RANGE, POLL, COMMIT, SEEK, etc.) and writing stdout, plus optional persistence via MQ_STATE_DIR/mq.log with CRC-framed records and atomic compaction."
+description = "Kafka-like partitioned message queue broker with producer/consumer groups, TRIM retention, PRODUCE_BATCH atomic, PRODUCE_IDEMPOTENT dedup, and durable WAL recovery. Agent implements Go binary reading stdin commands (CREATE_TOPIC, PRODUCE, PRODUCE_AUTO, PRODUCE_IDEMPOTENT, PRODUCE_BATCH, FETCH, FETCH_RANGE, TRIM, POLL, COMMIT, SEEK, etc.) and writing stdout, plus optional persistence via MQ_STATE_DIR/mq.log with CRC-framed records and atomic compaction preserving low watermarks and dedup state."
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
 keywords = ["kafka", "message-queue", "broker", "partition", "consumer-group", "durability", "go"]
