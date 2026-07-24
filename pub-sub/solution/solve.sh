@@ -712,7 +712,6 @@ func main() {
 		fmt.Println(strings.Join(out, ","))
 	}
 }
-
 EOF
 
 echo "Solution installed at /app/main.go"
