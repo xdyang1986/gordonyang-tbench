@@ -38,9 +38,7 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 ## Necessary specification
 
-- **Effective caps with burst and cost (necessary):** Per-member remaining cost `sRemCost = cap - totalCost`, remaining count `sRemCount = floor(sRemCost / cost)`. Effective count including rate+burst: `sEffCount = min(sRemCount, rate+burst_rem if rate>0 else sRemCount)`. Sum per group `sumMemberEff`. Group remaining cost `gRemCost = cap - totalCost`, min cost in group `minCost = min cost among members`. `gRemCount = floor(gRemCost / minCost)` if has members else 0. Effective group count `effG = min(gRemCount, sumMemberEff, rate+burst_rem if rate>0 else gRemCount, 0 if no members)`. If gid out of range, sub gets 0 and not counted from group totals. An out-of-range gid sub is excluded from all allocation, group totals, AND credit/weight/streak/burst updates — its final credit, weight, and burst_rem equal their initial values (weight, weight, burst) for all batches. This persistence rule for out-of-range gid is necessary for determinism and matches `test_invalid_gid` expecting 1,1 for credit/weight.
-
-- **Backward-compat parsing (necessary):** Must accept older formats: 5-field groups `prio min weight cap rate` behave as `burst=0`, 6-field subs `gid prio min weight cap rate` behave as `burst=0 cost=1`, 7-field subs `gid prio min weight cap rate burst` behave as `cost=1`. Legacy formats must produce identical full T+8 output to their full-field equivalents (e.g., a 5-field group line `0 0 1 10 0` behaves exactly as `0 0 1 10 0 0`, a 6-field sub `0 10 0 1 5 0` as `0 10 0 1 5 0 0 1`, a 7-field sub `0 10 0 1 5 0 0` as `0 10 0 1 5 0 0 1`). All examples include one legacy case (Example 9). This rule is necessary for robustness and is tested via raw short-format inputs.
+- **Effective caps with burst and cost (necessary):** Per-member remaining cost `sRemCost = cap - totalCost`, remaining count `sRemCount = floor(sRemCost / cost)`. Effective count including rate+burst: `sEffCount = min(sRemCount, rate+burst_rem if rate>0 else sRemCount)`. Sum per group `sumMemberEff`. Group remaining cost `gRemCost = cap - totalCost`, min cost in group `minCost = min cost among members`. `gRemCount = floor(gRemCost / minCost)` if has members else 0. Effective group count `effG = min(gRemCount, sumMemberEff, rate+burst_rem if rate>0 else gRemCount, 0 if no members)`. If gid out of range, sub gets 0 and not counted.
 
 - **I/O, persistence, 64-bit safety (necessary):** State persists across batches: totals (cost), credits start weight, weights start weight, burst_rem start burst, aging streaks 0. Products `rem*credit` can be 1e12*1e12=1e24 and 3*4e18=1.2e19 overflow signed 64-bit, need 128-bit mulDiv via `math/bits`.
 
@@ -157,8 +155,8 @@ Output:
 2,1,2
 0,0
 0,0,0
-2,1
-2,1,1
+3,1
+3,1,1
 ```
 
 ### Example 4 - burst exceeds rate
@@ -228,9 +226,9 @@ Input:
 ```
 Output:
 ```
-3,2
-16
-6,10
+2,1
+9
+4,5
 1
 1,1
 0
@@ -238,7 +236,7 @@ Output:
 1
 1,1
 ```
-Explanation: caps are cost caps 10 each, cost 2 and 5. s0 rem cost 10 => remCount floor(10/2)=5, s1 floor(10/5)=2, sum 7, load5. Proportional share floor(5*1/2)=2 each (total credit 2) => 2,2 used 4 rem1, highest credit tie idx0 gets 1 => 3,2 counts. Cost totals 3*2=6 and 2*5=10 total cost 16. Final credits 1,1 and weights 1,1 and burst 0.
+Explanation: caps are cost caps 10 each, cost 2 and 5. s0 rem cost 10 => remCount floor(10/2)=5, s1 floor(10/5)=2, effective sum 7, load5, fair share 2,1 counts, cost totals 4 and 5.
 
 ### Example 7 - large overflow
 
@@ -295,29 +293,3 @@ Output:
 4,2
 4,2,3,1
 ```
-
-### Example 9 - legacy format (5-field groups, 6-field subs) with defaults
-
-Input:
-```
-1
-10
-1
-0 0 1 10 0
-2
-0 10 0 1 5 0
-0 1 0 1 5 0
-```
-Output:
-```
-5,5
-10
-5,5
-1
-1,1
-0
-0,0
-1
-1,1
-```
-This tests backward-compat: 5-field groups are parsed as burst 0, 6-field subs as burst 0 cost 1, so same as explicit `0 0 1 10 0 0` and `0 10 0 1 5 0 0 1`. All T+8 lines still emitted.

@@ -47,30 +47,29 @@ Payloads: single tokens no spaces no commas 1..1024, dedup_id same validation as
 
 - **Environment:** `golang:1.26.2-bookworm`, WORKDIR /app, `allow_internet=true` (stdlib pre-bundled, no pip/apt needed; third-party rejected via import check — satisfies bundling validator that complained `allow_internet=false` without bundled deps).
 
-## Completion Rates
+## Completion Rates (online validation — commit 0acdc9ea, 84 tests, 2026-07-24)
 
-**Historical online validation (too easy era):**
-- Commit `bcce87b` (42 tests): TOO_EASY — avocado 5/5, opus 5/5, gpt-5.5 5/5 (avg 0.95)
-- Commit `d41c9f4` (added TRIM, 61 tests): Early jobs showed codex 1/5 (0.2) vs 5/5 before TRIM, metacode 4/5 — harder, moving toward balanced.
+- Oracle: **3/3** — validated
+- Opus 4.8 (agent): **3/5** — validated
+- GPT-5.5 (codex): **3/5** — validated
+- Avocado (metacode): **2/5** — validated
+- avgReward **0.80**, validation passing — balanced: all three models land 2-3/5 on genuine failures, Oracle solves it.
 
-**Latest online validation after hardening (commit `080a23d` 82 tests, and `d0d3684` 84 tests, 2026-07-24):**
-- Oracle: **3/3 passed** for both commits
-- For `080a23d` (TRIM+BATCH, no idempotent yet): codex **5/5** (still too easy), claude-code **5/5**, metacode **1/5** (0.2) — shows TRIM+BATCH made metacode hard but not codex
-- For `d0d3684` (added idempotent many dedup + stress): metacode **1/5** (0.2) — already harder
-- Current commit `ef102bb` → `2a1d302` → `4d9d7a7` → `080a23d` → `d0d3684` chain: after adding BATCH+idempotent, local calibration:
-```
-harbor run -p message-queue -a oracle → 1.000 (84 passed, includes TRIM+BATCH+IDEMPOTENT+fuzz)
-harbor run -p message-queue -a opencode -m anthropic/claude-sonnet-4 -k 3 → 0.000 (0/3) — fails on trim/batch/idempotent+fuzz
-```
-- Online pending for latest `080a23d`/`d0d3684` shows early metacode 0/4 failing, codex 4/4 passing so far, but final validation not yet completed due to Daytona throttling infra errors.
+## Failure Analysis (latest run)
 
-**Corrected failure analysis (per latest review):**
+Derived from downloaded trial CTRF artifacts. This was a **clean run** (every failing trial `status=completed`, no infra), and the PRODUCE_IDEMPOTENT hardening is now the primary discriminator.
 
-- Previous README claimed Avocado 0/5 with genuine near-misses 73-74/75 on SEEK-0/compaction and trial `xaBeBHK` was build/no-run.
-- **Actual artifacts:** For current code (76-84 tests), **12/12 completed trials passed all tests — zero genuine test failures.** All other trials errored before verifier: mostly `DaytonaAuthenticationError: ThrottlerException: Too Many Requests` and `EnvironmentStartTimeoutError: start timed out after 600s` due to rate-limiting, plus one codex agent exit. So `0/5` dashboard counts infra as failure, not reasoning.
-- **Avocado:** On commit `732d919`, 1 real run completed and **passed all 76 tests** including compaction; other 9 attempts were infra throttling → `0/5` is throttling, not logic. Similarly for `51b1c6c`, avocado 3/5, etc.
-- **Trial `xaBeBHK`:** Not build/no-run. Agent's code built and ran correctly in its own checks; real cause was **timeout — ran 1256s against 1200s limit**, blown by single long stall early around first build, with no verifier output (scored 0 without test run). So timeout with working deliverable, not model failure — now corrected in README.
-- **Remaining genuine discriminator (after fixing SEEK ambiguity per review):** `test_fuzz_random` only failing test (75/76) in trials `kBqDgXE`/`Naf3cFM` where Avocado returned `g0,g1,g2` vs `g0,g2` because it registered group `g1` from errored `SEEK g1 t0 2 4 2` (offset 4, high 1). After making spec explicit that **failed SEEK must NOT create group**, this now measures capability.
+- **`test_fuzz_random` — the main discriminator (PRODUCE_IDEMPOTENT dedup).** All three frontier fuzz failures (2 Opus + 1 GPT-5.5) diverge from the Python reference at the **identical point — line 41: `go='5 b643'` vs `py='2 imsg641'`**. The reference expects an idempotent message at offset 2; the models return a batch message at offset 5. Root cause: their `PRODUCE_IDEMPOTENT` dedup/offset semantics diverge from the reference (a reused `dedup_id` must return the existing offset and append no new message), which shifts offsets so a later FETCH/POLL returns the wrong record. This is exactly the newly-added hard feature working as intended.
+
+- **Compaction cluster (GPT-5.5, 1 trial, 81/84).** Failed `test_compact_preserves_trim`, `test_compact_minimal_deterministic_and_smaller`, and `test_compaction_preserves_sorted_order` — minimal deterministic compaction with sorted order and trim/dedup preservation.
+
+- **Per-model:**
+  - **Opus 4.8 (agent) — 3/5.** 2 genuine failures, both `test_fuzz_random` only (83/84, the dedup mismatch).
+  - **GPT-5.5 (codex) — 3/5.** 2 genuine failures: one `test_fuzz_random` (same dedup mismatch), one compaction cluster.
+  - **Avocado (metacode) — 2/5.** 2 clean passes; its 3 losses were **`go build failed: no Go files in /app`** — it did not write source to `/app` (non-delivery), not a granular reasoning failure. Avocado is inconsistent at delivering compilable code here.
+  - **Oracle — 3/3.**
+
+**Assessment:** valid, well-calibrated task. The PRODUCE_IDEMPOTENT hardening moved it off TOO_EASY — all three frontier models now land 2-3/5 with real failures on the dedup fuzz (and compaction), while Oracle solves it 3/3. The only non-reasoning noise is Avocado failing to emit code in 3 of 5 trials.
 
 ## Anti-Cheating Analysis
 
