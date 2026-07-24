@@ -54,13 +54,19 @@ Append `payload` to topic-partition log. Offset assigned is current log length (
 Auto-partitioned produce, Kafka-like. Partition is chosen deterministically as `sum(byte values of payload) % num_partitions`. Offset assigned similarly. On success output `<partition> <offset>` (two tokens). On topic missing, output `ERROR`. In durable mode the broker must log this as a normalized `PRODUCE <topic> <chosen_partition> <payload> <timestamp>` record so replay is simple.
 
 **`JOIN_GROUP <group> <topic> <timestamp>`**
-Create consumer group if not exists, subscribe it to topic. Idempotent: subscribing twice to same topic is no-op. If topic does not exist, output `ERROR`. No output on success. Logged only when subscription is newly added.
+Create consumer group if not exists, subscribe it to topic. Idempotent: subscribing twice to same topic is no-op.
+- If topic does not exist → output `ERROR` and group is **NOT** created.
+- Otherwise (valid) creates group if needed, subscribes, no output, logged only when subscription is newly added.
 
 **`COMMIT <group> <topic> <partition> <offset> <timestamp>`**
-Commit offset for group. `offset` must be `>= -1` and `< high` where high is partition's next offset, and must be `>= low` or `-1` where low is partition's earliest retained after TRIMs, with `-1` meaning clear committed. If `offset >= high` or `< -1` or (`offset != -1` and `offset < low`), output `ERROR`. If topic/partition invalid, `ERROR`. Otherwise sets group's committed offset for that partition to `offset` (overwrites). Auto-creates group and auto-subscribes to topic if needed (if topic exists). No output on success. Logged only when committed value actually changes.
+Commit offset for group. `offset` must be `>= -1` and `< high` where high is partition's next offset, and must be `>= low` or `-1` where low is partition's earliest retained after TRIMs, with `-1` meaning clear committed.
+- If topic/partition invalid or offset out of range (`offset >= high` or `< -1` or (`offset != -1` and `offset < low`)) → output `ERROR` and group is **NOT** created and no subscription happens.
+- Otherwise (valid) auto-creates group if needed, auto-subscribes to topic if needed (when topic exists), sets committed offset (overwrites), no output, logged only when committed value actually changes.
 
 **`SEEK <group> <topic> <partition> <offset> <timestamp>`**
-Set group's next poll position to `offset`. `offset` must be `>= low && <= high` where low is partition's earliest retained offset (after TRIMs) and high is next offset. If out of range, `ERROR`. If topic/partition invalid, `ERROR`. Auto-creates group and subscribes. No output on success. Logged only when position actually changes.
+Set group's next poll position to `offset`. `offset` must be `>= low && <= high` where low is partition's earliest retained offset (after TRIMs) and high is next offset.
+- If topic/partition invalid or offset out of range (`offset < low` or `offset > high`) → output `ERROR` and group is **NOT** created and no subscription happens.
+- Otherwise (valid) auto-creates group if needed, auto-subscribes to topic if needed, sets position, no output, logged only when position actually changes (reference logs only one SEEK per successful POLL advance, not one for init and one for advance — this is now explicit).
 
 **`TRIM <topic> <partition> <offset> <timestamp>`**
 Trims log by removing messages with offset < offset (log retention). Sets low watermark to max(old low, offset). After trim, messages with offset < low are considered deleted and `FETCH` returns `NONE` for them. `low` starts at 0, high is next offset to assign. Conditions:
@@ -100,7 +106,7 @@ If topic missing → `ERROR`. Else `<num_partitions> <total_retained>` where tot
 If topic/partition invalid → `ERROR`. Else `<low> <high>` where `low` is earliest retained offset (after TRIMs, starts at 0) and `high` is next offset (log length). Empty partition → `0 0` before any trim, or `<low> <low>` after trimming all.
 
 **`POLL <group> <topic> <partition> <timestamp>`**
-Consumer-group poll. If topic/partition invalid → `ERROR`. Auto-creates group and auto-subscribes to topic if needed (when topic exists). Position handling: if group has no position for that partition, initialize to `max(low, committed+1 if committed exists else low)`. If group's existing position `< low` (due to TRIM), auto-advance it to `low`. If position `< high`, output `<offset> <payload>` (e.g., `3 hello`) where offset is position before increment, then increment position by 1. If position `>= high`, output `NONE`. `ERROR` only for invalid topic/partition.
+Consumer-group poll. If topic/partition invalid → `ERROR` and group is **NOT** created. Otherwise (valid) auto-creates group if needed and auto-subscribes to topic if needed (when topic exists). Position handling: if group has no position for that partition, initialize to `max(low, committed+1 if committed exists else low)`. If group's existing position `< low` (due to TRIM), auto-advance it to `low`. If position `< high`, output `<offset> <payload>` (e.g., `3 hello`) where offset is position before increment, then increment position by 1. If position `>= high`, output `NONE`.
 
 **`GET_GROUP_OFFSET <group> <topic> <partition> <timestamp>`**
 If topic/partition invalid → `ERROR`. If group does not exist → `NONE`. Else if group has no committed offset (or committed==-1) or committed `< low` (trimmed) → `NONE`. Else committed offset integer (e.g., `5`).
