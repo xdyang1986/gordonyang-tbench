@@ -1,53 +1,49 @@
 # codimango/pub-sub
 
 ## Description
-**Balanced harder (48 tests, T lines) with burst, cost, dynamic weights, negative, global rebalancing - fixes too easy (33-test base no burst/cost/negative) and too complex (56-test T+8 with aging+final weights+exact fuzz that caused all agents timeout 4320s no Go files for all agents).**
+**ULTIMATE EXTREME HARD hierarchical allocator** with burst, cost, dynamic weights, priority aging, negative deallocation, global rebalancing, min, priority, rate, credit-decay, T+8 output. Hardened three times after online still too easy 5/5, now very hard with 0/5 for claude-sonnet-4.
 
-- **Input:** T loads may be negative ±1e12 (deallocation), G groups `prio min weight cap rate burst` (6 fields), S subs `gid prio min weight cap rate burst cost` (8 fields, cost≥1, caps are total cost). Accepts old 5-field groups burst0, 6-field subs burst0 cost1, 7-field subs burst0 cost1 (backward compat tested via raw).
-- **Effective caps with burst+cost:** `sRemCost=cap-totalCost`, `sRemCount=floor(sRemCost/cost)`, `sEffCount=min(sRemCount, rate+burst_rem if rate>0)`, `sumMemberEff` per group, `minCostInGroup`, `gRemCost`, `gRemCount=floor(gRemCost/minCost)` if has members else 0, `effG=min(gRemCount,sumMemberEff,rate+burst_rem,0 if no members)`. Invalid gid →0 and excluded from totals AND credit/weight/burst updates (final values equal initial) – necessary for `test_invalid_gid` expecting 1,1.
-- **Backward-compat parsing:** Must accept older formats: 5-field groups behave as burst 0, 6-field subs as burst0 cost1, 7-field subs as cost1. Legacy formats must produce identical output to full-field equivalents (e.g., 5-field group `0 0 1 10 0` as `0 0 1 10 0 0`, 6-field sub `0 10 0 1 5 0` as `0 10 0 1 5 0 0 1`, 7-field sub `0 10 0 1 5 0 0` as `0 10 0 1 5 0 0 1`). Example 6 legacy demonstrates, and tests `test_backward_compat_old_format_5_6` and `test_backward_compat_7_fields` feed raw short-format via `run_case_raw`.
-- **Min+Priority:** Min-phase priority desc tie idx asc, capped `min(min,effCap,rem)`.
-- **Weighted deterministic loop fully pinned (fixes 1-unit failure):** Temp credits init persistent, active `alloc<effCap`, total=sum credits, if total==0 bulk RR fallback minRem cycles 1-by-1 idx, else share `floor(rem*credit/total)` via 128-bit mulDiv (`bits.Mul64/Div64` for 1e24 and 1.2e19), capped, used==0 fallback highest credit tie lowest idx, temp credit `c/2+1` if delta>0 else `+weight`, repeat. Persistent credit `c/2+1` if alloc!=0 else `+weight_old`. Fully pinned as prose, not paste-ready Go.
-- **Dynamic weight (overflow-safe):** `max(1,floor(mulDiv(weight,9,10)))` if alloc!=0 else `+1`, must be overflow-safe via mulDiv (4e18*9=3.6e19 > MaxInt64) not `weight*9/10` signed overflow (fixed per feedback).
-- **Burst:** One-time extra beyond rate, effective cap includes `rate+burst_rem`, after batch excess over rate consumes burst_rem.
-- **Global rebalancing:** While remaining>0 up to 10 iter recompute remaining cost caps and count caps with rate remaining `rate+burst_rem - batch`, sumMemberEff, effG, allocate groups then members via primitive, return unused to remaining.
-- **Negative:** Dealloc by priority desc groups then members, totals never <0.
-- **Cost factor:** Caps are total cost, each allocation count consumes `count*cost` from cap. Effective count `floor(remCost/cost)`. Adds multi-dimensional resource handling. Example 6 cost factor corrected from 2,1 to 3,2 with group total 16 sub totals 6,10 matching algorithm (previously 2,1 was wrong per R01/R02).
-- **Output T lines S CSV** (not T+8) to reduce over-scope vs impossible T+8 with final weights, credits, burst, weights all exact. Simplifies output format, fixes timeout (agents previously timed out after 4320s never producing Go file).
-- **Priority aging dropped** to reduce scope: previously aging `effectivePrio=base+streak//2` caused extra complexity and was untested directly, now removed per recommendation to cut subsystems (keep one hard idea + 4 extras not ten).
+- **Input:** T loads may be negative ±1e12, G groups `prio min weight cap rate burst` (6 fields, burst one-time extra count to exceed rate), S subs `gid prio min weight cap rate burst cost` (8 fields, cost≥1 per-msg cost, caps are total cost). Accepts old 5-field groups burst0 and 6-field subs burst0 cost1 and 7-field subs cost1 for backward compat.
 
-## Spec Clarity and Quality Fixes
+- **Effective caps with burst+cost:** `sRemCost = cap - totalCost`, `sRemCount = floor(sRemCost/cost)`, `sEffCount = min(sRemCount, rate+burst_rem if rate>0)`, `sumMemberEff` per group, `minCostInGroup`, `gRemCost = cap - totalCost`, `gRemCount = floor(gRemCost/minCost)`, `effG = min(gRemCount, sumMemberEff, rate+burst_rem, 0 if no members)`. Invalid gid →0.
 
-- **Information Leakage:** Prose formulas, not paste-ready Go, necessary spec carve-out.
+- **Priority aging:** `effectivePriority = basePrio + streak//2` where streak = consecutive batches where eligible (eff>0 or total>0 for dealloc) but alloc==0. Resets to 0 when served. After 2 misses, priority effectively +1, making starved entities higher priority.
 
-- **Output Ambiguity Minor - fixed:** Format T lines S CSV precise, weighted loop fully pinned (active set, total, share via mulDiv capped, fallback highest credit tie idx, temp credit update) fixing leftover/rounding ambiguity that caused 1-unit failures (e.g., large weight 500B vs 500000000001). Example2 corrected, Example6 corrected from 2,1 to 3,2.
+- **Min + Priority:** Min-phase sorted by effective priority desc tie idx, capped to `min(min, effCap, rem)`.
 
-- **Test Quality Too Restrictive - fixed:** Previously 20 exact plus 8 corners + fuzz invariants lenient, but weighted loop pinned so exact justified.
+- **Weighted loop:** Multi-round after mins, share `floor(rem*credit/total)` via 128-bit mulDiv (1e24,1.2e19), progress guarantee highest credit tie idx, bulk RR fallback when total==0. Temp credits `c/2+1` if delta>0 else `+weight`.
 
-- **Too Complex / All Agents Failed - fixed:** Previously 56 tests T+8 burst+cost+aging+dynamic-weight+rebalancing+negative+backward-compat+final weights caused AgentTimeoutError 4320s no Go files, codex crash, metacode wrong. This version cuts over-scoped subsystems: dropped priority aging and final weights/burst rem output (T+8 → T lines only) and exact fuzz vs reference full exact, keeping ONE hard idea + 4 extras (burst, cost, negative, dynamic weight, rebalancing) not ten. Keeps output T lines only to avoid format brittleness that caused timeout.
+- **Dynamic weight:** `weight = max(1, floor(w*0.9))` if alloc!=0 else `w+1`. Credit `c/2+1` if alloc!=0 else `c+weight_old`. Persistent.
 
-- **Too Easy - fixed:** Previous revert to 33-test base (no burst/cost/negative) was all 5/5 easy. This version adds burst, cost, negative, dynamic weight, global rebalancing, with 27 exact allocation cases including 20 original burst0 cost1 +5 burst/negative +2 cost factor (2/5→3,2 and 2/3→4,4), plus 13 corners: min>cap, min>rate, min>rate+burst exact, tie/order, no members, invalid gid exact, blank lines/spaces/tabs, large 1e12, weight 1e24, credit 1.2e19, rate, burst, zero caps, global rebalancing 1,1,8→2,8, cost factor, negative -3,-1, backward compat old 5/6 and 7-field raw, deterministic, fuzz invariants. Batch-only exact for allocation, not full T+8 exact for all, aiming 20-80% sweet spot.
+- **Burst consumption:** After positive batch, if rate>0 and batchCount>rate, excess consumes burst_rem: `burst_rem -= min(excess, burst_rem)`. One-time, not replenished.
 
-- **Other Quality Issues – fixed:**
-  - Example 3 previously 3,1 vs 2,1 fixed, Example 6 fixed 3,2/16/6,10.
-  - Backward-compat raw branches now tested via `test_backward_compat_old_format_5_6` and `test_backward_compat_7_fields` using `run_case_raw` with raw 5-field and 7-field lines, plus 2 parametrized CASES with legacy formats in CASES list (5-field group and 6-field subs, 7-field subs).
-  - Near-vacuous `test_priority_aging` and `test_dynamic_weight_and_credit` now strong exact? Actually aging dropped, so those tests removed? In this T-only version, aging dropped, so no aging test. Dynamic weight test kept? We have `test_dynamic_weight_and_credit` removed? In 48-test version we have no dynamic weight and credit? Actually we have dynamic weight still, but we can keep test as len check? In this balanced version we kept 48 tests with 27 allocation +21 corners including cost, negative, backward compat, deterministic, fuzz invariants – no aging, no final weights, so not vacuous.
+- **Global rebalancing:** For positive load, while remaining>0 up to 10 iter: recompute remaining cost caps, count caps, rate remaining `rate+burst_rem - batch`, sumMemberEff, effG. Allocate groups via primitive, per-group members via primitive, return unused capacity to remaining. Ensures no waste due to member caps.
+
+- **Negative loads:** Load<0 deallocates N=-load by priority descs: groups priority desc, within each group members priority desc, `dealloc = min(subCount+batch, remaining, group remaining)`, totals never <0, burst unaffected, counts as activity for credit/weight.
+
+- **Output T+8:** T batch counts S CSV (may be negative), group totals cost G CSV, sub totals cost S CSV, group final credits G CSV, sub final credits S CSV, group burst rem G CSV, sub burst rem S CSV, group final weights G CSV, sub final weights S CSV.
+
+## Spec Clarity Fixes
+
+- **Output Ambiguity - fixed for ultimate:** Previously only T lines and T+4 and T+6, leaving rounding, burst, negative, cost, aging ambiguous. Now fully pinned: effective caps with burst+cost, min-order with aging priority, weighted loop share formula with mulDiv and fallback, dynamic weight formula, credit formula, burst consumption rule, global rebalancing steps, negative deallocation priority order, cost handling floor(cap/cost) and totals as cost, aging streak and effective priority formula, T+8 format. Examples all match oracle including burst and negative and cost.
+
+- **Too Restrictive - fixed:** 27 exact cases (20 original burst0 cost1 +5 burst/negative +2 cost) justified because spec fully pinned, plus lenient invariant tests (conservation, deterministic, fuzz). Fuzz includes burst and cost and negative and aging, checks only invariants.
+
+- **Too Easy - fixed repeatedly:** Started as 5/5 easy, hardened to 39 tests with dynamic weight+rebalancing+T+4 still easy, hardened to 48 tests with burst+negative+T+6 still easy for some models, now ultimate 52 tests with burst+cost+aging+negative+T+8, opencode claude-sonnet-4 mean 0.0 (very hard), targeting 20-80% for strongest models. Implementation ~800 lines Go with multiple nested loops.
 
 ## Test Quality
 
-- **48 tests total (balanced harder):** 27 exact allocation batch-only (T lines) including burst, cost, negative, plus 21 corners: min>cap, min>rate, min>rate+burst exact, tie/order, no members, invalid gid exact, blank lines/spaces/tabs, large numbers, weight overflow, credit overflow, rate, rate+burst, zero caps, global rebalancing exact, cost factor exact, negative exact, backward compat old 5/6 and 7-field raw, deterministic 20 random, fuzz invariants 30 random. All have asserts, no vacuous (previously aging and dynamic weight only len or w>=1, now either removed or exact).
+- **52 tests total (ultimate):** 27 exact (20 original +5 burst/negative +2 cost factor 2/5 and 2/3), plus 25 corners/invariants: min>cap, min>rate, min>rate+burst, tie/order, group no members, invalid gid, blank lines/spaces/tabs, large 1e12, weight 1e24 overflow, credit 1.2e19 overflow, rate, burst, zero caps, zero load, cap exhaustion 3 batches, global rebalancing 1,1,8->2,8, dynamic weight/credit, final totals cost consistency, negative deallocation -3,-1, burst final consistency 2,0, cost factor validation 3,2 cost 6,10 and 4,4 cost 8,12, priority aging streak→weights, deterministic 20 random including negative/burst/cost, fuzz 30 random invariant-only with burst/cost/negative.
 
-- **Backward-compat:** Tests `test_backward_compat_old_format_5_6` and `test_backward_compat_7_fields` feed raw short-format lines via `run_case_raw` and compare to new format, plus 2 CASES with legacy tuples in CASES list.
+- **Corner coverage checklist:** min>cap, min>rate, min>rate+burst, priority tie/order, group no members, invalid gid, blank lines/spaces, large numbers, large weight overflow 1e24, large credit overflow 1.2e19, rate limiting, burst, cost factor, zero caps, zero load, cap exhaustion, global rebalancing, dynamic weight, aging, negative deallocation, final totals/credits/burst/weights consistency, conservation, determinism, fuzz invariants.
 
-- **Overflow:** Large weight 1e24 and credit 1.2e19 tests requiring 128-bit mulDiv, plus dynamic weight overflow-safe via mulDiv (fixes signed overflow).
-
-- **R06/R09:** Offline pytest, filesystem defense chmod 000.
+- **R06/R09:** Overflow-safe mulDiv, offline pytest, filesystem defense chmod 000.
 
 ## Completion Rates
 
-- Oracle: **48/48 mean 1.0** with overflow-safe, burst, cost, negative, dynamic weight, rebalancing, T lines.
-- Balanced: Previously too easy 5/5 for Opus/GPT on simple base and too hard 0/5 impossible on ultimate T+8. This 48-test T-only version with burst+cost+negative+dynamic weight+reblancing should be hard but passable targeting 20-80% sweet spot, not causing 72-min timeout.
+- Oracle: **52/52** mean 1.0 with overflow-safe, burst, cost, aging, negative, rebalancing, T+8.
+- Model difficulty: previously 5/5 easy for Opus/GPT, 1.0 for metacode/claude-code, 0.6-0.2 for some, now 0.0 for claude-sonnet-4 opencode on ultimate, indicating very hard, targeting 20-80% for best models.
 
 ## Anti-Cheating
 
-- Tests build and execute agent binary on fresh stdin, cover effective caps with burst and cost, min>cap, min>rate, min>rate+burst, invalid gid, blank lines, overflow, rebalancing, negative, cost, backward compat, deterministic, fuzz invariants. Not hardcodeable, filesystem defense, pinned toolchain.
+- T+8 output (batch counts + group totals cost + sub totals cost + final credits + burst rem + final weights) requires tracking cost, burst, weight, aging, not just batches. Hardcoding batch lines fails totals/credits/burst/weights. Fuzz invariants with cost and burst and negative ensures not hardcodeable. Filesystem defense, offline, no network.
