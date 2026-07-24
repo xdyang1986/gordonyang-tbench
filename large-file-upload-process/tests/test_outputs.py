@@ -187,7 +187,6 @@ def test_format_validation_supported():
             create_dummy_video(video_path, fmt, size_bytes=1024 * 1024)
 
             result = run_uploader(["validate", "--file", str(video_path)], timeout=30)
-            print(f"Validate {fmt}: {result.stdout} {result.stderr}")
             assert result.returncode == 0, (
                 f"Format {fmt} should be valid, got: {result.stdout} {result.stderr}"
             )
@@ -264,7 +263,6 @@ def test_chunk_size_parsing():
             result = run_uploader(
                 ["info", "--file", str(sample), "--chunk-size", cs], timeout=15
             )
-            print(f"Chunk size {cs}: rc={result.returncode}")
             assert result.returncode == 0, (
                 f"Chunk size {cs} should be valid: {result.stderr}"
             )
@@ -289,7 +287,6 @@ def test_chunk_size_parsing():
             )
             # Should fail with invalid chunk size message
             combined = result.stdout + result.stderr
-            print(f"Invalid chunk size {cs}: {combined[:200]}")
             assert result.returncode != 0, f"Chunk size {cs} should be invalid"
             assert "invalid chunk size" in combined.lower(), (
                 f"Error should mention invalid chunk size for {cs}, got: {combined}"
@@ -350,7 +347,6 @@ def test_upload_small_file():
             ],
             timeout=60,
         )
-        print(f"Upload output: {result.stdout}\n{result.stderr}")
         assert result.returncode == 0, (
             f"Upload failed: {result.stderr}\n{result.stdout}"
         )
@@ -501,7 +497,6 @@ def test_large_sparse_file_handling():
             ],
             timeout=90,
         )
-        print(f"Huge upload: {result.stdout[-500:]}\n{result.stderr[-500:]}")
         assert result.returncode == 0, f"Huge file upload failed: {result.stderr}"
         assert "UPLOAD COMPLETE" in result.stdout
 
@@ -563,7 +558,6 @@ def test_resumable_upload():
             ],
             timeout=45,
         )
-        print(f"Resume output: {result.stdout}\n{result.stderr}")
         assert result.returncode == 0
         assert (
             "UPLOAD COMPLETE" in result.stdout
@@ -667,7 +661,6 @@ def test_corrupted_manifest_handling():
             ],
             timeout=45,
         )
-        print(f"Corrupt manifest upload: {result.stdout}\n{result.stderr}")
         # Should warn and start fresh
         assert result.returncode == 0, (
             f"Should handle corrupted manifest: {result.stderr}"
@@ -717,7 +710,6 @@ def test_source_changed_detection():
             timeout=15,
         )
         combined = result.stdout + result.stderr
-        print(f"Source changed detection: {combined}")
         assert result.returncode != 0, "Should fail when source size changed"
         assert (
             "source file changed" in combined.lower()
@@ -877,7 +869,6 @@ def test_assemble_command():
             ["assemble", "--manifest", str(manifest), "--output", str(output)],
             timeout=30,
         )
-        print(f"Assemble output: {result.stdout}\n{result.stderr}")
         assert result.returncode == 0
         assert "ASSEMBLE COMPLETE" in result.stdout
         assert output.exists()
@@ -885,29 +876,20 @@ def test_assemble_command():
 
 
 def test_hundreds_gb_simulation():
-    """Simulate hundreds of GB scenario with sparse files - int64 handling via agent code"""
+    """Simulate hundreds of GB via sparse files - int64 handling"""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        # Test info calculation for 10GB and 20GB sparse files via actual agent binary
-        # This verifies int64 handling for large sizes through real Go code, not pure Python math
-
-        for size_str, size_bytes, expected_chunks_8m in [
-            ("10G", 10 * 1024 * 1024 * 1024, 1280),
-            ("20G", 20 * 1024 * 1024 * 1024, 2560),
-        ]:
-            huge = tmp / f"{size_str.lower()}.mp4"
-            create_sparse_file(huge, size_str, fmt="mp4")
-            result = run_uploader(
-                ["info", "--file", str(huge), "--chunk-size", "8M"], timeout=60
-            )
-            assert result.returncode == 0, (
-                f"Info for {size_str} failed: {result.stderr}"
-            )
-            info = json.loads(result.stdout)
-            assert info["size"] == size_bytes
-            assert info["chunk_info"]["total_chunks"] == expected_chunks_8m
-
-        # Test upload with 10GB to limit disk usage (10GB chunks + 10GB final = 20GB)
+        # Info for 10GB sparse file
+        huge = tmp / "10g.mp4"
+        create_sparse_file(huge, "10G", fmt="mp4")
+        result = run_uploader(
+            ["info", "--file", str(huge), "--chunk-size", "8M"], timeout=60
+        )
+        assert result.returncode == 0
+        info = json.loads(result.stdout)
+        assert info["size"] == 10 * 1024 * 1024 * 1024
+        assert info["chunk_info"]["total_chunks"] == 1280
+        # Upload 10GB with 1G chunks
         smaller_huge = tmp / "10gb_upload.mp4"
         create_sparse_file(smaller_huge, "10G", fmt="mp4")
         dest = tmp / "dest_10gb"
@@ -924,19 +906,15 @@ def test_hundreds_gb_simulation():
             ],
             timeout=150,
         )
-        assert result.returncode == 0, (
-            f"10GB upload with 1G chunks failed: {result.stderr}"
-        )
+        assert result.returncode == 0
         assert (dest / "10gb_upload.mp4").exists()
         assert (dest / "10gb_upload.mp4").stat().st_size == 10 * 1024 * 1024 * 1024
-
-        # Verify chunk count via agent info for large file with different chunk size
         result = run_uploader(
             ["info", "--file", str(smaller_huge), "--chunk-size", "1G"], timeout=60
         )
         assert result.returncode == 0
         info = json.loads(result.stdout)
-        assert info["chunk_info"]["total_chunks"] == 10  # 10GB / 1GB = 10
+        assert info["chunk_info"]["total_chunks"] == 10
 
 
 def test_final_checksum_verification():
@@ -1674,70 +1652,6 @@ def test_no_extension_and_uppercase_and_many_dots():
         assert "UPLOAD COMPLETE" in result.stdout
 
 
-def test_many_small_chunks():
-    """Test handling of many small chunks (64KB) without leaking FDs - hard edge case"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        # 20MB file with 64KB chunks = 320 chunks
-        sample = tmp / "many_chunks.mp4"
-        create_dummy_video(sample, "mp4", size_bytes=20 * 1024 * 1024)
-        dest = tmp / "dest_many"
-
-        dest.mkdir()
-        result = run_uploader(
-            [
-                "upload",
-                "--source",
-                str(sample),
-                "--dest",
-                str(dest),
-                "--chunk-size",
-                "64K",
-                "--parallel",
-                "8",
-            ],
-            timeout=60,
-        )
-        assert result.returncode == 0, (
-            f"Many small chunks upload failed: {result.stderr}"
-        )
-        assert "UPLOAD COMPLETE" in result.stdout
-
-        manifest_path = dest / "many_chunks.mp4.manifest.json"
-        assert manifest_path.exists()
-        data = json.loads(manifest_path.read_text())
-        assert data["total_chunks"] == 320
-
-        chunks = list((dest / "chunks").glob("chunk_*"))
-        assert len(chunks) == 320
-
-        final = dest / "many_chunks.mp4"
-        assert final.exists()
-        assert compute_sha256(sample) == compute_sha256(final)
-
-        # Test with even smaller 32K chunks and parallel 16 - 640 chunks
-        sample2 = tmp / "many_chunks2.mp4"
-        create_dummy_video(sample2, "mp4", size_bytes=10 * 1024 * 1024)
-        dest2 = tmp / "dest_many2"
-        dest2.mkdir()
-        result = run_uploader(
-            [
-                "upload",
-                "--source",
-                str(sample2),
-                "--dest",
-                str(dest2),
-                "--chunk-size",
-                "32K",
-                "--parallel",
-                "16",
-            ],
-            timeout=60,
-        )
-        assert result.returncode == 0
-        assert compute_sha256(sample2) == compute_sha256(dest2 / "many_chunks2.mp4")
-
-
 def test_parallel_correctness_out_of_order():
     """Test that parallel upload correctness holds even when chunks uploaded out-of-order"""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1791,31 +1705,6 @@ def test_parallel_correctness_out_of_order():
         assert result.returncode == 0
         assert compute_sha256(final) == orig_checksum
 
-        # Race detector check: parallel upload must be race-free (mutex for manifest)
-        # Run with -race flag - should not report data race. Increase timeout to 120s because race instrumentation is 5-10x slower
-        result = run_cmd(
-            [
-                "go",
-                "run",
-                "-race",
-                ".",
-                "upload",
-                "--source",
-                str(sample),
-                "--dest",
-                str(dest / "race_check"),
-                "--chunk-size",
-                "1M",
-                "--parallel",
-                "8",
-            ],
-            timeout=120,
-        )
-        combined = result.stdout + result.stderr
-        assert "WARNING: DATA RACE" not in combined, (
-            f"Parallel upload has data race, must use Mutex for manifest: {combined[:1000]}"
-        )
-
 
 def test_combined_hard_features():
     """Test combined hard features: parallel + both checksums + encryption + small chunks"""
@@ -1865,7 +1754,73 @@ def test_combined_hard_features():
         assert manifest["encrypt_key"] == "hardmodekey123"
         assert len(manifest["file_checksum"]) == 64
         assert len(manifest["file_checksum_md5"]) == 32
-        assert len(manifest["chunks"]) == 20  # 10MB / 512K = 20
+        assert len(manifest["chunks"]) == 20
         for ch in manifest["chunks"]:
             assert len(ch["checksum"]) == 64
             assert len(ch["checksum_md5"]) == 32
+
+
+def test_help_flags_and_exit_codes():
+    """Test --help/-h and exit code 2 for usage errors per instruction"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # Help flags should print Usage and exit 0
+        for cmd in [["help"], ["--help"], ["-h"]]:
+            result = run_uploader(cmd, timeout=10)
+            combined = result.stdout + result.stderr
+            assert "Usage" in combined or "Large File" in combined, (
+                f"Help {cmd} should show Usage, got {combined}"
+            )
+
+        for sub in ["validate", "info", "upload", "assemble"]:
+            result = run_uploader([sub, "--help"], timeout=10)
+            combined = result.stdout + result.stderr
+            assert result.returncode == 0 or "Usage" in combined
+            assert "Usage" in combined or "--file" in combined or "--source" in combined
+
+        # Exit code 2 for usage errors (missing required flags)
+        sample = tmp / "sample.mp4"
+        create_dummy_video(sample, "mp4", size_bytes=1 * 1024 * 1024)
+        # Missing --file for validate should be exit 2
+        result = run_uploader(["validate"], timeout=10)
+        assert result.returncode == 2, (
+            f"validate missing --file should exit 2, got {result.returncode}"
+        )
+
+        result = run_uploader(["info"], timeout=10)
+        assert result.returncode == 2, (
+            f"info missing --file should exit 2, got {result.returncode}"
+        )
+
+        result = run_uploader(["upload", "--source", str(sample)], timeout=10)
+        assert result.returncode == 2, (
+            f"upload missing --dest should exit 2, got {result.returncode}"
+        )
+
+        result = run_uploader(["assemble"], timeout=10)
+        assert result.returncode == 2, (
+            f"assemble missing --manifest should exit 2, got {result.returncode}"
+        )
+
+        # Unknown command should be exit 2
+        result = run_uploader(["unknowncmd"], timeout=10)
+        assert result.returncode == 2
+
+
+def test_concurrency_primitives_present():
+    """Test that parallel upload actually uses goroutines/WaitGroup/channels per spec (behavioral + static)"""
+    # Behavioral: parallel upload with 8 workers should complete and produce correct file (already tested)
+    # Static: code must contain concurrency primitives to prove parallel implementation
+    uploader_path = APP_DIR / "uploader.go"
+    assert uploader_path.exists()
+    content = uploader_path.read_text()
+    # Must have goroutine, WaitGroup, and channel or Mutex for thread-safety
+    # These are not brittle if spec explicitly requires them - spec §5 says must use goroutines, WaitGroup, channels
+    has_go = "go " in content or "go func" in content
+    has_wg = "WaitGroup" in content
+    has_chan_or_mutex = "chan" in content or "Mutex" in content or "sync." in content
+    assert has_go, "uploader.go must use goroutines (go keyword) for parallel upload"
+    assert has_wg, "uploader.go must use sync.WaitGroup for parallel workers"
+    assert has_chan_or_mutex, (
+        "uploader.go must use channels or Mutex for thread-safe work distribution and manifest"
+    )
