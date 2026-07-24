@@ -1,14 +1,3 @@
-"""Black-box tests for Kafka-like message queue broker.
-
-Builds Go program and drives via stdin/stdout.
-
-Semantics under test:
-  * topics with partitions, append-only logs, offsets
-  * PRODUCE and PRODUCE_AUTO (hash by sum bytes % partitions)
-  * FETCH, FETCH_RANGE, LIST_TOPICS, TOPIC_INFO, PARTITION_INFO
-  * consumer groups: JOIN_GROUP, POLL, COMMIT, SEEK, GET_GROUP_OFFSET, LIST_GROUPS
-  * durable mode MQ_STATE_DIR/mq.log: CRC-framed log, torn-tail truncation, atomic compaction
-"""
 
 import os
 import struct
@@ -29,7 +18,6 @@ GO_ENV = {
     "GOPATH": "/tmp/gopath",
 }
 
-
 def _find_main_pkg():
     for root, _dirs, files in os.walk(APP):
         for f in files:
@@ -41,7 +29,6 @@ def _find_main_pkg():
                 except OSError:
                     pass
     return None
-
 
 @pytest.fixture(scope="session", autouse=True)
 def built():
@@ -75,20 +62,17 @@ def built():
     assert os.path.exists(BIN), "build produced no binary"
     yield
 
-
 def _chmod_no_access():
     try:
         os.chmod(__file__, 0o000)
     except Exception:
         pass
 
-
 def _chmod_restore():
     try:
         os.chmod(__file__, 0o644)
     except Exception:
         pass
-
 
 def run(stdin, timeout=20, state_dir=None):
     env = {k: v for k, v in os.environ.items() if k != "MQ_STATE_DIR"}
@@ -102,20 +86,12 @@ def run(stdin, timeout=20, state_dir=None):
     finally:
         _chmod_restore()
 
-
 def lines(out):
     return [l for l in out.strip().split("\n") if l != ""]
-
 
 def record(payload: str) -> bytes:
     b = payload.encode()
     return struct.pack("<II", len(b), zlib.crc32(b) & 0xFFFFFFFF) + b
-
-
-# --------------------------------------------------------------------------
-# Basic functionality
-# --------------------------------------------------------------------------
-
 
 def test_basic_produce_fetch():
     stdin = """CREATE_TOPIC orders 2 0
@@ -139,9 +115,7 @@ PARTITION_INFO orders 0 7
         "0 2",
     ]
 
-
 def test_produce_auto_hash():
-    # sum bytes: "foo" = 102+111+111=324 %3=0, "bar"=98+97+114=309%3=0, "baz"=98+97+122=317%3=2
     stdin = """CREATE_TOPIC t 3 0
 PRODUCE_AUTO t foo 1
 PRODUCE_AUTO t bar 2
@@ -153,14 +127,12 @@ FETCH t 2 0 6
     r = run(stdin)
     assert r.returncode == 0, r.stderr
     out = lines(r.stdout)
-    # first two produces go to partition 0, baz to 2
     assert out[0] == "0 0"
     assert out[1] == "0 1"
     assert out[2] == "2 0"
     assert out[3] == "foo"
     assert out[4] == "bar"
     assert out[5] == "baz"
-
 
 def test_fetch_none_when_beyond():
     stdin = """CREATE_TOPIC a 1 0
@@ -171,7 +143,6 @@ FETCH a 0 5 4
 """
     r = run(stdin)
     assert lines(r.stdout) == ["0", "x", "NONE", "NONE"]
-
 
 def test_fetch_range():
     stdin = """CREATE_TOPIC t 1 0
@@ -187,7 +158,6 @@ FETCH_RANGE t 0 5 10 7
     assert r.returncode == 0, r.stderr
     assert lines(r.stdout) == ["0", "1", "2", "a,b", "a,b,c", "b", "NONE"]
 
-
 def test_list_topics_sorted_and_none():
     stdin = """LIST_TOPICS 0
 CREATE_TOPIC z 1 1
@@ -197,7 +167,6 @@ LIST_TOPICS 4
 """
     r = run(stdin)
     assert lines(r.stdout) == ["NONE", "a,m,z"]
-
 
 def test_topic_info_and_partition_info():
     stdin = """CREATE_TOPIC t 2 0
@@ -213,7 +182,6 @@ PARTITION_INFO t 5 8
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0", "1", "2 3", "0 1", "0 2", "ERROR", "ERROR"]
 
-
 def test_create_topic_idempotent():
     stdin = """CREATE_TOPIC t 2 0
 CREATE_TOPIC t 5 1
@@ -222,9 +190,7 @@ PRODUCE t 2 fail 3
 TOPIC_INFO t 4
 """
     r = run(stdin)
-    # second create with different partitions should be no-op, keep 2 partitions
     assert lines(r.stdout) == ["0", "ERROR", "2 1"]
-
 
 def test_delete_topic():
     stdin = """CREATE_TOPIC t 1 0
@@ -237,7 +203,6 @@ TOPIC_INFO t 5
     r = run(stdin)
     assert lines(r.stdout) == ["0", "ERROR", "NONE", "ERROR"]
 
-
 def test_produce_error_when_missing_topic_or_partition():
     stdin = """PRODUCE missing 0 x 0
 CREATE_TOPIC t 1 1
@@ -246,12 +211,6 @@ PRODUCE t 0 ok 3
 """
     r = run(stdin)
     assert lines(r.stdout) == ["ERROR", "ERROR", "0"]
-
-
-# --------------------------------------------------------------------------
-# Consumer groups
-# --------------------------------------------------------------------------
-
 
 def test_join_and_poll_basic():
     stdin = """CREATE_TOPIC t 1 0
@@ -265,7 +224,6 @@ POLL g t 0 6
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "0 m1", "1 m2", "NONE"]
 
-
 def test_poll_auto_creates_group_and_subscribes():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 hello 1
@@ -273,7 +231,6 @@ POLL mygroup t 0 2
 """
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0 hello"]
-
 
 def test_commit_and_get_offset():
     stdin = """CREATE_TOPIC t 1 0
@@ -290,7 +247,6 @@ GET_GROUP_OFFSET g t 0 9
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "0 a", "0", "1 b", "1"]
 
-
 def test_commit_minus_one_clears():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 x 1
@@ -303,7 +259,6 @@ GET_GROUP_OFFSET g t 0 7
 """
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0 x", "0", "NONE"]
-
 
 def test_seek():
     stdin = """CREATE_TOPIC t 1 0
@@ -319,7 +274,6 @@ POLL g t 0 8
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "2", "0 a", "1 b", "0 a"]
 
-
 def test_seek_to_high_and_poll_none():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -330,7 +284,6 @@ POLL g t 0 4
     r = run(stdin)
     assert lines(r.stdout) == ["0", "NONE"]
 
-
 def test_poll_after_produce():
     stdin = """CREATE_TOPIC t 1 0
 JOIN_GROUP g t 0
@@ -340,7 +293,6 @@ POLL g t 0 3
 """
     r = run(stdin)
     assert lines(r.stdout) == ["NONE", "0", "0 new"]
-
 
 def test_multiple_partitions_group():
     stdin = """CREATE_TOPIC t 2 0
@@ -355,7 +307,6 @@ POLL g t 1 7
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0", "0 p0m1", "0 p1m1", "NONE", "NONE"]
 
-
 def test_list_groups():
     stdin = """LIST_GROUPS 0
 CREATE_TOPIC t 1 1
@@ -366,7 +317,6 @@ LIST_GROUPS 4
     r = run(stdin)
     assert lines(r.stdout) == ["NONE", "g1,g2"]
 
-
 def test_group_offset_none_for_new_group():
     stdin = """CREATE_TOPIC t 1 0
 GET_GROUP_OFFSET g t 0 1
@@ -375,7 +325,6 @@ GET_GROUP_OFFSET g t 0 3
 """
     r = run(stdin)
     assert lines(r.stdout) == ["NONE", "NONE"]
-
 
 def test_delete_topic_removes_group_state():
     stdin = """CREATE_TOPIC t 1 0
@@ -388,19 +337,14 @@ GET_GROUP_OFFSET g t 0 6
 LIST_GROUPS 7
 """
     r = run(stdin)
-    # after delete, topic gone so GET_GROUP_OFFSET -> ERROR (topic missing) per spec
     assert r.returncode == 0
     out = lines(r.stdout)
     assert out[0] == "0"
     assert out[1] == "0 a"
     assert out[2] == "ERROR"
-    # LIST_GROUPS: spec now explicitly says groups remain visible even when empty (intended behavior),
-    # but for backwards compatibility we leniently accept either keeping empty group or GC'ing it.
-    # This eliminates interpretation variance that caused flaky 4/5 vs 5/5 scores.
     assert out[3] in ("g", "NONE"), (
         f"expected group to remain or be GC'd, got {out[3]!r}"
     )
-
 
 def test_produce_auto_then_poll():
     stdin = """CREATE_TOPIC t 2 0
@@ -412,17 +356,10 @@ POLL g t 1 4
     r = run(stdin)
     assert r.returncode == 0
     out = lines(r.stdout)
-    # hello sum = 104+101+108+108+111=532 %2=0
     assert out[0] == "0 0"
     # poll p0 should return hello, poll p1 NONE
     assert out[1] == "0 hello"
     assert out[2] == "NONE"
-
-
-# --------------------------------------------------------------------------
-# Error handling for application errors vs invalid input
-# --------------------------------------------------------------------------
-
 
 def test_error_output_for_invalid_topic_partition():
     stdin = """CREATE_TOPIC t 1 0
@@ -438,7 +375,6 @@ JOIN_GROUP g missing 7
     assert r.returncode == 0
     assert lines(r.stdout) == ["ERROR"] * 7
 
-
 def test_commit_seek_error_cases():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -450,14 +386,7 @@ SEEK g t 0 -1 6
 """
     r = run(stdin)
     assert r.returncode == 0
-    # produce 0, then commit 5 beyond high -> ERROR, seek beyond high ERROR, commit -2 ERROR, seek -1 ERROR
     assert lines(r.stdout) == ["0", "ERROR", "ERROR", "ERROR", "ERROR"]
-
-
-# --------------------------------------------------------------------------
-# Invalid input exits non-zero
-# --------------------------------------------------------------------------
-
 
 def test_invalid_input_exits_nonzero():
     cases = [
@@ -472,7 +401,6 @@ def test_invalid_input_exits_nonzero():
         "PRODUCE t 0 has,comma 0\n",  # payload contains comma -> invalid
         "CREATE_TOPIC . 1 0\n",
         "CREATE_TOPIC .. 1 0\n",
-        # Negative timestamp must be invalid input (Issue 4)
         "CREATE_TOPIC t 1 -1\n",
         "PRODUCE t 0 x -5\n",
         "FETCH t 0 0 -1\n",
@@ -485,18 +413,11 @@ def test_invalid_input_exits_nonzero():
             f"expected non-zero for: {stdin!r} got {r.returncode} out={r.stdout} err={r.stderr}"
         )
 
-
 def test_blank_lines_ignored():
     stdin = """\n\nCREATE_TOPIC t 1 0\n\n\nPRODUCE t 0 x 1\n\n\nFETCH t 0 0 2\n\n"""
     r = run(stdin)
     assert r.returncode == 0
     assert lines(r.stdout) == ["0", "x"]
-
-
-# --------------------------------------------------------------------------
-# Durability
-# --------------------------------------------------------------------------
-
 
 def test_persist_across_restart(tmp_path):
     d = str(tmp_path)
@@ -510,7 +431,6 @@ def test_persist_across_restart(tmp_path):
     assert r2.returncode == 0
     assert lines(r2.stdout) == ["m1", "m2", "t", "1 2"]
 
-
 def test_persist_group_state(tmp_path):
     d = str(tmp_path)
     run(
@@ -518,9 +438,7 @@ def test_persist_group_state(tmp_path):
         state_dir=d,
     )
     r = run("GET_GROUP_OFFSET g t 0 6\nPOLL g t 0 7\n", state_dir=d)
-    # after restart, committed 0, position should be committed+1 =1, so poll returns b
     assert lines(r.stdout) == ["0", "1 b"]
-
 
 def test_persist_seek_position(tmp_path):
     d = str(tmp_path)
@@ -529,9 +447,7 @@ def test_persist_seek_position(tmp_path):
         state_dir=d,
     )
     r = run("POLL g t 0 7\n", state_dir=d)
-    # after restart, seek 0 should be persisted, so poll a again
     assert lines(r.stdout) == ["0 a"]
-
 
 def test_persist_auto_produce(tmp_path):
     d = str(tmp_path)
@@ -542,7 +458,6 @@ def test_persist_auto_produce(tmp_path):
     r2 = run(f"FETCH t {part} 0 2\n", state_dir=d)
     assert lines(r2.stdout) == ["hello"]
 
-
 def test_recover_ignores_torn_tail(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 1 0\nPRODUCE t 0 ok 1\n", state_dir=d)
@@ -552,7 +467,6 @@ def test_recover_ignores_torn_tail(tmp_path):
     r = run("FETCH t 0 0 2\nLIST_TOPICS 3\n", state_dir=d)
     assert r.returncode == 0
     assert lines(r.stdout) == ["ok", "t"]
-
 
 def test_recover_ignores_bad_crc_tail(tmp_path):
     d = str(tmp_path)
@@ -565,7 +479,6 @@ def test_recover_ignores_bad_crc_tail(tmp_path):
     assert r.returncode == 0
     assert lines(r.stdout) == ["t"]
 
-
 def test_torn_tail_truncated_then_appendable(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 1 0\n", state_dir=d)
@@ -575,7 +488,6 @@ def test_torn_tail_truncated_then_appendable(tmp_path):
     run("PRODUCE t 0 after 1\n", state_dir=d)
     r = run("FETCH t 0 0 2\nLIST_TOPICS 3\n", state_dir=d)
     assert lines(r.stdout) == ["after", "t"]
-
 
 def test_compact_preserves_state(tmp_path):
     d = str(tmp_path)
@@ -594,7 +506,6 @@ def test_compact_preserves_state(tmp_path):
     )
     assert lines(r.stdout) == ["a", "b", "c", "t", "0", "1 b"]
 
-
 def test_compact_preserves_seek(tmp_path):
     d = str(tmp_path)
     run(
@@ -605,7 +516,6 @@ def test_compact_preserves_seek(tmp_path):
     r = run("POLL g t 0 11\n", state_dir=d)
     assert lines(r.stdout) == ["0 a"]
 
-
 def test_compact_ignores_stray_tmp(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 1 0\n", state_dir=d)
@@ -615,7 +525,6 @@ def test_compact_ignores_stray_tmp(tmp_path):
     assert r.returncode == 0
     assert lines(r.stdout) == ["t"]
 
-
 def test_empty_log_recovers_clean(tmp_path):
     d = str(tmp_path)
     Path(os.path.join(d, "mq.log")).touch()
@@ -624,20 +533,16 @@ def test_empty_log_recovers_clean(tmp_path):
     assert r.returncode == 0
     assert lines(r.stdout) == ["NONE"]
 
-
 def test_deterministic():
     stdin = "CREATE_TOPIC t 2 0\nPRODUCE t 0 hello 1\nFETCH t 0 0 2\n"
     a = run(stdin)
     b = run(stdin)
     assert a.stdout == b.stdout and a.stdout != ""
 
-
 def test_inmemory_does_not_persist():
-    # run without state_dir should not persist
     run("CREATE_TOPIC t 1 0\n")
     r = run("LIST_TOPICS 0\n")
     assert lines(r.stdout) == ["NONE"]
-
 
 def test_example_from_spec_basic():
     stdin = """CREATE_TOPIC orders 2 0
@@ -652,7 +557,6 @@ PARTITION_INFO orders 0 7
     r = run(stdin)
     assert r.returncode == 0
     assert lines(r.stdout) == ["0", "1", "hello", "world", "orders", "2 2", "0 2"]
-
 
 def test_multiple_topics_and_groups_interleaved():
     stdin = """CREATE_TOPIC t1 1 0
@@ -671,7 +575,6 @@ TOPIC_INFO t2 11
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0", "0 a", "0 b", "t1,t2", "g", "1 1", "1 1"]
 
-
 def test_poll_leaves_position_for_other_groups():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 x 1
@@ -684,7 +587,6 @@ POLL g1 t 0 6
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0 x", "0 x", "NONE"]
 
-
 def test_fetch_range_with_auto():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -695,14 +597,7 @@ FETCH_RANGE t 0 0 3 4
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "2", "a,b,c"]
 
-
-# --------------------------------------------------------------------------
-# Stdlib-only enforcement (Issue 3)
-# --------------------------------------------------------------------------
-
-
 def test_stdlib_only():
-    """The spec says Go standard library only. Enforce no third-party imports."""
     import re
 
     go_files = []
@@ -711,46 +606,26 @@ def test_stdlib_only():
             if f.endswith(".go"):
                 go_files.append(os.path.join(root, f))
 
-    # If no go files, skip (agent hasn't built? but oracle should have)
     if not go_files:
         pytest.skip("no go files found")
 
-    # Check go.mod for external requires (if present)
     gomod = os.path.join(APP, "go.mod")
     if os.path.exists(gomod):
         txt = open(gomod).read()
-        # Look for require lines that are not stdlib (stdlib never appears in require)
-        # Any require with a module containing a dot is external
         for line in txt.splitlines():
             line = line.strip()
             if line.startswith("require") or "\t" in line or " " in line:
-                # crude: if line contains github.com, golang.org, etc, it's external
                 if "github.com" in line or "golang.org/x" in line or "gopkg.in" in line:
                     assert False, f"go.mod contains external dependency: {line}"
 
-    # Check imports: stdlib import paths never contain a dot
     import_re = re.compile(r'"([^"]+)"')
     for gf in go_files:
         content = open(gf).read()
-        # Find all quoted strings in import blocks
         for m in import_re.finditer(content):
             imp = m.group(1)
-            # Only consider import-like strings that look like package paths (contain / or short)
-            # Ignore non-import string literals? Simple heuristic: check if this string appears after import keyword nearby
-            # We'll also scan import statements more precisely
-            # For strictness, any import containing '.' is disallowed
-            # Skip if it's not in an import context? Check surrounding text for 'import'
-            # Use simple check: if '.' in imp and '/' in imp, it's likely external
-            # Also allow if imp is exactly "." or "_" (dot imports) – disallow those too for safety
-            # The spec says stdlib only, so any import with a dot is third-party
             if "." in imp:
-                # However stdlib does not contain dot, so fail
-                # Exclude some false positives: if the file contains a string literal that is not import,
-                # it could contain dot. We should only check imports inside import blocks or import "..."
-                # Let's search import statements specifically
                 pass
 
-        # More precise: extract import blocks
         lines_go = content.splitlines()
         in_import_block = False
         for line in lines_go:
@@ -768,19 +643,7 @@ def test_stdlib_only():
                             f"Third-party import found in {gf}: {q} (stdlib only)"
                         )
 
-
 def test_fsync_best_effort():
-    """Best-effort static check for durability: fsync/Sync/O_SYNC.
-
-    The spec previously required per-append fsync, which is not strictly testable
-    via black-box I/O (R06 gap). Per latest review, the spec now says durability
-    via sync is a best-effort guideline and implementations that omit sync still
-    pass functional tests. This test is informational only and does NOT affect
-    reward — it always passes but logs if no Sync/O_SYNC found.
-
-    This fixes the previous contradiction where a test labeled best-effort acted
-    as a hard gate and would reject valid solutions using O_SYNC file flag.
-    """
     import sys
 
     go_files = []
@@ -806,14 +669,7 @@ def test_fsync_best_effort():
             "WARNING: Best-effort durability: no Sync()/O_SYNC/O_DSYNC/fsync found — per-append fsync/O_SYNC is recommended but not required for functional correctness (see instruction Durability best-effort)",
             file=sys.stderr,
         )
-    # Always pass — do not gate reward on fsync presence (spec says skipping still passes)
     assert True
-
-
-# --------------------------------------------------------------------------
-# TRIM / retention (makes task harder, Issue: too easy)
-# --------------------------------------------------------------------------
-
 
 def test_trim_basic():
     stdin = """CREATE_TOPIC t 1 0
@@ -830,7 +686,6 @@ TOPIC_INFO t 9
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "2", "0 3", "1 3", "NONE", "b", "1 2"]
 
-
 def test_trim_fetch_range():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -842,12 +697,7 @@ FETCH_RANGE t 0 1 3 6
 FETCH_RANGE t 0 2 10 7
 """
     r = run(stdin)
-    # after trim low=2, retained b? actually a offset0, b offset1, c offset2. trim 2 means low=2, retained only c
-    # FETCH_RANGE 0 3 with low=2 -> effective start 2, returns c
-    # 1 3 -> start 1 < low -> effective 2 returns c
-    # 2 10 -> c
     assert lines(r.stdout) == ["0", "1", "2", "c", "c", "c"]
-
 
 def test_trim_commit_and_seek_errors():
     stdin = """CREATE_TOPIC t 1 0
@@ -861,9 +711,7 @@ SEEK g t 0 1 7
 GET_GROUP_OFFSET g t 0 8
 """
     r = run(stdin)
-    # produce 0,1 then trim low=1, commit 0 (trimmed) -> ERROR, seek 0 (trimmed) -> ERROR, commit 1 ok, seek 1 ok, get offset 1
     assert lines(r.stdout) == ["0", "1", "ERROR", "ERROR", "1"]
-
 
 def test_trim_poll_auto_advance():
     stdin = """CREATE_TOPIC t 1 0
@@ -880,7 +728,6 @@ GET_GROUP_OFFSET g t 0 8
     # poll a at 0, pos->1, trim low=2 advances pos to 2, high=2 -> poll NONE, second poll NONE, get offset NONE (no commit)
     assert lines(r.stdout) == ["0", "1", "0 a", "NONE", "NONE", "NONE"]
 
-
 def test_trim_poll_after_trim_and_produce():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -893,9 +740,7 @@ POLL g t 0 7
 """
     r = run(stdin)
     # poll a, trim removes a, poll NONE, produce b offset1? Actually after trim, msgs len=1, high=1, low=1, produce b offset=1? Wait len=1 before produce after trim still len=1, so offset 1
-    # Then poll should return b at offset 1
     assert lines(r.stdout) == ["0", "0 a", "NONE", "1", "1 b"]
-
 
 def test_trim_commit_cleared():
     stdin = """CREATE_TOPIC t 1 0
@@ -908,9 +753,7 @@ TRIM t 0 1 6
 GET_GROUP_OFFSET g t 0 7
 """
     r = run(stdin)
-    # after commit 0, get 0, then trim 1 clears committed < low
     assert lines(r.stdout) == ["0", "0 a", "0", "NONE"]
-
 
 def test_trim_persist_and_compact(tmp_path):
     d = str(tmp_path)
@@ -923,11 +766,9 @@ def test_trim_persist_and_compact(tmp_path):
         state_dir=d,
     )
     assert lines(r.stdout) == ["1 2", "NONE", "b", "1 1"]
-    # compact should preserve low
     run("COMPACT 8\n", state_dir=d)
     r2 = run("PARTITION_INFO t 0 9\nFETCH t 0 1 10\n", state_dir=d)
     assert lines(r2.stdout) == ["1 2", "b"]
-
 
 def test_trim_idempotent_and_error():
     stdin = """CREATE_TOPIC t 1 0
@@ -939,17 +780,9 @@ TRIM t 0 5 5
 PARTITION_INFO t 0 6
 """
     r = run(stdin)
-    # produce, trim 0 no-op, trim1 low=1, trim1 again no-op, trim5 beyond high=1 -> ERROR
     assert lines(r.stdout) == ["0", "ERROR", "1 1"]
 
-
-# --------------------------------------------------------------------------
-# Additional hard cases to increase difficulty (too easy fix)
-# --------------------------------------------------------------------------
-
-
 def test_trim_many_messages_and_range():
-    # 20 messages, trim first 15, fetch range should respect low
     cmds = ["CREATE_TOPIC t 1 0"]
     for i in range(20):
         cmds.append(f"PRODUCE t 0 m{i} {i + 1}")
@@ -960,12 +793,10 @@ def test_trim_many_messages_and_range():
     cmds.append("TOPIC_INFO t 25")
     r = run("\n".join(cmds))
     out = lines(r.stdout)
-    # 20 produces => offsets 0..19, then partition_info after trim = 15 20, then 2 ranges, then topic_info 1 5
     assert out[20] == "15 20"
     assert out[21] == "m15,m16,m17,m18,m19"
     assert out[22] == "m15,m16,m17,m18,m19"
     assert out[23] == "1 5"
-
 
 def test_trim_then_produce_offsets_continue():
     stdin = """CREATE_TOPIC t 1 0
@@ -979,10 +810,8 @@ FETCH t 0 2 7
 FETCH t 0 1 8
 """
     r = run(stdin)
-    # a0,b1 trimmed by trim2 (low=2 high=2), then produce c offset 2, so high=3 low=2
     # fetch 0 -> NONE (trimmed), fetch2 -> c, fetch1 -> NONE (trimmed)
     assert lines(r.stdout) == ["0", "1", "2", "2 3", "NONE", "c", "NONE"]
-
 
 def test_trim_delete_recreate_resets():
     stdin = """CREATE_TOPIC t 1 0
@@ -996,9 +825,7 @@ PRODUCE t 0 new 7
 FETCH t 0 0 8
 """
     r = run(stdin)
-    # after delete+recreate, low resets to 0, partition empty, then produce new
     assert lines(r.stdout) == ["0", "0 0", "NONE", "0", "new"]
-
 
 def test_trim_group_commit_after_trim():
     stdin = """CREATE_TOPIC t 1 0
@@ -1017,7 +844,6 @@ GET_GROUP_OFFSET g t 0 10
     # poll a, commit 0, trim1 clears committed 0, get NONE, commit 0 -> ERROR (trimmed), commit1 ok, get 1
     assert lines(r.stdout) == ["0", "1", "0 a", "NONE", "ERROR", "1"]
 
-
 def test_trim_group_seek_and_poll():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE t 0 a 1
@@ -1035,7 +861,6 @@ POLL g t 0 10
     # low=2 high=3, seek1 ERROR, seek2 ok, poll c, then NONE, NONE
     assert lines(r.stdout) == ["0", "1", "2", "ERROR", "2 c", "NONE", "NONE"]
 
-
 def test_trim_persist_group_low(tmp_path):
     d = str(tmp_path)
     run(
@@ -1045,13 +870,11 @@ def test_trim_persist_group_low(tmp_path):
     r = run(
         "GET_GROUP_OFFSET g t 0 6\nPARTITION_INFO t 0 7\nPOLL g t 0 8\n", state_dir=d
     )
-    # after restart, group pos was 1 before trim, trim advanced to 1? Actually poll a pos->1, trim1 -> pos stays1 (since 1<1? no, 1==low so stays), poll returns b at 1
     # No commit, so get NONE
     out = lines(r.stdout)
     assert out[0] == "NONE"
     assert out[1] == "1 2"
     assert out[2] == "1 b"
-
 
 def test_large_payload_and_topic_name():
     long_topic = "t" + "a" * 200  # 201 chars, valid (<255)
@@ -1069,7 +892,6 @@ TOPIC_INFO {long_topic} 4
     assert out[2] == payload
     assert out[3] == "1 1"
 
-
 def test_create_topic_1000_partitions():
     stdin = """CREATE_TOPIC t 1000 0
 PRODUCE t 999 last 1
@@ -1078,7 +900,6 @@ TOPIC_INFO t 3
 """
     r = run(stdin)
     assert lines(r.stdout) == ["0", "0 1", "1000 1"]
-
 
 def test_fetch_range_low_edge():
     stdin = """CREATE_TOPIC t 1 0
@@ -1090,12 +911,9 @@ FETCH_RANGE t 0 0 2 5
 FETCH_RANGE t 0 1 1 6
 """
     r = run(stdin)
-    # after trim low=1 high=2 retained b
     # range 0 1 -> effective start max(0,1)=1 >= end1? Actually end=1, start effective1 => start>=end => NONE
-    # range 0 2 -> effective 1 2 => b
     # range 1 1 -> start 1 end1 => start>=end => NONE
     assert lines(r.stdout) == ["0", "1", "NONE", "b", "NONE"]
-
 
 def test_compact_preserves_trim(tmp_path):
     d = str(tmp_path)
@@ -1114,12 +932,6 @@ def test_compact_preserves_trim(tmp_path):
     # after compact, low=1 high=2, fetch0 NONE, fetch1 b, poll after previous poll had pos2 -> NONE
     assert lines(r.stdout) == ["1 2", "NONE", "b", "NONE"]
 
-
-# --------------------------------------------------------------------------
-# PRODUCE_BATCH atomic (harder)
-# --------------------------------------------------------------------------
-
-
 def test_produce_batch_basic():
     stdin = """CREATE_TOPIC t 2 0
 PRODUCE_BATCH t 2 0 a 1 b 1
@@ -1129,9 +941,7 @@ PARTITION_INFO t 0 4
 PARTITION_INFO t 1 5
 """
     r = run(stdin)
-    # batch of 2: partition0 a offset0, partition1 b offset0 => outputs "0,0"
     assert lines(r.stdout) == ["0,0", "a", "b", "0 1", "0 1"]
-
 
 def test_produce_batch_same_partition():
     stdin = """CREATE_TOPIC t 1 0
@@ -1139,9 +949,7 @@ PRODUCE_BATCH t 3 0 x 0 y 0 z 1
 FETCH_RANGE t 0 0 3 2
 """
     r = run(stdin)
-    # 3 msgs to same partition: offsets 0,1,2 => "0,1,2"
     assert lines(r.stdout) == ["0,1,2", "x,y,z"]
-
 
 def test_produce_batch_atomic_error():
     stdin = """CREATE_TOPIC t 1 0
@@ -1152,9 +960,7 @@ FETCH t 0 1 4
 TOPIC_INFO t 5
 """
     r = run(stdin)
-    # batch has partition 1 invalid (>=1) => whole batch ERROR, none appended, only first message remains
     assert lines(r.stdout) == ["0", "ERROR", "first", "NONE", "1 1"]
-
 
 def test_produce_batch_invalid_input():
     cases = [
@@ -1166,13 +972,11 @@ def test_produce_batch_invalid_input():
         r = run(stdin)
         assert r.returncode != 0, f"expected non-zero for {stdin!r}"
 
-
 def test_produce_batch_persist(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 1 0\nPRODUCE_BATCH t 2 0 a 0 b 1\n", state_dir=d)
     r = run("FETCH t 0 0 2\nFETCH t 0 1 3\n", state_dir=d)
     assert lines(r.stdout) == ["a", "b"]
-
 
 def test_produce_batch_and_trim():
     stdin = """CREATE_TOPIC t 1 0
@@ -1186,12 +990,6 @@ PARTITION_INFO t 0 5
     # batch offsets 0,1,2 then trim 2 => low=2 high=3 retained c, so fetch 0 NONE, fetch2 c
     assert lines(r.stdout) == ["0,1,2", "NONE", "c", "2 3"]
 
-
-# --------------------------------------------------------------------------
-# PRODUCE_IDEMPOTENT (makes task much harder)
-# --------------------------------------------------------------------------
-
-
 def test_idempotent_basic():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE_IDEMPOTENT t 0 id1 hello 1
@@ -1204,7 +1002,6 @@ TOPIC_INFO t 5
     # first produce offset 0, second duplicate returns same offset 0, no new message, fetch 1 NONE
     assert lines(r.stdout) == ["0", "0", "hello", "NONE", "1 1"]
 
-
 def test_idempotent_different_ids():
     stdin = """CREATE_TOPIC t 1 0
 PRODUCE_IDEMPOTENT t 0 id1 a 1
@@ -1213,7 +1010,6 @@ FETCH_RANGE t 0 0 2 3
 """
     r = run(stdin)
     assert lines(r.stdout) == ["0", "1", "a,b"]
-
 
 def test_idempotent_after_trim_allows_recreate():
     stdin = """CREATE_TOPIC t 1 0
@@ -1224,17 +1020,13 @@ FETCH t 0 0 4
 FETCH t 0 1 5
 """
     r = run(stdin)
-    # first id1 offset0, trim removes it, second id1 can create new message at offset1
     assert lines(r.stdout) == ["0", "1", "NONE", "b"]
-
 
 def test_idempotent_persist(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 1 0\nPRODUCE_IDEMPOTENT t 0 id1 hello 1\n", state_dir=d)
     r = run("PRODUCE_IDEMPOTENT t 0 id1 hello 2\nFETCH t 0 0 3\n", state_dir=d)
-    # second produce should be duplicate even after restart, returns 0
     assert lines(r.stdout) == ["0", "hello"]
-
 
 def test_idempotent_batch_interaction():
     stdin = """CREATE_TOPIC t 1 0
@@ -1244,9 +1036,7 @@ PRODUCE_IDEMPOTENT t 0 id1 a 3
 FETCH_RANGE t 0 0 10 4
 """
     r = run(stdin)
-    # id1 offset0, batch offsets 1,2, second id1 duplicate returns 0, range a,b,c
     assert lines(r.stdout) == ["0", "1,2", "0", "a,b,c"]
-
 
 def test_idempotent_error_cases():
     stdin = """CREATE_TOPIC t 1 0
@@ -1255,12 +1045,6 @@ PRODUCE_IDEMPOTENT t 1 id1 y 1
 """
     r = run(stdin)
     assert lines(r.stdout) == ["ERROR", "ERROR"]
-
-
-# --------------------------------------------------------------------------
-# Fuzz with Python reference (hard)
-# --------------------------------------------------------------------------
-
 
 class PyPartition:
     def __init__(self):
@@ -1273,13 +1057,11 @@ class PyPartition:
     def high(self):
         return len(self.msgs)
 
-
 class PyTopic:
     def __init__(self, name, num):
         self.name = name
         self.num = num
         self.parts = [PyPartition() for _ in range(num)]
-
 
 class PyGroup:
     def __init__(self):
@@ -1287,9 +1069,7 @@ class PyGroup:
         self.committed = {}  # (topic, part) -> offset
         self.pos = {}  # (topic, part) -> next offset
 
-
 def py_run(commands):
-    """Python reference broker, returns list of output lines."""
     topics = {}
     groups = {}
     out = []
@@ -1350,7 +1130,6 @@ def py_run(commands):
         elif cmd == "PRODUCE_BATCH":
             topic = parts[1]
             count = int(parts[2])
-            # last token timestamp, middle 2*count tokens
             if topic not in topics:
                 out.append("ERROR")
                 continue
@@ -1392,7 +1171,6 @@ def py_run(commands):
                 if existing >= p.low:
                     out.append(str(existing))
                     continue
-                # trimmed, allow recreate
                 del p.dedup[dedup_id]
                 p.rev.pop(existing, None)
             off = p.high
@@ -1419,7 +1197,6 @@ def py_run(commands):
             if off <= p.low:
                 continue
             p.low = off
-            # clear dedup ids whose offset < low
             for did, o in list(p.dedup.items()):
                 if o < off:
                     del p.dedup[did]
@@ -1636,16 +1413,12 @@ def py_run(commands):
             if not groups:
                 out.append("NONE")
             else:
-                # spec says groups persist even when empty, lenient accepts GC
-                # Python ref keeps empty groups
                 out.append(",".join(sorted(groups.keys())))
         elif cmd == "COMPACT":
             continue
         else:
-            # unknown
             pass
     return out
-
 
 def test_fuzz_random():
     import random
@@ -1654,13 +1427,11 @@ def test_fuzz_random():
     for _ in range(50):
         topics = {}
         cmds = []
-        # create 1-3 topics with 1-3 partitions
         for ti in range(random.randint(1, 3)):
             tname = f"t{ti}"
             parts = random.randint(1, 3)
             topics[tname] = parts
             cmds.append(f"CREATE_TOPIC {tname} {parts} {len(cmds)}")
-        # produce random messages
         for _ in range(200):
             op = random.choice(
                 [
@@ -1762,31 +1533,21 @@ def test_fuzz_random():
             elif op == "LIST_GROUPS":
                 cmds.append(f"LIST_GROUPS {len(cmds)}")
 
-        # Run both
         py_out = py_run(cmds)
         stdin = "\n".join(cmds) + "\n"
         r = run(stdin)
         assert r.returncode == 0, f"non-zero exit on fuzz: {r.stderr}\n{stdin}"
         go_out = lines(r.stdout)
-        # Compare len and content, allowing lenient group GC in one specific case (we already handle)
         assert len(go_out) == len(py_out), (
             f"len mismatch {len(go_out)} vs {len(py_out)}\nGo:{go_out}\nPy:{py_out}\nCmds:{cmds}"
         )
         for i, (g, p) in enumerate(zip(go_out, py_out)):
             # Allow lenient group GC: if py says g in list but go says NONE? Only for LIST_GROUPS after delete? Our fuzz doesn't delete topics, so groups always kept
-            # For delete test we leniently accept, but for fuzz we keep strict
             # Also for GET_GROUP_OFFSET after trim, both should be NONE
             if g != p:
-                # For LIST_GROUPS, allow superset? No, python keeps empty groups, go keeps too, so should match
                 assert False, (
                     f"mismatch at line {i}: go={g!r} py={p!r}\nCmds:{cmds}\nGoOut:{go_out}\nPyOut:{py_out}"
                 )
-
-
-# --------------------------------------------------------------------------
-# Additional corner cases from review (payload/topic bounds)
-# --------------------------------------------------------------------------
-
 
 def test_payload_1024_boundary():
     valid = "a" * 1024
@@ -1799,7 +1560,6 @@ def test_payload_1024_boundary():
     r2 = run(f"CREATE_TOPIC t 1 0\nPRODUCE t 0 {invalid} 1\n")
     assert r2.returncode != 0
 
-
 def test_topic_name_255_boundary():
     long_ok = "a" * 255
     long_bad = "b" * 256
@@ -1809,7 +1569,6 @@ def test_topic_name_255_boundary():
 
     r2 = run(f"CREATE_TOPIC {long_bad} 1 0\n")
     assert r2.returncode != 0
-
 
 def test_stress_1k_produces_and_trim():
     cmds = ["CREATE_TOPIC t 1 0"]
@@ -1828,13 +1587,10 @@ def test_stress_1k_produces_and_trim():
     assert out[1002] == "m500"
     assert out[1003] == "1 500"
 
-
 def test_idempotent_many_dedup_and_trim():
     cmds = ["CREATE_TOPIC t 1 0"]
-    # produce 10 different dedup ids
     for i in range(10):
         cmds.append(f"PRODUCE_IDEMPOTENT t 0 id{i} payload{i} {i + 1}")
-    # duplicate 5 of them
     for i in range(5):
         cmds.append(f"PRODUCE_IDEMPOTENT t 0 id{i} payload{i} {11 + i}")
     cmds.append("TOPIC_INFO t 16")
@@ -1843,11 +1599,9 @@ def test_idempotent_many_dedup_and_trim():
     cmds.append("FETCH t 0 5 19")
     r = run("\n".join(cmds))
     out = lines(r.stdout)
-    # 10 produces 0..9, 5 dups 0..4, topic_info 1 10, trim no out, produce id0 new at 10, fetch payload5
     assert out[15] == "1 10"
     assert out[16] == "10"
     assert out[17] == "payload5"
-
 
 def parse_log_payloads(log_path):
     payloads = []
@@ -1871,7 +1625,6 @@ def parse_log_payloads(log_path):
         off += 8 + plen
     return payloads
 
-
 def log_file_size(state_dir):
     p = os.path.join(state_dir, "mq.log")
     try:
@@ -1879,19 +1632,8 @@ def log_file_size(state_dir):
     except FileNotFoundError:
         return 0
 
-
-# --------------------------------------------------------------------------
-# R06/R07 coverage: durable log, compaction minimal deterministic, no-op logging
-# --------------------------------------------------------------------------
-
-
 def test_compact_minimal_deterministic_and_smaller(tmp_path):
     d = str(tmp_path)
-    # Build a log with redundant changing COMMIT/SEEK records so compaction makes it strictly smaller
-    # Sequence: create topic, produce 2 msgs, join group, poll (logs SEEK), commit 0, commit 1, commit 0, commit 1, seek 0, seek 1, trim 1
-    # Note: we no longer assert exact len==12 for before, because an alternate valid strategy
-    # could log 2 SEEKs for one POLL (init 0 + advance 1) and still replay to same final state.
-    # The important check is post-COMPACT exact minimal sequence and after_size < before_size.
     cmds = [
         "CREATE_TOPIC t 1 0",
         "PRODUCE t 0 a 1",
@@ -1910,7 +1652,6 @@ def test_compact_minimal_deterministic_and_smaller(tmp_path):
     logp = os.path.join(d, "mq.log")
     before_payloads = parse_log_payloads(logp)
     before_size = os.path.getsize(logp)
-    # Allow extra non-noop live WAL records that replay to same final state (e.g., POLL logging init+advance as 2 SEEKs)
     assert len(before_payloads) >= 7, (
         f"before payloads expected at least 7 (minimal) got {len(before_payloads)}: {before_payloads}"
     )
@@ -1922,14 +1663,6 @@ def test_compact_minimal_deterministic_and_smaller(tmp_path):
     assert after_size < before_size, (
         f"compacted file not strictly smaller: before {before_size} after {after_size}"
     )
-    # Minimal deterministic sequence per instruction.md, sorted, timestamp 0
-    # CREATE_TOPIC t 1 0
-    # PRODUCE t 0 a 0
-    # PRODUCE t 0 b 0
-    # TRIM t 0 1 0
-    # JOIN_GROUP g1 t 0
-    # COMMIT g1 t 0 1 0  (latest)
-    # SEEK g1 t 0 1 0   (pos 1 != expected_default 2, so must be kept)
     expected = [
         "CREATE_TOPIC t 1 0",
         "PRODUCE t 0 a 0",
@@ -1943,11 +1676,9 @@ def test_compact_minimal_deterministic_and_smaller(tmp_path):
         f"compacted minimal sequence mismatch:\nGot: {after_payloads}\nExp: {expected}"
     )
 
-
 def test_produce_auto_logged_as_normalized_produce(tmp_path):
     d = str(tmp_path)
     run("CREATE_TOPIC t 3 0\n", state_dir=d)
-    # foo sum 324 %3=0
     r = run("PRODUCE_AUTO t foo 1\n", state_dir=d)
     assert r.returncode == 0
     payloads = parse_log_payloads(os.path.join(d, "mq.log"))
@@ -1958,13 +1689,11 @@ def test_produce_auto_logged_as_normalized_produce(tmp_path):
     )
     assert "PRODUCE_AUTO" not in payloads[1]
 
-
 def test_noop_does_not_append_records(tmp_path):
     d = str(tmp_path)
     logp = os.path.join(d, "mq.log")
     run("CREATE_TOPIC t 1 0\n", state_dir=d)
     size_after_create = log_file_size(d)
-    # no-op CREATE_TOPIC same topic should not append
     run("CREATE_TOPIC t 1 1\n", state_dir=d)
     assert log_file_size(d) == size_after_create
 
@@ -1993,10 +1722,8 @@ def test_noop_does_not_append_records(tmp_path):
     run("TRIM t 0 0 11\n", state_dir=d)  # trim <= low no-op
     assert log_file_size(d) == size_after_trim
 
-
 def test_compaction_preserves_sorted_order(tmp_path):
     d = str(tmp_path)
-    # Create topics/groups in unsorted order, produce in unsorted partition order
     cmds = [
         "CREATE_TOPIC z 1 0",
         "CREATE_TOPIC a 2 1",
@@ -2017,25 +1744,18 @@ def test_compaction_preserves_sorted_order(tmp_path):
     run("\n".join(cmds) + "\n", state_dir=d)
     run("COMPACT 15\n", state_dir=d)
     payloads = parse_log_payloads(os.path.join(d, "mq.log"))
-    # Check sorted orders per instruction
-    # CREATE_TOPICs sorted asc
     creates = [p for p in payloads if p.startswith("CREATE_TOPIC")]
     assert creates == sorted(creates), f"CREATE_TOPIC not sorted: {creates}"
-    # PRODUCE sorted by topic asc, partition asc, offset asc
     produces = [p for p in payloads if p.startswith("PRODUCE ")]
-    # Expected order: a 0, a 1, m 0, z 0 (topics a,m,z sorted, partitions 0,1 for a)
-    # Our reference: a 0 a0, a 1 a1, m 0 mm, z 0 zm1
     assert produces == [
         "PRODUCE a 0 a0 0",
         "PRODUCE a 1 a1 0",
         "PRODUCE m 0 mm 0",
         "PRODUCE z 0 zm1 0",
     ], f"PRODUCE order mismatch: {produces}"
-    # TRIMs sorted
     trims = [p for p in payloads if p.startswith("TRIM")]
     assert trims == sorted(trims)
     assert trims == ["TRIM a 0 1 0"]
-    # JOIN_GROUP sorted by group asc, topic asc
     joins = [p for p in payloads if p.startswith("JOIN_GROUP")]
     assert joins == sorted(joins)
     assert joins == [
@@ -2044,17 +1764,11 @@ def test_compaction_preserves_sorted_order(tmp_path):
         "JOIN_GROUP g2 a 0",
         "JOIN_GROUP g2 m 0",
     ]
-    # COMMIT sorted
     commits = [p for p in payloads if p.startswith("COMMIT")]
     assert commits == sorted(commits)
-    # SEEK sorted and only those where pos != expected_default
     seeks = [p for p in payloads if p.startswith("SEEK")]
     assert seeks == sorted(seeks)
-    # In this case, after all ops, group g2 position for m is 1, low 0, committed none, expected 0, so pos1 !=0 -> SEEK kept
-    # g1 positions: after no polls, no pos, so none
-    # So only SEEK g2 m 0 1 0 should remain
     assert seeks == ["SEEK g2 m 0 1 0"]
-
 
 def test_invalid_group_names():
     invalid_names = [
@@ -2078,7 +1792,3 @@ def test_invalid_group_names():
                 f"expected non-zero for invalid group name {name!r} in {cmd!r}, got {r.returncode} out={r.stdout} err={r.stderr}"
             )
 
-
-# --------------------------------------------------------------------------
-# Additional hard cases to increase difficulty (too easy fix)
-# --------------------------------------------------------------------------
