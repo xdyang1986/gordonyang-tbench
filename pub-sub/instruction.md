@@ -228,9 +228,9 @@ Input:
 ```
 Output:
 ```
-2,1
-9
-4,5
+3,2
+16
+6,10
 1
 1,1
 0
@@ -238,7 +238,7 @@ Output:
 1
 1,1
 ```
-Explanation: caps are cost caps 10 each, cost 2 and 5. s0 rem cost 10 => remCount floor(10/2)=5, s1 floor(10/5)=2, effective sum 7, load5, fair share 2,1 counts, cost totals 4 and 5.
+Explanation: caps are cost caps 10 each, cost 2 and 5. s0 rem cost 10 => remCount floor(10/2)=5, s1 floor(10/5)=2, sum 7, load5. Proportional share floor(5*1/2)=2 each (total credit 2) => 2,2 used 4 rem1, highest credit tie idx0 gets 1 => 3,2 counts. Cost totals 3*2=6 and 2*5=10 total cost 16. Final credits 1,1 and weights 1,1 and burst 0.
 
 ### Example 7 - large overflow
 
