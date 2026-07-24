@@ -30,7 +30,7 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 - **Effective caps with burst+cost:** `sRemCost = cap - totalCost`, `sRemCount = floor(sRemCost/cost)`, `sEffCount = min(sRemCount, rate+burst_rem if rate>0)`. Sum per group `sumMemberEff`. Group `gRemCost = cap - totalCost`, `minCostInGroup = min cost among members`. `gRemCount = floor(gRemCost/minCost)` if has members else 0. Effective group count `effG = min(gRemCount, sumMemberEff, rate+burst_rem if rate>0, 0 if no members)`. Invalid gid →0 and excluded from group totals AND credit/weight/burst updates (final values equal initial).
 
-- **Backward-compat parsing:** Must accept older formats: 5-field groups behave as burst 0, 6-field subs as burst0 cost1, 7-field subs as cost1. Legacy formats must produce identical output to full-field equivalents (e.g., 5-field group `0 0 1 10 0` as `0 0 1 10 0 0`, 6-field sub `0 10 0 1 5 0` as `0 10 0 1 5 0 0 1`, 7-field sub `0 10 0 1 5 0 0` as `0 10 0 1 5 0 0 1`). Example 6 demonstrates.
+- **Backward-compat parsing:** Must accept older formats: 5-field groups behave as burst 0, 6-field subs as burst0 cost1, 7-field subs as cost1. Legacy formats must produce identical output to full-field equivalents (e.g., 5-field group `0 0 1 10 0` as `0 0 1 10 0 0`, 6-field sub `0 10 0 1 5 0` as `0 10 0 1 5 0 0 1`, 7-field sub `0 10 0 1 5 0 0` as `0 10 0 1 5 0 0 1`).
 
 - **I/O, persistence, 64-bit safety:** State persists across batches: total cost, credit start weight, weight start weight, burst_rem start burst. `rem*credit` up to 1e24 and 1.2e19 overflow, need 128-bit mulDiv via `math/bits`.
 
@@ -60,7 +60,7 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
   - `burst_rem` starts at input burst, is one-time extra count beyond rate, not replenished.
   - Effective per-batch count cap includes `rate+burst_rem` when rate>0.
   - After positive batch, if `batchCount > rate` and `rate>0`, `excess = batchCount - rate`, consume `min(excess, burst_rem)`, `burst_rem -= consumed`.
-  - Single-batch burst tests cover capping, but multi-batch carryover (remaining burst used in next batch) must also be implemented.
+  - Burst allowance may be consumed across batches: if a batch uses burst to exceed rate, remaining burst for next batch is reduced.
 
 - **Global rebalancing (necessary):**
   - For positive loads, use an outer loop up to 10 iterations while remaining>0:
@@ -69,8 +69,8 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
     - `sumMemberEff` per group = sum `sEffCount`, `effG = min(gRemCount, sumMemberEff, rate+burst_rem - groupBatch)`, 0 if no members.
     - If sum eff==0 break.
     - Allocate remaining to groups via primitive, then per-group to members via same primitive.
-    - If group allocation cannot be fully taken by members (sum member alloc < group alloc), leftover returns to remaining and is reallocated to other groups next iteration.
-  - This loop is tested via `test_global_rebalancing` (1,1,8 → 2,8).
+    - If group allocation cannot be fully taken by members, leftover returns to remaining and is reallocated to other groups next iteration.
+  - For example, with group caps 10 each and one group limited by member caps to 2 total, load 10 results in batch allocation `1,1,8` where group0 gets 2 total and group1 gets 8 total, demonstrating rebalancing.
 
 - **Negative loads:** If load<0, N=-load dealloc by priority desc groups then members, respecting totals never <0, burst unaffected, counts as activity.
 

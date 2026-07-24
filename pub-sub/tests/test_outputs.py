@@ -444,6 +444,13 @@ def test_blank_lines_and_spaces():
     assert out == ["6,4,3,3"]
 
 
+def test_tab_delimited_and_spaces():
+    # Tabs + spaces robustness per spec
+    raw = "1\n16\n2\n10\t0\t5\t10\t0\t0\n5\t0\t3\t10\t0\t0\n4\n0\t10\t0\t5\t6\t0\t0\t1\n0\t5\t0\t3\t9\t0\t0\t1\n1\t5\t0\t4\t3\t0\t0\t1\n1\t1\t0\t1\t12\t0\t0\t1\n"
+    out = run_case_raw(raw)
+    assert out == ["6,4,3,3"]
+
+
 def test_large_numbers():
     out = run_case(
         1,
@@ -686,3 +693,16 @@ def test_fuzz_invariants():
         ]
         out = run_case(T, loads, groups, subs)
         assert len(out) == T
+        # Conservation invariants: caps as cost, cost factor, non-negative totals, etc.
+        caps = [s[4] for s in subs]
+        costs = [s[7] if len(s) >= 8 else 1 for s in subs]
+        tot_cost = [0] * S
+        for line in out:
+            parts = [int(x) for x in line.split(",")]
+            assert len(parts) == S
+            for i, v in enumerate(parts):
+                # Allow negative for deallocation, but cumulative must stay in [0, cap]
+                assert tot_cost[i] + v * costs[i] >= 0
+                assert tot_cost[i] + v * costs[i] <= caps[i]
+            for i, v in enumerate(parts):
+                tot_cost[i] += v * costs[i]
