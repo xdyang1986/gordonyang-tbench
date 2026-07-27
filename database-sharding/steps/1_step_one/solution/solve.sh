@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Reference solution for Turn 1: Go proxy with validation, corruption handling, sorted keys
+# Reference solution Turn1: Go sharding proxy with checksum integrity, validation, corruption backup, sorted keys
 
 cat > /app/go.mod << 'GO'
 module sharding
@@ -14,6 +14,7 @@ package main
 
 import (
 	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -32,6 +33,11 @@ type Shard struct {
 type Config struct {
 	ShardCount int     `json:"shard_count"`
 	Shards     []Shard `json:"shards"`
+}
+
+type ShardFile struct {
+	Data     map[string]interface{} `json:"data"`
+	Checksum string                 `json:"checksum"`
 }
 
 type ShardingProxy struct {
@@ -65,6 +71,100 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
+func computeChecksum(data map[string]interface{}) string {
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	b, _ := json.Marshal(data)
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0644)
+}
+
+func atomicWrite(path string, data map[string]interface{}) error {
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	checksum := computeChecksum(data)
+	sf := ShardFile{Data: data, Checksum: checksum}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(dir, "tmp-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	enc := json.NewEncoder(tmpFile)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(sf); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	tmpFile.Close()
+	return os.Rename(tmpPath, path)
+}
+
+func readShardFile(path string) (map[string]interface{}, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return map[string]interface{}{}, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+	trim := strings.TrimSpace(string(b))
+	if trim == "" {
+		return map[string]interface{}{}, nil
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backupPath)
+		fmt.Fprintf(os.Stderr, "Warning: shard file %s is corrupted (invalid JSON), backup to %s: %v\n", path, backupPath, err)
+		_ = atomicWrite(path, map[string]interface{}{})
+		return map[string]interface{}{}, nil
+	}
+	if _, hasData := raw["data"]; hasData {
+		var sf ShardFile
+		if err := json.Unmarshal(b, &sf); err != nil {
+			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backupPath)
+			fmt.Fprintf(os.Stderr, "Warning: shard file %s corrupted (new format), backup to %s\n", path, backupPath)
+			_ = atomicWrite(path, map[string]interface{}{})
+			return map[string]interface{}{}, nil
+		}
+		if sf.Data == nil {
+			sf.Data = map[string]interface{}{}
+		}
+		expected := computeChecksum(sf.Data)
+		if sf.Checksum != "" && expected != sf.Checksum {
+			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backupPath)
+			fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
+			_ = atomicWrite(path, map[string]interface{}{})
+			return map[string]interface{}{}, nil
+		}
+		return sf.Data, nil
+	}
+	return raw, nil
+}
+
 func NewShardingProxy(configPath string) (*ShardingProxy, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -87,22 +187,7 @@ func NewShardingProxy(configPath string) (*ShardingProxy, error) {
 				return nil, err
 			}
 		} else {
-			b, err := os.ReadFile(s.Path)
-			if err != nil {
-				continue
-			}
-			trim := strings.TrimSpace(string(b))
-			if trim == "" {
-				atomicWrite(s.Path, map[string]interface{}{})
-				continue
-			}
-			var m map[string]interface{}
-			if err := json.Unmarshal([]byte(trim), &m); err != nil {
-				backupPath := fmt.Sprintf("%s.corrupt.%d", s.Path, time.Now().UnixNano())
-				_ = copyFile(s.Path, backupPath)
-				fmt.Fprintf(os.Stderr, "Warning: shard %d file %s corrupted, backup to %s\n", s.ID, s.Path, backupPath)
-				atomicWrite(s.Path, map[string]interface{}{})
-			}
+			_, _ = readShardFile(s.Path)
 		}
 	}
 	return &ShardingProxy{ConfigPath: configPath, Config: cfg}, nil
@@ -129,70 +214,12 @@ func (p *ShardingProxy) GetShardPath(key string) (string, error) {
 	return "", fmt.Errorf("shard id %d not found", sid)
 }
 
-func (p *ShardingProxy) readShard(path string) (map[string]interface{}, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return map[string]interface{}{}, nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]interface{}{}, nil
-		}
-		return nil, err
-	}
-	trim := strings.TrimSpace(string(b))
-	if trim == "" {
-		return map[string]interface{}{}, nil
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal([]byte(trim), &m); err != nil {
-		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
-		_ = copyFile(path, backupPath)
-		fmt.Fprintf(os.Stderr, "Warning: shard file %s corrupted, backup to %s: %v\n", path, backupPath, err)
-		atomicWrite(path, map[string]interface{}{})
-		return map[string]interface{}{}, nil
-	}
-	return m, nil
-}
-
-func copyFile(src, dst string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, b, 0644)
-}
-
-func atomicWrite(path string, data map[string]interface{}) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmpFile, err := os.CreateTemp(dir, "tmp-*.json")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmpFile.Name()
-	enc := json.NewEncoder(tmpFile)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	tmpFile.Close()
-	return os.Rename(tmpPath, path)
-}
-
 func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 	path, err := p.GetShardPath(key)
 	if err != nil {
 		return nil, false
 	}
-	m, err := p.readShard(path)
+	m, err := readShardFile(path)
 	if err != nil {
 		return nil, false
 	}
@@ -205,7 +232,7 @@ func (p *ShardingProxy) Set(key string, value interface{}) error {
 	if err != nil {
 		return err
 	}
-	m, err := p.readShard(path)
+	m, err := readShardFile(path)
 	if err != nil {
 		return err
 	}
@@ -218,7 +245,7 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	m, err := p.readShard(path)
+	m, err := readShardFile(path)
 	if err != nil {
 		return false, err
 	}
@@ -235,7 +262,7 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 func (p *ShardingProxy) GetAllKeys() ([]string, error) {
 	keysMap := make(map[string]struct{})
 	for _, s := range p.Config.Shards {
-		m, err := p.readShard(s.Path)
+		m, err := readShardFile(s.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -254,7 +281,7 @@ func (p *ShardingProxy) GetAllKeys() ([]string, error) {
 func (p *ShardingProxy) GetShardDistribution() (map[int]int, error) {
 	dist := make(map[int]int)
 	for _, s := range p.Config.Shards {
-		m, err := p.readShard(s.Path)
+		m, err := readShardFile(s.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -264,17 +291,20 @@ func (p *ShardingProxy) GetShardDistribution() (map[int]int, error) {
 }
 
 func printHelp() {
-	fmt.Println(`Usage:
-  proxy --config /app/config.json <command> [args]
-
+	fmt.Println(`Usage: proxy --config /app/config.json <command> [args]
 Commands:
-  get-shard-id <key>
-  get-shard-path <key>
-  get <key>
-  set <key> <value_json>
-  delete <key>
-  list-keys
-  distribution
+  get-shard-id <key>         prints shard id
+  get-shard-path <key>       prints shard path
+  get <key>                  prints JSON value or null
+  set <key> <value_json>     stores JSON value (raw string if not JSON)
+  delete <key>               prints true/false
+  list-keys                  prints sorted JSON array
+  distribution               prints JSON map shard_id->count including zeros
+  migrate --help             not implemented in turn1 (see turn2)
+Flags:
+  --config string (default /app/config.json)
+  --help -h help
+  --legacy string --dry-run --backup --force (turn2)
 `)
 }
 
@@ -289,7 +319,12 @@ func main() {
 			i++
 		} else if strings.HasPrefix(a, "--config=") {
 			configPath = strings.TrimPrefix(a, "--config=")
-		} else if a == "--help" || a == "-h" {
+		} else if a == "--help" || a == "-h" || a == "help" || a == "migrate" {
+			if a == "migrate" {
+				fmt.Fprintln(os.Stderr, "migrate not implemented in turn1")
+				printHelp()
+				os.Exit(1)
+			}
 			printHelp()
 			return
 		} else {
@@ -298,7 +333,7 @@ func main() {
 	}
 	if len(filtered) == 0 {
 		printHelp()
-		os.Exit(2)
+		return
 	}
 	proxy, err := NewShardingProxy(configPath)
 	if err != nil {
@@ -385,9 +420,6 @@ func main() {
 		}
 		b, _ := json.Marshal(m)
 		fmt.Println(string(b))
-	case "migrate":
-		fmt.Fprintln(os.Stderr, "migrate not implemented in turn1")
-		os.Exit(1)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", cmd)
 		printHelp()
@@ -399,10 +431,16 @@ GO
 echo "Turn1 Go solution applied"
 go build -o ./proxy_bin . && echo "Build OK" && rm -f ./proxy_bin
 
-python3 -c "
-import json
-cfg=json.load(open('/app/config.json'))
+python3 << 'PY'
+import json, hashlib
+def write_shard(path, data):
+    data_json = json.dumps(data, sort_keys=True, separators=(',', ':'))
+    checksum = hashlib.md5(data_json.encode()).hexdigest()
+    with open(path, 'w') as f:
+        json.dump({"data": data, "checksum": checksum}, f, indent=2)
+import json as js
+cfg=js.load(open('/app/config.json'))
 for s in cfg['shards']:
-    open(s['path'],'w').write('{}')
-print('Shards reset')
-"
+    write_shard(s['path'], {})
+print('Shards reset with checksum format')
+PY
