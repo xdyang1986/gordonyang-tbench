@@ -16,14 +16,14 @@ import pytest
 CONFIG_PATH = "/app/config.json"
 LEGACY_PATH = "/app/data/legacy.json"
 APP_DIR = "/app"
-BIN = "/tmp/shard_proxy"
+BIN = "/tmp/codimango/shard_proxy"
 
 GO_ENV = {
     **os.environ,
     "GOTOOLCHAIN": "local",
     "GOFLAGS": "-mod=mod",
-    "GOCACHE": "/tmp/gocache",
-    "GOPATH": "/tmp/gopath",
+    "GOCACHE": "/tmp/codimango/gocache",
+    "GOPATH": "/tmp/codimango/gopath",
 }
 
 
@@ -130,7 +130,7 @@ def _run_migrate(*args, config_path=CONFIG_PATH, legacy_path=LEGACY_PATH):
     if r2.returncode == 0 or "unknown" not in r2.stderr.lower():
         return r2
     # Alternative: try separate migrate binary (if agent built separate)
-    alt_bin = "/tmp/migrate_bin"
+    alt_bin = "/tmp/codimango/migrate_bin"
     # Try building migrate package if exists at /app/cmd/migrate or file with migrate main
     # For simplicity, return first result
     return r

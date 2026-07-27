@@ -2,14 +2,18 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/database-sharding"
-description = "Implement a database sharding proxy in Go: first iteration handles new traffic sharding (MD5 mod) with CLI proxy, second iteration fixes legacy migration with zero-downtime fallback, atomic writes, idempotent migration tool, dry-run and backup support."
+description = "Implement a database sharding proxy in Go: first iteration handles new traffic sharding (MD5 mod) with CLI proxy, second iteration fixes legacy migration with zero-downtime fallback, atomic writes, idempotent migration tool, dry-run and backup support, and edge-case handling for corrupted shards and config validation."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "database", "sharding", "proxy", "migration"]
+keywords = ["go", "database", "sharding", "proxy", "migration", "atomic-write", "md5"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
 
 [metadata]
 difficulty = "hard"
-category = "iterate_on_feature"
-tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang"]
+category = "software-engineering"
+category_usecase = "implement_new_feature"
+category_subdomain = "data_storage"
+tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang", "distributed-systems"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
 expert_time_estimate_min = 50

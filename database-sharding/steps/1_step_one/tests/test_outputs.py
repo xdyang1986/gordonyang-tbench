@@ -15,14 +15,14 @@ import pytest
 
 CONFIG_PATH = "/app/config.json"
 APP_DIR = "/app"
-BIN = "/tmp/shard_proxy"
+BIN = "/tmp/codimango/shard_proxy"
 
 GO_ENV = {
     **os.environ,
     "GOTOOLCHAIN": "local",
     "GOFLAGS": "-mod=mod",
-    "GOCACHE": "/tmp/gocache",
-    "GOPATH": "/tmp/gopath",
+    "GOCACHE": "/tmp/codimango/gocache",
+    "GOPATH": "/tmp/codimango/gopath",
 }
 
 

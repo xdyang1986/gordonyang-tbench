@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Reference solution for Turn 2: Go proxy with legacy fallback + migration
+# Reference solution for Turn 2: Go proxy with legacy fallback, corruption handling, duplicate detection, migration
 
 cat > /app/go.mod << 'GO'
 module sharding
@@ -20,7 +20,9 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 type Shard struct {
@@ -39,8 +41,30 @@ type ShardingProxy struct {
 	Config     Config
 }
 
-func NewShardingProxy(configPath string) (*ShardingProxy, error) {
-	return NewShardingProxyWithLegacy(configPath, "/app/data/legacy.json")
+func validateConfig(cfg Config) error {
+	if cfg.ShardCount <= 0 {
+		return fmt.Errorf("shard_count must be >0")
+	}
+	if len(cfg.Shards) == 0 {
+		return fmt.Errorf("shards empty")
+	}
+	seen := make(map[int]bool)
+	for _, s := range cfg.Shards {
+		if s.ID < 0 {
+			return fmt.Errorf("negative shard id %d", s.ID)
+		}
+		if s.ID >= cfg.ShardCount {
+			return fmt.Errorf("shard id %d >= shard_count %d", s.ID, cfg.ShardCount)
+		}
+		if strings.TrimSpace(s.Path) == "" {
+			return fmt.Errorf("empty shard path for id %d", s.ID)
+		}
+		if seen[s.ID] {
+			return fmt.Errorf("duplicate shard id %d", s.ID)
+		}
+		seen[s.ID] = true
+	}
+	return nil
 }
 
 func NewShardingProxyWithLegacy(configPath, legacyPath string) (*ShardingProxy, error) {
@@ -50,6 +74,9 @@ func NewShardingProxyWithLegacy(configPath, legacyPath string) (*ShardingProxy, 
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 	for _, s := range cfg.Shards {
@@ -73,11 +100,18 @@ func NewShardingProxyWithLegacy(configPath, legacyPath string) (*ShardingProxy, 
 			}
 			var m map[string]interface{}
 			if err := json.Unmarshal([]byte(trim), &m); err != nil {
+				backupPath := fmt.Sprintf("%s.corrupt.%d", s.Path, time.Now().UnixNano())
+				_ = copyFile(s.Path, backupPath)
+				fmt.Fprintf(os.Stderr, "Warning: shard %d file %s corrupted, backup to %s\n", s.ID, s.Path, backupPath)
 				atomicWrite(s.Path, map[string]interface{}{})
 			}
 		}
 	}
 	return &ShardingProxy{ConfigPath: configPath, LegacyPath: legacyPath, Config: cfg}, nil
+}
+
+func NewShardingProxy(configPath string) (*ShardingProxy, error) {
+	return NewShardingProxyWithLegacy(configPath, "/app/data/legacy.json")
 }
 
 func hashKey(key string, shardCount int) int {
@@ -118,6 +152,10 @@ func (p *ShardingProxy) readShard(path string) (map[string]interface{}, error) {
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(trim), &m); err != nil {
+		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backupPath)
+		fmt.Fprintf(os.Stderr, "Warning: shard file %s corrupted, backup to %s: %v\n", path, backupPath, err)
+		atomicWrite(path, map[string]interface{}{})
 		return map[string]interface{}{}, nil
 	}
 	return m, nil
@@ -140,10 +178,20 @@ func (p *ShardingProxy) readLegacy() (map[string]interface{}, error) {
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(trim), &m); err != nil {
-		// if invalid, return empty for fallback robustness, but migration should error
 		return map[string]interface{}{}, nil
 	}
 	return m, nil
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0644)
 }
 
 func atomicWrite(path string, data map[string]interface{}) error {
@@ -179,7 +227,6 @@ func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 	if v, ok := m[key]; ok {
 		return v, true
 	}
-	// fallback to legacy
 	leg, err := p.readLegacy()
 	if err != nil {
 		return nil, false
@@ -242,6 +289,7 @@ func (p *ShardingProxy) GetAllKeys() ([]string, error) {
 	for k := range keysMap {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return keys, nil
 }
 
@@ -257,8 +305,6 @@ func (p *ShardingProxy) GetShardDistribution() (map[int]int, error) {
 	return dist, nil
 }
 
-// Migration logic
-
 func loadConfig(configPath string) (Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(configPath)
@@ -266,6 +312,9 @@ func loadConfig(configPath string) (Config, error) {
 		return cfg, err
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	if err := validateConfig(cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -287,7 +336,7 @@ func readJSONMap(path string) (map[string]interface{}, error) {
 	return m, nil
 }
 
-func copyFile(src, dst string) error {
+func copyFileIO(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -315,15 +364,10 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 		}
 		return err
 	}
-	if cfg.ShardCount == 0 || cfg.Shards == nil {
-		fmt.Fprintln(os.Stderr, "Invalid config: missing shard_count or shards")
-		return fmt.Errorf("invalid config")
-	}
 	idToPath := make(map[int]string)
 	for _, s := range cfg.Shards {
 		idToPath[s.ID] = s.Path
 	}
-
 	legacyData, err := readJSONMap(legacyPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -333,10 +377,34 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 		fmt.Fprintf(os.Stderr, "Invalid legacy JSON %s: %v\n", legacyPath, err)
 		return err
 	}
+	// duplicate detection
+	keyToShards := make(map[string][]int)
+	for _, s := range cfg.Shards {
+		m, err := readJSONMap(s.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			m = map[string]interface{}{}
+		}
+		for k := range m {
+			keyToShards[k] = append(keyToShards[k], s.ID)
+		}
+	}
+	hasDup := false
+	for k, shards := range keyToShards {
+		if len(shards) > 1 {
+			hasDup = true
+			fmt.Fprintf(os.Stderr, "Warning: key %q found in multiple shards %v\n", k, shards)
+		}
+	}
+	if hasDup {
+		fmt.Fprintln(os.Stderr, "Detected duplicate keys across shards, will deduplicate during migration")
+	}
 	if len(legacyData) == 0 {
 		fmt.Println("Legacy file is empty, nothing to migrate")
 		if backupPath != "" {
-			if err := copyFile(legacyPath, backupPath); err != nil {
+			if err := copyFileIO(legacyPath, backupPath); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to create backup: %v\n", err)
 				return err
 			}
@@ -344,7 +412,6 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 		}
 		return nil
 	}
-
 	grouped := make(map[int]map[string]interface{})
 	for k, v := range legacyData {
 		sid := hashKey(k, cfg.ShardCount)
@@ -353,7 +420,6 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 		}
 		grouped[sid][k] = v
 	}
-
 	total := len(legacyData)
 	fmt.Printf("Migration plan: %d keys from %s -> %d shards\n", total, legacyPath, cfg.ShardCount)
 	for sid := 0; sid < cfg.ShardCount; sid++ {
@@ -362,18 +428,16 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 			fmt.Printf("  shard %d (%s): %d keys\n", sid, path, len(g))
 		}
 	}
-
 	if dryRun {
 		fmt.Println("Dry-run enabled, not writing any shard files")
 		return nil
 	}
-
 	if backupPath != "" {
 		if err := os.MkdirAll(filepath.Dir(backupPath), 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create backup dir: %v\n", err)
 			return err
 		}
-		if err := copyFile(legacyPath, backupPath); err != nil {
+		if err := copyFileIO(legacyPath, backupPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create backup: %v\n", err)
 			return err
 		}
@@ -381,15 +445,14 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 		for _, s := range cfg.Shards {
 			if _, err := os.Stat(s.Path); err == nil {
 				bak := s.Path + ".bak"
-				_ = copyFile(s.Path, bak)
+				_ = copyFileIO(s.Path, bak)
 			}
 		}
 	}
-
 	for sid, keysDict := range grouped {
 		shardPath, ok := idToPath[sid]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Shard id %d not found in config, skipping %d keys\n", sid, len(keysDict))
+			fmt.Fprintf(os.Stderr, "Shard id %d not found, skipping %d keys\n", sid, len(keysDict))
 			continue
 		}
 		current, err := readJSONMap(shardPath)
@@ -397,7 +460,6 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 			if os.IsNotExist(err) {
 				current = map[string]interface{}{}
 			} else {
-				// if invalid JSON, treat as empty but continue
 				current = map[string]interface{}{}
 			}
 		}
@@ -411,37 +473,16 @@ func migrate(legacyPath, configPath string, dryRun bool, backupPath string, forc
 				merged[k] = v
 				changed = true
 			} else if force {
+				if fmt.Sprintf("%v", merged[k]) != fmt.Sprintf("%v", v) {
+					fmt.Fprintf(os.Stderr, "Overwriting key '%s' in shard %d\n", k, sid)
+				}
 				merged[k] = v
 				changed = true
 			}
 		}
-		if !changed {
-			// check if current equals merged (force may have overwritten)
-			// For simplicity, compare len and content: if force, we already set changed, else no change
-			// Actually for idempotency, if no new keys and not force, skip write
-			if !force {
-				fmt.Printf("Shard %d already up-to-date (%d keys)\n", sid, len(keysDict))
-				continue
-			}
-			// if force but same values, still consider no change? We'll check deep equality via marshal length?
-			// Simple: if merged not different from current, skip
-			if len(merged) == len(current) {
-				same := true
-				for k, v := range keysDict {
-					if cv, ok := current[k]; !ok || fmt.Sprintf("%v", cv) != fmt.Sprintf("%v", v) {
-						// if force and value different, it's changed
-						if force {
-							// we already marked changed, but we check again
-						} else {
-							same = false
-						}
-					}
-				}
-				if same && !force {
-					fmt.Printf("Shard %d already up-to-date (%d keys)\n", sid, len(keysDict))
-					continue
-				}
-			}
+		if !changed && !force {
+			fmt.Printf("Shard %d already up-to-date (%d keys)\n", sid, len(keysDict))
+			continue
 		}
 		if err := atomicWrite(shardPath, merged); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write shard %d: %v\n", sid, err)
@@ -458,21 +499,18 @@ func printHelp() {
   proxy --config /app/config.json [--legacy /app/data/legacy.json] <command> [args]
 
 Commands:
-  get-shard-id <key>          prints shard id
-  get-shard-path <key>        prints shard path
-  get <key>                   prints JSON value or null
-  set <key> <value_json>      stores JSON value
-  delete <key>                prints true/false
-  list-keys                   prints JSON array of keys
-  distribution                prints JSON map shard_id->count
+  get-shard-id <key>
+  get-shard-path <key>
+  get <key>
+  set <key> <value_json>
+  delete <key>
+  list-keys
+  distribution
   migrate [--dry-run] [--backup path] [--force]
 
 Flags:
   --config string (default /app/config.json)
   --legacy string (default /app/data/legacy.json)
-  --dry-run   for migrate
-  --backup    path for migrate
-  --force     for migrate
 `)
 }
 
@@ -526,10 +564,7 @@ func main() {
 	cmd := filtered[0]
 	cmdArgs := filtered[1:]
 
-	// For migrate command, we handle separately but still need to parse flags inside cmdArgs for dry-run etc if not already captured globally
-	// Re-parse migrate flags that may appear after "migrate"
-	if cmd == "migrate" || (len(filtered) > 1 && filtered[0] == "migrate") {
-		// Already captured global dryRun/backup/force, but also check cmdArgs
+	if cmd == "migrate" {
 		for i := 0; i < len(cmdArgs); i++ {
 			a := cmdArgs[i]
 			if a == "--dry-run" {
@@ -551,32 +586,31 @@ func main() {
 
 	proxy, err := NewShardingProxyWithLegacy(configPath, legacyPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to init proxy: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Invalid config %s: %v\n", configPath, err)
+		os.Exit(2)
 	}
 
 	switch cmd {
 	case "get-shard-id":
 		if len(cmdArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "get-shard-id requires <key>")
+			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
-		sid := proxy.GetShardID(cmdArgs[0])
-		fmt.Println(sid)
+		fmt.Println(proxy.GetShardID(cmdArgs[0]))
 	case "get-shard-path":
 		if len(cmdArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "get-shard-path requires <key>")
+			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
 		path, err := proxy.GetShardPath(cmdArgs[0])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println(path)
 	case "get":
 		if len(cmdArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "get requires <key>")
+			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
 		val, ok := proxy.Get(cmdArgs[0])
@@ -584,54 +618,48 @@ func main() {
 			fmt.Println("null")
 			return
 		}
-		b, err := json.Marshal(val)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Marshal error: %v\n", err)
-			os.Exit(1)
-		}
+		b, _ := json.Marshal(val)
 		fmt.Println(string(b))
 	case "set":
 		if len(cmdArgs) < 2 {
-			fmt.Fprintln(os.Stderr, "set requires <key> <value_json>")
+			fmt.Fprintln(os.Stderr, "requires <key> <value_json>")
 			os.Exit(2)
 		}
-		key := cmdArgs[0]
-		valueStr := cmdArgs[1]
 		var v interface{}
-		if err := json.Unmarshal([]byte(valueStr), &v); err != nil {
-			v = valueStr
+		if err := json.Unmarshal([]byte(cmdArgs[1]), &v); err != nil {
+			v = cmdArgs[1]
 		}
-		if err := proxy.Set(key, v); err != nil {
-			fmt.Fprintf(os.Stderr, "Set error: %v\n", err)
+		if err := proxy.Set(cmdArgs[0], v); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 	case "delete":
 		if len(cmdArgs) < 1 {
-			fmt.Fprintln(os.Stderr, "delete requires <key>")
+			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
-		deleted, err := proxy.Delete(cmdArgs[0])
+		del, err := proxy.Delete(cmdArgs[0])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Delete error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		if deleted {
+		if del {
 			fmt.Println("true")
 		} else {
 			fmt.Println("false")
 		}
-	case "list-keys", "get-all-keys":
+	case "list-keys":
 		keys, err := proxy.GetAllKeys()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "list-keys error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		b, _ := json.Marshal(keys)
 		fmt.Println(string(b))
-	case "distribution", "get-shard-distribution":
+	case "distribution":
 		dist, err := proxy.GetShardDistribution()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "distribution error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		m := make(map[string]int)
@@ -641,19 +669,8 @@ func main() {
 		b, _ := json.Marshal(m)
 		fmt.Println(string(b))
 	default:
-		// support legacy help for migrate
-		if strings.Contains(cmd, "migrate") {
-			if err := migrate(legacyPath, configPath, dryRun, backupPath, force); err != nil {
-				os.Exit(1)
-			}
-			return
-		}
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
+		fmt.Fprintf(os.Stderr, "Unknown command %s\n", cmd)
 		printHelp()
 		os.Exit(2)
 	}
 }
-GO
-
-echo "Turn2 Go solution applied"
-go build -o /tmp/proxy . && echo "Build OK"

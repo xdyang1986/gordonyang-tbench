@@ -2,8 +2,8 @@ FROM public.ecr.aws/docker/library/golang:1.22-bookworm
 
 ENV GOTOOLCHAIN=local
 ENV GOFLAGS=-mod=mod
-ENV GOCACHE=/tmp/gocache
-ENV GOPATH=/tmp/gopath
+ENV GOCACHE=/tmp/codimango/gocache
+ENV GOPATH=/tmp/codimango/gopath
 
 WORKDIR /app
 RUN mkdir -p /app/data
