@@ -1,0 +1,59 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/database-sharding"
+description = "Implement a database sharding proxy in Go: first iteration handles new traffic sharding (MD5 mod) with CLI proxy, second iteration fixes legacy migration with zero-downtime fallback, atomic writes, idempotent migration tool, dry-run and backup support."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "database", "sharding", "proxy", "migration"]
+
+[metadata]
+difficulty = "hard"
+category = "iterate_on_feature"
+tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 50
+junior_time_estimate_min = 100
+languages = ["go"]
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+[environment.env]
+[solution.env]
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
