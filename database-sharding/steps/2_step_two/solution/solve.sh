@@ -173,10 +173,15 @@ func readShardFile(path string) (map[string]interface{}, error) {
 			sf.Data = map[string]interface{}{}
 		}
 		expected := computeChecksum(sf.Data)
-		if sf.Checksum != "" && expected != sf.Checksum {
+		// Per feedback: missing checksum must be treated as corruption
+		if sf.Checksum == "" || expected != sf.Checksum {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
-			fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
+			if sf.Checksum == "" {
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s missing checksum (corrupt), backup to %s\n", path, backupPath)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
+			}
 			_ = atomicWrite(path, map[string]interface{}{})
 			return map[string]interface{}{}, nil
 		}
@@ -637,10 +642,23 @@ func main() {
 	cmdArgs := filtered[1:]
 
 	if cmd == "migrate" {
+		// help check
 		for _, a := range cmdArgs {
 			if a == "--help" || a == "-h" || a == "help" {
 				printHelp()
 				return
+			}
+		}
+		// unknown flag detection for migrate
+		for i := 0; i < len(cmdArgs); i++ {
+			a := cmdArgs[i]
+			if strings.HasPrefix(a, "--") {
+				if a == "--dry-run" || a == "--force" || strings.HasPrefix(a, "--backup") || a == "--backup" {
+					// known, skip
+				} else {
+					fmt.Fprintf(os.Stderr, "Unknown migrate flag: %s\n", a)
+					os.Exit(2)
+				}
 			}
 		}
 		for i := 0; i < len(cmdArgs); i++ {
@@ -654,9 +672,22 @@ func main() {
 				backupPath = strings.TrimPrefix(a, "--backup=")
 			} else if a == "--force" {
 				force = true
+			} else if strings.HasPrefix(a, "--") {
+				// already handled unknown above, but skip known
+			} else {
+				// bare arg not expected for migrate
+				fmt.Fprintf(os.Stderr, "Unknown migrate arg: %s\n", a)
+				os.Exit(2)
 			}
 		}
 		if err := migrate(legacyPath, configPath, dryRun, backupPath, force); err != nil {
+			// Distinguish config errors (exit 2) vs legacy errors (exit 1)
+			// Config errors contain "config", "shard", "duplicate", "negative", "empty"
+			msg := err.Error()
+			lower := strings.ToLower(msg)
+			if strings.Contains(lower, "config") || strings.Contains(lower, "shard") || strings.Contains(lower, "duplicate") || strings.Contains(lower, "negative") || strings.Contains(lower, "empty") {
+				os.Exit(2)
+			}
 			os.Exit(1)
 		}
 		return

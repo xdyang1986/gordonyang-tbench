@@ -36,7 +36,7 @@ def _load_config(path=CONFIG_PATH):
 
 
 def _write_shard_with_checksum(path, data):
-    data_json = json.dumps(data, sort_keys=True, separators=(',', ':'))
+    data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
     checksum = hashlib.md5(data_json.encode()).hexdigest()
     with open(path, "w") as f:
         json.dump({"data": data, "checksum": checksum}, f, indent=2)
@@ -119,7 +119,7 @@ def _proxy_cli(*args, config_path=CONFIG_PATH):
 
 
 # ------------------------------------------------------------------ #
-# Basic
+# Basic and help (explicit bare help required per feedback)
 # ------------------------------------------------------------------ #
 
 
@@ -144,16 +144,28 @@ def test_config_and_shards_exist():
 
 def test_help_flag():
     _reset_shards()
-    for flag in ["--help", "-h", "help"]:
-        r = _proxy_cli(flag)
-        assert r.returncode == 0, f"help flag {flag} should exit 0"
+    # Per spec, bare with no args must also print help and exit 0 (explicit requirement)
+    for flag in [[], ["--help"], ["-h"], ["help"]]:
+        r = _proxy_cli(*flag)
+        assert r.returncode == 0, (
+            f"help {flag} should exit 0, got {r.returncode} stderr={r.stderr}"
+        )
         combined = (r.stdout + r.stderr).lower()
-        assert "get-shard-id" in combined or "set" in combined
-        assert "config" in combined
+        for word in [
+            "get-shard-id",
+            "set",
+            "get",
+            "list-keys",
+            "distribution",
+            "config",
+        ]:
+            assert word in combined, (
+                f"help should contain '{word}', got {combined[:1000]}"
+            )
 
 
 # ------------------------------------------------------------------ #
-# Config validation exit 2
+# Config validation exit 2 + no stdout
 # ------------------------------------------------------------------ #
 
 
@@ -171,7 +183,7 @@ def test_invalid_config_duplicate_id_exit_2():
         with open(path, "w") as f:
             json.dump(bad_cfg, f)
         r = _proxy_cli("list-keys", config_path=path)
-        assert r.returncode == 2, f"Duplicate id should exit 2"
+        assert r.returncode == 2
         assert r.stderr.strip() != ""
     finally:
         shutil.rmtree(tmpdir)
@@ -245,9 +257,33 @@ def test_missing_config_file_exit_2():
     assert r.returncode == 2
 
 
+def test_invalid_config_no_stdout():
+    # Per feedback: invalid config should produce no stdout, only stderr
+    tmpdir = tempfile.mkdtemp()
+    try:
+        bad_cfg = {"shard_count": 2, "shards": [{"id": 0, "path": ""}]}
+        path = os.path.join(tmpdir, "cfg.json")
+        with open(path, "w") as f:
+            json.dump(bad_cfg, f)
+        r = _proxy_cli("list-keys", config_path=path)
+        assert r.returncode == 2
+        assert r.stdout.strip() == "", (
+            f"Invalid config should produce no stdout, got {r.stdout!r}"
+        )
+        assert r.stderr.strip() != "", "Should have stderr message"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def test_unknown_command_exit_2():
     _reset_shards()
     r = _proxy_cli("unknown-cmd-xyz")
+    assert r.returncode == 2
+
+
+def test_missing_key_arg_exit_2():
+    _reset_shards()
+    r = _proxy_cli("get")
     assert r.returncode == 2
 
 
@@ -288,7 +324,7 @@ def test_get_shard_path_returns_correct_path():
 
 
 # ------------------------------------------------------------------ #
-# CRUD with checksum
+# CRUD with checksum format
 # ------------------------------------------------------------------ #
 
 
@@ -323,6 +359,7 @@ def test_delete_existing():
     _reset_shards()
     _proxy_cli("set", "to-delete", json.dumps(123))
     r = _proxy_cli("delete", "to-delete")
+    assert r.returncode == 0
     assert r.stdout.strip() == "true"
     r = _proxy_cli("get", "to-delete")
     assert r.stdout.strip() == "null"
@@ -331,6 +368,7 @@ def test_delete_existing():
 def test_delete_nonexistent():
     _reset_shards()
     r = _proxy_cli("delete", "no-such-key-abc")
+    assert r.returncode == 0
     assert r.stdout.strip() == "false"
 
 
@@ -351,7 +389,7 @@ def test_persistence_on_disk_with_checksum():
     assert "data" in obj and "checksum" in obj, "Must be new format with data+checksum"
     assert key in obj["data"]
     assert obj["data"][key] == value
-    data_json = json.dumps(obj["data"], sort_keys=True, separators=(',', ':'))
+    data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
     expected_checksum = hashlib.md5(data_json.encode()).hexdigest()
     assert obj["checksum"] == expected_checksum
     for s in cfg["shards"]:
@@ -391,6 +429,8 @@ def test_get_shard_distribution_includes_zero_counts():
         assert str(sid) in dist or sid in dist, f"Must include shard {sid} even zero"
     norm = {int(k): v for k, v in dist.items()}
     assert sum(norm.values()) == 5
+    # Explicit zero check: distribution must have 4 keys
+    assert len(norm) == cfg["shard_count"]
 
 
 def test_multiple_keys_routing_variety():
@@ -421,7 +461,7 @@ def test_atomic_write_no_corruption():
         with open(path) as f:
             obj = json.load(f)
         assert "data" in obj and "checksum" in obj
-        data_json = json.dumps(obj["data"], sort_keys=True, separators=(',', ':'))
+        data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
         assert obj["checksum"] == hashlib.md5(data_json.encode()).hexdigest()
 
 
@@ -478,6 +518,31 @@ def test_corruption_checksum_mismatch_backup():
     assert len(backups) >= 1
 
 
+def test_missing_checksum_corruption():
+    # Per feedback: data field with missing checksum must be treated as corruption
+    _reset_shards()
+    cfg = _load_config()
+    target_path = cfg["shards"][2]["path"]
+    with open(target_path, "w") as f:
+        json.dump({"data": {"b": 2}}, f)  # no checksum
+    r = _proxy_cli("get", "b")
+    assert r.returncode == 0
+    assert r.stdout.strip() == "null", (
+        "Missing checksum should be treated as corruption → null"
+    )
+    dir_name = os.path.dirname(target_path)
+    backups = [
+        f
+        for f in os.listdir(dir_name)
+        if ".corrupt." in f and os.path.basename(target_path) in f
+    ]
+    assert len(backups) >= 1, "Missing checksum should create corrupt backup"
+    with open(target_path) as f:
+        obj = json.load(f)
+    assert obj["data"] == {}
+    assert "checksum" in obj
+
+
 def test_custom_config_path():
     tmpdir = tempfile.mkdtemp()
     try:
@@ -515,7 +580,8 @@ def test_custom_config_path():
         shutil.rmtree(tmpdir)
 
 
-def test_stdlib_only_go_mod():
+def test_stdlib_only_go_mod_and_imports():
+    # Per feedback: stdlib-only should inspect go list/imports rather than only require lines
     go_mod_path = os.path.join(APP_DIR, "go.mod")
     assert os.path.exists(go_mod_path)
     with open(go_mod_path) as f:
@@ -527,4 +593,39 @@ def test_stdlib_only_go_mod():
             if len(parts) >= 2:
                 mod = parts[1]
                 if "." in mod.split("/")[0]:
-                    pytest.fail(f"External dep: {mod}")
+                    pytest.fail(f"External dep in go.mod: {mod}")
+    # Now inspect imports via go list
+    r = subprocess.run(
+        ["go", "list", "-f", '{{join .Imports " "}}', "."],
+        cwd=APP_DIR,
+        env=GO_ENV,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert r.returncode == 0, f"go list failed: {r.stderr}"
+    imports = r.stdout.strip().split()
+    allowed_stdlib_prefixes = [
+        "crypto/",
+        "encoding/",
+        "fmt",
+        "math/",
+        "os",
+        "path/",
+        "sort",
+        "strings",
+        "time",
+        "io",
+        "net",
+        "bufio",
+        "errors",
+        "strconv",
+        "sync",
+    ]
+    for imp in imports:
+        # Allow stdlib packages (no dot, or known stdlib)
+        if "." in imp:
+            # If contains dot, it's external (e.g., github.com/foo)
+            pytest.fail(f"External import found via go list: {imp}")
+        # Also check if import is not in allowed list but still stdlib (like bytes, etc.)
+        # We allow any stdlib that doesn't contain dot

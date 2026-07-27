@@ -2,6 +2,7 @@
 set -e
 
 # Reference solution Turn1: Go sharding proxy with checksum integrity, validation, corruption backup, sorted keys
+# Includes missing-checksum treated as corruption per feedback
 
 cat > /app/go.mod << 'GO'
 module sharding
@@ -152,11 +153,24 @@ func readShardFile(path string) (map[string]interface{}, error) {
 		if sf.Data == nil {
 			sf.Data = map[string]interface{}{}
 		}
-		expected := computeChecksum(sf.Data)
-		if sf.Checksum != "" && expected != sf.Checksum {
+		// Per feedback: missing checksum must be treated as corruption
+		if sf.Checksum == "" {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
-			fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
+			fmt.Fprintf(os.Stderr, "Warning: shard file %s missing checksum (corrupt), backup to %s\n", path, backupPath)
+			_ = atomicWrite(path, map[string]interface{}{})
+			return map[string]interface{}{}, nil
+		}
+		expected := computeChecksum(sf.Data)
+		// Per feedback: missing checksum must be treated as corruption
+		if sf.Checksum == "" || expected != sf.Checksum {
+			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backupPath)
+			if sf.Checksum == "" {
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s missing checksum (corrupt), backup to %s\n", path, backupPath)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
+			}
 			_ = atomicWrite(path, map[string]interface{}{})
 			return map[string]interface{}{}, nil
 		}
@@ -319,12 +333,7 @@ func main() {
 			i++
 		} else if strings.HasPrefix(a, "--config=") {
 			configPath = strings.TrimPrefix(a, "--config=")
-		} else if a == "--help" || a == "-h" || a == "help" || a == "migrate" {
-			if a == "migrate" {
-				fmt.Fprintln(os.Stderr, "migrate not implemented in turn1")
-				printHelp()
-				os.Exit(1)
-			}
+		} else if a == "--help" || a == "-h" || a == "help" {
 			printHelp()
 			return
 		} else {
