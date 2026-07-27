@@ -14,6 +14,7 @@ cat > /app/main.go << 'GO'
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -76,7 +77,11 @@ func computeChecksum(data map[string]interface{}) string {
 	if data == nil {
 		data = map[string]interface{}{}
 	}
-	b, _ := json.Marshal(data)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(data)
+	b := bytes.TrimSpace(buf.Bytes())
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -109,6 +114,7 @@ func atomicWrite(path string, data map[string]interface{}) error {
 	tmpPath := tmpFile.Name()
 	enc := json.NewEncoder(tmpFile)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	if err := enc.Encode(sf); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
