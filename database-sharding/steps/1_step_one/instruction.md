@@ -1,106 +1,147 @@
-# Turn 1: Implement Database Sharding Proxy in Go (with integrity, validation, and repair)
+# Turn 1: Hard Sharding Proxy in Go – Weighted, Broadcast, Integrity, Ops Log
 
 ## Background
 
-Traffic has outgrown single DB. Historical dump is in `/app/data/legacy.json` (old flat format without checksum), but 4 new shards are provisioned:
+Traffic outgrown single DB. Historical dump `/app/data/legacy.json` is old flat format, but 4 new shards are provisioned with **weights**:
 
-- `/app/data/shard_0.json`
-- `/app/data/shard_1.json`
-- `/app/data/shard_2.json`
-- `/app/data/shard_3.json`
+- `/app/data/shard_0.json` weight 1
+- `/app/data/shard_1.json` weight 2
+- `/app/data/shard_2.json` weight 1
+- `/app/data/shard_3.json` weight 1
 
-Topology in `/app/config.json`:
+Topology `/app/config.json`:
 ```json
 {
   "shard_count": 4,
   "shards": [
-    {"id": 0, "path": "/app/data/shard_0.json"},
-    {"id": 1, "path": "/app/data/shard_1.json"},
-    {"id": 2, "path": "/app/data/shard_2.json"},
-    {"id": 3, "path": "/app/data/shard_3.json"}
+    {"id": 0, "path": "/app/data/shard_0.json", "weight": 1},
+    {"id": 1, "path": "/app/data/shard_1.json", "weight": 2},
+    {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},
+    {"id": 3, "path": "/app/data/shard_3.json", "weight": 1}
   ]
 }
 ```
 
-## Task
+Weight is optional, default 1 if missing or <=0? Actually **validation** must reject weight <=0 if present (exit 2). For routing, if weight missing, default 1.
 
-Implement Go sharding proxy at `/app/` (`module sharding`). Built via `go build -o <binary> .`.
+We also need to handle special **broadcast keys** prefixed with `global:` – these must be replicated to **all shards** (not just one). This simulates global config that every DB needs.
+
+We also need a **transaction log** `/app/data/ops.log` – every successful `set`/`delete` must append a JSON line for crash recovery. This will be used in Turn2 migration replay.
+
+We focus on new traffic first, legacy ignored.
+
+## Task – Implement Go proxy at `/app/` (module `sharding`), built via `go build -o <binary> .`
 
 ### CLI (MUST)
 
-Global flag: `--config` default `/app/config.json`.
+Global `--config` default `/app/config.json`.
 
-Help explicitly required (bare help included):
+Help explicitly required:
 
-- Bare proxy with **no args** (`proxy` or with only `--config X` and no command) must print help to stdout containing `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `config` and exit 0.
+- Bare proxy with **no args** (`proxy` or `proxy --config X` with no command) must print help to stdout containing `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `config`, `global`, `weight`, `ops.log` and exit 0.
 - `--help`, `-h`, `help` must also print same help and exit 0.
-- Unknown command must exit 2.
+- Unknown command → exit 2.
 
 Commands:
 
 ```
 proxy --config /app/config.json get-shard-id <key> -> int, exit 0
-proxy --config /app/config.json get-shard-path <key> -> path, exit 0
-proxy --config /app/config.json get <key> -> JSON value or "null", exit 0 even if null, no stdout for invalid config
+  For global: keys (prefix global:), return -1 to indicate broadcast (special)
+  For normal keys, return weighted shard id
+
+proxy --config /app/config.json get-shard-path <key> -> path(s), exit 0
+  For normal: single path of designated shard
+  For global: comma-separated sorted list of all shard paths (by id)
+
+proxy --config /app/config.json get <key> -> JSON value or "null", exit 0
+  For normal: check its designated shard only
+  For global: check all shards in id order, return first found, or null
+
 proxy --config /app/config.json set <key> <value_json> -> durable, exit 0
-  value_json is JSON; if not valid JSON, treat as raw string value (store as string)
+  value_json is JSON; if not valid JSON, treat as raw string value
+  For normal: write to its weighted designated shard
+  For global: write to ALL shards (replicate)
+  On success, also append to ops.log
+
 proxy --config /app/config.json delete <key> -> "true"/"false", exit 0
-proxy --config /app/config.json list-keys -> sorted JSON array, deduped, sorted lexicographically, must read all shards, exit 0
-proxy --config /app/config.json distribution -> JSON map shard_id (as string) -> count, includes all ids even zero, must read all shards, exit 0
+  For normal: delete from designated shard
+  For global: delete from all shards (true if any shard had it)
+  On success (true), also append to ops.log
+
+proxy --config /app/config.json list-keys -> sorted JSON array deduped, reads all shards, exit 0
+  Must include global keys once even if replicated
+
+proxy --config /app/config.json distribution -> JSON map shard_id (string) -> count, includes all ids even zero, exit 0
+  Counts per shard include broadcast keys (so sum may be >= unique keys)
+
+procxy --config /app/config.json ops-log -> prints ops.log lines as JSON array or raw, exit 0 (optional but helpful)
 ```
 
-Exit codes:
-- 0 = success (including help and get returning null)
-- 1 = I/O error
-- 2 = unusable input: missing config, invalid JSON config, duplicate shard id, empty path, negative id, id >= shard_count, missing shard_count, bad args, unknown command, missing <key>. For invalid config, **produce no stdout**, only stderr.
+Exit codes: 0 success (including help, get null), 1 I/O error, 2 invalid input (bad config, duplicate id, empty path, negative id, id>=count, weight<=0 if present, bad args, unknown command, missing key).
 
-### Sharding Algorithm (MUST)
+For invalid config, **no stdout**, only stderr.
 
-Use MD5 for stability. Key's UTF-8 bytes are MD5 hashed, digest interpreted as big-endian unsigned integer mod shard_count. Must match Python: `int(hashlib.md5(key.encode()).hexdigest(),16) % shard_count`. Do not use CRC32/FNV/random.
+### Weighted Sharding Algorithm (MUST, not just mod)
 
-### Persistence with Integrity Header (unique)
+- Use MD5 big-endian mod but **weighted**:
+  - Each shard has `weight` default 1 if missing. If weight present, must be >0 else config invalid exit 2.
+  - Total weight = sum(weights)
+  - Compute hash: MD5 of key's UTF-8 bytes, interpret 16-byte digest as big-endian unsigned integer (big.Int.SetBytes), e.g., Python `int(md5(key.encode()).hexdigest(),16)`
+  - Compute `weighted_index = hashInt % totalWeight`
+  - Iterate shards **sorted by id ascending**, subtracting weight: for each shard in id order, if `weighted_index < shard.weight`, pick that shard id; else `weighted_index -= weight` and continue.
+
+  Example: shards 0:w1, 1:w2, 2:w1, 3:w1 → total 5. Hash%5=0→0, 1→1, 2→1, 3→2, 4→3.
+
+- For `global:` keys, `get-shard-id` returns -1 (broadcast indicator), not normal weighted.
+
+### Persistence with Integrity Header + Ops Log (unique, hard)
 
 Shard file format:
 
 ```json
 {
   "data": { "key": value, ... },
-  "checksum": "hex md5 of canonical JSON of data"
+  "checksum": "hex md5 of canonical JSON of data without HTML escaping"
 }
 ```
 
-- **Canonical JSON for checksum**: Must be **sorted keys, no spaces, without HTML escaping**. In Python, use `json.dumps(data, sort_keys=True, separators=(',', ':'))` (note separators). In Go, `json.Marshal(data)` sorts map keys and produces no spaces, but **by default Go's encoder HTML-escapes `<`, `>`, `&` as `\u003c`, `\u003e`, `\u0026`**. For this task, you **must disable HTML escaping** so checksum matches Python. In Go, use `json.Encoder` with `SetEscapeHTML(false)` or ensure `json.Marshal` equivalent without HTML escaping. Example: empty data `{}` canonical is `{}` → MD5 `99914b932bd37a50b983c5e7c90ae93b`. So empty shard file = `{"data":{},"checksum":"99914b932bd37a50b983c5e7c90ae93b"}` (with indent in file but checksum computed from canonical without spaces).
+- Canonical data JSON: **sorted keys, no spaces, without HTML escaping**: Python `json.dumps(data, sort_keys=True, separators=(',', ':'))` must match Go `json.Marshal` with `SetEscapeHTML(false)`. Go's default `json.Marshal` escapes `<>&` as `\u003c` etc; you **must disable** escaping via `json.Encoder.SetEscapeHTML(false)` for checksum. Include test with `<>&`.
+- On write: always new format with correct checksum, atomic via `os.CreateTemp` in same dir + `os.Rename`. **Source inspection**: must contain `CreateTemp` and `Rename`.
+- On read and **initialization**: `NewShardingProxy` must **validate and repair every configured shard before any command** (not just on read). For each shard:
+  - Missing/empty → empty `{}`
+  - Has `data` field: require `checksum` present and non-empty, else corruption. Compute expected checksum from `data` canonical (sorted keys, no spaces, no HTML escaping). Mismatch → corruption.
+  - Corruption: backup to `<path>.corrupt.<nanosec>` + stderr warning containing "corrupt"/"checksum", recreate empty with valid checksum.
+  - No `data` field → old flat format, treat whole file as data, convert to new format on next write. Invalid JSON → corruption handling.
+- Because init repairs every shard, `list-keys`/`distribution` reading all shards triggers repair.
 
-- On **write**: always new format with correct checksum, atomic via temp file in same dir + rename. **Source inspection**: your Go code must contain `os.CreateTemp` (or `ioutil.TempFile`) and `os.Rename`/`os.Replace` to prove atomicity. Direct writes without temp+rename will be considered reward hacking per R07.
+- **Transaction log** `/app/data/ops.log`: On each successful `set`/`delete` (returns true or set success), append JSON line (one per line, no array) to ops.log:
+  ```
+  {"op":"set","key":"...","value":...,"ts":<unix_nano>,"shard_id":<id or -1 for global>}
+  {"op":"delete","key":"...","ts":<unix_nano>,"shard_id":<id or -1>}
+  ```
+  - Create file if missing, open with `O_APPEND` atomically.
+  - If ops.log contains invalid JSON line (corruption), skip that line on read (if you implement ops-log command) and log warning to stderr.
 
-- On **read** and **initialization**: Proxy initialization (`NewShardingProxy`) must **validate and repair every configured shard before any command** – not just on-demand read. For each shard path, if file missing/empty → treat as empty. If file contains `data` field:
-  - If `checksum` field missing or empty → treat as corruption per feedback
-  - Else compute expected checksum from `data` canonical JSON (sorted keys, no spaces, no HTML escaping), compare to stored `checksum`. Mismatch → corruption.
-  - Corruption handling: backup original to `<path>.corrupt.<nanosec>` (nanosec timestamp), log warning to stderr containing "corrupt" or "checksum", then recreate empty file with valid checksum and treat as empty.
-  - If file has no `data` field (old flat format like `{}`) → treat whole file as data dict for backward compat, convert to new format on next write. Invalid JSON → corruption handling same.
-- Because initialization repairs every shard, `list-keys` and `distribution` which read all shards will also trigger repair for any corrupted shard.
+- `list-keys` sorted, deduped, `distribution` includes zeros, counts include broadcast keys in each shard.
 
-- `get` reads from disk each time (or after init repair).
-- `list-keys` sorted, deduped.
-- `distribution` includes zeros.
+### Config Validation
 
-### Config Validation (required)
-
-On startup, validate config, else exit 2 stderr, **no stdout**:
-- shard_count >0, len(shards)>0, ids unique, non-negative, < shard_count, path non-empty
-- If config missing or invalid JSON → exit 2, no stdout
+On startup, validate, else exit 2 stderr, no stdout:
+- shard_count>0, len(shards)>0, ids unique, non-negative, <count, path non-empty, weight>0 if present (missing → default 1 for routing, but present <=0 invalid)
+- Config missing/invalid JSON → exit 2, no stdout
 
 ### Constraints
 
-- Go stdlib only (`go.mod` no external requires, and `go list -f '{{join .Imports " "}}'` must not show external paths containing dot).
-- Builds with `go build -o <binary> .`
-- Respect `--config`.
-- No hardcoded `/tmp/proxy`; use `/tmp/codimango` if tmp needed.
+- Go stdlib only, `go.mod` no external requires, `go list -f '{{join .Imports " "}}'` no dot imports
+- Builds via `go build -o <binary> .`
+- Respect `--config`
+- No hardcoded `/tmp/proxy`, use `/tmp/codimango` if tmp needed
 
-### Success Turn1
+### Success
 
-- Correct MD5 mod routing.
-- Durable new-format files with valid checksum (no HTML escaping) after set.
-- Sorted list-keys exact, distribution includes zeros.
-- Config validation exit 2 with no stdout, corruption backup/recreate (including missing checksum case), raw-string handling, help and bare help exit 0.
-- Legacy ignored.
+- Weighted routing correct, broadcast global: works (replicates to all)
+- Durable new-format files with valid checksum (no HTML escaping), ops.log appended
+- Sorted list-keys exact, distribution includes zeros, accounts for broadcast
+- Config validation exit 2 no stdout, corruption backup/recreate including missing checksum, raw-string handling, help and bare help exit 0
+
+Legacy ignored for now.

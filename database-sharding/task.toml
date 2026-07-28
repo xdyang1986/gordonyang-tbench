@@ -2,9 +2,9 @@ schema_version = "1.1"
 
 [task]
 name = "xdyang1986/database-sharding"
-description = "Implement a database sharding proxy in Go: first iteration handles new traffic sharding (MD5 mod) with CLI proxy and validation; second iteration fixes legacy migration with zero-downtime fallback, atomic writes, idempotent migration, dry-run, backup, duplicate detection, and corruption handling."
+description = "Hard Go multi-turn sharding proxy: Turn1 requires weighted MD5 sharding (weights per shard), global: broadcast keys replication, transaction log ops.log with integrity, checksum file format without HTML escaping, config validation exit 2 no stdout, corruption backup .corrupt.<timestamp>, sorted list-keys, distribution including zeros. Turn2 adds legacy fallback, duplicate/misplaced detection and cleanup (only correct shard retains key), migration with dry-run, backup of legacy and each modified shard .bak, force overwrite stderr logging, corrupted shard handling, ops.log replay, global keys replication, and help explicit with bare no-args."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "database", "sharding", "proxy", "migration", "atomic-write"]
+keywords = ["go", "database", "sharding", "proxy", "migration", "weighted", "broadcast", "checksum"]
 format = "terminal_bench_multi_turn"
 workstream = "swe_public_repo"
 
@@ -13,11 +13,11 @@ difficulty = "hard"
 category = "software-engineering"
 category_usecase = "migration"
 category_subdomain = "distributed_systems"
-tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang", "distributed-systems"]
+tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang", "distributed-systems", "weighted", "broadcast"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
-expert_time_estimate_min = 50
-junior_time_estimate_min = 100
+expert_time_estimate_min = 70
+junior_time_estimate_min = 130
 languages = ["go"]
 
 [environment]

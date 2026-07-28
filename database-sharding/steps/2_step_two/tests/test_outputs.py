@@ -26,9 +26,36 @@ GO_ENV = {
 }
 
 
-def _expected_shard_id(key: str, shard_count: int) -> int:
-    h = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
-    return h % shard_count
+def _expected_weighted_shard_id_for_simple(key, shards):
+    total = 0
+    for s in sorted(shards, key=lambda x: x["id"]):
+        w = s.get("weight", 1)
+        if w is None:
+            w = 1
+        total += w
+    h = int(hashlib.md5(key.encode()).hexdigest(), 16) % total
+    for s in sorted(shards, key=lambda x: x["id"]):
+        w = s.get("weight", 1)
+        if w is None:
+            w = 1
+        if h < w:
+            return s["id"]
+        h -= w
+    return sorted(shards, key=lambda x: x["id"])[-1]["id"]
+
+
+def _expected_shard_id(key: str, shards_or_count) -> int:
+    if isinstance(key, str) and key.startswith("global:"):
+        return -1
+    if isinstance(shards_or_count, list):
+        return _expected_weighted_shard_id_for_simple(key, shards_or_count)
+    try:
+        cfg = _load_config()
+        shards = cfg["shards"]
+        return _expected_weighted_shard_id_for_simple(key, shards)
+    except:
+        h = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
+        return h % int(shards_or_count)
 
 
 def _load_config(path=CONFIG_PATH):
@@ -49,6 +76,12 @@ def _reset_shards(config_path=CONFIG_PATH):
         p = shard["path"]
         os.makedirs(os.path.dirname(p), exist_ok=True)
         _write_shard_with_checksum(p, {})
+    # Also clear ops.log to avoid interference from previous set/delete (log replay)
+    ops_path = "/app/data/ops.log"
+    try:
+        open(ops_path, "w").write("")
+    except:
+        pass
 
 
 def _load_shard_data(path):
@@ -701,9 +734,13 @@ def test_migrate_force_overwrite_stderr():
         _proxy_cli("set", "forcekey", json.dumps("oldval"))
         with open(legacy_path, "w") as f:
             json.dump({"forcekey": "newval"}, f)
+        # Clear ops.log before first migrate to isolate preserve test from log replay
+        open("/app/data/ops.log", "w").write("")
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
         assert r.returncode == 0
         assert json.loads(_proxy_cli("get", "forcekey").stdout.strip()) == "oldval"
+        # Clear ops.log before second migrate so force overwrite not reverted by log replay
+        open("/app/data/ops.log", "w").write("")
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, ["--force"])
         assert r.returncode == 0
         assert "overwriting" in r.stderr.lower(), (
@@ -980,3 +1017,152 @@ def test_stdlib_go_list_imports():
     for imp in imports:
         if "." in imp:
             pytest.fail(f"External import found via go list: {imp}")
+
+
+def _expected_weighted_shard_id(key, shards):
+    total = 0
+    for s in sorted(shards, key=lambda x: x["id"]):
+        w = s.get("weight", 1)
+        if w is None:
+            w = 1
+        total += w
+    h = int(hashlib.md5(key.encode()).hexdigest(), 16) % total
+    for s in sorted(shards, key=lambda x: x["id"]):
+        w = s.get("weight", 1)
+        if w is None:
+            w = 1
+        if h < w:
+            return s["id"]
+        h -= w
+    return sorted(shards, key=lambda x: x["id"])[-1]["id"]
+
+
+def test_weighted_routing_step2():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        shards = []
+        weights = [1, 2, 1, 1]
+        for i, w in enumerate(weights):
+            p = os.path.join(tmpdir, f"shard_{i}.json")
+            shards.append({"id": i, "path": p, "weight": w})
+            _write_shard_with_checksum(p, {})
+        cfg_path = os.path.join(tmpdir, "cfg.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"shard_count": 4, "shards": shards}, f)
+        for target_idx in range(sum(weights)):
+            found = None
+            for i in range(2000):
+                k = f"weighted-find-{target_idx}-{i}"
+                if (
+                    int(hashlib.md5(k.encode()).hexdigest(), 16) % sum(weights)
+                    == target_idx
+                ):
+                    found = k
+                    break
+            assert found is not None
+            expected = _expected_weighted_shard_id(found, shards)
+            r = subprocess.run(
+                [BIN, "--config", cfg_path, "get-shard-id", found],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert r.returncode == 0
+            assert int(r.stdout.strip()) == expected
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_global_broadcast_step2():
+    _reset_shards()
+    r = _proxy_cli("set", "global:hardtest", json.dumps({"v": 1}))
+    assert r.returncode == 0
+    r = _proxy_cli("get-shard-id", "global:hardtest")
+    assert int(r.stdout.strip()) == -1
+    cfg = _load_config()
+    for s in cfg["shards"]:
+        assert "global:hardtest" in _load_shard_data(s["path"])
+
+
+def test_ops_log_replay_after_migration():
+    # After legacy migration, ops.log replay should apply latest values
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    open(ops_path, "w").write("")
+    # Set via proxy to create log entry that overrides legacy
+    _proxy_cli("set", "replaykey", json.dumps("old-in-shard"))
+    # Now create legacy file with same key but older value
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({"replaykey": "legacy-val", "other": "x"}, f)
+        # Now set a newer value via proxy after legacy file creation, which should be in ops.log
+        # Actually we already set old-in-shard, now set new via proxy to have log entry newer than legacy
+        _proxy_cli("set", "replaykey", json.dumps("new-from-log"))
+        # Reset shards to simulate pre-migration state with only old-in-shard? Let's reset and then migrate with log replay
+        # For this test, we want migration to read legacy (legacy-val) then replay log (new-from-log) → final should be new-from-log
+        # So we need to keep ops.log containing new-from-log entry, and shards empty before migration
+        # Let's reset shards empty, keep ops.log
+        cfg = _load_config()
+        for s in cfg["shards"]:
+            _write_shard_with_checksum(s["path"], {})
+        # ops.log currently has entries: set replaykey old-in-shard, set replaykey new-from-log (and maybe others)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0, f"Migration with log replay failed: {r.stderr}"
+        # After migration, replaykey should be new-from-log (from ops.log), not legacy-val
+        r = _proxy_cli("get", "replaykey")
+        assert r.returncode == 0
+        got = json.loads(r.stdout.strip())
+        assert got == "new-from-log", (
+            f"Ops log replay should make replaykey=new-from-log, got {got}, legacy was legacy-val"
+        )
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_migrate_corrupted_shard_with_missing_checksum():
+    _reset_shards()
+    cfg = _load_config()
+    target_path = cfg["shards"][0]["path"]
+    with open(target_path, "w") as f:
+        json.dump({"data": {"a": 1}}, f)  # missing checksum
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({"b": 2}, f)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0, (
+            f"Migration should handle missing checksum corruption, got {r.stderr}"
+        )
+        # Should have backup
+        backups = [
+            f for f in os.listdir(os.path.dirname(target_path)) if ".corrupt." in f
+        ]
+        assert len(backups) >= 1
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_bare_no_args_step2_is_help():
+    _reset_shards()
+    r = _proxy_cli()
+    assert r.returncode == 0
+    combined = (r.stdout + r.stderr).lower()
+    for word in ["get-shard-id", "migrate", "config", "legacy", "weight", "global"]:
+        assert word in combined, f"Bare help should contain '{word}'"
+
+
+def test_initialization_repairs_all_shards_step2():
+    _reset_shards()
+    cfg = _load_config()
+    for s in cfg["shards"]:
+        with open(s["path"], "w") as f:
+            f.write("{invalid")
+    r = _proxy_cli("list-keys")
+    assert r.returncode == 0
+    for s in cfg["shards"]:
+        obj = json.load(open(s["path"]))
+        assert "data" in obj and "checksum" in obj
+        assert obj["data"] == {}
