@@ -358,9 +358,10 @@ def test_allocation(T, loads, groups, subs, expected):
     assert out == expected
 
 
+
 def test_sensitive_multibatch_invariants():
-    # Sensitive multi-batch cases (11,13,17) previously byte-exact but now invariant per feedback
-    # Check conservation, caps, min, priority instead of exact CSV
+    # Sensitive multi-batch cases (indices 11,13,17) switched from byte-exact to invariant per feedback
+    # Now checks conservation, caps with cost and burst, min guarantees, priority order - no or True
     for T, loads, groups, subs in SENSITIVE_CASES:
         out = run_case(T, loads, groups, subs)
         assert len(out) == T
@@ -380,92 +381,114 @@ def test_sensitive_multibatch_invariants():
         for batch_idx, line in enumerate(out):
             parts = [int(x) for x in line.split(",")] if line else []
             assert len(parts) == S
-            # Check caps
-            for i, v in enumerate(parts):
-                assert sub_tot_cost[i] + v * sub_costs[i] >= 0
-                assert sub_tot_cost[i] + v * sub_costs[i] <= sub_caps[i]
-
-            # Check min guarantees: if load sufficient, mins should be satisfied in priority order
-            # For this invariant test, we check that for any entity, allocation >= min capped to feasible if possible
-            # Simplified: if sum of effective mins for this batch <= load, then each sub gets at least its min capped
-            # We check per-group and per-sub mins
             load = loads[batch_idx]
+            # Check caps: cumulative cost stays within [0, cap]
+            for i, v in enumerate(parts):
+                assert sub_tot_cost[i] + v * sub_costs[i] >= 0, f"case batch {batch_idx} sub {i} negative cumulative"
+                assert sub_tot_cost[i] + v * sub_costs[i] <= sub_caps[i], f"case batch {batch_idx} sub {i} cap exceeded"
 
-            # Check group min: if group has effective cap, its total allocation for this batch should be at least min if load sufficient
-            # To keep lenient, we just check that allocations are non-negative and don't exceed effective caps
-            # Effective caps check (including rate and burst)
-            sum_member_rem = [0] * G
-            for s_idx, s in enumerate(subs):
-                gid = s[0]
+            # Compute effective count caps at batch start (remaining)
+            s_eff_count = []
+            for s_idx in range(S):
+                cost = sub_costs[s_idx]
+                if cost <= 0:
+                    cost = 1
+                rem_cost = sub_caps[s_idx] - sub_tot_cost[s_idx]
+                rem_count = rem_cost // cost if cost else 0
+                ra = subs[s_idx][5] if len(subs[s_idx]) > 5 else 0
+                bu = subs[s_idx][6] if len(subs[s_idx]) > 6 else 0
+                if ra > 0:
+                    max_batch = ra + bu
+                    if rem_count > max_batch:
+                        rem_count = max_batch
+                s_eff_count.append(max(0, rem_count))
+
+            sum_member_eff = [0]*G
+            min_cost_in_group = [10**18]*G
+            for s_idx in range(S):
+                gid = subs[s_idx][0]
                 if 0 <= gid < G:
-                    # remaining cost -> count
-                    cost = sub_costs[s_idx]
-                    rem_cost = sub_caps[s_idx] - sub_tot_cost[s_idx]
-                    rem_count = rem_cost // cost if cost > 0 else 0
-                    # rate+burst
-                    ra = subs[s_idx][5] if len(subs[s_idx]) > 5 else 0
-                    bu = subs[s_idx][6] if len(subs[s_idx]) > 6 else 0
-                    if ra > 0:
-                        max_batch = ra + bu
-                        if rem_count > max_batch:
-                            remCount = max_batch
-                            rem_count = max_batch
-                    sum_member_rem[gid] += rem_count
-            eff_g = []
+                    sum_member_eff[gid] += s_eff_count[s_idx]
+                    if sub_costs[s_idx] < min_cost_in_group[gid]:
+                        min_cost_in_group[gid] = sub_costs[s_idx]
+
+            eff_g_count = []
             for g in range(G):
-                rem_cost = group_caps[g] - group_tot_cost[g]
-                # Find min cost in group for count conversion
-                min_c = None
-                for s_idx, s in enumerate(subs):
-                    if s[0] == g:
-                        c = sub_costs[s_idx]
-                        if min_c is None or c < min_c:
-                            min_c = c
-                if min_c is None:
-                    eff_g.append(0)
+                has = False
+                for s in range(S):
+                    if subs[s][0] == g:
+                        has = True
+                        break
+                if not has:
+                    eff_g_count.append(0)
                     continue
-                g_rem_count = rem_cost // min_c if min_c > 0 else rem_cost
+                g_rem_cost = group_caps[g] - group_tot_cost[g]
+                if minCost := min_cost_in_group[g] == 10**18:
+                    g_rem_count = 0
+                else:
+                    mc = min_cost_in_group[g]
+                    g_rem_count = g_rem_cost // mc if mc > 0 else g_rem_cost
                 c = g_rem_count
-                if sum_member_rem[g] < c:
-                    c = sum_member_rem[g]
+                if sum_member_eff[g] < c:
+                    c = sum_member_eff[g]
                 ra = groups[g][4] if len(groups[g]) > 4 else 0
                 bu = groups[g][5] if len(groups[g]) > 5 else 0
                 if ra > 0:
                     max_batch = ra + bu
                     if c > max_batch:
                         c = max_batch
-                eff_g.append(c)
+                eff_g_count.append(max(0, c))
 
+            # Check group caps: per-batch group allocation (sum of its members counts) <= eff_g
             for g in range(G):
-                gs_count = sum(parts[i] for i, s in enumerate(subs) if s[0] == g)
+                gs_count = sum(parts[i] for i in range(S) if subs[i][0] == g)
                 if gs_count >= 0:
-                    assert gs_count <= eff_g[g] or True
-                    gmin = group_mins[g]
-                    if load >= gmin and eff_g[g] >= gmin:
-                        assert gs_count >= min(gmin, eff_g[g]) or True
+                    assert gs_count <= eff_g_count[g], f"batch {batch_idx} group {g} exceeds eff {gs_count} > {eff_g_count[g]}"
 
+            # Check min guarantees per group in priority order
+            # Groups sorted by effective priority desc (base priority, since no aging in this balanced version) tie idx
+            g_order = sorted(range(G), key=lambda g: (-groups[g][0], g))
+            rem_load = load
+            for g in g_order:
+                if rem_load <= 0:
+                    break
+                eff = eff_g_count[g]
+                gmin = group_mins[g]
+                capped_min = min(gmin, eff)
+                if rem_load >= capped_min and eff >= capped_min and capped_min > 0:
+                    gs_count = sum(parts[i] for i in range(S) if subs[i][0] == g)
+                    assert gs_count >= capped_min, f"batch {batch_idx} group {g} min {capped_min} not met got {gs_count}"
+                # For priority check, if load insufficient, higher priority should be satisfied first
+                # We check that higher priority groups get at least min before lower
+                rem_load -= sum(parts[i] for i in range(S) if subs[i][0] == g)
+
+            # Per-group subs min and priority checks
+            for g in range(G):
+                members = [s_idx for s_idx in range(S) if subs[s_idx][0] == g]
+                members_sorted = sorted(members, key=lambda s_idx: (-subs[s_idx][1], subs[s_idx][0]))
+                rem_group = sum(parts[i] for i in members)
+                for s_idx in members_sorted:
+                    s = subs[s_idx]
+                    s_min = s[2]
+                    s_cap = s_eff_count[s_idx]
+                    capped_min = min(s_min, s_cap)
+                    if rem_group >= capped_min and s_cap >= capped_min and capped_min > 0:
+                        assert parts[s_idx] >= capped_min, f"batch {batch_idx} sub {s_idx} min {capped_min} not met got {parts[s_idx]}"
+                    rem_group -= parts[s_idx]
+
+            # Update totals
             for i, v in enumerate(parts):
                 sub_tot_cost[i] += v * sub_costs[i]
             for g in range(G):
-                gs_cost = sum(
-                    parts[i] * sub_costs[i] for i, s in enumerate(subs) if s[0] == g
-                )
+                gs_cost = sum(parts[i] * sub_costs[i] for i in range(S) if subs[i][0] == g)
                 group_tot_cost[g] += gs_cost
                 assert group_tot_cost[g] >= 0
                 assert group_tot_cost[g] <= group_caps[g]
 
-            # Priority check for min phase: allocations should respect priority order for mins
-            # For any two subs in same group where one has higher priority, if load insufficient for both mins,
-            # higher priority should get its min first. We check that higher priority gets at least as much as lower
-            # when mins are equal and caps sufficient and load limited? Lenient: if both have same cap and min 1 and load 1, higher prio should get 1, lower 0
-            # For our sensitive cases, we just ensure that higher priority subs get >= lower when load limited
-            # This is already covered by exact cases for non-sensitive, but for sensitive we keep invariant
-            # Check that no allocation is negative for positive loads (except deallocation cases which we don't have in sensitive)
             if load >= 0:
                 for p in parts:
                     assert p >= 0
 
-        # Final totals non-negative and within caps already checked
 
 
 def test_conservation():
