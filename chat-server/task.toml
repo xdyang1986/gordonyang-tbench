@@ -1,0 +1,51 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/chat-server"
+description = "Hard Go multi-turn chat server: Turn1 implements core room/user/message communication with persistence, atomic writes, checksum integrity. Turn2 adds large-scale support: weighted sharding across nodes, per-user rate limiting (token bucket), presence heartbeat with TTL, message pagination, ops log, snapshot/restore, and concurrent safety for 10k+ messages."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "chat", "messaging", "sharding", "rate-limit", "presence", "pagination", "concurrency"]
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "real-time_communication"
+category_subdomain = "backend_services"
+tags = ["iterate_on_feature", "chat-server", "messaging", "golang", "sharding", "rate-limiting", "presence", "distributed-systems"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 90.0
+junior_time_estimate_min = 180.0
+languages = ["go"]
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
