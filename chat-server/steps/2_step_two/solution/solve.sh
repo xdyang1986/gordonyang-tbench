@@ -3003,7 +3003,8 @@ func main() {
 
 EOMAIN
 echo "Step2 solution applied"
-go build -o /tmp/chat_server_bin . && echo "Build OK" && rm -f /tmp/chat_server_bin
+mkdir -p /tmp/codimango
+go build -o /tmp/codimango/chat_server_bin . && echo "Build OK" && rm -f /tmp/codimango/chat_server_bin
 python3 << 'PY'
 import json, os, hashlib
 def write_with_checksum(path, data):
