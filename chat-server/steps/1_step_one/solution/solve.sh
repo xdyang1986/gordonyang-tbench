@@ -110,6 +110,7 @@ func saveData(path string, d Data) error {
 	}
 	enc := json.NewEncoder(tmp)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	enc.Encode(d)
 	tmp.Close()
 	return os.Rename(tmp.Name(), path)
