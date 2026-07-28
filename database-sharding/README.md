@@ -83,3 +83,23 @@ Written in Go, tested via Python harness that builds binary with `go build -o <b
 - Migration golden solution now **actually removes wrong-shard duplicates**, leaving only correct shard – regression test `test_migrate_cleans_duplicate_across_shards` asserts this.
 
 Validation: **Turn1 31/31**, **Turn2 24/24** direct pytest and harness reward 1, docker builds, skeleton fails as expected.
+
+## Completion Rates (online validation — commit 8089743, 2026-07-28)
+
+- Oracle: **3/3** — validated
+- GPT-5.5 (codex): **3/10** — validated
+- Opus 4.8 (agent): _run in progress_
+- Avocado (metacode): _run in progress_
+- avgReward **0.63**, validation passing.
+
+## Failure Analysis (latest run)
+
+Derived from downloaded trial CTRF artifacts. This is a **clean run** (no infra errors — every failing trial `status=completed`), and the signal is razor-sharp and consistent across models.
+
+- **`test_get_shard_id_uses_md5` — the sole discriminator.** All 7 of GPT-5.5's genuine failures fail *only* this test (41/42); Avocado's completed failures fail *only* this test too. The failing assertion is on the **empty-string key**: `get-shard-id ""` must succeed (exit 0) and compute an MD5 shard for the empty string, but the models return **exit 2 with `get-shard-id requires a key`** — they conflate an *empty-string key* with a *missing key argument*. A subtle spec edge: an empty string is a provided (valid) key to hash, distinct from omitting the argument entirely (which the separate `test_missing_key_arg_exit_2` correctly requires to exit 2, and the models pass that one).
+
+- **GPT-5.5 (codex) — 3/10.** 3 clean passes, 7 genuine failures, all `test_get_shard_id_uses_md5` only. Zero infra.
+- **Avocado (metacode) — in progress.** Clean run so far; every completed failure is `test_get_shard_id_uses_md5` only (41/42).
+- **Oracle — 3/3.** Reference handles the empty-string key correctly.
+
+**Assessment:** genuine, well-behaved discriminator — the empty-string-key MD5 edge trips both GPT-5.5 (heavily, 3/10) and Avocado on real completed trials with no infra noise. Oracle solves it. Final Opus/Avocado numbers pending run completion.
