@@ -1,7 +1,7 @@
 schema_version = "1.1"
 
 [task]
-name = "codimango/database-sharding"
+name = "xdyang1986/database-sharding"
 description = "Implement a database sharding proxy in Go: first iteration handles new traffic sharding (MD5 mod) with CLI proxy and validation; second iteration fixes legacy migration with zero-downtime fallback, atomic writes, idempotent migration, dry-run, backup, duplicate detection, and corruption handling."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "database", "sharding", "proxy", "migration", "atomic-write"]
