@@ -1282,7 +1282,7 @@ func main() {
 				}
 				room, exists := data.Rooms[roomID]
 				if !exists {
-					return fmt.Errorf("room not exist")
+					return atomicWriteStoreData(dataPath, data)
 				}
 				newUsers := []string{}
 				for _, u := range room.Users {
@@ -1294,10 +1294,6 @@ func main() {
 				return atomicWriteStoreData(dataPath, data)
 			})
 			if err != nil {
-				if err.Error() == "room not exist" {
-					fmt.Fprintf(os.Stderr, "room %s does not exist\n", roomID)
-					os.Exit(2)
-				}
 				fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
 				os.Exit(1)
 			}
@@ -2001,7 +1997,7 @@ func main() {
 					}
 				}
 				if !foundAny {
-					return fmt.Errorf("room not exist")
+					return nil
 				}
 				for _, s := range cfg.Shards {
 					data, _, err := loadShardFileData(s.Path)
@@ -2036,7 +2032,7 @@ func main() {
 			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
-				return fmt.Errorf("room not exist")
+				return nil
 			}
 			newUsers := []string{}
 			for _, u := range room.Users {
@@ -2052,10 +2048,6 @@ func main() {
 			return nil
 		})
 		if err != nil {
-			if err.Error() == "room not exist" {
-				fmt.Fprintf(os.Stderr, "room %s does not exist\n", roomID)
-				os.Exit(2)
-			}
 			fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
 			os.Exit(1)
 		}
@@ -3006,7 +2998,7 @@ echo "Step2 solution applied"
 mkdir -p /tmp/codimango
 go build -o /tmp/codimango/chat_server_bin . && echo "Build OK" && rm -f /tmp/codimango/chat_server_bin
 python3 << 'PY'
-import json, os, hashlib
+import json, hashlib, os
 def write_with_checksum(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))

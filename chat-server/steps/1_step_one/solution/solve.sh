@@ -445,7 +445,8 @@ func main() {
 			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
-				return fmt.Errorf("room not exist")
+				// idempotent: leaving non-existent room is success (per Turn1 spec for large-scale ease)
+				return atomicWrite(dataPath, data)
 			}
 			newUsers := []string{}
 			for _, u := range room.Users {
@@ -457,10 +458,6 @@ func main() {
 			return atomicWrite(dataPath, data)
 		})
 		if err != nil {
-			if err.Error() == "room not exist" {
-				fmt.Fprintf(os.Stderr, "room %s does not exist\n", roomID)
-				os.Exit(2)
-			}
 			fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
 			os.Exit(1)
 		}

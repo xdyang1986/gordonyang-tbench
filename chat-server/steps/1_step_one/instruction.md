@@ -88,8 +88,9 @@ File format (new):
 - `create-room` idempotent: if exists, still success.
 - `join` fails with exit 2 if room not exist.
 - `join` idempotent: duplicate join same user same room still success, list-users deduped.
+- `leave` idempotent: succeeds with exit 0 even if room doesn't exist or user not in room (tests expect 0 for nonexistent).
 - `send` to room: user must be member else exit 2 stderr, no stdout.
-- `get-messages`: sorted by id asc (which equals time order). If room not exist → empty array `[]`? Actually should be exit 2? For simplicity: if room not exist, return `[]` and exit 0 (tests expect empty for non-existent). However `list-users` for non-existent room should exit 2.
+- `get-messages`: sorted by id asc (which equals time order). If room not exist → empty array `[]` and exit 0 (tests expect empty for non-existent). However `list-users` for non-existent room should exit 2.
 - `list-rooms` sorted ascending.
 - `list-users` sorted ascending, exit 2 if room not exist.
 - `send-private`: always allowed, even if users never joined any room. Auto-track users in global list.
