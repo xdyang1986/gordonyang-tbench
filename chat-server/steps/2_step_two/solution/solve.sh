@@ -2998,7 +2998,7 @@ echo "Step2 solution applied"
 mkdir -p /tmp/codimango
 go build -o /tmp/codimango/chat_server_bin . && echo "Build OK" && rm -f /tmp/codimango/chat_server_bin
 python3 << 'PY'
-import json, hashlib, os
+import json, os, hashlib
 def write_with_checksum(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
@@ -3008,10 +3008,8 @@ def write_with_checksum(path, data):
 for f in os.listdir("/app/data") if os.path.exists("/app/data") else []:
     fp=os.path.join("/app/data",f)
     try:
-        if os.path.isfile(fp):
-            os.remove(fp)
-    except:
-        pass
+        if os.path.isfile(fp): os.remove(fp)
+    except: pass
 os.makedirs("/app/data", exist_ok=True)
 shards=[]
 weights=[1,2,1,1]
@@ -3019,20 +3017,9 @@ for i in range(4):
     p=f"/app/data/shard_{i}.json"
     shards.append({"id": i, "path": p, "weight": weights[i]})
     write_with_checksum(p, {"next_id": 1, "rooms": {}, "seen_users": {}})
-cfg={
-  "shard_count": 4,
-  "shards": shards,
-  "rate_limit": {"messages_per_second": 100, "burst": 1000},
-  "presence_ttl_seconds": 2,
-  "ops_log": "/app/data/chat_ops.log",
-  "private_path": "/app/data/private.json",
-  "presence_path": "/app/data/presence.json",
-  "rate_limit_path": "/app/data/rate_limit.json",
-  "counter_path": "/app/data/counter.json",
-  "users_path": "/app/data/users.json"
-}
-with open("/app/config.json","w") as f:
-    json.dump(cfg,f,indent=2)
+cfg={"shard_count": 4, "shards": shards, "rate_limit": {"messages_per_second": 100, "burst": 1000}, "presence_ttl_seconds": 2, "ops_log": "/app/data/chat_ops.log", "private_path": "/app/data/private.json", "presence_path": "/app/data/presence.json", "rate_limit_path": "/app/data/rate_limit.json", "counter_path": "/app/data/counter.json", "users_path": "/app/data/users.json"}
+import json as js
+with open("/app/config.json","w") as f: js.dump(cfg,f,indent=2)
 write_with_checksum("/app/data/private.json", {"private_messages": []})
 write_with_checksum("/app/data/presence.json", {})
 write_with_checksum("/app/data/rate_limit.json", {})
