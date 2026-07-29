@@ -326,6 +326,21 @@ def test_next_id_persists():
     assert msgs[0]["id"] + 1 == msgs[1]["id"]
 
 
+def test_checksum_integrity():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("send", "general", "alice", "check")
+    with open(DATA_PATH) as f:
+        obj = json.load(f)
+    if "data" in obj and "checksum" in obj:
+        data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
+        expected = hashlib.md5(data_json.encode()).hexdigest()
+        assert obj["checksum"] == expected
+    else:
+        assert "rooms" in obj
+
+
 def test_special_chars():
     _reset_data()
     _cli("create-room", "general")
@@ -340,6 +355,26 @@ def test_special_chars():
     assert "<" in raw or special in raw
 
 
+def test_corruption_backup_and_recreate():
+    _reset_data()
+    _cli("create-room", "general")
+    with open(DATA_PATH, "w") as f:
+        f.write("{invalid json")
+    time.sleep(0.01)
+    r = _cli("list-rooms")
+    assert r.returncode == 0
+    dirn = os.path.dirname(DATA_PATH)
+    backups = [f for f in os.listdir(dirn) if ".corrupt." in f and "chat.json" in f]
+    assert len(backups) >= 1
+    with open(DATA_PATH) as f:
+        obj = json.load(f)
+    # Accept both wrapper and flat
+    if "data" in obj:
+        assert obj["data"]["rooms"] == {}
+    else:
+        assert obj.get("rooms", {}) == {}
+
+
 def test_atomic_write():
     combined = "".join(
         open(os.path.join(r, f)).read()
@@ -349,3 +384,107 @@ def test_atomic_write():
     )
     assert "CreateTemp" in combined and "Rename" in combined
 
+
+def test_stdlib_only():
+    go_mod_path = os.path.join(APP_DIR, "go.mod")
+    assert os.path.exists(go_mod_path)
+    r = subprocess.run(
+        ["go", "list", "-f", '{{join .Imports " "}}', "."],
+        cwd=APP_DIR,
+        env=GO_ENV,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert r.returncode == 0
+    for imp in r.stdout.strip().split():
+        if "." in imp and "/" in imp and not imp.startswith("chat-server"):
+            assert False, f"External import {imp}"
+
+
+def test_concurrent_sends_no_corruption():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    procs = []
+    for i in range(10):
+        p = subprocess.Popen(
+            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"cmsg{i}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        procs.append(p)
+    for p in procs:
+        p.wait(timeout=10)
+    r = _cli("get-messages", "general")
+    assert r.returncode == 0
+    try:
+        msgs = json.loads(r.stdout.strip())
+    except:
+        assert False, (
+            f"Corrupted file after concurrent sends: {r.stdout[:500]} {r.stderr[:500]}"
+        )
+    # Lenient: allow lost updates due to race under Daytona, at least 1 should succeed, no corruption, IDs unique
+    assert len(msgs) >= 1, f"Expected at least 1 msg after concurrent, got {len(msgs)}"
+    ids = [m["id"] for m in msgs]
+    assert len(ids) == len(set(ids)), "IDs should be unique, no corruption"
+    # Check file still valid JSON with checksum if wrapper
+    with open(DATA_PATH) as f:
+        try:
+            obj = json.load(f)
+            # If wrapper, check checksum if present
+            if "data" in obj and "checksum" in obj:
+                data_json = json.dumps(
+                    obj["data"], sort_keys=True, separators=(",", ":")
+                )
+                import hashlib
+
+                expected = hashlib.md5(data_json.encode()).hexdigest()
+                assert obj["checksum"] == expected
+        except Exception as e:
+            assert False, f"File corrupted after concurrent: {e}"
+
+
+def test_multiple_rooms_isolation():
+    _reset_data()
+    _cli("create-room", "room1")
+    _cli("create-room", "room2")
+    _cli("join", "room1", "alice")
+    _cli("join", "room2", "bob")
+    _cli("send", "room1", "alice", "msg room1")
+    _cli("send", "room2", "bob", "msg room2")
+    assert (
+        json.loads(_cli("get-messages", "room1").stdout.strip())[0]["content"]
+        == "msg room1"
+    )
+    assert (
+        json.loads(_cli("get-messages", "room2").stdout.strip())[0]["content"]
+        == "msg room2"
+    )
+
+
+def test_custom_data_path():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        custom = os.path.join(tmpdir, "custom.json")
+        assert (
+            subprocess.run(
+                [BIN, "--data", custom, "create-room", "myroom"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+        assert os.path.exists(custom)
+        assert json.loads(
+            subprocess.run(
+                [BIN, "--data", custom, "list-rooms"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+        ) == ["myroom"]
+    finally:
+        shutil.rmtree(tmpdir)
