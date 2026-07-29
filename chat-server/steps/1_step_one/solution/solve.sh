@@ -71,6 +71,10 @@ func loadData(path string) Data {
 				}
 			}
 		}
+		// corruption: backup and return empty
+		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = os.WriteFile(backupPath, b, 0644)
+		fmt.Fprintf(os.Stderr, "Warning: chat file %s is corrupted (invalid JSON), backup to %s\n", path, backupPath)
 		return empty
 	}
 	if d.Rooms == nil {
