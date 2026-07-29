@@ -2,6 +2,7 @@
 set -e
 cat > /app/go.mod << 'EOGOMOD'
 module chat-server
+
 go 1.22
 EOGOMOD
 cat > /app/main.go << 'EOMAIN'
@@ -37,6 +38,32 @@ type Data struct {
 	PrivateMessages []Message        `json:"private_messages"`
 	NextID          int64            `json:"next_id"`
 	SeenUsers       map[string]bool  `json:"seen_users"`
+}
+
+
+func acquireLock(lockPath string) error {
+    for i := 0; i < 2000; i++ {
+        f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+        if err == nil {
+            f.Close()
+            return nil
+        }
+        time.Sleep(5 * time.Millisecond)
+    }
+    return fmt.Errorf("failed to acquire lock %s", lockPath)
+}
+
+func releaseLock(lockPath string) {
+    _ = os.Remove(lockPath)
+}
+
+func withLock(dataPath string, fn func() error) error {
+    lockPath := dataPath + ".lock"
+    if err := acquireLock(lockPath); err != nil {
+        return err
+    }
+    defer releaseLock(lockPath)
+    return fn()
 }
 
 func loadData(path string) Data {
@@ -414,6 +441,6 @@ python3 << 'PY'
 import json, os
 os.makedirs("/app/data", exist_ok=True)
 with open("/app/data/chat.json","w") as f:
-    json.dump({"rooms": {}, "private_messages": [], "next_id": 1, "seen_users": {}}, f, indent=2)
+    json.dump({"next_id": 1, "private_messages": [], "rooms": {}, "seen_users": {}}, f, indent=2)
 print("Reset data")
 PY
