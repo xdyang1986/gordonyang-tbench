@@ -2,7 +2,6 @@
 set -e
 cat > /app/go.mod << 'EOGOMOD'
 module chat-server
-
 go 1.22
 EOGOMOD
 cat > /app/main.go << 'EOMAIN'
@@ -71,10 +70,11 @@ func loadData(path string) Data {
 				}
 			}
 		}
-		// corruption: backup and return empty
+		// corruption: backup and recreate empty valid file
 		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 		_ = os.WriteFile(backupPath, b, 0644)
 		fmt.Fprintf(os.Stderr, "Warning: chat file %s is corrupted (invalid JSON), backup to %s\n", path, backupPath)
+		_ = saveData(path, empty)
 		return empty
 	}
 	if d.Rooms == nil {
