@@ -308,14 +308,44 @@ def test_missing_key_arg_exit_2():
 def test_get_shard_id_uses_md5():
     _reset_shards()
     cfg = _load_config()
-    keys = ["user:1", "user:2", "order:123", "test-key", "another", "hello world", ""]
+    # Per feedback: empty string "" is NOT included as valid key to avoid Oracle null ambiguity
+    keys = ["user:1", "user:2", "order:123", "test-key", "another", "hello world"]
     for k in keys:
         r = _proxy_cli("get-shard-id", k)
-        assert r.returncode == 0
+        assert r.returncode == 0, f"get-shard-id failed for {k!r}: {r.stderr}"
         got = int(r.stdout.strip())
         expected = _expected_shard_id(k, cfg["shard_count"])
         assert got == expected
         assert 0 <= got < cfg["shard_count"]
+
+
+def test_empty_string_not_legitimate_key():
+    # Per latest reviewer decision Request changes: empty string handling must be explicit
+    # Spec now says "" IS NOT legitimate key (treat as invalid input exit 2, no stdout) to avoid Oracle null ambiguity
+    # This test verifies that empty string is treated as invalid (exit 2) and produces no stdout, same as missing arg
+    # Alternatively, if you treat "" as valid per old spec, you will fail this test, but spec now explicitly says invalid
+    # This replaces previous ambiguous discriminator that hinged on unstated desire
+    _reset_shards()
+    # get-shard-id "" should exit 2, no stdout
+    r = _proxy_cli("get-shard-id", "")
+    assert r.returncode == 2, (
+        f"Empty string key should be treated as invalid input exit 2 per clarified spec, got {r.returncode} stdout={r.stdout!r} stderr={r.stderr!r}"
+    )
+    assert r.stdout.strip() == "", (
+        f"Invalid input should produce no stdout, got {r.stdout!r}"
+    )
+    # set "" should also exit 2
+    r = _proxy_cli("set", "", json.dumps("val"))
+    assert r.returncode == 2, f"set empty key should exit 2"
+    assert r.stdout.strip() == ""
+    # get "" should exit 2
+    r = _proxy_cli("get", "")
+    assert r.returncode == 2
+    assert r.stdout.strip() == ""
+    # delete "" should exit 2
+    r = _proxy_cli("delete", "")
+    assert r.returncode == 2
+    assert r.stdout.strip() == ""
 
 
 def test_get_shard_id_deterministic():
