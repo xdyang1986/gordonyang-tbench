@@ -1027,10 +1027,18 @@ func main() {
 			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
+		if cmdArgs[0] == "" {
+			fmt.Fprintln(os.Stderr, "empty key not allowed")
+			os.Exit(2)
+		}
 		fmt.Println(proxy.GetShardID(cmdArgs[0]))
 	case "get-shard-path":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
+			os.Exit(2)
+		}
+		if cmdArgs[0] == "" {
+			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		path, err := proxy.GetShardPath(cmdArgs[0])
@@ -1042,6 +1050,10 @@ func main() {
 	case "get":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
+			os.Exit(2)
+		}
+		if cmdArgs[0] == "" {
+			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		val, ok := proxy.Get(cmdArgs[0])
@@ -1057,6 +1069,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "requires <key> <value_json>")
 			os.Exit(2)
 		}
+		if cmdArgs[0] == "" {
+			fmt.Fprintln(os.Stderr, "empty key not allowed")
+			os.Exit(2)
+		}
 		var v interface{}
 		if err := json.Unmarshal([]byte(cmdArgs[1]), &v); err != nil {
 			v = cmdArgs[1]
@@ -1068,6 +1084,10 @@ func main() {
 	case "delete":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
+			os.Exit(2)
+		}
+		if cmdArgs[0] == "" {
+			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		del, err := proxy.Delete(cmdArgs[0])
