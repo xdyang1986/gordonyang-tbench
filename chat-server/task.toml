@@ -13,6 +13,7 @@ difficulty = "hard"
 category = "software-engineering"
 category_usecase = "handle_events"
 category_subdomain = "backend_services"
+reward_type = "binary"
 tags = ["iterate_on_feature", "chat-server", "messaging", "golang", "sharding", "rate-limiting", "presence", "distributed-systems"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
