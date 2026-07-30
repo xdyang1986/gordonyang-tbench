@@ -96,3 +96,18 @@ Written in Go, tested via Python harness that builds binary with `go build -o <b
 
 - Contamination check: **MEDIUM** (passed). Provenance: no third-party model authorship detected.
 - Oracle (reference solution) passes cleanly; weaker models (avocado 20%, codex 30%) mostly fail → difficulty calibrated as hard but solvable.
+
+#### Failure analysis (per-turn step breakdown)
+
+Turn 2 only runs when Turn 1 earns full reward (`min_reward=1`, `dependencies=["1_step_one"]`), so Turn-2 sample sizes below equal the number of Turn-1 passes for that agent.
+
+| Agent | Turn 1 step-pass | Turn 2 step-pass | Full multi-turn |
+|---|---|---|---|
+| oracle | 3/3 | 3/3 | 3/3 |
+| claude-code (opus-4-8) | 10/10 | 10/10 | 10/10 |
+| codex (gpt-5.5) | 3/10 | 3/3 | 3/10 |
+| metacode (avocado-5.14) | 3/10 | 2/3 | 2/10 |
+
+- **Turn 1 is the discriminator.** Weak models pass Turn 1 only ~30% of the time; almost every failure occurs there. The Turn-1 gates that break them are the composed integrity requirements: big-endian MD5-mod sharding (no CRC32/FNV), the `data`+`checksum` canonical-JSON header, config validation with silent `exit 2`, and corruption backup/recreate.
+- **Turn 2 is mostly reached-and-solved.** Once a model clears Turn 1, it usually completes migration (codex 3/3, avocado 2/3) — the multi-turn `inherit_prior_session` lets it build on a correct Turn-1 base. Avocado's single Turn-2 loss is the duplicate/misplaced-key cleanup path.
+- **Net:** the reward gap between opus (1.00) and avocado/codex (0.25/0.30) is driven almost entirely by Turn-1 completion, confirming the task separates strong from weak agents rather than being uniformly too hard (oracle 3/3) or too easy.
