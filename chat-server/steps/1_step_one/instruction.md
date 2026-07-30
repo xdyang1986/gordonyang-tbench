@@ -1,4 +1,10 @@
-# Turn 1: Chat Server Core Communication (Go) – Medium-Hard
+# Turn 1: Chat Server Core Communication (Go) – Hard
+
+## Background
+
+We need a production-grade chat server for team collaboration. Build core chat communication functionality in Go with durable persistence and integrity. This turn is deliberately hard: checksum canonicalization, atomic multi-process safety, global ID monotonicity, and message content with spaces.
+
+Data directory `/app/data/` writable, default persistence `/app/data/chat.json`.
 
 ## Background
 
@@ -75,8 +81,13 @@ File at `--data` path must use **either** simple flat JSON **or** wrapper with c
   "checksum": "hex md5 of canonical JSON of data without HTML escaping"
 }
 ```
-- Canonical data JSON: `json.dumps(data, sort_keys=True, separators=(',', ':'))` with no HTML escaping – Go must use `json.Encoder.SetEscapeHTML(false)` for checksum calculation and file write. Test includes `<>&` in message content to ensure no escaping.
-- On write: atomic via `os.CreateTemp` in same dir + `os.Rename`. Behavioral check: during 10 concurrent `send` processes, file must never become invalid JSON and must preserve most or all successful sends – specifically at least 8 messages after 10 concurrent sends, IDs unique. This verifies atomic CreateTemp+Rename behaviorally, not via source string inspection.
+- Canonical data JSON: `json.dumps(data, sort_keys=True, separators=(',', ':'))` with no HTML escaping – Go must use `json.Encoder.SetEscapeHTML(false)` for checksum calculation and file write. Test includes `<>&` in message content to ensure no escaping, for both room and private messages.
+- On write: atomic via `os.CreateTemp` in same dir + `os.Rename` plus file lock `<data>.lock` with `O_CREATE|O_EXCL` retry loop (5ms sleep, 2000 tries). Behavioral hard check: during 10 concurrent `send` processes to same room, file must never become invalid JSON and must preserve **all** successful sends – specifically 10 messages after 10 concurrent sends, IDs unique, no partial writes. Lock file must be cleaned up after each command (must not remain). This is extra hard: requires proper file locking and atomic rename.
+- Message content with spaces: CLI receives `<message>` as remaining args. Implementation must use `strings.Join(remainingArgs, " ")` to support `send general alice Hello World with spaces` where message contains spaces without quoting. Tests will invoke binary with multiple args for message.
+- Global ID uniqueness: IDs must be globally incrementing int64 starting at 1, unique across both room and private messages, monotonic increasing, persists across restarts and interleaved sends. E.g., room msg id=1, private id=2, room id=3.
+- Large history: must handle 500 messages efficiently, pagination via limit and performance (<2s for 500).
+- Concurrent different rooms: 10 parallel sends to 10 different rooms must not corrupt file and each room must have its message.
+- SeenUsers persistence: `list-all-users` must persist even after room deletion; deleting room does not clear seen_users or reset next_id.
 - On read: validation before any command:
   - Missing file → empty store `rooms={}, private_messages=[], next_id=1, seen_users={}`
   - Empty file → empty store
@@ -97,15 +108,23 @@ File at `--data` path must use **either** simple flat JSON **or** wrapper with c
 - `get-private` both directions sorted asc
 - `list-all-users` union ever seen (rooms users current + private participants + seen_users persisted)
 
-### Integrity Coverage (Turn1 will test explicitly)
-- `test_checksum_integrity`: if file uses wrapper, verify checksum matches canonical (Python's sort_keys+separators, Go SetEscapeHTML(false)). If flat, at least check file has `rooms` key.
-- `test_checksum_mismatch_handling`: create wrapper file with data but wrong checksum, run `list-rooms`, expect backup file named `<original>.corrupt.<nanosec>` where nanosec integer, stderr warning contains "corrupt" or "checksum", and file recreated empty with valid checksum.
-- `test_missing_checksum_handling`: wrapper with `data` but missing `checksum` or empty checksum → same corruption handling (backup, warning, recreate empty)
-- `test_invalid_json_backup_naming`: file with invalid JSON `{invalid` → backup file named `<path>.corrupt.<nanosec>` with integer nanosec, and recreated file valid empty.
-- `test_stderr_warnings`: corruption produces warning to stderr containing "corrupt"
-- `test_atomic_behavior_concurrent`: behavioral atomicity – during 10 concurrent `send` processes, continuously reading file must never yield invalid JSON; after 10 concurrent sends, file must remain valid and preserve most or all successful sends – at least 8 messages, IDs unique, file valid. This verifies atomic CreateTemp+Rename behaviorally, not via source string inspection.
-- `test_stdlib_only`: `go.mod` no external requires and `go list -f '{{join .Imports " "}}' .` has no dotted imports.
-- `test_atomic_write_advisory`: previously source-string check `CreateTemp`+`Rename` – now made **advisory** not reward-critical: if not found, log warning but don't fail; behavioral concurrent test is reward-critical.
+### Integrity Coverage (Turn1 will test explicitly – extra hard)
+- `test_checksum_integrity`: strict wrapper with `data`+`checksum`, checksum matches canonical Python sort_keys+separators, Go SetEscapeHTML(false). Checks both room and private special chars.
+- `test_checksum_mismatch_handling`: wrong checksum → backup `<original>.corrupt.<nanosec>` integer, stderr warning containing "corrupt"/"checksum", recreated empty valid wrapper.
+- `test_missing_checksum_handling`: missing/empty checksum → same corruption handling.
+- `test_invalid_json_backup_naming`: invalid JSON `{invalid` → backup naming integer nanosec, recreated valid.
+- `test_stderr_warnings`: corruption produces stderr warning containing "corrupt".
+- `test_atomic_behavior_concurrent`: hard behavioral atomicity – 10 concurrent sends to same room, file never invalid JSON, must preserve **all 10** messages (not 8), IDs unique. Requires CreateTemp+Rename + file lock.
+- `test_atomic_write_advisory`: source-string check `CreateTemp`+`Rename` advisory (warning) – behavioral test is reward-critical.
+- `test_stdlib_only`: no external imports.
+- `test_send_with_spaces_via_join`: `send general alice Hello World with spaces` passed as multiple args must be joined to "Hello World with spaces". Similarly for private.
+- `test_global_id_uniqueness_interleaved`: interleaved room and private sends must have globally monotonic IDs, unique across both.
+- `test_large_history_and_pagination_performance`: 500 messages, limit/offset pagination, <2s.
+- `test_concurrent_different_rooms`: 10 parallel sends to 10 different rooms, each room 1 message, no corruption, IDs unique.
+- `test_seen_users_persists_after_delete`: list-all-users persists after room deletion, next_id not reset.
+- `test_file_lock_cleanup`: after command, .lock file must not remain.
+- `test_delete_room_cleans`: delete removes room messages but not other rooms, not seen_users.
+- `test_private_special_chars_no_escape`: private messages with <>& must use SetEscapeHTML(false) and raw file contains "<".
 
 ### Exit Codes
 0 success, 1 I/O error, 2 invalid input. For `leave` nonexistent, exit 0 idempotent.
@@ -133,7 +152,9 @@ go build -o ./chat-server .
 
 Implement at `/app` – Turn1.
 
-### Success Criteria
+### Success Criteria – Hard
 - Binary builds, help contains keywords, bare help works
-- Rooms, joins, leaves idempotent, messages ordered, private isolation, persistence via CLI (not just raw file), sorted lists
-- Integrity: checksum wrapper optional for Turn1 but one test requires wrapper to be implementable, special chars, atomic behavioral, corruption backup naming, stderr warnings, stdlib-only
+- Rooms, joins, leaves idempotent, messages ordered globally monotonic across room+private, private isolation, persistence via CLI, sorted lists
+- Integrity hard: strict wrapper checksum canonical no HTML escape for both room and private, corruption backup naming integer nanosec, stderr warnings, stdlib-only, atomic CreateTemp+Rename + file lock preserving all 10 concurrent sends, lock cleanup, spaces via Join
+- Large history 500 msgs performance <2s, concurrent different rooms, seen_users persists after delete, next_id not reset
+- Extra hard edge cases make naive WriteFile or per-room counter fail

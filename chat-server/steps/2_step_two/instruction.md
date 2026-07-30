@@ -1,4 +1,10 @@
-# Turn 2: Large-Scale Chat Server Support (Go)
+# Turn 2: Large-Scale Chat Server Support (Go) – Extra Hard
+
+## Background
+
+Turn 1 implemented core chat communication. Now we need to scale to many rooms and users with production-grade distributed systems requirements. This turn is extra hard: weighted sharding, persistent token bucket with refill, presence TTL, pagination performance, atomic multi-file transactions, full snapshot/restore, ops-log corruption tolerance, and strict concurrency preserving all 10 sends.
+
+Turn 1 code is present via `inherit_prior_session`.
 
 ## Background
 
@@ -72,14 +78,14 @@ Validation: bad config (invalid JSON, shard_count <=0, duplicate id, empty path,
 - **Per-user behavior**: each user independent bucket
 - **Persistence path**: `rate_limit_path` default `/app/data/rate_limit.json`, wrapper format with checksum `{"data": {"alice": {"tokens":..., "last_refill":...}}, "checksum": "..."}`, atomic via `CreateTemp`+`Rename`, corruption handling same as other files, file locking via global lock `/app/data/global.lock`
 - **Exit code / stderr**: if rate-limited, exit code 1 (not 2), stderr must contain "rate limit" (case-insensitive), no stdout, must NOT increment message IDs and must NOT append to ops log
-- **Tests for this turn**: verify both within-burst success and rejection. Burst enforcement: with burst 2, 2 sends succeed, 3rd must fail exit 1 with "rate limit" stderr and produce no ID increment and no ops_log side effects. Per-user buckets independent, refill after elapsed time (tested via persistence).
+- **Tests for this turn – extra hard**: verify both within-burst success and rejection, **refill after sleep**, and **persistence across restarts**. Burst enforcement: with burst 2 rate 1, 2 sends succeed, 3rd must fail exit 1 with "rate limit" stderr and produce no ID increment and no ops_log side effects. After 1.5s sleep, token refills and next send must succeed. Per-user buckets independent, and rate_limit file must persist across CLI invocations (corruption handling tested).
 
 ### Presence (large-scale)
 
 - `heartbeat <userID>`: updates user's last_seen to now (UnixNano) persisted in file at `presence_path` default `/app/data/presence.json`, wrapper with checksum, atomic writes, corruption handling, global lock
 - `get-presence <userID>`: returns JSON `{"user_id": "alice", "online": true/false, "last_seen": 123, "last_seen_seconds_ago": 0.5}` where `online = now - last_seen <= presence_ttl_seconds * 1e9` (TTL from config default 60). If user never heartbeat, online false, last_seen 0
 - `list-online`: returns JSON array sorted of userIDs whose last_seen within TTL, i.e., `now - last_seen <= TTL*1e9`
-- **Tests for this turn**: verify heartbeat makes online, `list-online` contains user, and TTL expiry. With TTL 2s, after heartbeat and sleep 2.5-3s, `get-presence` must return `online=false` and `list-online` must not contain user.
+- **Tests for this turn – extra hard**: verify heartbeat makes online, `list-online` contains user, **TTL expiry**, and **unknown user handling**. With TTL 2s, after heartbeat and sleep 3s, `get-presence` must return `online=false` and `list-online` must not contain user. For user never seen, `get-presence` must return `{"user_id":..., "online":false, "last_seen":0, "last_seen_seconds_ago":0}`. Presence file must use wrapper checksum and handle corruption.
 
 ### New Commands (MUST)
 
@@ -113,29 +119,36 @@ Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
 
 - `global:` prefix → -1 broadcast, `get-shard-path` returns comma-separated sorted list of all shard paths
 
-### Pagination
+### Pagination – Extra Hard
 
 - `get-messages <roomID> [limit] [offset]`: limit 0 = all, offset 0 default, returns `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]`
-- Similarly `get-private <u1> <u2> [limit] [offset]` must support offset pagination.
-- Must work for 50 messages quickly, and for large history 200 performance test <2s. Tests verify both `get-messages` and `get-private` pagination with offset: e.g., limit 10 offset 0 → msg0-9, offset 10 → msg10-19.
+- Similarly `get-private <u1> <u2> [limit] [offset]` must support offset pagination, both directions.
+- Must handle spaces via `strings.Join` for message content as in Turn1.
+- Must work for 500 messages quickly, and for large history 1000 performance test <2s. Tests verify both `get-messages` and `get-private` pagination with offset: e.g., limit 10 offset 0 → msg0-9, offset 10 → msg10-19, offset 500, and reversely. O(n) slicing required, not O(n^2).
+- Global ID monotonic: pagination must preserve global ID order.
 
-### Snapshot/Restore
+### Snapshot/Restore – Extra Hard
 
-- `snapshot <backup_path>`: dir mode – mkdir -p backup_path, copy each shard file (if exists), private_path, presence_path, counter_path, users_path, rate_limit_path, ops_log into backup dir (basename preserved). Must preserve private messages, presence, counter (next_id), users, rate_limit, and ops_log.
-- `restore <backup_path>`: dir – copy files back from backup dir to original paths (overwrite). After restore, private messages, presence, counter, users, rate_limit, and ops_log must be exactly as snapshot time (tested).
-- Exit 0
+- `snapshot <backup_path>`: two modes:
+  - **Dir mode** (no .json suffix or existing dir): mkdir -p backup_path, copy each shard file (if exists), private_path, presence_path, counter_path, users_path, rate_limit_path, ops_log into backup dir (basename preserved), plus config.json. Must preserve private messages, presence, counter (next_id), users, rate_limit, and ops_log exactly.
+  - **File mode** (path ends with .json): writes combined JSON file with keys `shards` (map shard_id->ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log`. Reference solution implements both; tests verify both modes.
+- `restore <backup_path>`: dir mode copies files back from backup dir to original paths (overwrite). File mode reads combined JSON and restores each component via atomic writes. After restore, private messages, presence, counter (next_id must be restored, so next send gets expected ID), users, rate_limit, and ops_log must be exactly as snapshot time. Tests verify that after restore, mutated data (new rooms, new users, new private msgs) are gone and old state restored, including that `list-all-users` does not contain post-snapshot users and `list-rooms` does not contain post-snapshot rooms.
+- Exit 0, must handle global lock.
 
-### Integrity & Concurrency (Turn2, lenient for ease)
+### Integrity & Concurrency (Turn2, extra hard)
 
-- Persistence files (chat.json, shard_*.json, private.json, presence.json, rate_limit.json, counter.json, users.json) may use simple flat JSON OR wrapper `{"data":..., "checksum":...}` – tests accept both for ease, but reference solution uses wrapper with checksum where checksum = MD5 of canonical data JSON `json.dumps(data, sort_keys=True, separators=(',',':'))` with `SetEscapeHTML(false)`, atomic via `CreateTemp`+`Rename`
-- Corruption handling: if file has invalid JSON, backup to `<path>.corrupt.<nanosec>` where nanosec = `time.Now().UnixNano()` integer, stderr warning containing "corrupt" or "checksum", recreate empty valid file
+- Persistence files (chat.json, shard_*.json, private.json, presence.json, rate_limit.json, counter.json, users.json) **must** use wrapper `{"data":..., "checksum":...}` where checksum = MD5 of canonical data JSON `json.dumps(data, sort_keys=True, separators=(',',':'))` with `SetEscapeHTML(false)`, atomic via `CreateTemp`+`Rename`. Tests verify checksum for all sharded files (strict), not just chat.json.
+- Corruption handling **for all files**: if any persistence file has invalid JSON, backup to `<path>.corrupt.<nanosec>` integer, stderr warning containing "corrupt" or "checksum", recreate empty valid file with correct checksum. Tests verify for shard files, private.json, rate_limit.json, presence.json, etc.
 - Missing checksum handling for wrapped files: if file has `data` field but `checksum` missing or empty → corruption handling (backup, recreate empty)
 - Checksum mismatch: if file has `data` and `checksum` but checksum mismatch → corruption handling
-- **Atomic behavior under concurrent sends**: Must not corrupt file – behavioral check: during 10 concurrent sends, file must remain valid JSON, IDs unique, no partial writes. Tests spawn 10 parallel `send` processes and verify file stays valid JSON and preserves most or all successful sends – at least 8 messages after 10 concurrent sends. Requires file locking via `<path>.lock` or global lock `/app/data/global.lock` with `O_CREATE|O_EXCL` retry to prevent races.
+- **Atomic behavior under concurrent sends – extra hard**: Must not corrupt any shard file. Behavioral hard check: during 10 concurrent sends to same room, file must remain valid JSON, IDs unique, no partial writes, and preserve **all 10** messages (not 8). Additionally, 10 concurrent sends to 10 different rooms hashing to different shards must preserve all 10 with unique global IDs (tests multi-shard atomic via global lock). Requires file locking via `<path>.lock` or global lock `/app/data/global.lock` with `O_CREATE|O_EXCL` retry loop.
 - **Stdlib-only imports**: `go.mod` must have no external requires, `go list -f '{{join .Imports " "}}' .` should contain no dotted imports (only stdlib). Tested in Turn1.
-- **Source-string checks for `CreateTemp` and `Rename`**: These are **advisory** not reward-critical – reference solution contains them and behavioral atomic test is reward-critical. Tests will log warning if missing but not fail. Both Turn1 and Turn2 use behavioral atomicity as primary check.
-- **Ops-log invalid line handling**: `ops-log` must skip invalid JSON lines with warning to stderr containing "corrupt" or similar, and return valid entries as JSON array. Tested.
-- **Config validation & unknown-field tolerance**: malformed configs (invalid JSON, shard_count <=0, duplicate id, empty path, weight <=0) must exit 2; unknown fields must be ignored.
+- **Source-string checks for `CreateTemp` and `Rename`**: advisory – logs warning if missing but behavioral tests are reward-critical. Reference uses both.
+- **Ops-log invalid line handling**: `ops-log` must skip invalid JSON lines with warning to stderr containing "corrupt"/"skip"/"warning", and return valid entries as JSON array. Must preserve order.
+- **Config validation & unknown-field tolerance**: malformed configs (invalid JSON, shard_count <=0, duplicate id, empty path, weight <=0, negative id) must exit 2; unknown fields at top-level and inside shards must be ignored (tolerant). Tests verify unknown fields still allow room creation.
+- **Weighted distribution**: 50 rooms test with tolerance checking shard 1 weight2 gets ~40% of rooms.
+- **Global broadcast**: `global:` rooms must be created in all shards, `send` replicates to all, `get-messages` dedupes by ID, `distribution` counts global in each shard.
+- **Spaces handling**: message content with spaces must use `strings.Join` remaining args (tested for both room and private in sharded mode).
 
 ### Exit Codes
 0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, etc). `leave` idempotent exit 0 even if room not exist.
@@ -159,14 +172,15 @@ go build -o ./chat-server .
 
 Implement at `/app`.
 
-### Success
-- Turn1 features still work in sharded mode
-- Weighted sharding correct, global broadcast, distribution
-- Pagination works for 50 messages for both get-messages and get-private with offset
-- Snapshot/restore dir mode preserves private, presence, counter, users, rate_limit, ops_log
-- Presence heartbeat makes online and TTL expiry after sleep (offline + list-online)
-- Rate limiting: burst enforcement exit 1 with no ID/op-log side effects, per-user independent
-- Config validation: malformed configs exit 2, unknown fields tolerated
-- Ops-log skips invalid lines with warning
-- Help contains keywords
-- Concurrent atomic behavior preserves ≥8 of 10 sends
+### Success – Extra Hard
+- Turn1 features still work in sharded mode, including spaces via Join, global ID monotonic, checksum strict, atomic all-10 concurrent, lock cleanup
+- Weighted sharding correct (MD5 big-endian mod weighted, totalWeight sum, iterate sorted by id), global broadcast: id -1, comma-separated paths, replication to all shards, dedup on get-messages, distribution counts global in each shard, 20-room exact and 50-room weight tolerance
+- Pagination extra hard: 500+ messages for both get-messages and get-private with limit+offset, O(n) slicing, performance <2s for 1000 msgs
+- Snapshot/restore extra hard: dir mode copies all files + config, file mode combined JSON with shards/private/presence/counter/users/rate_limit/ops_log, restore verifies private, presence, counter next_id, users, rate_limit, ops_log exact, and that post-snapshot mutations are gone
+- Presence: heartbeat online, TTL expiry 2s→3s sleep offline, list-online excludes, unknown user returns online false last_seen 0, wrapper checksum + corruption handling
+- Rate limiting extra hard: burst 2 rate1, 2 succeed, 3rd fails exit1 no ID/op-log side effects, per-user independent, refill after 1.5s sleep succeeds, persistence across restarts, corruption handling for rate_limit.json, private.json
+- Config validation: invalid JSON, shard_count≤0, duplicate id, empty path, weight≤0, negative id → exit2; unknown fields at top and shard level tolerated
+- Ops-log skips invalid lines with warning, preserves order
+- Integrity: all shard files + private + presence + rate_limit + counter + users use wrapper checksum strict, atomic via CreateTemp+Rename, global lock
+- Help contains all keywords, bare no args → help exit0
+- Concurrent extra hard: 10 concurrent same room preserves all 10, 10 concurrent different shards preserves all 10 with unique global IDs
