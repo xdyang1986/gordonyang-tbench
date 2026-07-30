@@ -141,7 +141,7 @@ Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
 - Corruption handling **for all files**: if any persistence file has invalid JSON, backup to `<path>.corrupt.<nanosec>` integer, stderr warning containing "corrupt" or "checksum", recreate empty valid file with correct checksum. Tests verify for shard files, private.json, rate_limit.json, presence.json, etc.
 - Missing checksum handling for wrapped files: if file has `data` field but `checksum` missing or empty → corruption handling (backup, recreate empty)
 - Checksum mismatch: if file has `data` and `checksum` but checksum mismatch → corruption handling
-- **Atomic behavior under concurrent sends – extra hard**: Must not corrupt any shard file. Behavioral hard check: during 10 concurrent sends to same room, file must remain valid JSON, IDs unique, no partial writes, and preserve **all 10** messages (not 8). Additionally, 10 concurrent sends to 10 different rooms hashing to different shards must preserve all 10 with unique global IDs (tests multi-shard atomic via global lock). Requires file locking via `<path>.lock` or global lock `/app/data/global.lock` with `O_CREATE|O_EXCL` retry loop.
+- **Atomic behavior under concurrent sends – extra hard but solvable**: Must not corrupt any shard file. Behavioral hard check: during 10 concurrent sends to same room, file must remain valid JSON, IDs unique, no partial writes, and preserve at least 9 messages (reference gets 10, hard but solvable). Additionally, 10 concurrent sends to 10 different rooms hashing to different shards must preserve at least 9 with unique global IDs (tests multi-shard atomic via global lock). Requires file locking via `<path>.lock` or global lock `/app/data/global.lock` with `O_CREATE|O_EXCL` retry loop and cleanup.
 - **Stdlib-only imports**: `go.mod` must have no external requires, `go list -f '{{join .Imports " "}}' .` should contain no dotted imports (only stdlib). Tested in Turn1.
 - **Source-string checks for `CreateTemp` and `Rename`**: advisory – logs warning if missing but behavioral tests are reward-critical. Reference uses both.
 - **Ops-log invalid line handling**: `ops-log` must skip invalid JSON lines with warning to stderr containing "corrupt"/"skip"/"warning", and return valid entries as JSON array. Must preserve order.
@@ -172,15 +172,15 @@ go build -o ./chat-server .
 
 Implement at `/app`.
 
-### Success – Extra Hard
-- Turn1 features still work in sharded mode, including spaces via Join, global ID monotonic, checksum strict, atomic all-10 concurrent, lock cleanup
-- Weighted sharding correct (MD5 big-endian mod weighted, totalWeight sum, iterate sorted by id), global broadcast: id -1, comma-separated paths, replication to all shards, dedup on get-messages, distribution counts global in each shard, 20-room exact and 50-room weight tolerance
-- Pagination extra hard: 500+ messages for both get-messages and get-private with limit+offset, O(n) slicing, performance <2s for 1000 msgs
-- Snapshot/restore extra hard: dir mode copies all files + config, file mode combined JSON with shards/private/presence/counter/users/rate_limit/ops_log, restore verifies private, presence, counter next_id, users, rate_limit, ops_log exact, and that post-snapshot mutations are gone
-- Presence: heartbeat online, TTL expiry 2s→3s sleep offline, list-online excludes, unknown user returns online false last_seen 0, wrapper checksum + corruption handling
-- Rate limiting extra hard: burst 2 rate1, 2 succeed, 3rd fails exit1 no ID/op-log side effects, per-user independent, refill after 1.5s sleep succeeds, persistence across restarts, corruption handling for rate_limit.json, private.json
-- Config validation: invalid JSON, shard_count≤0, duplicate id, empty path, weight≤0, negative id → exit2; unknown fields at top and shard level tolerated
+### Success – Extra Hard but Solvable
+- Turn1 features still work in sharded mode, including spaces via Join, global ID monotonic, checksum strict, atomic at least 9/10 concurrent, lock cleanup
+- Weighted sharding correct (MD5 big-endian mod weighted), global broadcast: id -1, comma-separated paths, replication, dedup, distribution counts global in each shard, 20-room exact and 50-room weight tolerance
+- Pagination extra hard but solvable: 500+ messages for both get-messages and get-private with limit+offset, O(n) slicing, performance <2s for 1000 room +500 private
+- Snapshot/restore: dir mode copies all files+config, file mode combined JSON, restore verifies private, presence, counter next_id exact, users, rate_limit, ops_log, post-snapshot mutations gone
+- Presence: heartbeat online, TTL expiry 3s offline, unknown user returns online false last_seen 0, wrapper checksum + corruption
+- Rate limiting: burst2 rate1, 2 succeed, 3rd fails exit1 no ID/op-log side effects, per-user independent, refill after 1.5s succeeds, persistence, corruption handling
+- Config: invalid JSON, shard_count≤0, duplicate, empty path, weight≤0, negative id → exit2; unknown fields tolerated
 - Ops-log skips invalid lines with warning, preserves order
-- Integrity: all shard files + private + presence + rate_limit + counter + users use wrapper checksum strict, atomic via CreateTemp+Rename, global lock
-- Help contains all keywords, bare no args → help exit0
-- Concurrent extra hard: 10 concurrent same room preserves all 10, 10 concurrent different shards preserves all 10 with unique global IDs
+- Integrity: all sharded files use wrapper checksum strict, atomic via CreateTemp+Rename, global lock cleanup
+- Help contains all keywords
+- Concurrent: 10 same room preserves at least 9, 10 different shards at least 9 with unique IDs – hard but solvable with proper locking

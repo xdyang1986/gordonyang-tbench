@@ -1,0 +1,54 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/distant-estimate"
+description = "Multi-turn Go router: Turn1 implements distance-based shortest path selection via Dijkstra with lexicographically smallest tie-break, single and batch modes, exit codes 0/1/2. Turn2 extends it with traffic-aware routing where each edge has a traffic_factor multiplying effective cost, selects best path by minimal effective distance, outputs raw distance + effective distance + traffic_delay, validates traffic file and enforces factor >0."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "routing", "dijkstra", "shortest-path", "traffic-aware", "graph", "cli", "lexicographic-tie-break", "multi-turn"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "compute_result"
+category_subdomain = "networking"
+reward_type = "binary"
+languages = ["go"]
+tags = ["go", "routing", "dijkstra", "graph", "traffic", "cli"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 60.0
+junior_time_estimate_min = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
