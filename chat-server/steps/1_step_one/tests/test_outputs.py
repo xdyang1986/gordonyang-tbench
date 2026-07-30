@@ -373,7 +373,7 @@ def test_stderr_warnings():
 
 
 def test_atomic_behavior_concurrent():
-    # Hard: 10 concurrent same room must preserve at least 9, file never invalid, lock cleaned
+    # Extra hard: 10 concurrent same room must preserve all 10, file never invalid, lock cleaned
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
@@ -400,9 +400,9 @@ def test_atomic_behavior_concurrent():
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert file_valid
-    assert len(msgs) >= 9, (
-        f"Expected at least 9 msgs after 10 concurrent (hard), got {len(msgs)}"
+    assert file_valid, "File must never be invalid JSON"
+    assert len(msgs) == 10, (
+        f"Expected all 10 msgs after 10 concurrent with proper locking (extra hard), got {len(msgs)}"
     )
     assert len({m["id"] for m in msgs}) == len(msgs)
     assert not os.path.exists(DATA_PATH + ".lock")
@@ -521,10 +521,11 @@ def test_global_id_uniqueness_interleaved():
 
 
 def test_large_history_and_pagination_performance():
+    # Hard: 500 msgs latest N performance <2s – tests large history handling
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
-    for i in range(400):
+    for i in range(500):
         assert _cli("send", "general", "alice", f"bulk{i}").returncode == 0
     start = time.time()
     r = _cli("get-messages", "general", "10")
@@ -532,12 +533,13 @@ def test_large_history_and_pagination_performance():
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
     assert len(msgs) == 10
-    assert msgs[0]["content"] == "bulk390" and msgs[-1]["content"] == "bulk399"
-    assert elapsed < 2.0
-    assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 400
+    assert msgs[0]["content"] == "bulk490" and msgs[-1]["content"] == "bulk499"
+    assert elapsed < 2.0, f"500 msgs pagination took {elapsed}s, should be <2s"
+    assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 500
 
 
 def test_concurrent_different_rooms():
+    # Extra hard: 10 parallel different rooms must preserve at least 9 total
     _reset_data()
     for i in range(10):
         _cli("create-room", f"room{i}")
@@ -561,7 +563,9 @@ def test_concurrent_different_rooms():
         data = _load_data()
         if f"room{i}" in data["rooms"]:
             all_ids.extend([m["id"] for m in data["rooms"][f"room{i}"]["messages"]])
-    assert total >= 8, f"Expected at least 8 total msgs across 10 rooms, got {total}"
+    assert total >= 9, (
+        f"Expected at least 9 total msgs across 10 different rooms (hard), got {total}"
+    )
     assert len(set(all_ids)) == len(all_ids)
 
 

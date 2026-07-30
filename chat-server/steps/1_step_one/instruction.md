@@ -60,12 +60,12 @@ File at `--data` path must use wrapper with checksum for hard integrity.
 - Schema: top-level must have `rooms` map where `rooms[roomID]` has `users` array and `messages` array, plus `private_messages`, `next_id`, `seen_users` inside `data`.
 - Canonical data JSON: `json.dumps(data, sort_keys=True, separators=(',', ':'))` with no HTML escaping – Go must use `json.Encoder.SetEscapeHTML(false)` for checksum and file write. Tests include `<>&` in message content for both room and private to ensure no escaping (raw file must contain "<").
 - On write: atomic via `os.CreateTemp` in same dir + `os.Rename` plus file lock `<data>.lock` with `O_CREATE|O_EXCL` retry loop (5ms sleep, 2000 tries) and cleanup after each command.
-- Behavioral hard checks (solvable with proper locking):
-  - Same room: 10 concurrent `send` processes, file must never become invalid JSON, must preserve at least **9 messages** after 10 concurrent (reference gets 10), IDs unique, lock cleaned.
-  - Different rooms: 10 parallel sends to 10 different rooms must preserve at least **8 total** messages, no corruption, IDs unique.
+- Behavioral hard checks (extra hard, reference gets 10/10):
+  - Same room: 10 concurrent `send` processes, file must never become invalid JSON, must preserve **all 10 messages** after 10 concurrent, IDs unique, lock cleaned.
+  - Different rooms: 10 parallel sends to 10 different rooms must preserve at least **9 total** messages, no corruption, IDs unique.
 - Spaces via Join: CLI receives message as remaining args. Must use `strings.Join(remainingArgs, " ")` to support `send general alice Hello World with spaces` and `send-private alice bob secret with spaces` where message contains spaces without quoting. Tests invoke binary with multiple separate args.
 - Global ID uniqueness: IDs globally incrementing across room and private, monotonic, persists across restarts and interleaved.
-- Large history: must handle **400 messages** efficiently, pagination via limit latest N semantics and performance <2s.
+- Large history: must handle **500 messages** efficiently, pagination via limit latest N semantics (`get-messages general 10` → last 10) and performance <2s.
 - On read: validation before any command:
   - Missing file → empty store `rooms={}, private_messages=[], next_id=1, seen_users={}`
   - Empty file → empty store
@@ -123,9 +123,9 @@ go build -o ./chat-server .
 
 Implement at `/app` – Turn1.
 
-### Success Criteria – Hard but Solvable
+### Success Criteria – Hard (39 tests)
 - Binary builds, help contains keywords, bare help works
 - Rooms, joins, leaves idempotent, messages ordered globally monotonic across room+private, private isolation, persistence via CLI, sorted lists
-- Integrity hard but solvable: strict wrapper checksum canonical no HTML escape for room+private, corruption backup naming integer nanosec, stderr warnings, stdlib-only, atomic CreateTemp+Rename + file lock preserving at least 8-9/10 concurrent sends, lock cleanup, spaces via Join
-- Large history 400 msgs performance <2s, latest N semantics, seen_users persists after delete, next_id not reset, private special chars preserved
-- 39 tests, balanced: naive WriteFile or per-room counter or args[2] fails, but proper implementation passes
+- Integrity hard: strict wrapper checksum canonical no HTML escape for room+private, corruption backup naming integer nanosec, stderr warnings, stdlib-only, atomic CreateTemp+Rename + file lock preserving all 10 same room and at least 9/10 diff rooms (extra hard), lock cleanup, spaces via Join for both room and private, private special chars preserved
+- Large history 500 msgs performance <2s, latest N semantics, seen_users persists after delete, next_id not reset
+- 39 tests, hard: naive WriteFile or per-room counter or args[2] fails, but proper implementation with locking and Join passes
