@@ -82,4 +82,17 @@ Written in Go, tested via Python harness that builds binary with `go build -o <b
 - Hashing described conceptually, not handed as exact Go snippet, so agent must derive `big.Int.SetBytes` logic.
 - Migration golden solution now **actually removes wrong-shard duplicates**, leaving only correct shard – regression test `test_migrate_cleans_duplicate_across_shards` asserts this.
 
-Validation: **Turn1 31/31**, **Turn2 24/24** direct pytest and harness reward 1, docker builds, skeleton fails as expected.
+### Latest online validation (commit `55f423c`)
+
+**Status: PASSING** (validationStatus=passing). Full multi-turn (Turn1 + Turn2) trial pass rates per agent:
+
+| Stage | Agent / Model | Pass rate | Mean reward |
+|---|---|---|---|
+| Structural | — | 10/10 checks pass | — |
+| Oracle | oracle | 3/3 (100%) | 1.00 |
+| Codex | gpt-5.5 | 3/10 (30%) | 0.30 |
+| Metacode | meta/avocado-5.14-code | 2/10 (20%) | 0.25 |
+| Agent | claude-code / claude-opus-4-8 | 10/10 (100%) | 1.00 |
+
+- Contamination check: **MEDIUM** (passed). Provenance: no third-party model authorship detected.
+- Oracle (reference solution) passes cleanly; weaker models (avocado 20%, codex 30%) mostly fail → difficulty calibrated as hard but solvable.
