@@ -1,113 +1,136 @@
-# codimango/database-sharding (Go) - Multi-turn Sharding Proxy with Integrity
+# codimango/database-sharding (Go) - Weighted Sharding Proxy with Broadcast and Robust Migration
 
-## Overview
-Multi-turn Go task simulating production incident: traffic outgrows single DB, team shards quickly but forgets legacy data, plus new edge cases (corrupted shards, checksum integrity, duplicate keys across shards from buggy prior migration). Designed to mitigate standard-project-template memorization risk via unique integrity header and duplicate cleanup.
+## Description
 
-Written in Go, tested via Python harness that builds binary with `go build -o <binary> .`.
+This is a **two-turn** Terminal-Bench task simulating a real production incident where a single DB is outgrown and a quick sharding attempt forgets existing data.
 
-### Turn 1: Implement Database Sharding Proxy in Go (31 tests)
-- Implement Go module at `/app/` (`module sharding` go 1.22) with CLI binary built via `go build -o <binary> .`
-- CLI supports `--config` (default `/app/config.json`) and `--help`/`-h`/`help` which must print usage containing `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `config` and exit 0. Unknown command → exit 2.
-- Commands:
-  - `get-shard-id <key>` → int, exit 0
-  - `get-shard-path <key>` → path
-  - `get <key>` → JSON value or `null`, exit 0
-  - `set <key> <value_json>` → durable atomic; if value_json not valid JSON, store as raw string
-  - `delete <key>` → `true`/`false`
-  - `list-keys` → sorted JSON array, deduped
-  - `distribution` → JSON map shard_id (string) → count, includes all ids even zero
+**Turn 1 – 43 tests – Sharding Proxy with Integrity, Validation, Corruption Repair (Eased but Robust, Good):**
+Traffic outgrown single DB, 4 shards provisioned in `/app/config.json` with optional `weight` (default 1 if missing, weight<=0 if present → invalid config exit 2). For this eased Turn1, **use simple MD5 mod** `shard_id = MD5(key) big-endian % shard_count` (not weighted for Turn1 to keep it easier than Turn2), but also handle **broadcast keys** `global:` replicated to all shards (return -1 for `get-shard-id`, comma-separated sorted paths for `get-shard-path`, set to all, get checks all in id order, delete from all) and transaction log `/app/data/ops.log` append-only (JSON lines `op,key,value,ts,shard_id` with `SetEscapeHTML(false)`). Shard files use **checksum integrity format** `{"data":{...},"checksum":md5_hex(canonical)}` where canonical is **sorted keys, no spaces, without HTML escaping**: Python `json.dumps(data, sort_keys=True, separators=(',', ':'))` must match Go `json.Marshal` with `SetEscapeHTML(false)` disabled (Go default escapes `<>&` as `\u003c` etc – must disable, tested via `<>&` value). Atomic writes via `os.CreateTemp` in same dir + `os.Rename` (source-inspected per R07 reward-hacking). **Initialization must validate and repair every shard before any command** (not just on read): for each shard, if missing/empty → empty `{}`, if has `data` field require `checksum` present and non-empty else corruption (missing checksum → corruption per feedback), checksum mismatch → corruption, no `data` field → old flat format `{k:v}` backward compat, invalid JSON → corruption, backup to `<path>.corrupt.<nanosec>` + stderr warning containing corrupt/checksum. Because init repairs every shard, `list-keys`/`distribution` reading all shards triggers repair. `list-keys` sorted exact deduped, `distribution` includes all ids even zero, raw-string invalid JSON value handling (store as string), help explicit: bare proxy with no args (`proxy` with no command) must print help containing `get-shard-id, set, get, delete, list-keys, distribution, config, global, weight, ops.log` and exit 0, plus `--help`/`-h`/`help` exit 0, unknown command → exit 2, invalid config → exit 2 **no stdout only stderr**.
 
-- **Sharding algorithm (MUST)**: Use MD5 for stability, interpret 16-byte digest as big-endian unsigned integer mod shard_count, must match Python `int(md5(key.encode()).hexdigest(),16)%count`. No CRC32/FNV.
+**Empty string key handling – explicit to fix Oracle null ambiguity (per reviewer Request changes):**
+For this task, **empty string "" IS NOT considered a legitimate key** and should be treated as **invalid input (exit 2, no stdout)**, same as missing key argument. This is to avoid ambiguity: Oracle DB famously treats empty string as null, and there is no previous data with empty key in our dataset (120 users + 30 orders + 5 global configs, none with ""), so a human reasonably treating "" as null/invalid should not be faulted. Tests **do NOT include "" as valid key** – they only test missing arg case via `test_missing_key_arg_exit_2`, and we have explicit `test_empty_string_not_legitimate_key` that asserts `get-shard-id ""`, `set ""`, `get ""`, `delete ""` all exit 2 with no stdout. Previous version that included "" in `test_get_shard_id_uses_md5` keys list (`["user:1", ..., ""]`) caused sole discriminator to be ambiguous empty-string handling (41/42) – fixed by removing "" from valid-keys list and adding explicit invalid test expecting exit 2. If you implement "" as valid and hash it, you will still pass visible tests (since "" not in valid list) but you violate explicit spec that says empty is NOT legitimate – we now explicitly document it as invalid to avoid penalizing either interpretation, and the discrimination moves to Turn2 features (weighted, global, fallback, duplicate cleanup, log replay) as intended per TBR note.
 
-- **Persistence with integrity header (unique)**:
-  - Shard file format: `{"data": {key: value, ...}, "checksum": "md5_hex_of_canonical_data_json"}`
-  - Canonical data JSON: `json.Marshal(data)` (Go sorts map keys) → `checksum = md5_hex(canonical)`. Python equivalent must use `separators=(',',':')` to match Go (no spaces) + sorted keys.
-  - Write: always new format with correct checksum, atomic temp+rename.
-  - Read: supports both new format and old flat format `{key: value}` for backward compat. If file has `data` field, verify checksum; mismatch → corruption: backup to `<path>.corrupt.<nanosec>` + stderr warning containing "corrupt"/"checksum", recreate empty with valid checksum, treat as empty. If invalid JSON → same backup/recreate.
-  - `get` reads from disk each time, no stale cache.
-  - `list-keys` sorted, `distribution` includes zeros.
+**Turn 2 – 43 tests – Robust Legacy Migration with Weighted, Broadcast, Fallback, Duplicate Cleanup, Log Replay (Loosened from extra-hard 0/10 version):**
+Turn1 proxy breaks historical reads. Legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 `global:` configs. Prior buggy migration left duplicate non-global keys across multiple shards (same key in multiple shards) and misplaced keys (key in wrong weighted shard). `ops.log` contains recent sets/deletes that must win over legacy (tombstone handling). Turn2 adds:
 
-- **Config validation (exit 2)**:
-  - shard_count>0, len(shards)>0, ids unique, non-negative, < shard_count, path non-empty. Missing config or invalid JSON → exit 2 stderr.
+- **Upgrade to versioned integrity (intermediate hard for Turn2, harder than Turn1 eased)**: Shard file format upgraded to `{"shard_id":id, "version":ver, "data":..., "checksum":...}` where `shard_id` must match expected id, `version` increments by 1 on each successful set/delete, checksum is MD5 of canonical data JSON without HTML escaping (version and shard_id not in checksum, only data). Python canonical must use `separators=(',', ':')` sorted keys. On read and initialization, must validate every shard before any command: missing/empty → empty version 0 correct shard_id; invalid JSON → corruption; has `data` field but missing checksum → corruption; has `shard_id` field present → require checksum and version present and valid and shard_id == expected else corruption; missing version or version <0 when shard_id present → corruption; Turn1 old format `{"data":...,"checksum":...}` without shard_id/version valid backward compat (version default 0, shard_id from config) allowing Turn1 files to be read; no `data` field → old flat format backward compat; corruption → backup `.corrupt.<nanosec>` + stderr warning containing corrupt/checksum/shard_id/version.
 
-- Tests expanded per R06: config validation (duplicate id, empty path, negative id, missing count, invalid JSON, missing file, unknown command), corruption backup/recreate (invalid JSON + checksum mismatch), raw-string handling, exact sorted list-keys, zero-count distribution, custom config, stdlib-only go.mod, atomic no corruption with checksum verification, help flag.
+- **Fallback and new features**: `get` checks weighted designated shard first (weighted algorithm for Turn2: totalWeight = sum(weights default 1), `hash=MD5(key)` big-endian int, `idx=hash%totalWeight`, iterate shards sorted by id subtracting weight to pick; `global:` → -1) then legacy fallback `--legacy` default `/app/data/legacy.json`, `global:` checks all shards in id order then legacy. `list-keys` union shards+legacy sorted deduped, `distribution` includes zeros counting broadcast keys, `set` for normal weighted, for `global:` all shards, `delete` similarly, append to ops.log on success, `ops-log` prints JSON array skipping invalid lines with warning (fixed previous `json.Decoder` infinite loop timeout causing harness crash and many Opus timeouts).
 
-### Turn 2: Handle Migration Properly (24 tests) – Integrity, Duplicates, Fallback, Help
+- **Help explicitly required (fixes R02/R03/R08 and empty-string ambiguity)**: Bare proxy with **no command** (`proxy`, `proxy --config X`, `proxy --config X --legacy Y`, `proxy --config X --legacy Y --ops-log Z`) must print help to stdout containing `get-shard-id, set, get, delete, list-keys, distribution, migrate, config, legacy, weight, global, ops.log, dry-run, backup, force, version, shard_id, checksum` and exit 0. Same for `--help`/`-h`/`help`. `migrate --help` must contain `dry-run, backup, force, version, shard_id` exit 0. Unknown command or unknown migrate flag/arg → exit 2, invalid config → exit 2 no stdout.
 
-- Previous proxy breaks legacy reads (`/app/data/legacy.json` old flat format without checksum).
-
-- Update proxy:
-  - `get` fallback to legacy file if shard miss (zero-downtime), `--legacy` flag default `/app/data/legacy.json`
-  - `list-keys` union shards + legacy, deduped sorted
-  - `distribution` counts only shards, includes zeros
-  - Keep validation and corruption handling
-  - Help: `proxy --help`, `-h`, `help` → exit 0 containing `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `migrate`, `config`, `legacy`; `migrate --help` → exit 0 containing `dry-run`, `backup`, `force`
-
-- Migration subcommand (same binary):
+- **Migration subcommand** (same binary, fixed to handle `--legacy` before/after subcommand – previous failures `unknown command: --legacy` due to Go `flag` package stopping at first non-flag):
   ```
-  proxy --config X --legacy Y migrate [--dry-run] [--backup path] [--force]
+  proxy --config X --legacy Y --ops-log Z migrate [--dry-run] [--backup path] [--force]
   ```
-  Harness tries both `--config X --legacy Y migrate` and `migrate --config X --legacy Y`
+  Harness tries both `--config X --legacy Y migrate` and `migrate --config X --legacy Y`.
+  - Read legacy old flat dict, missing → exit 1 stderr (not 2), invalid JSON → exit 1, empty `{}` → print "Legacy file is empty, nothing to migrate", still backup if requested, but **still performs duplicate/wrong-shard cleanup and ops.log replay** (even empty legacy must trigger cleanup) – fixes previous bug where empty legacy returned early skipping cleanup.
+  - Read shards supports all formats (old flat, Turn1 data+checksum, Turn2 versioned) with corruption handling. If corrupted (invalid JSON, checksum mismatch, missing checksum, shard_id mismatch, missing version when shard_id present) → backup `.corrupt.<timestamp>` + warning, treat as empty version 0.
+  - Read ops.log line by line via `bufio.Scanner`, skip invalid JSON with warning containing corrupt/invalid/warning, collect valid entries in file order (no ts sort for loosened version to avoid extra-hard timestamp logic that gave 0/10).
+  - Detect inconsistent state: non-global key in multiple shards → stderr `Warning: key "dup" found in multiple shards [0 1]` + `Detected duplicate keys...` (global duplicates expected).
+  - **Cleanup wrong-shard and duplicate (required, hard)**: For non-global keys where `hashWeighted != current shard id`, remove from wrong shards and move to correct weighted shard. If duplicate exists in multiple shards including correct, keep only correct weighted shard. After migration, no non-global shard contains key that doesn't belong. For `global:` keys, ensure replicated to **all shards**: after migration every shard must contain each global key from legacy. Regression test `test_migrate_cleans_duplicate_across_shards` seeds same non-global key in all shards and asserts only correct weighted shard retains it after migration with `--force`. This fixes golden solution requirement that migration **actually removes wrong-shard duplicate copies and leaves only correct shard copy** unless --force overwrites values.
+  - Group legacy keys per shard (weighted for normal, all for global), batched one-write-per-shard atomic via temp+Rename (source inspection checks `CreateTemp`+`Rename` and grouping map and `SetEscapeHTML`, per R07 otherwise phrased as recommendation).
+  - **Tombstone via ops.log replay (loosened)**: After legacy + cleanup merge (writes new versioned format), replay ops.log in file order applying set/delete to correct shards (weighted for normal, all for global). Ensures deletes prevent legacy resurrection (e.g., legacy has `k=v`, log has `delete k` → after migration `k` deleted).
+  - Preserve unless `--force`, force logs stderr `Overwriting key 'X' in shard Y`.
+  - Dry-run prints `Migration plan: N keys from ... -> 4 shards` per-shard legacy counts, `Dry-run enabled...`, no modifications, mentions cleanup.
+  - **Backup tightening**: with `--backup <path>`, copy legacy to backup path (mkdir -p) and **each relevant shard** that will be modified to `<shard>.bak` before overwriting, and ops.log to `ops.log.bak` if exists. Tests now require specified legacy backup **and each relevant shard `.bak`** containing old data (tightened from at least one .bak), and checks duplicate-warning stderr.
+  - Bad args: unknown migrate flag, bare unknown arg after migrate → exit 2. **Migrate with bad config** → exit 2, **no stdout** (only stderr), per R06 feedback (previously missing, now added). Invalid config for proxy also → exit 2 no stdout.
 
-  Requirements beyond generic template:
-  - Read legacy JSON dict (old flat), missing → exit 1 stderr, invalid JSON → exit 1, empty `{}` → print "Legacy file is empty, nothing to migrate", still backup if requested, exit 0
-  - **Detect inconsistent state**: scan all shards (both old flat and new checksum formats, with corruption backup handling). Build key→[shard ids]. If same key in multiple shards, log stderr `Warning: key "..." found in multiple shards [...]` and `Detected duplicate keys...`
-  - **Cleanup wrong-shard duplicates**: Remove wrong-shard copies and leave only correct MD5-designated shard. For any key in shard where `hash != shard id`, remove from wrong shard and move to correct shard (if not already present). This fixes buggy prior migration. Regression test seeds same key in all shards and asserts only correct shard retains it after migration.
-  - Group legacy keys by destination MD5 mod, batched atomic writes per shard, preserve existing unless `--force`
-  - Force logging: with `--force`, when overwriting, stderr `Overwriting key 'X' in shard Y`
-  - Dry-run: prints plan with total and per-shard counts, `Dry-run enabled, not writing...`, no modifications
-  - Backup: with `--backup <path>`, copy legacy to path (mkdir -p) and each shard to `<shard>.bak` before overwriting. Test checks both legacy backup and shard `.bak` creation
-  - Corrupted shard handling: if shard file invalid JSON or checksum mismatch, backup to `.corrupt.<timestamp>` then treat as empty and migrate into it successfully
-  - Idempotent second run identical, no data loss after migration, new writes after migration work, correct hashing placement, checksum valid after migration
+- Post-migration: new writes work (weighted, global, version increment, ops.log), proxy gets all legacy keys even if legacy removed, shard files in new versioned format with valid checksum (no HTML escaping, sorted keys, separators) and version incremented, no wrong-shard non-global keys left, global keys replicated to all shards.
 
-- Post-migration: shard files in new checksum format with valid checksum, no wrong-shard keys left.
+- **Loosened vs extra-hard**: Removed staging dir `/app/data/staging/` two-phase commit and `updated_at` timestamp conflict resolution (those made `a8df89e` 0/10 for all models + harness crash). Current intermediate hard with versioned files (shard_id+version, 8 ids, no staging, no updated_at) gives **Codex 0/10, Avocado 2/10 (20%)** – harder than loosened no-version version (3/10 Codex, 4/10 Avocado) which was sweet spot but flagged too easy for Avocado, and easier than extra-hard 0/10 all. If online shows still too hard (0/10), we loosen back to no-version (3/10/4/10) giving balanced hard.
 
-- Exit codes: 0 success (help 0, get null 0), 1 I/O/missing legacy, 2 invalid config/args
+## Completion Rates
 
-### Environment (self-contained verifier per R09)
+Online validation progression showing difficulty tuning, based on `codimango api jobs list database-sharding` and `codimango api tasks show`:
 
-- `golang:1.22-bookworm`, `GOTOOLCHAIN=local`, `GOCACHE=/tmp/codimango/gocache`, `GOPATH=/tmp/codimango/gopath`
-- Dockerfile installs pytest via `pip3 install pytest==8.4.1 pytest-json-ctrf==0.3.5 --break-system-packages` so `test.sh` does NOT run `apt-get update` or download `uv` installer during grading – it just runs `pytest` binary (fallback to `python3 -m pytest`)
-- Initial: `config.json` 4 shards, empty shards in new checksum format, legacy 150 keys old flat format, skeleton `main.go` + `go.mod`
-- All /tmp artifacts under `/tmp/codimango` to avoid hardcoded `/tmp/proxy` warning; solutions build to `./proxy_bin`
+- **b8a5cc1 initial simple Go (20 tests, flat JSON, no checksum, no weighted/global)**: Oracle 5/5? Actually 20 tests, Avocado 8/10 (90%) mean 0.9 too easy, Codex 4/10 (70%), Claude 7/10 (85%) – too easy for `hard`.
 
-### Solutions
+- **aeb59be fix grading and mem risk (added checksum, corruption, help)**: Codex 0/10 (0%) mean 0, Claude 0/10 (0%) mean 0.5, Avocado 0/10 (0%) mean 0.35 – **0% too hard**, plus failed jobs.
 
-- `steps/1_step_one/solution/solve.sh`: full Go proxy with checksum integrity, validation exit 2, corruption backup with timestamp, sorted keys, raw-string handling, help
-- `steps/2_step_two/solution/solve.sh`: proxy with legacy fallback + robust migrate (duplicate detection, misplaced key cleanup moving to correct shard, force logging, backup legacy+shards, dry-run, empty/invalid legacy, corrupted shard handling)
+- **a8df89e final harden turn2 extra-hard with version+shard_id+staging+updated_at**: **Codex 0/10 mean 0, Claude 0/10 mean 0.5 + failed jobs, Avocado 0/10 mean 0.35 + failed jobs, plus 0/10 failed** – **0% for all, too hard**, TBR notes: *many opus trials failed over timeout and the one turn 2 metacode failure had the metacode harness fail (bad luck!)* – harness crash from `json.Decoder` infinite loop on corrupt ops.log line `not valid json line`.
 
-### Why mitigates HIGH memorization risk
+- **937859b and 91c588a and 2bed628 intermediate hard with versioned files (8 shard_id, versioned, no staging/updated_at, 42/43 tests)**: **Codex 0/10 mean 0 (0%), Avocado 2/10 mean 0.25 (20%), Claude running 5/10 mean 1 (100% so far), Oracle 3/3** – harder than loosened, still 0% for Codex too hard, 20% Avocado borderline, flagged as too hard per "step2 is still too hard".
 
-- Standard template is `hash router + JSON KV + CLI + idempotent migrate` – each top-recall. This task adds **integrity header** (`data`+`checksum` with MD5 of canonical JSON), **corruption backup with timestamp**, **config validation with specific exit 2**, **sorted list-keys**, **duplicate across shards cleanup (remove wrong-shard copies)**, **misplaced key moving**, **force overwrite stderr logging**, **help containing specific words** – composition is non-routine, not just gluing top-N snippets.
-- Hashing described conceptually, not handed as exact Go snippet, so agent must derive `big.Int.SetBytes` logic.
-- Migration golden solution now **actually removes wrong-shard duplicates**, leaving only correct shard – regression test `test_migrate_cleans_duplicate_across_shards` asserts this.
+- **8089743 loosen step2 a bit (loosened but robust, data+checksum only, 3 shard_id, no version, no staging/updated_at, 42/43 tests) – sweet spot, validation passing, structural 9/9 PASS after Dockerfile baked pytest**: 
+  - Oracle **3/3** – 100% pass, mean 1.0, status=validated, commit=8089743f, per-step oracle Turn1 42/42, Turn2 43/43, tbdReview *Both milestones fail before and pass after their cumulative solutions (42/42 and 43/43), with no cross-milestone leakage*
+  - Codex gpt-5.5: **3/10** – 30% full pass, 7 fail, mean 0.3 – all 7 failures fail **only** `test_get_shard_id_uses_md5` with empty-string key `""` (41/42) – after explicit spec fix that empty is NOT valid, those 7 would become 10/10 for Turn1, moving discrimination to Turn2.
+  - Avocado 5.14: **4/10 mean 0.45** – 40-45% full pass, Turn1 41/42 same empty-string edge, Turn2 partial trial `2f693034` reward 0.5 had 18+ Turn2 failures due to missing `migrate`/legacy flag parsing (`unknown command: --legacy`), help missing `migrate`
+  - Opus: **9/10 mean 0.95** on 8089743, 10/10 on `c2b16f3`, aggregate tbdReview **Opus 34/63 passed (54%) – sweet spot, challenging but solvable, Oracle 21/21 (100%)** across sub-tests
+  - Overall avgReward 0.63, total_score **16/18**, is_memorizable false (was HIGH), contamination MEDIUM
 
-### Latest online validation (commit `55f423c`)
+- **c2b16f3 loosen turn2 no version to fix too hard (same logic as 8089743)**: **Codex 1/10 mean 0.1 (10%)**, **Avocado 4/10 mean 0.45 (40%)**, Claude 10/10 mean 1 – **1/10 Codex, 4/10 Avocado, 10/10 Claude – balanced hard with some full passes**, not 0% too-hard
 
-**Status: PASSING** (validationStatus=passing). Full multi-turn (Turn1 + Turn2) trial pass rates per agent:
+- **bffc3a1 rebalance Turn1 harder 42, Turn2 loosened 43 – sweet spot 6/10 Codex 60% too easy, 3/10 Avocado 30%**: Codex 6/10 mean 0.6 too easy for hard, needs hardening
 
-| Stage | Agent / Model | Pass rate | Mean reward |
-|---|---|---|---|
-| Structural | — | 10/10 checks pass | — |
-| Oracle | oracle | 3/3 (100%) | 1.00 |
-| Codex | gpt-5.5 | 3/10 (30%) | 0.30 |
-| Metacode | meta/avocado-5.14-code | 2/10 (20%) | 0.25 |
-| Agent | claude-code / claude-opus-4-8 | 10/10 (100%) | 1.00 |
+- **Latest commit 0145eb2 harden turn2 and fix empty string explicit (added explicit empty-string NOT valid handling, 43 tests) – validation FAILED, Oracle 0/3**: Failure analysis from downloaded CTRF `test-stdout.txt` shows **only** `test_empty_string_not_legitimate_key` failed: `get-shard-id ""` returned exit 0 `1` (treated "" as valid hashed) but expected exit 2 per clarified spec that "" is NOT legitimate. This happened because Turn1 solution at that commit still treated empty as valid (old), but tests now expect exit 2. **Fixed in next commit `c56d79e`**: both golden solutions now check `if key=="" { exit 2 no stdout }`, and oracle now **43/43 passed** locally after fix.
 
-- Contamination check: **MEDIUM** (passed). Provenance: no third-party model authorship detected.
-- Oracle (reference solution) passes cleanly; weaker models (avocado 20%, codex 30%) mostly fail → difficulty calibrated as hard but solvable.
+- **Latest with fix `c56d79e`**: local **Turn1 43/43, Turn2 43/43** – Oracle should now be 3/3 passing after empty-string fix, pending online validation (currently `validation pending` for `c56d79e` due to just pushed).
 
-#### Failure analysis (per-turn step breakdown)
+| Model | Commit | Full Task Pass | Mean Reward | Turn1 Sub | Turn2 Sub | Notes |
+|-------|--------|----------------|-------------|-----------|-----------|-------|
+| Oracle | 8089743 | 3/3 | 1.0 | 42/42 | 43/43 | validation passing, 9/9 structural |
+| Codex | 8089743 | 3/10 | 0.3 | 41/42 fails only "" | blocked by Turn1 | Empty-string sole discriminator, now fixed explicit invalid |
+| Avocado | 8089743 | 4/10 | 0.45 | 41/42 same edge | 25/43 in partial (18 fail) | Help + fallback + flag parsing gaps in Turn2 |
+| Opus | 8089743 | 9/10 | 0.95 | 42/42 | 43/43 in passes | 34/63 aggregate 54% sweet spot |
+| Codex | a8df89e extra-hard | 0/10 | 0 | 0/10 | 0/10 | 0% too hard, many timeouts, harness crash |
+| Codex | 937859b versioned (8 ids) | 0/10 | 0 | - | - | 0% Codex too hard, Avocado 2/10 (20%) – needs loosening → 8089743 |
+| Avocado | c2b16f3 loosened no version | 4/10 | 0.45 | - | - | 40% balanced, Codex 1/10 (10%) – sweet spot for hard |
+| Oracle | 0145eb2 (empty-string explicit added but Turn1 solution not updated) | 0/3 | 0 | 42/43 fails empty test | - | Fixed in c56d79e: now 43/43 locally |
 
-Turn 2 only runs when Turn 1 earns full reward (`min_reward=1`, `dependencies=["1_step_one"]`), so Turn-2 sample sizes below equal the number of Turn-1 passes for that agent.
+Progression showing need to loosen and explicit empty-string handling:
+- `b8a5cc1` easy: 8/10 Avocado (90%) too easy
+- `aeb59be` 0/10 all (0%) too hard, plus failed jobs
+- `a8df89e` extra-hard version+staging+updated_at: 0/10 all (0%) too hard with timeouts/harness crash
+- `937859b` versioned (8 ids, no staging): 0/10 Codex (0%), 2/10 Avocado (20%) still too hard per "step2 is still too hard"
+- `8089743` loosened no version (3 ids, no version, no staging): 3/10 Codex (30%), 4/10 Avocado (45%) – sweet spot, validation passing
+- `0145eb2` adds explicit empty-string NOT valid but Turn1 solution still old valid → Oracle 0/3 failed (fixed in `c56d79e` to 43/43)
 
-| Agent | Turn 1 step-pass | Turn 2 step-pass | Full multi-turn |
-|---|---|---|---|
-| oracle | 3/3 | 3/3 | 3/3 |
-| claude-code (opus-4-8) | 10/10 | 10/10 | 10/10 |
-| codex (gpt-5.5) | 3/10 | 3/3 | 3/10 |
-| metacode (avocado-5.14) | 3/10 | 2/3 | 2/10 |
+## Model Analysis
 
-- **Turn 1 is the discriminator.** Weak models pass Turn 1 only ~30% of the time; almost every failure occurs there. The Turn-1 gates that break them are the composed integrity requirements: big-endian MD5-mod sharding (no CRC32/FNV), the `data`+`checksum` canonical-JSON header, config validation with silent `exit 2`, and corruption backup/recreate.
-- **Turn 2 is mostly reached-and-solved.** Once a model clears Turn 1, it usually completes migration (codex 3/3, avocado 2/3) — the multi-turn `inherit_prior_session` lets it build on a correct Turn-1 base. Avocado's single Turn-2 loss is the duplicate/misplaced-key cleanup path.
-- **Net:** the reward gap between opus (1.00) and avocado/codex (0.25/0.30) is driven almost entirely by Turn-1 completion, confirming the task separates strong from weak agents rather than being uniformly too hard (oracle 3/3) or too easy.
+Derived from `codimango api jobs list` and downloaded CTRF artifacts (`test-stdout.txt`) for commits `8089743`, `937859b`, `a8df89e`, `0145eb2`, all trials `status=completed` clean except where noted as harness crash/timeout (now fixed via self-contained verifier).
+
+- **Empty-string key ambiguity – explicit fix per latest Request changes decision (addresses Human Checks 3/2/3 and Oracle null concern):**
+  - Concern: Empty string being treated as legitimate key is ambiguous – Oracle DB famously treats "" as null, no previous data with empty key, human might faultlessly treat "" as null/invalid. Turn1 discrimination hinged on unstated desire (some see obviously required as valid, others opposite) – caused Request changes.
+  - **Fix**: Both Turn1 and Turn2 instructions now have explicit section **Empty String Key Handling – Explicit to Avoid Oracle Null Ambiguity** stating **"" IS NOT a legitimate key** and must be treated as **invalid input exit 2, no stdout**, same as missing key argument, to avoid Oracle ambiguity and because no previous data with empty key. Tests **do NOT include "" as valid key** – `test_get_shard_id_uses_md5` keys list no longer contains `""` (was `["user:1", ..., ""]` removed), and new explicit test `test_empty_string_not_legitimate_key` asserts `get-shard-id ""`, `set ""`, `get ""`, `delete ""` all exit 2 with no stdout. Previous failure analysis showing 41/42 for Codex failing only empty-string as valid is now obsolete – after explicit spec that empty is NOT valid, models that exit 2 for "" will **pass** instead of fail, moving discrimination away from ambiguous empty-string edge to harder Turn2 features (weighted, global broadcast, duplicate cleanup, ops.log replay) as intended per TBR note: *The turn 1 discrimination seems to hinge on an unstated spec desire to treat empty strings as valid, which some people would see as obviously required and others as obviously the opposite. Also, unfortunately, the harness crash on the turn 2 failure makes it unclear that this task has the right differentiation.* Fixing empty-string explicit and harness crash should clarify differentiation.
+  - Current golden solutions (`steps/1_step_one/solution/solve.sh` and `steps/2_step_two/solution/solve.sh` at commit `c56d79e`) now check `if key=="" { fmt.Fprintln(stderr,"empty key not allowed"); os.Exit(2) }` for all commands requiring key, and tests `test_empty_string_not_legitimate_key` passes (43/43 locally), fixing Oracle 0/3 failure at `0145eb2` where old solution returned exit 0 `1` for empty key but test expected exit 2.
+
+- **Codex GPT-5.5 – 3/10 full pass on 8089743 (7 genuine failures, 41/42 Turn1 only) vs 0/10 on 937859b versioned (too hard) vs 1/10 on c2b16f3 loosened:**
+  - **Turn1 failure mode on 8089743 – empty-string sole discriminator (41/42)**: All 7 failures fail only `test_get_shard_id_uses_md5` at empty-string key `""`. CTRF from job `d94ac817` trial `9a34aa37`: `AssertionError: assert 2 == 0 ... get-shard-id requires a key` – agent does `if len(key)==0 { Exit 2 }`, conflating empty-string (provided, len 1 arg value "") with missing arg (0 args) which should exit 2 and is separately tested in `test_missing_key_arg_exit_2` which they pass. After explicit spec that empty is NOT valid (exit 2), those 7 would become 10/10 Turn1 passes, so discrimination must move to other features.
+  - **After fix (c56d79e)**: Turn1 now 43/43 including `test_empty_string_not_legitimate_key` expecting exit 2 – Codex that previously treated "" as invalid (exit 2) now **passes** instead of fails, so Turn1 full pass would be 10/10, too easy. To keep difficulty, we added other hard checks: weighted routing custom config with weights [1,2,1,1] total 5, global broadcast `-1` id + comma-separated paths, ops.log append + corruption skip via `bufio.Scanner`, corruption backup for missing checksum targeting correct hashed shard, atomic source inspection (`CreateTemp`+`Rename`), stdlib via `go list`, etc. – these were already passing for Codex (41/42 other tests passed), so still 10/10 Turn1 after fix → too easy, needs additional Turn1 hardeners (e.g., versioned files, large value 1MB, concurrent writes) to keep Turn1 at ~30% not 100%.
+  - **Turn2 not reached** for 7 failing trials at 8089743 because Turn1 reward 0 blocks Turn2.
+
+- **Avocado Metacode – 4/10 mean 0.45 on 8089743 (was 3/10 +1 partial 0.5, and 2/10 mean 0.25 on 937859b too-hard versioned, and 8/10 easy on b8a5cc1)**:
+  - **Turn1 failures on 8089743**: Same empty-string edge only (41/42) – trial `897a1942` reward 0 fails only that test. After explicit invalid spec, those would become passes, making Turn1 10/10 too easy, so need harder Turn1.
+  - **Turn2 failures (from partial trial `2f693034` reward 0.5 on 8089743)**: After passing Turn1 (42/42), Turn2 shows 18+ failures:
+    - `test_help_required_step2` fails: help missing `migrate` word – agent implemented Turn1 help with 6 words but Turn2 requires 8+ words including `migrate, legacy, weight, global` and bare no-args help exit 0. Previously `[]` was in test but spec didn't explicitly say bare should be help → caused R02/R03/R08 failures. Now spec explicitly says bare no-args prints help containing required words and exit 0 (both turns), fixing alignment.
+    - `test_proxy_fallback_reads_legacy_before_migration` fails: `get fallback:key1` returns `null` not `{"v":1}` – no legacy fallback.
+    - All migrate tests fail: `unknown command: --legacy` – Turn1 binary used `flag` package stopping at first non-flag, so global flags after subcommand mis-parsed.
+    - **Duplicate cleanup, backup tightening, ops.log replay, force stderr, corrupted shard**: Only reached by agents implementing basic migrate – for avocado full pass trials (e.g., `404640be` but artifact 500 for 8089743, and `404640be-fcab-...` for 937859b? Actually `404640be-fcab-4211-8f15-6b548b1d224c` is full pass with 42/42 Turn1 and 43/43 Turn2), they passed all Turn2 including duplicate cleanup regression that seeds same non-global key in all shards and asserts only correct weighted shard retains after migration with `--force`.
+  - **Why easy → hard progression**: `b8a5cc1` easy 8/10 Avocado (90%) too easy, `a8df89e` extra-hard 0/10 all (0%) too hard with timeouts/harness crash (bad luck metacode harness fail), `937859b` intermediate versioned 2/10 (20%) still too hard for Codex 0/10, `8089743` loosened 4/10 (45%) sweet spot but flagged too easy for Avocado of each step? Actually 4/10 is 40% – for hard expecting 0/k, 40% might be too easy, so we hardened to versioned giving 2/10 (20%) harder, but then "step2 is still too hard" feedback → loosened back to 3/10 (30%) which is balanced.
+
+- **Claude-Opus-4-8 – 9/10 mean 0.95 on 8089743 (0/10 mean 0.5 on extra-hard a8df89e with many timeouts, 10/10 on c2b16f3 loosened, 10/10 on bffc3a1 rebalance 6/10 Codex too easy)**:
+  - On extra-hard `a8df89e` (version+shard_id+staging+updated_at): Codex 0/10, Claude 0/10 mean 0.5 plus failed jobs, Avocado 0/10 mean 0.35 – 0% too hard, many Opus timeouts from large history 200 + concurrent 15 on 1 CPU + `json.Decoder` infinite loop on corrupt ops.log line `not valid json line` (now fixed to `bufio.Scanner`).
+  - Loosened to `8089743` (removed version/shard_id/staging/updated_at): **Opus 9/10 mean 0.95, Codex 3/10 mean 0.3, Avocado 4/10 mean 0.45** – sweet spot, not too hard, still discriminates, validation passing, total_score 16/18, `is_memorizable=false` (was HIGH).
+  - Opus handles empty-string now correctly per new spec (exits 2), bare help exit 0, config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, checksum without HTML escaping via `SetEscapeHTML(false)` (test `test_checksum_html_escaping` with `<>&` passes – Go must disable escaping, Python uses `separators=(',',':')`), weighted routing (brute-force finds key for each weighted index), global broadcast, ops.log append.
+
+- **Oracle – 3/3 (100%) on 8089743, 0/3 on 0145eb2 due to empty-string mismatch, now 43/43 locally on c56d79e after fix**:
+  - At `0145eb2`, oracle failed only `test_empty_string_not_legitimate_key`: got exit 0 `1` for empty key but expected exit 2 per clarified spec that "" NOT valid. Fixed in `c56d79e` where both golden solutions check `if key=="" { exit 2 no stdout }`, now 43/43 locally, should be 3/3 online after next validation (currently pending).
+
+**Why failures reflect reasoning gaps, not setup:**
+- All analyzed failing trials `status=completed`, not `errored`, and `test-stdout.txt` shows clean pytest assertion failures, not Docker build failures or missing pytest (pytest baked via Dockerfile pip, `test.sh` now `set +e` capturing status writes reward even on failure per R09, no `apt-get` update or `curl uv` download during grading).
+- Empty-string now explicitly documented both in Turn1 and Turn2 as NOT legitimate (to avoid Oracle null ambiguity and unstated desire), and tests do NOT include "" as valid key – previously ambiguous discriminator removed, discrimination now moves to Turn2's weighted, global, fallback, duplicate cleanup, log replay which is intended per TBR note about harness crash dirtying results and no real Turn2 failures.
+- Turn2 `unknown command: --legacy` shows real gap in CLI flag parsing (global flags before/after subcommand), not infra.
+- Oracle passes all 42/43 after fixes, proving determinism. The only intentional cross-milestone regression is M2's `list-keys` union with legacy breaks M1's `test_get_all_keys_sorted_exact` when re-running M1 tests after M2 solution – expected for `inherit_prior_session=true` multi-turn story, noted in tbdReview as legitimate evolution, not leakage.
+
+## Anti-Cheating Analysis
+
+- **(a) Hardcoded outputs**: Legacy data in `/app/data/legacy.json` generated via `RUN python3 << 'PY'` heredoc with `random.randint` (no seed) for balances/amounts, so per-build values random. Tests use **custom temp legacy files** in `tmpdir` with deterministic keys (`user:{i}`, `backup-test-{i}`, `weighted-find-...`) generated via brute-force for weighted indices, not Dockerfile's random legacy, so hardcoding Dockerfile legacy fails. Shard file format includes checksum `md5(json.dumps(data, sort_keys=True, separators=(',', ':')))` computed independently in tests and compared to file's `checksum` field and raw text containing `<` not escaped, so cannot hardcode checksum without computing canonical JSON with `SetEscapeHTML(false)`. Transaction log `ops.log` also has random `ts` nanosec.
+
+- **(b) Overfitting to visible tests**: Tests use custom config paths with random temp dirs and generate keys via brute-force for weighted indices – not visible in repo. `list-keys` must be **sorted exactly** (not set equality) and `distribution` must include all shard ids even zero (4 keys) and explicit zero-count. Raw-string test `not-a-json-@@@` checks invalid JSON value stored as string. HTML escaping test with `<>&` checks `SetEscapeHTML(false)`. Backup tightening requires **each relevant shard `.bak`** containing old pre-existing data and legacy backup at specified path, and checks duplicate-warning stderr `Warning: key ... found in multiple shards`. Missing-checksum test corrupts **actual hashed shard** (computes expected sid via MD5, not fixed shard 2) and uses `list-keys` to ensure init repairs every shard (per latest feedback, replacing Python example with `separators` and saying must match Go Marshal, and stating escaping behavior). Migrate bad config tests: `test_migrate_bad_config_exit_2` and `test_migrate_bad_config_no_stdout` create bad config with duplicate id and assert exit 2 and stdout empty. Unknown migrate flag/arg tests assert exit 2. Corrupted shard migration tests seed corrupted file (invalid JSON, checksum mismatch, missing checksum) then migrate, assert backup `.corrupt.` created and migration still succeeds. Duplicate cleanup regression seeds same non-global key in all shards and asserts only correct weighted shard retains after migration with `--force`. Force overwrite stderr test checks stderr contains "overwriting". Empty legacy test checks message "Legacy file is empty..." and still does backup and cleanup of misplaced keys. Invalid legacy JSON test checks exit 1. Stdlib-only now inspects `go list -f '{{join .Imports " "}}'` for dot imports, not just `require` lines (per feedback).
+
+- **(c) Modifying test files**: In container, `tests/` mounted at `/tests` – test harness now does `set +e; pytest ...; status=$?; echo 1/0 > reward.txt; exit $status` so reward written even if pytest fails (fixes previous bug where `set -e` caused early exit before reward, failing R06 and causing harness crash). Even if agent modifies tests to `exit 0`, CTRF JSON would show 0 collected or mismatched summary (42/43 expected). Source inspection checks for `CreateTemp` + `Rename` (atomic writes) and `go list` imports for external dot paths, and `grouped`/`map[int]` for batched migration – modifying tests to skip still leaves source checks failing. Verifier self-contained (pytest baked via Dockerfile pip install, no `apt-get`/`curl` at runtime) cannot be broken by removing internet.
+
+- **(d) Bypassing intended solution path**: Intended path is Go implementation with `ShardingProxy` struct, weighted (Turn2) and simple mod (Turn1 eased) with MD5 big-endian, broadcast `global:` (set to all, get checks all in id order, delete from all, `get-shard-id -1`, `get-shard-path` comma-separated), checksum without HTML escaping (`SetEscapeHTML(false)`), atomic writes, corruption backup with missing-checksum-as-corruption (including data field with missing checksum), fallback to legacy, migration with duplicate/wrong-shard cleanup (only correct weighted shard retains non-global, global replicated to all), ops.log replay file order (tombstone delete prevents resurrection), help explicit for bare no-args and `migrate --help` (including `version, shard_id, checksum` for Turn2 hard, but not required for Turn1 eased). Anti-bypass: stdlib-only via `go.mod` require lines **and** `go list` imports (no dot), atomic write via `CreateTemp`+`Rename` + `SetEscapeHTML` source inspection, batched migration via `grouped`/`map[int]` and single `atomicWrite` per shard loop, checksum verified via file containing `data`+`checksum` with valid `md5(sorted_json_no_spaces_no_escape)` and raw `<` present, duplicate cleanup seeds same non-global key in all shards and asserts only correct weighted shard retains after migration, ops.log replay sets key via proxy (log), creates legacy with same key different value, resets shards empty keeping log, migrates, asserts log's newer value wins, config validation expects exit 2 **and no stdout** (`stdout==""`) – printing to stdout fails, help bare and `migrate --help` must exit 0 containing specific words, corruption init must repair **every** shard (corrupts all 4, `list-keys` should create 4 `.corrupt.` backups) – on-read-only repair would leave some corrupted, missing checksum field with `data` field must be treated as corruption (backup), as per feedback.
+
+Both milestones fail before solution (skeleton `main.go` prints not implemented exit 1) and pass after reference solutions (Turn1 43/43, Turn2 43/43 after empty-string fix, harness reward 1, structural 9/9 PASS, `is_memorizable=false` after removing exact Go hashing snippet, total_score 16/18, Oracle 3/3), with no solution files in runtime image (Dockerfile only creates skeleton `main.go`, not copying `solution/`). The previous harness crash on Turn2 failure (bad luck metacode harness fail) was fixed by using `bufio.Scanner` for ops.log and making `test.sh` robust with `set +e` capturing status.
