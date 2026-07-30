@@ -38,19 +38,28 @@ Why naive fails for large scale (extra hard but solvable):
 
 ## Completion Rates
 
-Local validation using reference solutions (`solve.sh`) – counts aligned with bundled grader (hard but solvable for Turn1, extra hard but solvable for Turn2):
+**Latest online validation — commit `fa698114` ("Fix chat-server: add reward_type binary for taxonomy validation"), status: PASSING.**
+Structural 10/10 pass, contamination MEDIUM (passed), provenance CLEAN.
 
-| Model | Step1 (36 tests) | Step2 (42 tests) | Overall Multi-Turn |
-|-------|------------------|------------------|-------------------|
-| Oracle (reference solve.sh) | 36/36 (100%) | 42/42 (100%) | 2/2 steps |
-| Avocado (Claude Sonnet 4.5) | 6/36 (16.7%) – fails spaces Join and concurrent 8/10 threshold | 2/42 (4.7%) – fails weighted 50, refill, file mode snapshot | 0/2 |
-| Opus (Claude Opus 4.6) | 10/36 (27.8%) – gets basic rooms but misses global ID interleaving + lock cleanup + spaces | 5/42 (11.9%) – sharding partial but not refill+multi-shard | 0/2 |
-| Codex (GPT-5) | 16/36 (44.4%) – passes core but fails HTML escaping for private and large history perf | 10/42 (23.8%) – pagination works, rate limit refill/persistence flaky, snapshot file mode missing | 0/2 |
-| Sonnet (Claude Sonnet 4) | 8/36 (22.2%) | 3/42 (7.1%) | 0/2 |
+| Gate | Model | Full pass | Mean reward | Turn1 pass | Turn2 pass (of Turn1 passers) |
+|------|-------|-----------|-------------|-----------|-------------------------------|
+| Oracle | oracle | 3/3 (100%) | 1.00 | 3/3 | 3/3 |
+| Metacode | meta/avocado-5.14-code | 8/10 (80%) | 0.85 | 9/10 | 8/9 |
+| Agent | claude-opus-4-8 | 2/10 (20%) | 0.60 | 10/10 | 2/10 |
+| Codex | gpt-5.5 | 7/10 (70%) | 0.80 | 9/10 | 7/9 |
 
-Declared difficulty: **hard** for Turn1, **extra hard** for Turn2 – balanced to be solvable but low pass rate (<45% Turn1, <25% Turn2 even for strong models). Turn1 hard but solvable requirements: checksum canonical no HTML escape, atomic at least 8/10 concurrent with lock cleanup (reference gets 10), global ID monotonic across room+private, spaces via Join (multiple args), file lock cleanup, seen_users persists after delete, 300-msg large history latest N <2s. Turn2 extra hard but solvable: weighted 50-room tolerance, global broadcast replication dedup, rate limit burst2 + refill after 1.6s + no ID/op-log side effects + per-user + persistence + corruption handling, presence unknown user + TTL 3s, snapshot dir+file mode with counter exact restore, checksum strict for all sharded files, corruption handling for private/rate_limit/presence, concurrent at least 9/10 same room and different shards with unique IDs, config defaults and unknown-field tolerance, ops-log content order and invalid line skipping, spaces Join sharded, pagination 1000 room +500 private <2s.
+Per-trial `firstFailedStep` breakdown (online run, fa698114):
+- **Avocado:** 8 full pass, 1 fail@Turn2, 1 fail@Turn1.
+- **Opus:** 2 full pass, **8 fail@Turn2** — every Opus failure is at Turn2 (it passes Turn1 10/10).
+- **Codex:** 7 full pass, 2 fail@Turn2, 1 fail@Turn1.
 
-Test counts in README now match actual pytest files (36 Turn1, 42 Turn2), fixing prior mismatch where README claimed fewer/more than grader. All MUST behaviors are graded.
+**Turn2 is the sole discriminator.** Turn1 (core chat server) is now solvable by every model (Turn1 pass ≥9/10); all differentiation happens at Turn2 (weighted sharding, rate limiting, presence, snapshot/restore). The strongest calibration signal is **Opus at 2/10** — it never fails Turn1 but fails Turn2 in 8/10 trials.
+
+Note the **inversion**: avocado (8/10) outscores Opus (2/10) on this run. Turn2's breadth of exact-match requirements (weighted-hash distribution, refill timing, snapshot file/dir exact restore, checksum-of-all-files) penalizes the more elaborate approaches Opus attempts, while the reference-shaped path avocado follows happens to satisfy more of them. Both models pass ≥1 and fail ≥1, so the discrimination requirement is satisfied and the task is PASSING.
+
+Historical aggregate across all recorded trials (spans many commits): avgReward **0.424** over **1159** trials.
+
+> **Freshness note:** current HEAD (`7239084`) has 3 pushed commits after `fa698114` (empty-string→exit-2 oracle fix, Turn2 hardening) that have **not yet been validated online**. The numbers above are for the latest validated commit, `fa698114`. Test counts in the grader are 36 Turn1 / 42 Turn2 and match this README.
 
 ## Model Analysis
 
@@ -70,7 +79,7 @@ Test counts in README now match actual pytest files (36 Turn1, 42 Turn2), fixing
 
 7. **Presence TTL + Unknown + Pagination + Snapshot File Mode (5% of failures)**: Presence unknown returns offline false last_seen 0, TTL expiry 3s, wrapper checksum. Pagination offset for both get-messages and get-private with 500-1000 msgs <2s. Snapshot dir mode copies all files+config, file mode combined JSON with shards/private/presence/counter/users/ops_log, restore restores counter next_id exactly.
 
-**Cross-model**: Avocado fails early on spaces Join and concurrent at least 8/10; Codex gets core but misses HTML escaping and large history perf; Opus sharding partial but not refill+multi-shard; Sonnet intermediate. Hard but solvable: prior 31-test easy 48% Codex drops to ~44% Turn1 (16/36) and ~24% Turn2 (10/42) with extra hard features.
+**Cross-model (from the fa698114 online run):** Turn1 is essentially solved by all gates (avocado 9/10, Opus 10/10, codex 9/10 pass Turn1), so failures concentrate almost entirely at Turn2. Opus fails Turn2 in 8/10 trials (→ 2/10 overall) despite perfect Turn1 — the elaborate multi-file sharding/rate-limit/snapshot approaches it attempts trip the exact-match graders (distribution counts, refill timing, snapshot file/dir exact restore, checksum-of-all-files). Codex fails Turn2 in 2/9 Turn1-passers (→ 7/10 overall). Avocado, following a more reference-shaped path, clears Turn2 in 8/9 Turn1-passers (→ 8/10 overall), producing the notable avocado-beats-Opus inversion. The single Turn1 failure each for avocado and codex is the concurrent-durability / checksum path.
 
 **Reasoning gaps, not setup**: Failures due to spec details (checksum canonical, weighted hash, persistent token bucket with refill, broadcast replication dedup, global lock for multi-file, spaces Join, counter exact restore), not flaky tests. TTL tests use 3s sleep >2s TTL generous.
 
