@@ -76,7 +76,7 @@ File at `--data` path must use **either** simple flat JSON **or** wrapper with c
 }
 ```
 - Canonical data JSON: `json.dumps(data, sort_keys=True, separators=(',', ':'))` with no HTML escaping – Go must use `json.Encoder.SetEscapeHTML(false)` for checksum calculation and file write. Test includes `<>&` in message content to ensure no escaping.
-- On write: atomic via `os.CreateTemp` in same dir + `os.Rename`. Behavioral check: during 10 concurrent `send` processes, file should never become invalid JSON and should have at least 1 message after, IDs unique.
+- On write: atomic via `os.CreateTemp` in same dir + `os.Rename`. Behavioral check: during 10 concurrent `send` processes, file must never become invalid JSON and must preserve most or all successful sends – specifically at least 8 messages after 10 concurrent sends, IDs unique. This verifies atomic CreateTemp+Rename behaviorally, not via source string inspection.
 - On read: validation before any command:
   - Missing file → empty store `rooms={}, private_messages=[], next_id=1, seen_users={}`
   - Empty file → empty store
@@ -103,7 +103,7 @@ File at `--data` path must use **either** simple flat JSON **or** wrapper with c
 - `test_missing_checksum_handling`: wrapper with `data` but missing `checksum` or empty checksum → same corruption handling (backup, warning, recreate empty)
 - `test_invalid_json_backup_naming`: file with invalid JSON `{invalid` → backup file named `<path>.corrupt.<nanosec>` with integer nanosec, and recreated file valid empty.
 - `test_stderr_warnings`: corruption produces warning to stderr containing "corrupt"
-- `test_atomic_behavior_concurrent`: behavioral atomicity – during 10 concurrent `send` processes, continuously reading file should never yield invalid JSON; after at least 1 message succeeds, IDs unique, file valid. This verifies atomic CreateTemp+Rename behaviorally, not via source string.
+- `test_atomic_behavior_concurrent`: behavioral atomicity – during 10 concurrent `send` processes, continuously reading file must never yield invalid JSON; after 10 concurrent sends, file must remain valid and preserve most or all successful sends – at least 8 messages, IDs unique, file valid. This verifies atomic CreateTemp+Rename behaviorally, not via source string inspection.
 - `test_stdlib_only`: `go.mod` no external requires and `go list -f '{{join .Imports " "}}' .` has no dotted imports.
 - `test_atomic_write_advisory`: previously source-string check `CreateTemp`+`Rename` – now made **advisory** not reward-critical: if not found, log warning but don't fail; behavioral concurrent test is reward-critical.
 

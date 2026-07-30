@@ -49,9 +49,9 @@ Must keep Turn 1 functionality working (create-room, delete-room, list-rooms, jo
 - `rate_limit_path` optional default `/app/data/rate_limit.json`
 - `counter_path` optional default `/app/data/counter.json`
 - `users_path` optional default `/app/data/users.json`
-- **Unknown fields must be ignored** – implementation must be tolerant: if config contains extra fields not listed above (e.g., future extensions), ignore them and use defaults for missing optional fields. Do not fail on unknown fields.
+- **Unknown fields must be ignored** – implementation must be tolerant: if config contains extra fields not listed above (e.g., future extensions), ignore them and use defaults for missing optional fields. Do not fail on unknown fields. Tests verify that config with extra field like `future_field` or `unknown_top_level` still allows `create-room` to succeed.
 
-Validation: bad config (invalid JSON, shard_count <=0, duplicate id, empty path, weight <=0) → exit 2.
+Validation: bad config (invalid JSON, shard_count <=0, duplicate id, empty path, weight <=0) → exit 2. Tests verify all these invalid cases return exit 2.
 
 ### Sharded Mode Semantics
 - Rooms sharded via weighted hash of roomID
@@ -72,14 +72,14 @@ Validation: bad config (invalid JSON, shard_count <=0, duplicate id, empty path,
 - **Per-user behavior**: each user independent bucket
 - **Persistence path**: `rate_limit_path` default `/app/data/rate_limit.json`, wrapper format with checksum `{"data": {"alice": {"tokens":..., "last_refill":...}}, "checksum": "..."}`, atomic via `CreateTemp`+`Rename`, corruption handling same as other files, file locking via global lock `/app/data/global.lock`
 - **Exit code / stderr**: if rate-limited, exit code 1 (not 2), stderr must contain "rate limit" (case-insensitive), no stdout, must NOT increment message IDs and must NOT append to ops log
-- **Tests for this turn**: will only verify **within-burst success** (lenient) – e.g., burst 10000 allows 50 sends to succeed, not requiring failure enforcement. This eases Turn2 while still requiring token-bucket logic and persistence. Strict failure tests may be added in future but not required for reward in this simplified Turn2.
+- **Tests for this turn**: verify both within-burst success and rejection. Burst enforcement: with burst 2, 2 sends succeed, 3rd must fail exit 1 with "rate limit" stderr and produce no ID increment and no ops_log side effects. Per-user buckets independent, refill after elapsed time (tested via persistence).
 
 ### Presence (large-scale)
 
 - `heartbeat <userID>`: updates user's last_seen to now (UnixNano) persisted in file at `presence_path` default `/app/data/presence.json`, wrapper with checksum, atomic writes, corruption handling, global lock
 - `get-presence <userID>`: returns JSON `{"user_id": "alice", "online": true/false, "last_seen": 123, "last_seen_seconds_ago": 0.5}` where `online = now - last_seen <= presence_ttl_seconds * 1e9` (TTL from config default 60). If user never heartbeat, online false, last_seen 0
 - `list-online`: returns JSON array sorted of userIDs whose last_seen within TTL, i.e., `now - last_seen <= TTL*1e9`
-- **Tests for this turn**: only verify **heartbeat makes online** and `list-online` contains user (simple, no TTL expiry sleep required). TTL expiry handling is optional for this simplified Turn2 but recommended per spec.
+- **Tests for this turn**: verify heartbeat makes online, `list-online` contains user, and TTL expiry. With TTL 2s, after heartbeat and sleep 2.5-3s, `get-presence` must return `online=false` and `list-online` must not contain user.
 
 ### New Commands (MUST)
 
@@ -116,13 +116,13 @@ Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
 ### Pagination
 
 - `get-messages <roomID> [limit] [offset]`: limit 0 = all, offset 0 default, returns `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]`
-- Similarly `get-private`
-- Must work for 50 messages quickly, and for large history 200 performance test <2s
+- Similarly `get-private <u1> <u2> [limit] [offset]` must support offset pagination.
+- Must work for 50 messages quickly, and for large history 200 performance test <2s. Tests verify both `get-messages` and `get-private` pagination with offset: e.g., limit 10 offset 0 → msg0-9, offset 10 → msg10-19.
 
 ### Snapshot/Restore
 
-- `snapshot <backup_path>`: dir mode – mkdir -p backup_path, copy each shard file (if exists), private_path, presence_path, counter_path, users_path, ops_log into backup dir (basename preserved)
-- `restore <backup_path>`: dir – copy files back from backup dir to original paths (overwrite)
+- `snapshot <backup_path>`: dir mode – mkdir -p backup_path, copy each shard file (if exists), private_path, presence_path, counter_path, users_path, rate_limit_path, ops_log into backup dir (basename preserved). Must preserve private messages, presence, counter (next_id), users, rate_limit, and ops_log.
+- `restore <backup_path>`: dir – copy files back from backup dir to original paths (overwrite). After restore, private messages, presence, counter, users, rate_limit, and ops_log must be exactly as snapshot time (tested).
 - Exit 0
 
 ### Integrity & Concurrency (Turn2, lenient for ease)
@@ -131,9 +131,11 @@ Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
 - Corruption handling: if file has invalid JSON, backup to `<path>.corrupt.<nanosec>` where nanosec = `time.Now().UnixNano()` integer, stderr warning containing "corrupt" or "checksum", recreate empty valid file
 - Missing checksum handling for wrapped files: if file has `data` field but `checksum` missing or empty → corruption handling (backup, recreate empty)
 - Checksum mismatch: if file has `data` and `checksum` but checksum mismatch → corruption handling
-- **Atomic behavior under concurrent sends**: Must not corrupt file – behavioral check: during 10 concurrent sends, file should remain valid JSON, IDs unique, no partial writes. Tests will spawn 10 parallel `send` processes and verify file stays valid JSON and has at least 2 messages after (lenient). Advisory: implement file locking via `<path>.lock` with `O_CREATE|O_EXCL` retry to prevent races.
+- **Atomic behavior under concurrent sends**: Must not corrupt file – behavioral check: during 10 concurrent sends, file must remain valid JSON, IDs unique, no partial writes. Tests spawn 10 parallel `send` processes and verify file stays valid JSON and preserves most or all successful sends – at least 8 messages after 10 concurrent sends. Requires file locking via `<path>.lock` or global lock `/app/data/global.lock` with `O_CREATE|O_EXCL` retry to prevent races.
 - **Stdlib-only imports**: `go.mod` must have no external requires, `go list -f '{{join .Imports " "}}' .` should contain no dotted imports (only stdlib). Tested in Turn1.
-- **Source-string checks for `CreateTemp` and `Rename`**: These are made **advisory** not reward-critical in Turn2 simplified – reference solution contains them, but tests will not fail if missing; instead behavioral atomic check above ensures no corruption. Turn1 still checks source as advisory? Actually Turn1 will have behavioral check, not strict source string.
+- **Source-string checks for `CreateTemp` and `Rename`**: These are **advisory** not reward-critical – reference solution contains them and behavioral atomic test is reward-critical. Tests will log warning if missing but not fail. Both Turn1 and Turn2 use behavioral atomicity as primary check.
+- **Ops-log invalid line handling**: `ops-log` must skip invalid JSON lines with warning to stderr containing "corrupt" or similar, and return valid entries as JSON array. Tested.
+- **Config validation & unknown-field tolerance**: malformed configs (invalid JSON, shard_count <=0, duplicate id, empty path, weight <=0) must exit 2; unknown fields must be ignored.
 
 ### Exit Codes
 0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, etc). `leave` idempotent exit 0 even if room not exist.
@@ -159,9 +161,12 @@ Implement at `/app`.
 
 ### Success
 - Turn1 features still work in sharded mode
-- Weighted sharding correct, global broadcast
-- Pagination works for 50 messages
-- Snapshot/restore dir mode
-- Presence simple heartbeat online
-- Rate limiting lenient within-burst (optional)
+- Weighted sharding correct, global broadcast, distribution
+- Pagination works for 50 messages for both get-messages and get-private with offset
+- Snapshot/restore dir mode preserves private, presence, counter, users, rate_limit, ops_log
+- Presence heartbeat makes online and TTL expiry after sleep (offline + list-online)
+- Rate limiting: burst enforcement exit 1 with no ID/op-log side effects, per-user independent
+- Config validation: malformed configs exit 2, unknown fields tolerated
+- Ops-log skips invalid lines with warning
 - Help contains keywords
+- Concurrent atomic behavior preserves ≥8 of 10 sends
