@@ -1,13 +1,10 @@
 #!/bin/bash
 set -euo pipefail
-
 mkdir -p /app
 cat > /app/go.mod <<'EOF'
 module router
-
 go 1.22
 EOF
-
 cat > /app/main.go <<'GOEOF'
 package main
 
@@ -19,6 +16,7 @@ import (
     "math"
     "os"
     "sort"
+    "strings"
 )
 
 type GraphFile struct {
@@ -26,19 +24,19 @@ type GraphFile struct {
     Edges []Edge   `json:"edges"`
 }
 type Edge struct {
-    From string `json:"from"`
-    To string `json:"to"`
+    From     string  `json:"from"`
+    To       string  `json:"to"`
     Distance float64 `json:"distance"`
 }
 type SingleOut struct {
-    Path []string `json:"path"`
-    Distance float64 `json:"distance"`
+    Path     []string `json:"path"`
+    Distance float64  `json:"distance"`
 }
 type BatchOut struct {
-    Source string `json:"source"`
-    Destination string `json:"destination"`
-    Path []string `json:"path"`
-    Distance float64 `json:"distance"`
+    Source      string   `json:"source"`
+    Destination string   `json:"destination"`
+    Path        []string `json:"path"`
+    Distance    float64  `json:"distance"`
 }
 
 func printHelp() {
@@ -79,9 +77,7 @@ type PriorityQueue []*Item
 func (pq PriorityQueue) Len() int { return len(pq) }
 func (pq PriorityQueue) Less(i,j int) bool {
     const eps = 1e-9
-    if math.Abs(pq[i].dist - pq[j].dist) > eps {
-        return pq[i].dist < pq[j].dist
-    }
+    if math.Abs(pq[i].dist - pq[j].dist) > eps { return pq[i].dist < pq[j].dist }
     return comparePaths(pq[i].path, pq[j].path) < 0
 }
 func (pq PriorityQueue) Swap(i,j int) { pq[i], pq[j] = pq[j], pq[i] }
@@ -102,7 +98,7 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     if gf.Nodes == nil || len(gf.Nodes)==0 { return nil,nil,false }
     nodeSet := make(map[string]bool)
     for _, n := range gf.Nodes {
-        if n=="" { return nil,nil,false }
+        if strings.TrimSpace(n) == "" { return nil,nil,false }
         if nodeSet[n] { return nil,nil,false }
         nodeSet[n]=true
     }
@@ -110,10 +106,10 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     adj := make(map[string]map[string]float64)
     for _, nd := range gf.Nodes { adj[nd]=make(map[string]float64) }
     for _, e := range gf.Edges {
-        if e.From==""||e.To=="" { return nil,nil,false }
+        if strings.TrimSpace(e.From) == "" || strings.TrimSpace(e.To) == "" { return nil,nil,false }
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
-        if e.Distance<=0 { return nil,nil,false }
+        if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
@@ -173,26 +169,29 @@ func main() {
     if len(os.Args)>=2 && os.Args[1]=="help" { printHelp(); os.Exit(0) }
     fs:=flag.NewFlagSet("router", flag.ContinueOnError)
     fs.SetOutput(os.Stderr)
-    var graphPath, fromNode, toNode, requestsPath string
+    var graphPath, fromNode, toNode, requestsPath, sourceAlt, destAlt string
     var helpFlag bool
     fs.StringVar(&graphPath, "graph", "", "graph file")
     fs.StringVar(&fromNode, "from", "", "from")
     fs.StringVar(&toNode, "to", "", "to")
+    fs.StringVar(&sourceAlt, "source", "", "source alt")
+    fs.StringVar(&destAlt, "destination", "", "dest alt")
     fs.StringVar(&requestsPath, "requests", "", "requests")
     fs.BoolVar(&helpFlag, "help", false, "help")
     fs.BoolVar(&helpFlag, "h", false, "help")
     if err:=fs.Parse(os.Args[1:]); err!=nil { os.Exit(2) }
     if helpFlag { printHelp(); os.Exit(0) }
     if graphPath=="" { os.Exit(2) }
+    if fromNode=="" { fromNode=sourceAlt }
+    if toNode=="" { toNode=destAlt }
     adj, nodeSet, ok := parseGraph(graphPath)
     if !ok { os.Exit(2) }
-
     if requestsPath!="" {
         data, err:=os.ReadFile(requestsPath)
         if err!=nil { os.Exit(2) }
         var rawArr []json.RawMessage
         if err:=json.Unmarshal(data, &rawArr); err!=nil { os.Exit(2) }
-        type pair struct{src,dst string}
+        type pair struct{src, dst string}
         var pairs []pair
         valid:=true
         for _, raw:=range rawArr {
@@ -216,7 +215,7 @@ func main() {
         if !valid { os.Exit(2) }
         anyNoRoute:=false
         for _, p:=range pairs {
-            if p.src==""||p.dst=="" {
+            if strings.TrimSpace(p.src)==""||strings.TrimSpace(p.dst)=="" {
                 anyNoRoute=true
                 out:=BatchOut{Source:p.src, Destination:p.dst, Path:[]string{}, Distance:-1}
                 b,_:=json.Marshal(out)
@@ -238,7 +237,7 @@ func main() {
         if anyNoRoute { os.Exit(1) }
         os.Exit(0)
     } else {
-        if fromNode==""||toNode=="" { os.Exit(2) }
+        if strings.TrimSpace(fromNode)==""||strings.TrimSpace(toNode)=="" { os.Exit(2) }
         path,dist,found:=dijkstra(adj,fromNode,toNode,nodeSet)
         if !found {
             out:=SingleOut{Path:[]string{}, Distance:-1}
@@ -254,6 +253,4 @@ func main() {
     }
 }
 GOEOF
-
-go build -o router .
-echo "Built router"
+cd /app && go build -o router . && echo "Build ok step1 harder"

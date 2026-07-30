@@ -1,9 +1,9 @@
-# Turn 2: Traffic-Aware Best Path Selection (Go) – Multi-Turn Step 2
+# Turn 2: Traffic-Aware Best Path Selection (Go) – Multi-Turn Step 2 – HARD
 
 ## Background
-Turn 1 built distance-based routing. Production traffic now requires live congestion data. Extend the same router binary (Turn1 code present via `inherit_prior_session`) to incorporate traffic multipliers and select the best path by **effective distance** (physical distance * traffic factor).
+Turn 1 built distance-based routing. Production now requires live congestion data. Extend same router binary (Turn1 code present via `inherit_prior_session`) to incorporate traffic multipliers and select best path by **effective distance** (physical distance * traffic factor). This is HARD – adds float factor parsing, dual JSON formats, extra-field tolerance, 3-way effective tie-breaks, large batches with traffic, validation of missing edge, whitespace, factor string.
 
-Turn1 functionality must still work when --traffic is not provided.
+Turn1 functionality must still work when --traffic not provided.
 
 ## Task – Extend Go Router at `/app`, built via `go build -o router .`
 
@@ -18,117 +18,95 @@ router --help | -h
 ```
 
 New flag:
-- `--traffic <PATH>` – optional, path to traffic JSON (see format). If provided, routing must use traffic-aware effective distance for path selection, while still reporting raw distance.
-- Help must now contain keywords: `graph`, `from`, `to`, `requests`, `traffic`, `help` (case-insensitive check). Must still handle bare no args → help exit 0, must contain all keywords.
-- Order of flags does not matter; --traffic may appear before or after others.
-- Invalid traffic file (unreadable, invalid JSON, validation failure) → exit 2, no stdout.
+- `--traffic <PATH>` – optional, path to traffic JSON. Routing must use traffic-aware effective distance for selection, while reporting raw distance. Also accept alternative long form `--traffic-factor`? No, only `--traffic` required.
+- Help must now contain keywords: `graph`, `from`, `to`, `requests`, `traffic`, `help` (case-insensitive). Bare no args → help exit 0, must contain all 6.
+- Order of flags does not matter; --traffic may appear before or after.
+- Unknown flag (including misspelling) → exit 2, no stdout.
+- Invalid traffic file (unreadable, invalid JSON, validation) → exit 2, no stdout.
 
-### Traffic JSON Format (MUST)
+### Traffic JSON Format (MUST) – HARDER
 
 ```json
 {
   "traffic": [
-    {"from":"A","to":"B","factor":2.5},
+    {"from":"A","to":"B","factor":2.5, "extra":"ignore"},
     {"from":"B","to":"C","factor":0.5}
-  ]
+  ],
+  "extra_top":"ignore"
 }
 ```
 
 Rules:
-- `traffic` – required array in object, or alternative format: array directly `[{"from":"A","to":"B","factor":1.5}]` (accept both; object wrapping recommended format). Tests accept both forms.
-- Each entry: `from`, `to` strings non-empty must be nodes existing in graph, and edge between them must exist in graph (undirected existence – if graph has A-B edge, traffic A-B is valid, B-A also valid). If traffic references non-existing node or non-existing graph edge → invalid input exit 2.
-- `factor` – number >0 (float allowed). Must be >0. If <=0 or missing or not number → exit 2.
-- Duplicate traffic entries for same unordered pair: last occurrence wins (or first – deterministically choose last). If duplicate with different directions (A->B and B->A), treat as same undirected edge unless you implement directional – for simplicity spec says **undirected factor**: factor applies both ways. If both directions specified separately, last wins.
-- Missing traffic entry for an edge → default factor 1.0 (no congestion).
-- No self-traffic (from==to) → invalid exit 2.
+- Two accepted forms (must support both):
+  1. Object-wrapped: `{"traffic": [ {...}, ... ] }`
+  2. Direct array: `[{"from":"A","to":"B","factor":1.5}]`
+- Each entry: `from`, `to` strings non-empty (whitespace-only invalid → exit2), must be nodes existing in graph, and edge between them must exist in graph undirected (if graph has A-B, traffic A-B valid, B-A also valid). If references non-existing node or non-existing graph edge → invalid exit 2.
+- `factor` – required number >0, may be int or float. Must be >0. If <=0, missing, NaN, Inf, or not a number (string `"2.5"`, bool, object) → exit 2. Extra unknown fields inside traffic entry or top-level object must be **ignored**, not invalid (e.g., `{"from":"A","to":"B","factor":2,"delay":5}` is valid, factor 2).
+- Duplicate traffic entries for same unordered pair: **last occurrence wins**. If duplicate with different directions (A->B and B->A), treat as same undirected edge, last wins.
+- Missing traffic entry for an edge → default factor 1.0.
+- No self-traffic (from==to or whitespace trimmed equal) → invalid exit 2.
 
-### Routing Algorithm – Traffic-Aware (MUST)
+### Routing Algorithm – Traffic-Aware (MUST) – HARD
 
-- Effective edge cost = `distance * factor` (factor default 1.0 if no traffic entry).
-- Path selection in traffic mode: minimize **sum of effective distances** (effective_distance) using Dijkstra.
-- Still compute **raw distance** sum (sum of original distances) along selected path for reporting.
-- Tie-breaking: Same as Turn1 but on effective_distance – if multiple paths have identical effective_distance (within floating tolerance 1e-9), choose lexicographically smallest path.
-- Source == destination: path [source], distance 0, effective_distance 0, traffic_delay 0.
-- No path: same as Turn1 handling but with extended fields when traffic present.
+- Effective edge cost = `distance * factor` (distance is float, factor default 1.0)
+- Path selection with traffic: minimize **sum effective** using Dijkstra.
+- Still compute raw distance sum along selected path.
+- Tie-breaking: Same as Turn1 but on effective_distance within 1e-9 tolerance – if multiple paths have identical effective_distance, choose lexicographically smallest path case-sensitive. If still tie? Shorter wins. Tests include 3-way effective tie: A-B-D, A-C-D, A-E-D all effective 10 (raw may differ), B<C<E so A-B-D wins regardless of discovery order. Must sort neighbors.
+- Source == destination: path [source], distance 0, effective 0, delay 0.
+- No path: same handling with extended fields.
+- Float handling: distances and factors float, sum may be float; output float; tolerance 1e-6 for comparison.
 
-### Output Format Extended (MUST)
+### Output Format Extended (MUST) – HARD
 
-Single query **without** --traffic: Same as Turn1 (backward compat):
-`{"path":["A","B"],"distance":5}` success exit 0
-`{"path":[],"distance":-1}` no route exit1
+Single without traffic: as Turn1
 
-Single query **with** --traffic:
-
-Success:
+Single with traffic success:
 `{"path":["A","C"],"distance":10,"effective_distance":15.5,"traffic_delay":5.5}`
-- `distance` = sum raw distances (int, but may output int; tests accept float if same value)
-- `effective_distance` = sum effective (float, may be integer value but output as number)
-- `traffic_delay` = effective - raw (float)
-- All three must be present when --traffic supplied and path found.
-- Path must be selected based on effective_distance, not raw.
-- Floating comparisons: tests allow tolerance 1e-6 for effective_distance and traffic_delay.
+- All three distance fields must be present when --traffic supplied and path found
+- Path selected by effective, not raw
+- Floating tolerance 1e-6
 
 No path with traffic:
-`{"path":[],"distance":-1,"effective_distance":-1,"traffic_delay":-1}` exit 1
+`{"path":[],"distance":-1,"effective_distance":-1,"traffic_delay":-1}` exit1
 
-Invalid → exit 2 no stdout.
+Invalid → exit2 no stdout
 
-Batch mode **without** traffic: Same as Turn1.
+Batch without traffic: as Turn1
 
-Batch mode **with** traffic:
-
-For each request, one JSON line:
-
-Success:
+Batch with traffic per line:
 `{"source":"A","destination":"C","path":["A","B","C"],"distance":8,"effective_distance":12.5,"traffic_delay":4.5}`
 
 No path:
 `{"source":"A","destination":"C","path":[],"distance":-1,"effective_distance":-1,"traffic_delay":-1}`
 
-Exit codes batch with traffic:
-- 0 all routed
-- 1 at least one no route
-- 2 invalid
+Exit: 0 all routed, 1 some no route, 2 invalid
 
-### Business Rules & Edge Cases (MUST)
+### Business Rules & Edge Cases (MUST) – HARDER
 
-- Turn1 still passes without traffic: your Turn2 binary will be tested with Turn1 cases too.
-- Traffic changes best path: explicit test where direct edge A-C distance 5 factor 10 => effective 50, alternative A-B-C distance 6+6=12 factor 1 each => effective 12, so longer raw but traffic-aware prefers alternative. Must select alternative.
-- Factor <1 means faster (e.g., no congestion, carpool lane): effective < raw, traffic_delay negative allowed.
-- Batch order preserved, single vs batch consistent.
-- Help keywords: graph, from, to, requests, traffic, help.
-- Validation expanded:
-  - graph invalid → exit 2 (same as Turn1)
-  - traffic file invalid JSON / missing / referenced edge not in graph / nodes missing / factor <=0 / self-loop traffic → exit 2
-  - requests file invalid → exit 2
-  - Unknown flags → exit 2 (or handle, but no stdout)
-- Stdlib only, build via `go build -o router .`
-- Performance: 500 nodes, 2000 edges, 100 requests with traffic <2 sec.
-- Floating tolerance: effective sum may have floating errors; tests compare with abs diff <1e-6.
+- Turn1 still passes without traffic
+- Traffic changes best path: direct edge short but high factor 10 → effective 50, alternative longer raw 12 factor1 → effective12, must pick alternative
+- Factor <1 faster, negative delay allowed
+- Batch order preserved
+- Help keywords 6
+- Graph invalid → exit2 (including whitespace node IDs)
+- Traffic invalid: invalid JSON, missing file, referenced edge not in graph, nodes whitespace, factor <=0, factor string, self-loop, extra top-level without traffic key (when expecting object?) – but direct array is valid alternative, object must have traffic key, array missing traffic key invalid
+- Requests invalid → exit2
+- Unknown flags → exit2
+- Extra unknown fields in graph top-level, edge, requests, traffic must be **ignored** (not invalid) – tests cover this
+- Stdlib only
+- Performance: 500 nodes, 2000 edges, 100 requests with traffic <2 sec
+- Float tolerance
 
-### Examples
+### Examples – HARD
 
 ```bash
 go build -o router .
 ./router --graph graph.json --from A --to C --traffic traffic.json
-# traffic.json: {"traffic":[{"from":"A","to":"C","factor":10},{"from":"A","to":"B","factor":1},{"from":"B","to":"C","factor":1}]}
-# Graph: A-B 6, B-C 6, A-C 5
-# Raw shortest is A-C distance 5, but effective A-C=50, A-B-C effective=12, so selects A-B-C
-# Output: {"path":["A","B","C"],"distance":12,"effective_distance":12,"traffic_delay":0}
+# Graph A-B6 B-C6 A-C5, traffic A-C factor10 => picks A-B-C raw12 eff12 delay0
 
 ./router --graph graph.json --requests req.json --traffic traffic.json
-# Per line includes effective fields
+# req.json may have extra fields: [{"source":"A","destination":"C","priority":1}]
+# traffic.json may be [{"from":"A","to":"B","factor":0.001}] direct array
 ```
 
-### Success Criteria – Hard
-
-- Turn1 cases still pass when traffic not supplied
-- Single and batch modes both work with traffic
-- Traffic-aware selection picks minimal effective distance, not raw
-- Lexicographic tie-break enforced for equal effective distance
-- Validation: negative/zero factor, missing edge, self-loop traffic, duplicate handling, file not found → exit 2
-- Help contains all 6 keywords, bare no args help exit 0
-- Output JSON valid, correct fields, floating tolerance handled
-- Stdlib only, builds via go build
-
-Implement at `/app` – Turn2 extends Turn1.
+Success criteria hard – must handle all above.

@@ -1,7 +1,7 @@
-# Turn 1: Distance-Based Best Path Selection (Go) – Multi-Turn Step 1
+# Turn 1: Distance-Based Best Path Selection (Go) – Multi-Turn Step 1 – HARD
 
 ## Background
-A logistics platform needs a routing service that selects the best path between locations based purely on physical distance. Build the first phase of the router: distance-only shortest path.
+A logistics platform needs a routing service that selects the best path between locations based purely on physical distance. Build the first phase of the router: distance-only shortest path. This is HARD – tests cover floats, extra unknown fields, whitespace validation, 3-way tie-breaks, large batches, unknown flags, case-sensitive IDs.
 
 You will extend this same binary in Turn 2 to incorporate live traffic data.
 
@@ -23,126 +23,93 @@ router (no args) -> help
 ```
 
 Flags:
-- `--graph <PATH>` – required, path to graph JSON (see format)
-- `--from <NODE>`, `--to <NODE>` – source and destination for single query mode, both required if --requests not used
+- `--graph <PATH>` – required, path to graph JSON
+- `--from <NODE>`, `--to <NODE>` – source and destination for single query mode, both required if --requests not used. Also accept alternative spellings `--source` and `--destination` or `-from/-to`? No – only `--from/--to` required, but tests may use `--graph` + `--from`/`--to` only.
 - `--requests <PATH>` – optional batch mode, path to requests JSON array. If provided, ignores --from/--to.
 - `--help`, `-h`, `help` – prints help to stdout containing keywords: `graph`, `from`, `to`, `requests`, `help` and exits 0
 - Bare binary no args → help exit 0
-- Unknown flag or missing required args → exit 2, no stdout expected (stderr may contain message)
+- Unknown flag or missing required args → exit 2, no stdout expected
 
-### Graph JSON Format (MUST)
+### Graph JSON Format (MUST) – HARDER
 
 ```json
 {
   "nodes": ["A","B","C","D"],
   "edges": [
-    {"from":"A","to":"B","distance":5},
-    {"from":"B","to":"C","distance":3},
-    {"from":"A","to":"C","distance":10}
-  ]
+    {"from":"A","to":"B","distance":5, "extra":"ignore"},
+    {"from":"B","to":"C","distance":3}
+  ],
+  "extra_top":"ignore me"
 }
 ```
 
 Rules:
-- `nodes` – required array of non-empty unique strings (node IDs). At least 1.
-- `edges` – required array. Each edge has `from` (string), `to` (string), `distance` (number >0 integer). `from` and `to` must exist in nodes. `from` != `to` (no self loops, invalid if self-loop). Distance must be >0, integer (tests use integers but accept floats as valid for Turn1 if >0).
-- Graph is **undirected**: edge A-B can be traversed both ways with same distance. Duplicate edges between same unordered pair are allowed; keep smallest distance for routing (or keep all – shortest wins).
-- Invalid graph: empty/duplicate nodes, empty node ID, edge referencing non-existing node, distance <=0, self-loop, invalid JSON, unreadable file → exit 2, no stdout (stderr may explain). Tests explicitly check negative distance, self-loop, duplicate node ID, empty node ID.
+- `nodes` – required array of non-empty unique strings (node IDs). At least 1. **Whitespace-only strings** e.g., `"   "` or `""` are considered empty → invalid graph exit 2. Node IDs are case-sensitive: `"A"` and `"a"` are distinct, not duplicate. May contain letters, numbers, hyphen, underscore (e.g., `Node-A_1`). Unique check is exact string match.
+- `edges` – required array. Each edge has `from` (string), `to` (string), `distance` (number >0). Distance may be integer **or float** >0 (e.g., 2.5). `from` and `to` must exist in nodes, trimmed whitespace invalid (if from/to is empty or whitespace-only → invalid). `from` != `to` (no self loops). Extra unknown fields inside edge objects or top-level (e.g., `"extra"`) must be **ignored**, not cause invalid.
+- Graph is **undirected**: edge A-B can be traversed both ways with same distance. Duplicate edges between same unordered pair are allowed; keep smallest distance for routing.
+- Invalid graph: empty/duplicate nodes, empty/whitespace node ID, edge referencing non-existing node, distance <=0 or missing or not a number, self-loop, invalid JSON (trailing comma, etc.), unreadable file → exit 2, no stdout. Tests check negative, zero, self-loop, duplicate, empty, whitespace, non-numeric distance, missing fields, extra top-level ignored (should NOT be invalid).
 
-### Requests JSON Format (Batch Mode)
+### Requests JSON Format (Batch Mode) – HARDER
 
 When `--requests` is used:
 
 ```json
 [
-  {"source":"A","destination":"C"},
-  {"source":"B","destination":"D"}
+  {"source":"A","destination":"C","priority":1},
+  {"from":"B","to":"D","extra":"ignore"}
 ]
 ```
 
-Alternative key support: also accept `from`/`to` keys for backward compat: `{"from":"A","to":"C"}`. If request contains both forms, prefer `source`/`destination`. Mixed formats allowed.
+- File must be JSON array. If not array or invalid JSON → exit 2 no stdout.
+- Each element: object containing `source`/`destination` **or** `from`/`to`. If both forms present, prefer `source`/`destination`. Values must be strings. If value not string → invalid exit 2. If string is empty → treat as **no route** (not invalid) – output empty path -1, counts as no route. Whitespace-only also considered empty for requests? For requests, treat empty string as no route, whitespace-only as no route (not invalid) to allow batch partial failures. Extra unknown fields in request objects (e.g., `priority`) must be **ignored**.
+- Output order must match input order.
 
-Each entry must have source & destination strings that are non-empty (validation: if request has empty source/destination, treat as "no route" not invalid, unless source/destination not a string – then invalid -> exit 2). But file itself must be valid JSON array; otherwise exit 2.
+### Routing Algorithm – Distance-Based Shortest Path (MUST) – HARD
 
-### Routing Algorithm – Distance-Based Shortest Path (MUST)
-
-- Use Dijkstra (or equivalent shortest path) minimizing sum of `distance` along path.
+- Use Dijkstra minimizing sum of `distance` (float) along path.
 - If source == destination: path = [source], distance = 0.
-- If no path exists: special handling (see Output).
-- Tie-breaking: When multiple paths have identical total distance, choose **lexicographically smallest path** defined as:
-  - Compare path arrays element-by-element as strings.
-  - At first differing index, smaller string wins (e.g., ["A","B","D"] < ["A","C","D"] because B<C).
-  - If one path is prefix of other, shorter wins (should not happen for same source/dest with positive weights except same node case, but handle).
-  - This tie-break must be deterministic and enforced in all modes. Tests include explicit tie case where two equal-distance paths exist.
-
-- Implementation must be efficient for up to 500 nodes, 2000 edges, 100 requests: <2 sec.
+- If no path: special handling.
+- **Tie-breaking HARD:** When multiple paths have identical total distance within 1e-9 tolerance, choose **lexicographically smallest path**:
+  - Compare element-by-element as strings case-sensitive.
+  - At first differing index, smaller string wins (e.g., B < C)
+  - If one is prefix of other, shorter wins (rare but handle)
+  - Tests include **3-way equal distance tie**: A-B-D (5+5), A-C-D (5+5), A-E-D (5+5) – B<C<E so A-B-D must win regardless of discovery order. Implementation must sort neighbors or use priority queue with lexicographic secondary.
+- Performance: 500 nodes, 2000 edges, 100 requests <2 sec in Go. Tests include linear chain 100 nodes and large batch 100 requests – must be efficient (<2 sec).
 
 ### Output Format (MUST)
 
-Single query mode (`--from X --to Y`):
+Single query mode:
 
-Success (path found):
-- stdout: JSON object `{"path":["A","B","C"],"distance":8}` on one line
-- exit 0
+Success:
+`{"path":["A","B","C"],"distance":8}` – distance may be float if sum is float, e.g., 8.5
 
 No path:
-- stdout: `{"path":[],"distance":-1}` (empty path, distance -1)
-- exit 1
+`{"path":[],"distance":-1}` exit1
 
-Invalid input:
-- no stdout
-- exit 2
+Invalid:
+no stdout exit2
 
-Batch mode (`--requests PATH`):
+Batch mode: one JSON line per request in order
 
-For each request in input order, output one JSON line to stdout (newline-delimited):
-
-Success per request:
+Success:
 `{"source":"A","destination":"C","path":["A","B","C"],"distance":8}`
 
-No path per request:
+No path:
 `{"source":"A","destination":"C","path":[],"distance":-1}`
 
-Exit codes for batch:
-- 0 if every request successfully routed (all found)
-- 1 if at least one request has no path (but input valid)
-- 2 if invalid input (graph invalid, requests file unreadable/invalid JSON structure, requests not an array, etc.)
+Exit: 0 all routed, 1 at least one no route, 2 invalid
 
-Output must be exactly one JSON object per line, no extra lines, no extra spaces requirement except valid JSON (tests parse each line). Output order must match input request order.
+Distance output: integer if whole number, float otherwise – tests parse as number and accept both.
 
-For single mode, output source/destination fields NOT required (only path+distance).
+### Exit Codes
 
-Distance type: output integer if sum is integer; tests accept int. Do not output float for Turn1 unless needed.
+0 success/help, 1 no route but valid, 2 invalid
 
-### Exit Code Summary
+### Constraints – HARD
 
-0 – success, all routes found (or help)
-1 – valid input but at least one route not found / disconnected
-2 – invalid input (bad JSON, validation failure, missing files, missing flags)
+- Go stdlib only, `go build -o router .`
+- Must handle: floats, extra unknown fields ignored (graph top-level, edge, requests), whitespace-only node IDs invalid (graph) but empty request source treated as no route, case-sensitive IDs, duplicate edges min, 3-way tie-break deterministic regardless of map iteration order (must sort), unknown flags exit2, file not found exit2
+- Help contains 5 keywords
+- Binary `/app/router`
 
-### Constraints
-
-- Go stdlib only (`go.mod` no external require, no dotted imports)
-- Must compile via `go build -o router .` from `/app`
-- No network access at runtime
-- Must handle source==destination, disconnected graphs, tie-breaking
-- Help output must contain all keywords: graph, from, to, requests, help (case-insensitive search)
-- Bin binary name `router` at `/app/router`
-- Must respect --graph path absolute or relative; assume file path exists only if provided.
-
-### Examples
-
-```bash
-go build -o router .
-./router --help
-./router --graph graph.json --from A --to C
-# Output: {"path":["A","B","C"],"distance":8}
-
-./router --graph graph.json --requests req.json
-# req.json: [{"source":"A","destination":"C"},{"source":"X","destination":"Y"}]
-# Output per line:
-# {"source":"A","destination":"C","path":["A","B","C"],"distance":8}
-# {"source":"X","destination":"Y","path":[],"distance":-1}
-```
-
-Implement at `/app` – Turn1. Turn2 will reuse same binary with additional flag.
+Examples as before.
