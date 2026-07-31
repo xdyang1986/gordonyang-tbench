@@ -8,10 +8,10 @@ import json
 import os
 import sys
 import re
-import glob
 import hashlib
 import sqlite3
-from datetime import datetime, timezone
+import shutil
+from datetime import datetime, timezone, timedelta
 
 try:
     import yaml
@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "checkpoint_dir": "/app/state",
     "metrics_path": "/app/metrics/freshness.json",
     "dead_letter_path": "/app/state/dead_letter.jsonl",
+    "archive_dir": "/app/data/archive",
 }
 
 VALID_FILENAME_RE = re.compile(r'^events_[A-Za-z0-9_.\-]+\.jsonl$')
@@ -39,7 +40,7 @@ def load_config(path="/app/config.yaml"):
                         if k in data:
                             cfg[k] = data[k]
         except Exception as e:
-            print(f"Warning: could not read config {path}: {e}", file=sys.stderr)
+            print(f"Warning: config {e}", file=sys.stderr)
     return cfg
 
 def parse_iso(s):
@@ -53,6 +54,7 @@ def parse_iso(s):
                     return dt.replace(tzinfo=timezone.utc)
                 except ValueError:
                     continue
+        # fromisoformat handles +00:00 and offset
         iso = orig.replace('Z', '+00:00')
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is None:
@@ -65,6 +67,7 @@ def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def ensure_tables(conn):
+    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS events (
       event_id TEXT PRIMARY KEY,
@@ -86,9 +89,12 @@ def ensure_tables(conn):
     CREATE TABLE IF NOT EXISTS ingestion_manifest (
       file_name TEXT PRIMARY KEY,
       file_hash TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
       num_lines INTEGER NOT NULL,
       num_valid INTEGER NOT NULL,
       num_invalid INTEGER NOT NULL,
+      num_future INTEGER NOT NULL,
+      num_outlier INTEGER NOT NULL,
       processed_at TEXT NOT NULL
     );
     """)
@@ -100,7 +106,23 @@ def ensure_tables(conn):
       total_purchases INTEGER NOT NULL,
       total_amount REAL NOT NULL,
       total_views INTEGER NOT NULL,
-      total_carts INTEGER NOT NULL
+      total_carts INTEGER NOT NULL,
+      avg_amount REAL NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS daily_top_users (
+      date TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      PRIMARY KEY(date, user_id)
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS hourly_sales (
+      hour TEXT PRIMARY KEY,
+      total_amount REAL NOT NULL,
+      event_count INTEGER NOT NULL
     );
     """)
     conn.commit()
@@ -117,26 +139,39 @@ def main():
     checkpoint_dir = cfg.get('checkpoint_dir', DEFAULT_CONFIG['checkpoint_dir'])
     metrics_path = cfg.get('metrics_path', DEFAULT_CONFIG['metrics_path'])
     dead_letter_path = cfg.get('dead_letter_path', "/app/state/dead_letter.jsonl")
+    archive_dir = cfg.get('archive_dir', "/app/data/archive")
 
     os.makedirs(incoming_dir, exist_ok=True)
+    os.makedirs(archive_dir, exist_ok=True)
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
     os.makedirs(os.path.dirname(dead_letter_path), exist_ok=True)
     os.makedirs(os.path.dirname(warehouse_db), exist_ok=True)
     os.makedirs("/app/logs", exist_ok=True)
 
-    all_files = os.listdir(incoming_dir)
+    # discovery strict
+    try:
+        all_files = os.listdir(incoming_dir)
+    except OSError:
+        all_files = []
     valid_files = []
     for fn in all_files:
-        if VALID_FILENAME_RE.match(fn):
-            middle = fn[7:-6]
-            if len(middle) == 0:
-                continue
-            valid_files.append(fn)
-
+        if fn.startswith('.'):
+            continue
+        if '..' in fn:
+            continue
+        if not VALID_FILENAME_RE.match(fn):
+            continue
+        middle = fn[7:-6]
+        if len(middle) == 0:
+            continue
+        if middle.startswith('.'):
+            continue
+        valid_files.append(fn)
     valid_files_sorted = sorted(valid_files)
     full_paths = [os.path.join(incoming_dir, f) for f in valid_files_sorted]
 
+    # load prev checkpoint
     prev_checkpoint = {}
     checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.json")
     if os.path.exists(checkpoint_path):
@@ -152,14 +187,20 @@ def main():
     per_file_stats = {}
     dead_letters = []
     total_invalid_global = 0
+    total_future = 0
+    total_outlier = 0
+    now_dt = datetime.now(timezone.utc)
+    future_threshold = now_dt + timedelta(hours=1)
 
     for fn, fp in zip(valid_files_sorted, full_paths):
         try:
             with open(fp, 'rb') as hf:
                 content_bytes = hf.read()
                 file_hash = hashlib.sha256(content_bytes).hexdigest()
+                file_size = len(content_bytes)
+            stat_mtime = os.path.getmtime(fp)
         except Exception as e:
-            print(f"Warning: could not hash file {fp}: {e}", file=sys.stderr)
+            print(f"Warning: hash fail {fp}: {e}", file=sys.stderr)
             continue
 
         if args.incremental and fn in prev_checkpoint:
@@ -167,15 +208,21 @@ def main():
             if prev_hash == file_hash:
                 per_file_stats[fn] = {
                     "hash": file_hash,
+                    "size": file_size,
                     "num_lines": prev_checkpoint[fn].get("num_lines", 0),
                     "num_valid": prev_checkpoint[fn].get("num_valid", 0),
-                    "num_invalid": prev_checkpoint[fn].get("num_invalid", 0)
+                    "num_invalid": prev_checkpoint[fn].get("num_invalid", 0),
+                    "num_future": prev_checkpoint[fn].get("num_future", 0),
+                    "num_outlier": prev_checkpoint[fn].get("num_outlier", 0),
+                    "mtime": stat_mtime
                 }
                 continue
 
         num_lines = 0
         num_valid = 0
         num_invalid = 0
+        num_future_file = 0
+        num_outlier_file = 0
 
         try:
             with open(fp, 'r', encoding='utf-8', errors='ignore') as f:
@@ -213,13 +260,23 @@ def main():
                             "detected_at": now_iso()
                         })
                         continue
-                    if event_type not in ('purchase', 'view', 'cart'):
+                    if event_type not in ('purchase','view','cart'):
                         num_invalid += 1
                         dead_letters.append({
                             "file": fn,
                             "line_no": line_no,
                             "content": raw[:500],
                             "reason": "invalid_type",
+                            "detected_at": now_iso()
+                        })
+                        continue
+                    if amount != amount:  # NaN
+                        num_invalid += 1
+                        dead_letters.append({
+                            "file": fn,
+                            "line_no": line_no,
+                            "content": raw[:500],
+                            "reason": "negative_amount",
                             "detected_at": now_iso()
                         })
                         continue
@@ -233,6 +290,17 @@ def main():
                             "detected_at": now_iso()
                         })
                         continue
+                    if amount > 100000:
+                        num_invalid += 1
+                        num_outlier_file += 1
+                        dead_letters.append({
+                            "file": fn,
+                            "line_no": line_no,
+                            "content": raw[:500],
+                            "reason": "outlier_amount",
+                            "detected_at": now_iso()
+                        })
+                        continue
                     dt = parse_iso(event_time)
                     if dt is None:
                         num_invalid += 1
@@ -241,6 +309,19 @@ def main():
                             "line_no": line_no,
                             "content": raw[:500],
                             "reason": "invalid_time",
+                            "detected_at": now_iso()
+                        })
+                        continue
+                    # future check: dt > now +1h
+                    # dt is aware UTC, now_dt aware
+                    if dt > future_threshold:
+                        num_invalid += 1
+                        num_future_file += 1
+                        dead_letters.append({
+                            "file": fn,
+                            "line_no": line_no,
+                            "content": raw[:500],
+                            "reason": "future_event",
                             "detected_at": now_iso()
                         })
                         continue
@@ -266,16 +347,22 @@ def main():
                                 '_dt': dt
                             }
         except Exception as e:
-            print(f"Warning: failed to read file {fp}: {e}", file=sys.stderr)
+            print(f"Warning: read fail {fp}: {e}", file=sys.stderr)
             continue
 
         per_file_stats[fn] = {
             "hash": file_hash,
+            "size": file_size,
             "num_lines": num_lines,
             "num_valid": num_valid,
-            "num_invalid": num_invalid
+            "num_invalid": num_invalid,
+            "num_future": num_future_file,
+            "num_outlier": num_outlier_file,
+            "mtime": stat_mtime
         }
         total_invalid_global += num_invalid
+        total_future += num_future_file
+        total_outlier += num_outlier_file
 
     if args.incremental:
         conn = sqlite3.connect(warehouse_db)
@@ -300,7 +387,7 @@ def main():
     ensure_tables(conn)
     processed_at = now_iso()
     try:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         for ev in deduped.values():
             conn.execute("""
                 INSERT OR REPLACE INTO events (event_id, user_id, event_type, amount, event_time, processed_at)
@@ -308,9 +395,10 @@ def main():
             """, (ev['event_id'], ev['user_id'], ev['event_type'], ev['amount'], ev['event_time'], processed_at))
         for fn, stats in per_file_stats.items():
             conn.execute("""
-                INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, num_lines, num_valid, num_invalid, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (fn, stats["hash"], stats["num_lines"], stats["num_valid"], stats["num_invalid"], processed_at))
+                INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, file_size, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (fn, stats["hash"], stats["size"], stats["num_lines"], stats["num_valid"], stats["num_invalid"], stats["num_future"], stats["num_outlier"], processed_at))
+        # daily_sales
         conn.execute("DELETE FROM daily_sales")
         conn.execute("""
             INSERT INTO daily_sales (date, total_amount, event_count)
@@ -321,9 +409,10 @@ def main():
             WHERE event_type='purchase'
             GROUP BY substr(event_time, 1, 10)
         """)
+        # user_stats
         conn.execute("DELETE FROM user_stats")
         conn.execute("""
-            INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts)
+            INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts, avg_amount)
             SELECT
                 user_id,
                 MIN(event_time) as first_seen,
@@ -331,14 +420,55 @@ def main():
                 SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END) as total_purchases,
                 SUM(CASE WHEN event_type='purchase' THEN amount ELSE 0 END) as total_amount,
                 SUM(CASE WHEN event_type='view' THEN 1 ELSE 0 END) as total_views,
-                SUM(CASE WHEN event_type='cart' THEN 1 ELSE 0 END) as total_carts
+                SUM(CASE WHEN event_type='cart' THEN 1 ELSE 0 END) as total_carts,
+                CASE WHEN SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END) > 0
+                     THEN SUM(CASE WHEN event_type='purchase' THEN amount ELSE 0 END) *1.0 / SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END)
+                     ELSE 0 END as avg_amount
             FROM events
             GROUP BY user_id
+        """)
+        # daily_top_users: top 3 per date
+        conn.execute("DELETE FROM daily_top_users")
+        # Get per date per user sums
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT substr(event_time, 1, 10) as date, user_id, SUM(amount) as total_amount
+            FROM events
+            WHERE event_type='purchase'
+            GROUP BY date, user_id
+        """)
+        rows = cur.fetchall()
+        # group by date
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for date, user_id, total in rows:
+            grouped[date].append((user_id, total))
+        for date, ulist in grouped.items():
+            # sort by total_amount DESC, user_id ASC
+            ulist_sorted = sorted(ulist, key=lambda x: (-x[1], x[0]))
+            top3 = ulist_sorted[:3]
+            for user_id, total in top3:
+                conn.execute("""
+                    INSERT INTO daily_top_users (date, user_id, total_amount)
+                    VALUES (?, ?, ?)
+                """, (date, user_id, total))
+        # hourly_sales
+        conn.execute("DELETE FROM hourly_sales")
+        conn.execute("""
+            INSERT INTO hourly_sales (hour, total_amount, event_count)
+            SELECT substr(event_time, 1, 13) || ':00:00Z' as hour,
+                   SUM(amount) as total_amount,
+                   COUNT(*) as event_count
+            FROM events
+            WHERE event_type='purchase'
+            GROUP BY hour
         """)
         conn.commit()
     except Exception as e:
         conn.rollback()
-        print(f"Error transaction {e}", file=sys.stderr)
+        print(f"Error tx {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     cur = conn.cursor()
@@ -354,47 +484,84 @@ def main():
     manifest_count = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM user_stats")
     user_stats_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM daily_top_users")
+    top_users_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM hourly_sales")
+    hourly_count = cur.fetchone()[0]
     conn.close()
 
+    # dead-letter sorted
+    dead_letters_sorted = sorted(dead_letters, key=lambda x: (x["file"], x["line_no"]))
     with open(dead_letter_path, 'w') as dl:
-        for entry in dead_letters:
+        for entry in dead_letters_sorted:
             dl.write(json.dumps(entry) + "\n")
+    # ensure exists even if empty
+    if not os.path.exists(dead_letter_path):
+        open(dead_letter_path, 'w').close()
 
+    # archive files
+    archived = []
+    for fn in per_file_stats.keys():
+        src = os.path.join(incoming_dir, fn)
+        dst = os.path.join(archive_dir, fn)
+        try:
+            if os.path.exists(src):
+                shutil.move(src, dst)
+                archived.append(fn)
+        except Exception as e:
+            print(f"Warning: archive fail {fn}: {e}", file=sys.stderr)
+
+    # checkpoint atomic
     checkpoint_data = {
+        "version": 2,
         "last_batch_time": now_iso(),
+        "created_at": now_iso(),
         "files_processed": sorted(per_file_stats.keys()),
         "files": per_file_stats,
+        "archive": sorted(archived),
         "total_events": total_events,
         "total_invalid": total_invalid_global,
+        "total_future": total_future,
+        "total_outlier": total_outlier,
         "mode": "batch"
     }
-    with open(checkpoint_path, 'w') as out:
+    tmp_cp = checkpoint_path + ".tmp"
+    with open(tmp_cp, 'w') as out:
         json.dump(checkpoint_data, out, indent=2)
+    os.rename(tmp_cp, checkpoint_path)
 
     freshness_sec = None
     if max_event_time:
         dt_max = parse_iso(max_event_time)
         if dt_max:
-            now_dt = datetime.now(timezone.utc)
-            freshness_sec = (now_dt - dt_max).total_seconds()
+            now_dt2 = datetime.now(timezone.utc)
+            freshness_sec = (now_dt2 - dt_max).total_seconds()
 
     metrics_data = {
         "mode": "batch",
+        "version": 2,
         "last_batch_time": checkpoint_data["last_batch_time"],
         "total_events": total_events,
         "total_files_processed": len(per_file_stats),
         "total_invalid": total_invalid_global,
+        "total_future": total_future,
+        "total_outlier": total_outlier,
         "warehouse_db": warehouse_db,
         "max_event_time": max_event_time,
         "min_event_time": min_event_time,
         "freshness_sec": freshness_sec,
         "manifest_count": manifest_count,
-        "user_stats_count": user_stats_count
+        "user_stats_count": user_stats_count,
+        "daily_top_users_count": top_users_count,
+        "hourly_sales_count": hourly_count,
+        "archived_files": len(archived)
     }
-    with open(metrics_path, 'w') as out:
+    tmp_m = metrics_path + ".tmp"
+    with open(tmp_m, 'w') as out:
         json.dump(metrics_data, out, indent=2)
+    os.rename(tmp_m, metrics_path)
 
-    print(f"Processed {len(per_file_stats)} files, {total_events} unique events, {total_invalid_global} invalid, {user_stats_count} users, {daily_count} daily")
+    print(f"Processed {len(per_file_stats)} files, {total_events} unique events, {total_invalid_global} invalid ({total_future} future, {total_outlier} outlier), {user_stats_count} users, {daily_count} daily, {top_users_count} top_users, {hourly_count} hourly, archived {len(archived)}")
 
 if __name__ == "__main__":
     main()
@@ -409,6 +576,7 @@ warehouse_db: /app/warehouse.db
 checkpoint_dir: /app/state
 metrics_path: /app/metrics/freshness.json
 dead_letter_path: /app/state/dead_letter.jsonl
+archive_dir: /app/data/archive
 manifest_db_table: ingestion_manifest
 batch:
   dedup_strategy: latest_event_time
@@ -418,4 +586,4 @@ stream:
   offsets_file: /app/state/stream_offsets.json
 YAML
 
-echo "Batch ingestor oracle hard mode installed"
+echo "Batch ingestor v3 hard installed"

@@ -39,17 +39,19 @@ Why naive fails both hard 56/59:
 
 ## Completion Rates
 
-Local validation oracle – aligned with grader (56 Turn1 hard, 59 Turn2 balanced-hard) – hard but oracle 100%:
+### Latest online validation (commit `ea0b7ef`, "balanced 59 tests")
 
-| Model | Step1 (56 tests) | Step2 (59 tests) | Overall |
-|-------|------------------|------------------|---------|
-| Oracle | 56/56 (100%) | 59/59 (100%) | 2/2 |
-| Avocado online 49 tests strict (83fbfaa) | 56/56 | 1/10 (10%) metacode – 9/10 fail only `test_rate_limit_persistence` flat vs buckets – artificial | 1/10 |
-| Avocado online 56 tests format-agnostic lenient >=9 (7f35008) | 56/56 | 8/10 (80%) metacode – 2 fail step1 members vs users, step2 8/8 100% for those reaching it – too easy | 8/10 |
-| Avocado new 59 tests strict all 10/20 (balanced) | 56/56 | Expected 4-5/10 (~40-50%) after hardening: strict 10 all 10 same-room & 10 multi-shard & 20 multi-shard & 20 joins + 200 rooms + 2000 pagination + 10KB sharded+private + nonexist/leave-all sharded + unicode + private special | ~40% target |
-| Codex online 49 strict | 5 fail step1, 5 fail step2 get_shard_path quoting | 1/10 only `test_rate_limit_persistence` | 0/10 |
-| Codex online 56 lenient | 2 fail step1 members vs users, 1 fail get_shard_path quoted | 7/10 (70%) – too easy | 7/10 |
-| Opus | 3/56 | 2/56 before | 0/2 |
+**Status: PASSING** (structural 10/10, oracle 3/3, contamination LOW, provenance clean). Full multi-turn pass rates per agent (snapshot — metacode and agent stages still running):
+
+| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 | Status |
+|-------|---------------|-----------------|--------|--------|--------|
+| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | completed |
+| Codex | gpt-5.5 | 6/10 (60%) | 7/10 | 6/7 | completed |
+| Metacode | meta/avocado-5.14-code | 4/10 so far | 7/8 | 4/7 | running (8/10 trials done) |
+| Agent | claude-code / claude-opus-4-8 | 1/10 so far | 5/7 | 1/5 | running (7/10 trials done) |
+
+- Turn 2 only runs after a Turn-1 pass, so Turn-2 denominators equal Turn-1 passes.
+- Calibration read: **balanced-hard**. Oracle passes fully; strong/medium models clear Turn 1 easily (codex 7/10, avocado 7/8, opus 5/7) but Turn 2 is the discriminator — codex 6/7, avocado 4/7, opus only 1/5. This is a healthy spread vs the prior over-hard commit `83fbfaa` (opus 0/10, all Turn-2 failures) and the too-easy `7f35008` (avocado 8/10).
 
 Declared difficulty: **hard-balanced** – fixing online oscillation:
 - 49 tests strict flat persistence → Metacode 1/10 (artificial blocker, 48/49 pass)
