@@ -1,20 +1,21 @@
-# Step 1: Batch Data Ingestion Pipeline
+# Step 1: Batch Data Ingestion Pipeline — Hard Mode
 
 ## Context
-You work on the e-commerce data platform at `/app`. Raw purchase/view/cart events land as JSONL files in `/app/data/incoming/` with names `events_*.jsonl`. Business currently uses manual batch loads; you need to automate it.
+You work on the e-commerce data platform at `/app`. Raw purchase/view/cart events land as JSONL files in `/app/data/incoming/`. Files are named `events_<id>.jsonl` and are produced by upstream producers that sometimes write temp files (`*.tmp`, `*.part`, `*.gz`) that must be ignored. Business currently uses manual batch loads; you need to automate a robust batch ingestion that meets data quality SLOs.
 
 Directory layout (created by Dockerfile):
 ```
 /app/
   config.yaml              # ingestion config, initially mode: batch
-  data/incoming/           # source JSONL files
-  state/                   # checkpoint directory
+  data/incoming/           # source JSONL files (may contain tmp/part/gz)
+  state/                   # checkpoint + dead-letter directory
   metrics/                 # freshness metrics output
+  logs/                    # logs dir
   warehouse.db             # SQLite warehouse (you must create)
 ```
 
 ## Source Data Format
-Each file `events_*.jsonl` contains one JSON per line. Empty lines may exist and must be skipped. Invalid JSON lines must be skipped with a warning to stderr, not crash.
+Each **valid** file `events_<alphanum_-_.>.jsonl` (regex `^events_[A-Za-z0-9_.-]+\.jsonl$`) contains one JSON per line. Empty lines may exist and must be skipped. Invalid JSON lines must be skipped with a warning to stderr and recorded to dead-letter (see below).
 
 Schema per event:
 ```json
@@ -22,48 +23,61 @@ Schema per event:
   "event_id": "evt_123",
   "user_id": "user_42",
   "event_type": "purchase" | "view" | "cart",
-  "amount": 12.34,          // float, for purchase >0, for view/cart can be 0
-  "event_time": "2024-01-15T10:23:00Z"  // ISO8601 UTC, always ending with Z
+  "amount": 12.34,
+  "event_time": "2024-01-15T10:23:00Z"   // ISO8601 UTC, Z or +00:00 allowed
 }
 ```
-- `event_id` is globally unique but duplicates can appear across files (re-delivery). De-duplication rule: **keep the record with the latest `event_time`**. If `event_time` equal, keep the last seen (in processing order).
-- `event_type` must be one of `purchase`, `view`, `cart`; otherwise skip line as invalid.
-- `amount` must be numeric >=0; otherwise skip.
+- `event_id` globally unique but duplicates appear across files (re-delivery). De-duplication rule: **keep the record with the latest `event_time`**. If `event_time` equal, keep last seen in processing order (lexicographic file order + line order).
+- `event_type` must be one of `purchase`, `view`, `cart`; otherwise invalid.
+- `amount` must be numeric >=0; otherwise invalid.
+- `event_time` must be parseable ISO8601. You must support `...Z` and `...+00:00` forms. Invalid time → invalid line.
 
 ## Task: Implement Batch Ingestor
 
-Create file `/app/batch_ingest.py` with executable batch logic. It should be runnable as:
+Create file `/app/batch_ingest.py` runnable as:
 ```
 python /app/batch_ingest.py
+python /app/batch_ingest.py --config /app/config.yaml
+python /app/batch_ingest.py --incremental   # optional: only process changed files based on hash (if you implement)
 ```
-Optionally it may accept `--config /app/config.yaml` but must work with no args using defaults.
+Must work with no args using defaults from config.
 
-### Requirements
+### Requirements (All Mandatory)
 
 1. **Config handling:**
-   - Read `/app/config.yaml` if exists, else use defaults:
+   - Read `/app/config.yaml` if exists, else defaults:
      ```yaml
      incoming_dir: /app/data/incoming
      warehouse_db: /app/warehouse.db
      checkpoint_dir: /app/state
      metrics_path: /app/metrics/freshness.json
+     dead_letter_path: /app/state/dead_letter.jsonl
+     manifest_db_table: ingestion_manifest
      ```
-   - Config contains `mode: batch` initially but parser should tolerate extra fields.
+   - Tolerate extra fields.
 
-2. **Discovery:**
-   - Scan `incoming_dir` for files matching `events_*.jsonl` sorted lexicographically.
-   - If directory does not exist, create it and exit with 0 (nothing to ingest).
-   - If no files, create DB if not exists and write metrics with 0 files.
+2. **Discovery (hard):**
+   - Scan `incoming_dir` for files matching **regex** `^events_[A-Za-z0-9_.-]+\.jsonl$` (not a simple glob for `*.tmp`/`*.part`/`*.gz`). Specifically:
+     - `events_001.jsonl` → valid
+     - `events_001.jsonl.tmp` → ignore
+     - `events_001.jsonl.part` → ignore
+     - `events_001.jsonl.gz` → ignore
+     - `events_.jsonl` → invalid and ignore
+   - Sorted lexicographically.
+   - If incoming_dir missing → create and exit 0.
+   - If no valid files → create DB if not exists and write metrics with 0 files.
 
-3. **Parsing & Deduplication:**
-   - For each file in sorted order, read line by line.
-   - Track in memory dict `event_id -> record` for de-duplication across files (keep latest `event_time`).
-   - Comparison of `event_time`: parse ISO8601 `YYYY-MM-DDTHH:MM:SSZ` – you can compare lexicographically since format is sortable, or parse to datetime.
-   - After scanning all files, you have final deduped set.
+3. **Parsing, Hashing & Deduplication:**
+   - For each valid file, compute **SHA256 hash** of its full content (hex).
+   - Read line by line (do NOT load entire file into memory at once).
+   - Track per-file counts: total lines, valid, invalid.
+   - Track global deduped dict `event_id -> record` keeping latest `event_time`. For equal time, last seen wins.
+   - Parsing ISO8601: support `Z` and `+00:00` and fractional seconds.
+   - Invalid lines must be collected for dead-letter.
 
-4. **SQLite Warehouse:**
-   - DB path from config: `/app/warehouse.db`
-   - Create tables if not exist:
+4. **SQLite Warehouse (hard):**
+   - DB path: `/app/warehouse.db`
+   - Create tables if not exist (all mandatory):
      ```sql
      CREATE TABLE IF NOT EXISTS events (
        event_id TEXT PRIMARY KEY,
@@ -78,72 +92,55 @@ Optionally it may accept `--config /app/config.yaml` but must work with no args 
        total_amount REAL NOT NULL,
        event_count INTEGER NOT NULL
      );
+     CREATE TABLE IF NOT EXISTS ingestion_manifest (
+       file_name TEXT PRIMARY KEY,
+       file_hash TEXT NOT NULL,
+       num_lines INTEGER NOT NULL,
+       num_valid INTEGER NOT NULL,
+       num_invalid INTEGER NOT NULL,
+       processed_at TEXT NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS user_stats (
+       user_id TEXT PRIMARY KEY,
+       first_seen TEXT NOT NULL,
+       last_seen TEXT NOT NULL,
+       total_purchases INTEGER NOT NULL,
+       total_amount REAL NOT NULL,
+       total_views INTEGER NOT NULL,
+       total_carts INTEGER NOT NULL
+     );
      ```
-   - Upsert events: use `INSERT OR REPLACE INTO events ...` or `ON CONFLICT(event_id) DO UPDATE`.
-     - `processed_at` must be current UTC time ISO8601 ending with Z (e.g. `datetime.utcnow().isoformat() + 'Z'`), truncated to seconds is ok.
-   - After upserting all deduped events, recompute `daily_sales` from scratch:
-     - For each date `YYYY-MM-DD` extracted from `event_time` (first 10 chars) where `event_type='purchase'`, aggregate:
-       `total_amount = SUM(amount)`, `event_count = COUNT(*)`
-     - Use `INSERT OR REPLACE` into `daily_sales`.
+   - Upsert events, manifest, recompute daily_sales and user_stats in single transaction.
 
 5. **Checkpoint:**
-   - After successful processing, ensure checkpoint dir exists.
    - Write `/app/state/checkpoint.json`:
      ```json
      {
-       "last_batch_time": "<ISO8601 now Z>",
+       "last_batch_time": "<ISO now Z>",
        "files_processed": ["events_001.jsonl", ...],
-       "total_events": <distinct count>,
+       "files": {
+         "events_001.jsonl": {"hash": "<sha256>", "num_lines": 10, "num_valid": 8, "num_invalid": 2},
+         ...
+       },
+       "total_events": <distinct>,
+       "total_invalid": <overall>,
        "mode": "batch"
      }
      ```
-   - Also if `checkpoint_dir` contains `processed.json` legacy, you may write both but `checkpoint.json` is required.
 
-6. **Metrics / Freshness:**
-   - Write file from `metrics_path` default `/app/metrics/freshness.json`:
-     ```json
-     {
-       "mode": "batch",
-       "last_batch_time": "<ISO8601 now Z>",
-       "total_events": <int>,
-       "total_files_processed": <int>,
-       "warehouse_db": "/app/warehouse.db",
-       "max_event_time": "<latest event_time in batch or null>",
-       "freshness_sec": <now - max_event_time in seconds if calculable, else null>
-     }
-     ```
-   - Ensure parent directory exists.
+6. **Dead-letter:**
+   - Write `/app/state/dead_letter.jsonl` with one JSON per invalid line containing file, line_no, content truncated to 500, reason (`invalid_json|invalid_fields|invalid_type|negative_amount|invalid_time`), detected_at.
 
-7. **Idempotency & Robustness:**
-   - Re-running batch must not create duplicates (PK handles) and must produce same final DB counts (idempotent).
-   - Partial file failures: skip bad lines, continue.
-   - Exit code 0 on success, non-zero only on unrecoverable error (e.g. cannot write DB).
+7. **Metrics:**
+   - Write `/app/metrics/freshness.json` with mode batch, total_events, total_files_processed (only valid regex), total_invalid, max/min event_time, freshness_sec, manifest_count, user_stats_count.
 
-8. **Logging:**
-   - Print to stdout: `Processed <N> files, <M> unique events, <K> daily aggregates` similar.
-   - Invalid lines to stderr.
+8. **Idempotency & Incremental:**
+   - Re-running must not duplicate.
+   - If `--incremental` flag, skip files whose hash equals previous checkpoint hash.
 
-### Example
+9. **Logging:** stdout processed counts, stderr warnings.
 
-Incoming file `events_001.jsonl`:
-```
-{"event_id":"e1","user_id":"u1","event_type":"purchase","amount":10.0,"event_time":"2024-01-01T01:00:00Z"}
-{"event_id":"e2","user_id":"u2","event_type":"view","amount":0,"event_time":"2024-01-01T02:00:00Z"}
-{"event_id":"e1","user_id":"u1","event_type":"purchase","amount":15.0,"event_time":"2024-01-01T03:00:00Z"}
-```
-Result: e1 kept with amount 15.0 (later time), total distinct 2, daily_sales for 2024-01-01 = 15.0 count 1.
+10. **Robustness:** Must not crash on empty, invalid, tmp/part/gz.
 
 ### Validation
-
-Tests will:
-- Clean `/app/data/incoming`, `/app/warehouse.db`, `/app/state`, `/app/metrics`
-- Create sample `events_*.jsonl` files with duplicates, invalid lines, empty lines, multiple dates
-- Run `python /app/batch_ingest.py` and check:
-  - DB exists and has correct tables
-  - Deduplication correct (latest wins)
-  - daily_sales aggregated only purchases
-  - checkpoint.json and freshness.json exist and have mode batch
-  - Rerun idempotent (counts unchanged)
-  - Handles empty dir and malformed lines without crashing
-
-You must NOT modify test files. Implement only `/app/batch_ingest.py` and ensure it meets spec. You may edit `/app/config.yaml` if needed but keep batch mode.
+Tests check 4 tables, dedup with +00:00, daily_sales, user_stats, manifest hashes, checkpoint files dict, dead_letter reasons, ignore tmp/part/gz, idempotency, empty handling.
