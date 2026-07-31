@@ -7,7 +7,9 @@ import argparse
 import json
 import os
 import sys
+import re
 import glob
+import hashlib
 import sqlite3
 import time
 import signal
@@ -23,12 +25,15 @@ DEFAULT_CONFIG = {
     "warehouse_db": "/app/warehouse.db",
     "checkpoint_dir": "/app/state",
     "metrics_path": "/app/metrics/freshness.json",
+    "dead_letter_path": "/app/state/dead_letter.jsonl",
     "stream": {
         "poll_interval_ms": 200,
         "freshness_sla_sec": 2,
         "offsets_file": "/app/state/stream_offsets.json"
     }
 }
+
+VALID_FILENAME_RE = re.compile(r'^events_[A-Za-z0-9_.\-]+\.jsonl$')
 
 RUNNING = True
 START_TIME = time.time()
@@ -49,7 +54,7 @@ def load_config(path="/app/config.yaml"):
             if yaml:
                 with open(path, 'r') as f:
                     data = yaml.safe_load(f) or {}
-                    for k in ["incoming_dir", "warehouse_db", "checkpoint_dir", "metrics_path", "mode"]:
+                    for k in ["incoming_dir", "warehouse_db", "checkpoint_dir", "metrics_path", "dead_letter_path", "mode"]:
                         if k in data:
                             cfg[k] = data[k]
                     if "stream" in data and isinstance(data["stream"], dict):
@@ -73,7 +78,10 @@ def parse_iso(s):
                 except ValueError:
                     continue
         iso = s.replace('Z', '+00:00')
-        return datetime.fromisoformat(iso)
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -95,6 +103,27 @@ def ensure_tables(conn):
       event_count INTEGER NOT NULL
     );
     """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS ingestion_manifest (
+      file_name TEXT PRIMARY KEY,
+      file_hash TEXT NOT NULL,
+      num_lines INTEGER NOT NULL,
+      num_valid INTEGER NOT NULL,
+      num_invalid INTEGER NOT NULL,
+      processed_at TEXT NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS user_stats (
+      user_id TEXT PRIMARY KEY,
+      first_seen TEXT NOT NULL,
+      last_seen TEXT NOT NULL,
+      total_purchases INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      total_views INTEGER NOT NULL,
+      total_carts INTEGER NOT NULL
+    );
+    """)
     conn.commit()
 
 def get_existing_event_times(conn):
@@ -112,6 +141,23 @@ def write_metrics(metrics_path, total_events, total_files, max_event_time, last_
     is_meeting = True
     if last_delay_ms is not None:
         is_meeting = last_delay_ms <= (sla_sec * 1000 + 500)
+    # get counts for manifest and user_stats if possible
+    manifest_count = 0
+    user_stats_count = 0
+    min_event_time = None
+    try:
+        conn = sqlite3.connect(warehouse_db)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM ingestion_manifest")
+        manifest_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM user_stats")
+        user_stats_count = cur.fetchone()[0]
+        cur.execute("SELECT MIN(event_time) FROM events")
+        min_event_time = cur.fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+
     data = {
         "mode": "stream",
         "last_processed_time": now_iso(),
@@ -123,6 +169,9 @@ def write_metrics(metrics_path, total_events, total_files, max_event_time, last_
         "streaming": True,
         "warehouse_db": warehouse_db,
         "max_event_time": max_event_time,
+        "min_event_time": min_event_time,
+        "manifest_count": manifest_count,
+        "user_stats_count": user_stats_count,
         "uptime_sec": time.time() - START_TIME
     }
     tmp = metrics_path + ".tmp"
@@ -153,9 +202,13 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
     try:
         file_size = os.path.getsize(filepath)
     except OSError:
-        return last_offset_bytes, 0, None
+        return last_offset_bytes, 0, None, 0, 0
     if file_size < last_offset_bytes:
         last_offset_bytes = 0
+
+    num_valid_file = 0
+    num_invalid_file = 0
+
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         f.seek(last_offset_bytes)
         remaining = f.read()
@@ -172,13 +225,13 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
                 bytes_to_advance = 0
                 processable_lines = []
         for line in processable_lines:
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if not stripped:
                 continue
             try:
-                obj = json.loads(line)
+                obj = json.loads(stripped)
             except json.JSONDecodeError:
-                print(f"Warning: invalid JSON in {filepath}: {line[:100]}", file=sys.stderr)
+                num_invalid_file += 1
                 continue
             try:
                 event_id = str(obj['event_id'])
@@ -186,20 +239,25 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
                 event_type = str(obj['event_type'])
                 amount = float(obj['amount'])
                 event_time = str(obj['event_time'])
-            except (KeyError, ValueError, TypeError) as e:
-                print(f"Warning: invalid fields in {filepath}: {e}", file=sys.stderr)
+            except (KeyError, ValueError, TypeError):
+                num_invalid_file += 1
                 continue
             if event_type not in ('purchase','view','cart'):
+                num_invalid_file += 1
                 continue
             if amount < 0:
+                num_invalid_file += 1
                 continue
             dt = parse_iso(event_time)
             if dt is None:
+                num_invalid_file += 1
                 continue
             existing = existing_times.get(event_id)
             if existing:
                 _, existing_dt = existing
                 if existing_dt and dt < existing_dt:
+                    # older, skip but count as valid (already seen)
+                    num_valid_file += 1
                     continue
             processed_at = now_iso()
             conn.execute("""
@@ -208,12 +266,13 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
             """, (event_id, user_id, event_type, amount, event_time, processed_at))
             existing_times[event_id] = (event_time, dt)
             processed_count += 1
+            num_valid_file += 1
             if max_event_time is None or (dt and (max_event_time[1] is None or dt > max_event_time[1])):
                 max_event_time = (event_time, dt)
         new_offset = last_offset_bytes + bytes_to_advance
-    return new_offset, processed_count, max_event_time
+    return new_offset, processed_count, max_event_time, num_valid_file, num_invalid_file
 
-def recompute_daily_sales(conn):
+def recompute_aggregates(conn):
     conn.execute("DELETE FROM daily_sales")
     conn.execute("""
         INSERT INTO daily_sales (date, total_amount, event_count)
@@ -224,31 +283,72 @@ def recompute_daily_sales(conn):
         WHERE event_type='purchase'
         GROUP BY substr(event_time, 1, 10)
     """)
+    conn.execute("DELETE FROM user_stats")
+    conn.execute("""
+        INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts)
+        SELECT
+            user_id,
+            MIN(event_time) as first_seen,
+            MAX(event_time) as last_seen,
+            SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END) as total_purchases,
+            SUM(CASE WHEN event_type='purchase' THEN amount ELSE 0 END) as total_amount,
+            SUM(CASE WHEN event_type='view' THEN 1 ELSE 0 END) as total_views,
+            SUM(CASE WHEN event_type='cart' THEN 1 ELSE 0 END) as total_carts
+        FROM events
+        GROUP BY user_id
+    """)
     conn.commit()
+
+def list_valid_files(incoming_dir):
+    try:
+        all_files = os.listdir(incoming_dir)
+    except OSError:
+        return []
+    valid = []
+    for fn in all_files:
+        if VALID_FILENAME_RE.match(fn):
+            middle = fn[7:-6]
+            if len(middle) == 0:
+                continue
+            valid.append(fn)
+    return sorted(valid)
 
 def backfill_once(cfg):
     incoming_dir = cfg['incoming_dir']
     warehouse_db = cfg['warehouse_db']
     metrics_path = cfg['metrics_path']
     offsets_file = cfg['stream']['offsets_file']
+
     os.makedirs(incoming_dir, exist_ok=True)
     os.makedirs(os.path.dirname(warehouse_db), exist_ok=True)
     os.makedirs(os.path.dirname(offsets_file), exist_ok=True)
     os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
     os.makedirs("/app/logs", exist_ok=True)
-    pattern = os.path.join(incoming_dir, 'events_*.jsonl')
-    files = sorted(glob.glob(pattern))
+
+    valid_files = list_valid_files(incoming_dir)
+    full_paths = [os.path.join(incoming_dir, f) for f in valid_files]
+
     conn = sqlite3.connect(warehouse_db)
     ensure_tables(conn)
     existing_times = get_existing_event_times(conn)
     offsets = load_offsets(offsets_file)
     total_new = 0
     latest_max_time = None
-    for fp in files:
-        fname = os.path.basename(fp)
-        prev = offsets.get(fname, {})
+
+    for fn, fp in zip(valid_files, full_paths):
+        # compute hash
+        try:
+            with open(fp, 'rb') as hf:
+                file_hash = hashlib.sha256(hf.read()).hexdigest()
+        except Exception:
+            file_hash = ""
+
+        prev = offsets.get(fn, {})
         last_offset = prev.get('offset', 0) if isinstance(prev, dict) else 0
-        new_offset, count, max_time = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fname not in offsets))
+
+        new_offset, count, max_time, num_valid, num_invalid = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fn not in offsets))
+
+        # force process remainder for --once
         try:
             actual_size = os.path.getsize(fp)
             if new_offset < actual_size:
@@ -267,39 +367,58 @@ def backfill_once(cfg):
                             amount=float(obj['amount'])
                             event_time=str(obj['event_time'])
                         except Exception:
+                            num_invalid+=1
                             continue
                         if event_type not in ('purchase','view','cart'):
+                            num_invalid+=1
                             continue
                         dt=parse_iso(event_time)
                         if not dt:
+                            num_invalid+=1
                             continue
                         existing = existing_times.get(event_id)
                         if existing:
                             _, existing_dt = existing
                             if existing_dt and dt < existing_dt:
+                                num_valid+=1
                                 continue
                         conn.execute("INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?)",
                                      (event_id, user_id, event_type, amount, event_time, now_iso()))
                         existing_times[event_id]=(event_time, dt)
-                        total_new+=1
+                        count+=1
+                        num_valid+=1
                         if latest_max_time is None or dt > latest_max_time[1]:
                             latest_max_time = (event_time, dt)
                 new_offset = actual_size
         except Exception as e:
-            print(f"backfill extra processing error {fp}: {e}", file=sys.stderr)
+            print(f"backfill extra error {fp}: {e}", file=sys.stderr)
+
         conn.commit()
+        # update manifest
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, num_lines, num_valid, num_invalid, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (fn, file_hash, 0, num_valid, num_invalid, now_iso()))
+            conn.commit()
+        except Exception:
+            pass
+
         try:
             stat = os.stat(fp)
-            offsets[fname] = {"offset": new_offset, "lines": 0, "mtime": stat.st_mtime, "size": stat.st_size}
+            offsets[fn] = {"offset": new_offset, "lines": 0, "mtime": stat.st_mtime, "size": stat.st_size, "hash": file_hash}
         except OSError:
-            offsets[fname] = {"offset": new_offset, "lines": 0, "mtime": time.time(), "size": new_offset}
+            offsets[fn] = {"offset": new_offset, "lines": 0, "mtime": time.time(), "size": new_offset, "hash": file_hash}
+
         total_new += count
         if max_time and (latest_max_time is None or (max_time[1] and latest_max_time[1] and max_time[1] > latest_max_time[1])):
             latest_max_time = max_time
+
         if count > 0:
             with open("/app/logs/stream.log", "a") as logf:
-                logf.write(f"{now_iso()} backfill {fname} {count} events offset {new_offset}\n")
-    recompute_daily_sales(conn)
+                logf.write(f"{now_iso()} backfill {fn} {count} events offset {new_offset}\n")
+
+    recompute_aggregates(conn)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM events")
     total_events = cur.fetchone()[0]
@@ -307,9 +426,11 @@ def backfill_once(cfg):
     max_et_row = cur.fetchone()
     max_event_time_str = max_et_row[0] if max_et_row else (latest_max_time[0] if latest_max_time else None)
     conn.close()
+
     write_offsets(offsets_file, offsets)
-    write_metrics(metrics_path, total_events, len(files), max_event_time_str, last_delay_ms=0, warehouse_db=warehouse_db)
-    print(f"Backfill done: {len(files)} files, total_events={total_events}, new_processed={total_new}")
+    write_metrics(metrics_path, total_events, len(valid_files), max_event_time_str, last_delay_ms=0, warehouse_db=warehouse_db)
+
+    print(f"Backfill done: {len(valid_files)} files, total_events={total_events}, new_processed={total_new}")
     return total_events
 
 def stream_loop(cfg):
@@ -325,30 +446,36 @@ def stream_loop(cfg):
             f.write(str(os.getpid()))
     except Exception as e:
         print(f"Warning: could not write pid file {pid_path}: {e}", file=sys.stderr)
+
     conn = sqlite3.connect(warehouse_db, check_same_thread=False, timeout=10.0)
     ensure_tables(conn)
     existing_times = get_existing_event_times(conn)
     offsets = load_offsets(offsets_file)
+
     print(f"Starting streaming loop poll_interval={poll_ms}ms incoming={incoming_dir}")
+
     try:
         while RUNNING:
             loop_start = time.time()
-            pattern = os.path.join(incoming_dir, 'events_*.jsonl')
-            files = sorted(glob.glob(pattern))
+            valid_files = list_valid_files(incoming_dir)
             any_new = 0
             latest_delay_ms = None
             latest_max = None
-            for fp in files:
-                fname = os.path.basename(fp)
-                prev = offsets.get(fname, {})
+
+            for fn in valid_files:
+                fp = os.path.join(incoming_dir, fn)
+                prev = offsets.get(fn, {})
                 last_offset = prev.get('offset', 0) if isinstance(prev, dict) else 0
                 try:
                     stat = os.stat(fp)
                     curr_size = stat.st_size
                     curr_mtime = stat.st_mtime
+                    with open(fp, 'rb') as hf:
+                        file_hash = hashlib.sha256(hf.read()).hexdigest()
                 except OSError:
                     continue
-                if fname not in offsets:
+
+                if fn not in offsets:
                     detection_delay = time.time() - curr_mtime
                     latest_delay_ms = int(detection_delay * 1000) if latest_delay_ms is None else min(latest_delay_ms, int(detection_delay*1000))
                 else:
@@ -356,13 +483,23 @@ def stream_loop(cfg):
                         last_offset = 0
                     elif curr_size == last_offset:
                         continue
-                new_offset, count, max_time = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fname not in offsets))
-                if count > 0:
+
+                new_offset, count, max_time, num_valid, num_invalid = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fn not in offsets))
+
+                if count > 0 or num_valid > 0:
                     conn.commit()
                     any_new += count
                     try:
+                        conn.execute("""
+                            INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, num_lines, num_valid, num_invalid, processed_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (fn, file_hash, 0, num_valid, num_invalid, now_iso()))
+                        conn.commit()
+                    except Exception:
+                        pass
+                    try:
                         with open("/app/logs/stream.log", "a") as logf:
-                            logf.write(f"{now_iso()} stream {fname} +{count} events offset {last_offset}->{new_offset}\n")
+                            logf.write(f"{now_iso()} stream {fn} +{count} events offset {last_offset}->{new_offset}\n")
                     except Exception:
                         pass
                     detection_time = time.time()
@@ -374,9 +511,11 @@ def stream_loop(cfg):
                     if max_time:
                         if latest_max is None or max_time[1] > latest_max[1]:
                             latest_max = max_time
-                offsets[fname] = {"offset": new_offset, "mtime": curr_mtime, "size": curr_size, "lines": 0}
+
+                offsets[fn] = {"offset": new_offset, "mtime": curr_mtime, "size": curr_size, "lines": 0, "hash": file_hash}
+
             if any_new > 0:
-                recompute_daily_sales(conn)
+                recompute_aggregates(conn)
                 cur = conn.cursor()
                 cur.execute("SELECT COUNT(*) FROM events")
                 total_events = cur.fetchone()[0]
@@ -384,7 +523,7 @@ def stream_loop(cfg):
                 row = cur.fetchone()
                 max_et = row[0] if row else (latest_max[0] if latest_max else None)
                 write_offsets(offsets_file, offsets)
-                write_metrics(metrics_path, total_events, len(files), max_et, last_delay_ms=latest_delay_ms if latest_delay_ms is not None else 0, warehouse_db=warehouse_db)
+                write_metrics(metrics_path, total_events, len(valid_files), max_et, last_delay_ms=latest_delay_ms if latest_delay_ms is not None else 0, warehouse_db=warehouse_db)
             else:
                 try:
                     mtime = os.path.getmtime(metrics_path)
@@ -395,9 +534,10 @@ def stream_loop(cfg):
                         cur.execute("SELECT MAX(event_time) FROM events")
                         row = cur.fetchone()
                         max_et = row[0] if row else None
-                        write_metrics(metrics_path, total_events, len(files), max_et, last_delay_ms=0, warehouse_db=warehouse_db)
+                        write_metrics(metrics_path, total_events, len(valid_files), max_et, last_delay_ms=0, warehouse_db=warehouse_db)
                 except Exception:
                     pass
+
             elapsed = time.time() - loop_start
             to_sleep = poll_sec - elapsed
             if to_sleep > 0:
@@ -441,6 +581,8 @@ def ensure_config_updated():
         data['checkpoint_dir'] = '/app/state'
     if 'metrics_path' not in data:
         data['metrics_path'] = '/app/metrics/freshness.json'
+    if 'dead_letter_path' not in data:
+        data['dead_letter_path'] = '/app/state/dead_letter.jsonl'
     if 'stream' not in data or not isinstance(data['stream'], dict):
         data['stream'] = {}
     data['stream']['poll_interval_ms'] = data['stream'].get('poll_interval_ms', 200)
@@ -450,16 +592,6 @@ def ensure_config_updated():
     with open(config_path, 'w') as out:
         if yaml:
             yaml.safe_dump(data, out, sort_keys=False)
-        else:
-            out.write(f"mode: {data['mode']}\n")
-            out.write(f"incoming_dir: {data['incoming_dir']}\n")
-            out.write(f"warehouse_db: {data['warehouse_db']}\n")
-            out.write(f"checkpoint_dir: {data['checkpoint_dir']}\n")
-            out.write(f"metrics_path: {data['metrics_path']}\n")
-            out.write("stream:\n")
-            out.write(f"  poll_interval_ms: {data['stream']['poll_interval_ms']}\n")
-            out.write(f"  freshness_sla_sec: {data['stream']['freshness_sla_sec']}\n")
-            out.write(f"  offsets_file: {data['stream']['offsets_file']}\n")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -473,6 +605,7 @@ def main():
     os.makedirs(os.path.dirname(cfg['stream']['offsets_file']), exist_ok=True)
     os.makedirs("/app/logs", exist_ok=True)
     os.makedirs(os.path.dirname(cfg['warehouse_db']), exist_ok=True)
+    os.makedirs(os.path.dirname(cfg.get('dead_letter_path', '/app/state/dead_letter.jsonl')), exist_ok=True)
     ensure_config_updated()
     cfg = load_config(args.config)
     backfill_once(cfg)
@@ -493,6 +626,7 @@ incoming_dir: /app/data/incoming
 warehouse_db: /app/warehouse.db
 checkpoint_dir: /app/state
 metrics_path: /app/metrics/freshness.json
+dead_letter_path: /app/state/dead_letter.jsonl
 stream:
   poll_interval_ms: 200
   freshness_sla_sec: 2
@@ -501,5 +635,4 @@ batch:
   dedup_strategy: latest_event_time
 YAML
 
-echo "Stream ingestor oracle installed"
-echo "Config updated to stream mode"
+echo "Stream ingestor oracle hard mode installed"
