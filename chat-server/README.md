@@ -8,9 +8,9 @@
 
 Persistence MUST use wrapper `{"data":{rooms, private_messages, next_id, seen_users}, "checksum": md5 canonical}` canonical = `json.dumps(data, sort_keys=True, separators=(',',':'))` no HTML escaping – Go must use `SetEscapeHTML(false)` for checksum and file write. On write atomic via `os.CreateTemp` same dir + `os.Rename` plus file lock `<data>.lock` `O_CREATE|O_EXCL` retry loop 5ms 2000 tries + cleanup (lock must not remain). On read: missing/empty → empty store, wrapper missing/empty checksum or mismatch or invalid JSON → corruption: backup `<path>.corrupt.<nanosec>` integer `UnixNano()`, stderr warning "corrupt"/"checksum", recreate empty valid wrapper. Behavioral hard (reference gets 20/20): **20 concurrent same room preserves all 20** (file never invalid JSON during concurrent, IDs unique), **20 parallel diff rooms preserves all 20**, **20 concurrent joins preserves all 20 sorted**, plus persistence across restarts, room IDs with dash/underscore/dot/colon. Large history **1000 msgs** latest N (`get-messages general 10` → `bulk990-999` for 1000) performance <2s, all 1000 retrievable, plus **200 rooms sorted**, 100 rooms sorted. Edge: empty room/user ID exit2, missing message exit2, invalid limit `-1, abc, -100` exit2 for both room and private, limit zero returns all, nonexist [], leave all [], join after delete fails exit2, send after leave fails exit2, next_id after corruption reset to 1, Unicode emoji, newlines/tabs, large message 10KB, persistence across many ops.
 
-**Turn 2 – Large Scale (Balanced Hard, 56 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1). Config defines `shard_count`, `shards [{id,path,weight}]` (validation: shard_count≤0, empty shards, negative id, duplicate id, empty path, weight≤0 → exit2, shard_count mismatch lenient not crash), `rate_limit {messages_per_second,burst}` default 5/s burst10, `presence_ttl_seconds` default60, `ops_log`, private/presence/rate_limit/counter/users paths. Unknown fields at top and inside shards must be ignored. **This version is balanced after fixing too-hard feedback**: 49 → 56 tests, rate_limit persistence now format-agnostic (accepts flat {"alice":..} and nested {"buckets":{"alice":..}}), adds genuine hard checks: 200 rooms sharded, 2000 pagination, 20 concurrent multi-shard all 20, 20 concurrent joins sharded all 20 sorted, large message 10KB sharded, unicode emoji sharded, private special chars sharded. Keeps lenient concurrent 10 ≥9 for same-room but adds strict 20 for multi-shard and joins.
+**Turn 2 – Large Scale (Balanced Hard, 59 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1). Config defines `shard_count`, `shards [{id,path,weight}]` (validation: shard_count≤0, empty shards, negative id, duplicate id, empty path, weight≤0 → exit2, shard_count mismatch lenient not crash), `rate_limit {messages_per_second,burst}` default 5/s burst10, `presence_ttl_seconds` default60, `ops_log`, private/presence/rate_limit/counter/users paths. Unknown fields at top and inside shards must be ignored. **This version is balanced after fixing too-easy feedback (8/10 metacode)**: previously 49 tests had Metacode 1/10 due to strict flat format blocker, after fix 56 tests went to 8/10 too easy (step2 100% for those reaching it). Now 59 tests with strict concurrent all 10 for same-room & multi-shard (was ≥9 lenient), plus 20 concurrent multi-shard all 20, 20 concurrent joins all 20 sorted, plus edge: 200 rooms sharded, 2000 pagination, large message 10KB sharded+private 10KB, nonexist empty and leave-all empty sharded, unicode emoji sharded, private special chars sharded. Rate_limit persistence format-agnostic (flat and buckets).
 
-New capabilities balanced hard (mix 10 lenient ≥9 and 20 strict all-20):
+New capabilities balanced hard (all strict concurrent all-10/20):
 - Weighted Sharding: MD5 big-endian weighted, totalWeight sum, idx=hashInt%totalWeight, iterate sorted by id subtracting weight; `global:` → -1, get-shard-path comma-separated sorted list. `create-room global:X` creates in ALL shards, `send` replicates to all shards same ID, `get-messages` dedupes by ID, `distribution` counts rooms per shard including global in each (1 normal+2 global*4=9). Tests 20-room exact, 50-room tolerance, 100-room tolerance (40% weight) plus 200-room sorted.
 - Rate Limiting: per-user token bucket persisted `rate_limit.json` wrapper checksum, tokens=burst, last_refill=now nano, refill elapsedSec*rate cap burst, consume1 else fail exit1 stderr "rate limit" no stdout, must NOT increment next_id nor ops_log, per-user independent (bob succeeds when alice limited), refill after 1.6s succeeds, **multiple cycles** (2 succeed fail sleep 1.2s succeed fail sleep 1.2s succeed), persistence across invocations format-agnostic (flat and nested buckets both accepted), corruption handling for rate_limit.json.
 - Presence: `heartbeat <user>` updates last_seen nano in `presence.json` wrapper checksum atomic global lock; `get-presence` returns `{"user_id","online":bool,"last_seen":nano,"last_seen_seconds_ago":float}` where online = now - last_seen ≤TTL*1e9, if never seen online false last_seen0; `list-online` sorted within TTL. Tests: heartbeat→online, TTL 2s→3s sleep offline and list-online excludes, unknown user returns online false last_seen0, multi-user TTL 3 users online, 3s sleep → [], heartbeat bob → [bob], corruption handling, wrapper checksum all files.
@@ -18,7 +18,7 @@ New capabilities balanced hard (mix 10 lenient ≥9 and 20 strict all-20):
 - Ops Log: append-only JSON lines, `ops-log` prints JSON array, must skip invalid JSON lines with warning stderr "corrupt"/"skip"/"warning", preserve order, content checks op types (create-room, join, send, send-private) order, **large 100 ops**.
 - Snapshot/Restore: `snapshot <path>` dir mode copies all shard files+private+presence+rate_limit+counter+users+ops_log+config.json basename preserved; file mode (path.json) writes combined JSON with keys shards map, private, presence, rate_limit, counter, users, ops_log. `restore` reverses both modes via atomic writes global lock, must restore counter next_id exactly so next send gets expected ID, post-snapshot mutations (new rooms, users, private msgs) gone – verified via exact file content equality and list-all-users/rooms, plus counter persistence.
 
-Why naive fails both hard 56/56:
+Why naive fails both hard 56/59:
 - Flat JSON no wrapper → checksum strict tests fail (all files)
 - WriteFile no lock → corruption under 20 parallel same room, diff rooms (20), concurrent joins 20 → loses (<20) and invalid JSON and lock files remain
 - `args[2]` not Join → spaces tests room+private (both Turn1 and sharded Turn2) and large message 10KB fail
@@ -39,24 +39,27 @@ Why naive fails both hard 56/56:
 
 ## Completion Rates
 
-Local validation oracle – aligned with grader (56 Turn1 hard, 56 Turn2 balanced-hard) – hard but oracle 100%:
+Local validation oracle – aligned with grader (56 Turn1 hard, 59 Turn2 balanced-hard) – hard but oracle 100%:
 
-| Model | Step1 (56 tests) | Step2 (56 tests) | Overall |
+| Model | Step1 (56 tests) | Step2 (59 tests) | Overall |
 |-------|------------------|------------------|---------|
-| Oracle | 56/56 (100%) | 56/56 (100%) | 2/2 |
-| Avocado (before fix 49 tests, strict rate_limit persistence) | 56/56 (100%) for step1, step2 48/49 (98%) but binary reward 0 → overall 0.5 | 1/10 (10%) metacode – 9/10 fail only on `test_rate_limit_persistence` expecting flat {"alice":..} but got {"buckets":{"alice":..}} – artificial difficulty | 1/10 full pass |
-| Avocado (after fix 56 tests, format-agnostic + added 200 rooms/2000 pagination/20 multi-shard/20 joins/10KB/unicode/private special) | 56/56 | Expected 3-4/10 (~30-40%) after balancing: fixes artificial blocker but retains genuine hard: 20 concurrent multi-shard all 20, 20 joins all 20 sorted, 200 rooms sharded, 2000 pagination <2s, 10KB sharded, unicode emoji sharded, private special chars sharded | ~30-40% target |
-| Opus | 3/56 (5.4%) | 2/56 (3.6%) before fix | 0/2 |
-| Codex | 8/56 (14.3%) | ~5/10 after fix (previously 0/10 due to same format bug + 0/5 step1) | 0/2 expected 30-40% after fix |
-| Sonnet | 2/56 (3.6%) | 1/56 before fix | 0/2 |
+| Oracle | 56/56 (100%) | 59/59 (100%) | 2/2 |
+| Avocado online 49 tests strict (83fbfaa) | 56/56 | 1/10 (10%) metacode – 9/10 fail only `test_rate_limit_persistence` flat vs buckets – artificial | 1/10 |
+| Avocado online 56 tests format-agnostic lenient >=9 (7f35008) | 56/56 | 8/10 (80%) metacode – 2 fail step1 members vs users, step2 8/8 100% for those reaching it – too easy | 8/10 |
+| Avocado new 59 tests strict all 10/20 (balanced) | 56/56 | Expected 4-5/10 (~40-50%) after hardening: strict 10 all 10 same-room & 10 multi-shard & 20 multi-shard & 20 joins + 200 rooms + 2000 pagination + 10KB sharded+private + nonexist/leave-all sharded + unicode + private special | ~40% target |
+| Codex online 49 strict | 5 fail step1, 5 fail step2 get_shard_path quoting | 1/10 only `test_rate_limit_persistence` | 0/10 |
+| Codex online 56 lenient | 2 fail step1 members vs users, 1 fail get_shard_path quoted | 7/10 (70%) – too easy | 7/10 |
+| Opus | 3/56 | 2/56 before | 0/2 |
 
-Declared difficulty: **hard-balanced** – both steps hard but solvable, fixing too-hard feedback identified in online runs:
-- Online commit `83fbfaa` 49 tests had Metacode 1/10, Codex 0/10 – all 9 failing Metacode trials failed ONLY `test_rate_limit_persistence` due to strict flat format check, while 48/49 other tests passed (including rate_limit rejection, refill, multiple cycles, presence TTL, snapshot, 1000 history, etc.). Root cause artificial difficulty, not core logic.
-- Previous 53 tests (commit `459054b`) had Metacode 7/10, Codex 6/10 – too easy.
-- 60 tests (commit `4f5854e`) had Metacode 0/10, Codex 0/10 – too hard (20 concurrent all-20 + 200 rooms + 2000 pagination + 10KB + unicode all strict).
-- New 56 tests balances: fix persistence to accept flat and nested buckets, keep lenient 10≥9 same-room but strict 20 all-20 for multi-shard and joins, plus genuine hard: 200 rooms sharded sorted, 2000 pagination perf <2s, 10KB sharded, private special chars `<>&` sharded, unicode emoji sharded. Oracle 56+56 100% proved (3:01). Targets 30-40% Metacode, 20-30% Codex, not 0% nor 70%.
+Declared difficulty: **hard-balanced** – fixing online oscillation:
+- 49 tests strict flat persistence → Metacode 1/10 (artificial blocker, 48/49 pass)
+- 56 tests format-agnostic lenient >=9 → Metacode 8/10, Codex 7/10 (too easy, step2 100% for those reaching it)
+- New 59 tests: format-agnostic but **strict all 10/20** for concurrent (same-room 10 all 10, multi-shard 10 all 10, multi-shard 20 all 20, joins 20 all 20) + added private 10KB, nonexist empty, leave-all empty → targets 40-50% Metacode, not 80% nor 10%
+- 60 tests (4f5854e) → Metacode 0/10 too hard
 
-Test counts match actual pytest files (56 Turn1, 56 Turn2). All MUST behaviors graded including rate-limit exit1 no side effects+refill+multiple cycles+persistence (format-agnostic)+per-user+corruption, TTL expiry+unknown+multi-user, malformed config validation+unknown tolerance+defaults, private pagination offset+500 perf+2000 perf, ops-log invalid skipping+content order+large, snapshot/restore all files+file mode+counter exact+ops_log, 200 rooms sharded, 20 concurrent multi-shard all 20, 20 joins sharded all 20, 10KB sharded, unicode.
+Test counts match actual pytest files (56 Turn1, 59 Turn2). All MUST behaviors graded including rate-limit exit1 no side effects+refill+multiple cycles+persistence (format-agnostic)+per-user+corruption, TTL expiry+unknown+multi-user, malformed config validation+unknown tolerance+defaults, private pagination offset+500 perf+2000 perf, ops-log invalid skipping+content order+large, snapshot/restore all files+file mode+counter exact+ops_log, 200 rooms sharded, 20 concurrent multi-shard all 20, 20 joins sharded all 20, 10KB sharded+private, unicode, nonexist/leave-all sharded.
+
+Oracle 59 tests 100% proved (3:02-3:04).
 
 ## Model Analysis
 
