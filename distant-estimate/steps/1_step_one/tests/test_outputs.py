@@ -536,24 +536,24 @@ def test_invalid_graph_file_not_found():
     proc = run(["--graph", "/nonexistent/path.json", "--from", "A", "--to", "B"])
     assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
 
-def test_directed_vs_undirected():
-    graph={"nodes":["A","B","C"], "edges":[
-        {"from":"A","to":"B","distance":1},
-        {"from":"B","to":"C","distance":1},
-        {"from":"C","to":"A","distance":1}
-    ]}
+
+
+
+def test_float_scientific_notation_distance():
+    # distance as 1e3 scientific notation
+    graph={"nodes":["A","B"], "edges":[{"from":"A","to":"B","distance":1e3}]}
+    import json, tempfile, os, math, subprocess
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode='w')
+        f.write(c); f.close(); return f.name
+    def run(args):
+        BIN="/app/router"
+        return subprocess.run([BIN]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
     gp=tmp(json.dumps(graph))
     try:
-        proc=run(["--graph",gp,"--from","B","--to","A"])
-        assert proc.returncode==0, proc.stderr.decode()
+        proc=run(["--graph",gp,"--from","A","--to","B"])
+        assert proc.returncode==0
         out=json.loads(proc.stdout.decode().strip())
-        assert out["path"]==["B","C","A"], f"directed should be B-C-A got {out['path']}"
-        assert out["distance"]==2
-        proc2=run(["--graph",gp,"--from","A","--to","C"])
-        assert proc2.returncode==0
-        out2=json.loads(proc2.stdout.decode().strip())
-        assert out2["path"]==["A","B","C"] and out2["distance"]==2
+        assert math.isclose(out["distance"],1000, abs_tol=1e-6)
     finally:
-        import os
         os.unlink(gp)
-

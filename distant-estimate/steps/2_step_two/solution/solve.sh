@@ -29,16 +29,10 @@ type Edge struct {
     Distance float64 `json:"distance"`
 }
 type TrafficEntryRaw struct {
-    From   string          `json:"from"`
-    To     string          `json:"to"`
-    Factor *float64        `json:"factor"`
-    Delay  *float64        `json:"delay"`
-}
-type TrafficEntry struct {
-    From   string  `json:"from"`
-    To     string  `json:"to"`
-    Factor float64 `json:"factor"`
-    Delay  float64 `json:"delay"`
+    From   string   `json:"from"`
+    To     string   `json:"to"`
+    Factor *float64 `json:"factor"`
+    Delay  *float64 `json:"delay"`
 }
 type TrafficFileObj struct {
     Traffic []TrafficEntryRaw `json:"traffic"`
@@ -91,12 +85,9 @@ Examples:
 }
 
 func comparePaths(a, b []string) int {
-    minLen := len(a)
-    if len(b) < minLen { minLen = len(b) }
-    for i:=0;i<minLen;i++ {
-        if a[i] < b[i] { return -1 }
-        if a[i] > b[i] { return 1 }
-    }
+    ml := len(a)
+    if len(b) < ml { ml = len(b) }
+    for i:=0;i<ml;i++ { if a[i] < b[i] { return -1 }; if a[i] > b[i] { return 1 } }
     if len(a) < len(b) { return -1 }
     if len(a) > len(b) { return 1 }
     return 0
@@ -146,13 +137,15 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
         if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
-        // DIRECTED
+        // UNDIRECTED balanced
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
+                adj[e.To][e.From]=e.Distance
             }
         } else {
             adj[e.From][e.To]=e.Distance
+            adj[e.To][e.From]=e.Distance
         }
     }
     return adj, nodeSet, true
@@ -168,24 +161,17 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
     data, err := os.ReadFile(path)
     if err != nil { return nil,false }
     var rawEntries []TrafficEntryRaw
-    // Try object form first
     var generic map[string]json.RawMessage
     if err := json.Unmarshal(data, &generic); err == nil {
         if _, ok := generic["traffic"]; ok {
             var obj TrafficFileObj
             if err := json.Unmarshal(data, &obj); err != nil { return nil,false }
-            // obj.Traffic is []TrafficEntryRaw, but we need to handle
             rawEntries = obj.Traffic
         } else {
             return nil,false
         }
     } else {
-        // Try direct array of raw entries (may have factor as number, delay optional)
-        if err := json.Unmarshal(data, &rawEntries); err != nil {
-            // Also try to unmarshal as []TrafficEntry (strict) to catch factor string -> invalid
-            // If direct array fails, it's invalid
-            return nil,false
-        }
+        if err := json.Unmarshal(data, &rawEntries); err != nil { return nil,false }
     }
     if rawEntries == nil { rawEntries = []TrafficEntryRaw{} }
     factorMap := make(map[string]TrafficParsed)
@@ -194,27 +180,26 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
         if te.From==te.To { return nil,false }
         if te.Factor==nil { return nil,false }
         if *te.Factor<=0 || math.IsNaN(*te.Factor) || math.IsInf(*te.Factor,0) { return nil,false }
-        // delay optional, default 0, must be >=0 if present
-        delay := 0.0
-        if te.Delay != nil {
+        delay:=0.0
+        if te.Delay!=nil {
             if *te.Delay<0 || math.IsNaN(*te.Delay) || math.IsInf(*te.Delay,0) { return nil,false }
-            delay = *te.Delay
+            delay=*te.Delay
         }
         if !nodeSet[te.From]||!nodeSet[te.To] { return nil,false }
-        // Must correspond to existing directed edge
         if _, ok := adj[te.From][te.To]; !ok { return nil,false }
-        key := te.From+"|"+te.To // DIRECTED key
+        a,b := te.From, te.To
+        if a > b { a,b = b,a }
+        key := a+"|"+b // UNDIRECTED key for balanced difficulty
         factorMap[key]=TrafficParsed{Factor:*te.Factor, Delay:delay}
     }
     return factorMap, true
 }
 
 func getEffective(from,to string, raw float64, factorMap map[string]TrafficParsed) (float64, float64) {
-    // returns raw, effective
-    if factorMap==nil {
-        return raw, raw
-    }
-    key := from+"|"+to
+    if factorMap==nil { return raw, raw }
+    a,b := from,to
+    if a>b { a,b=b,a }
+    key := a+"|"+b
     if tp, ok := factorMap[key]; ok {
         eff := raw*tp.Factor + tp.Delay
         return raw, eff
@@ -397,4 +382,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step2 directed harder factor+delay"
+cd /app && go build -o router . && echo "Build ok step2 undirected balanced factor+delay + raw tie"

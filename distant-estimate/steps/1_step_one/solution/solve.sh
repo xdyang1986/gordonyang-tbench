@@ -57,12 +57,9 @@ Examples:
 }
 
 func comparePaths(a, b []string) int {
-    minLen := len(a)
-    if len(b) < minLen { minLen = len(b) }
-    for i:=0;i<minLen;i++ {
-        if a[i] < b[i] { return -1 }
-        if a[i] > b[i] { return 1 }
-    }
+    ml := len(a)
+    if len(b) < ml { ml = len(b) }
+    for i:=0;i<ml;i++ { if a[i] < b[i] { return -1 }; if a[i] > b[i] { return 1 } }
     if len(a) < len(b) { return -1 }
     if len(a) > len(b) { return 1 }
     return 0
@@ -110,13 +107,15 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
         if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
-        // DIRECTED: only From->To, keep smallest
+        // UNDIRECTED for balanced difficulty
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
+                adj[e.To][e.From]=e.Distance
             }
         } else {
             adj[e.From][e.To]=e.Distance
+            adj[e.To][e.From]=e.Distance
         }
     }
     return adj, nodeSet, true
@@ -252,4 +251,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step1 directed harder"
+cd /app && go build -o router . && echo "Build ok step1 undirected balanced"
