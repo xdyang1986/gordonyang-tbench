@@ -53,6 +53,22 @@ Why naive fails both hard 56/59:
 - Turn 2 only runs after a Turn-1 pass, so Turn-2 denominators equal Turn-1 passes.
 - Calibration read: **balanced-hard**. Oracle passes fully; strong/medium models clear Turn 1 easily (codex 7/10, avocado 7/8, opus 5/7) but Turn 2 is the discriminator — codex 6/7, avocado 4/7, opus only 1/5. This is a healthy spread vs the prior over-hard commit `83fbfaa` (opus 0/10, all Turn-2 failures) and the too-easy `7f35008` (avocado 8/10).
 
+#### Failure analysis (from trial ctrf verifier output)
+
+Failures are **tiered** — the stronger the model, the fewer and subtler the tests it misses. This is the signature of a well-calibrated discriminator, not a uniformly-too-hard task.
+
+| Model | Where it fails | # tests failed | Root cause |
+|-------|----------------|----------------|------------|
+| Opus (Turn 1, 2/10) | `test_persistence_via_cli` | **1/56** | On-disk room object must expose keys named `users` + `messages`; model wrote `members` instead of `users` (schema key-name mismatch). |
+| Opus (Turn 2, 4/4 near-miss) | `test_rate_limit_rejection_exit1_no_side_effects` | **1/59** | The per-user token bucket must be **shared across `send` and `send-private`**. Model used separate quotas, so `send-private` returned 0 (success) when the user was already rate-limited and should exit 1. |
+| Codex (Turn 2 near-miss) | `test_ops_log_content_and_order` | **1/59** | `ops-log` must record `create-room`/`join`/`send` op entries in order; model's ops-log never logged `create-room`, so `ops.index("create-room")` raised. |
+| Avocado (Turn 2) | broad collapse | **52/59** | Cannot bring up `--config` sharded mode at all — foundational failures across weighted hashing, config validation, broadcast, presence, rate-limit, snapshot. |
+
+Key observations:
+- **Opus is one test away in *every* failure** — the same single test recurs across all 4 Turn-2 near-misses (`test_rate_limit_rejection_exit1_no_side_effects`) and both Turn-1 misses (`test_persistence_via_cli`). The task's true Opus-level discriminator is the **cross-command shared rate-limit bucket** — a subtle spec detail (one bucket per user, not per message type) that's easy to overlook.
+- **Codex's discriminator is different** (ops-log completeness/ordering), so no single test is a universal gate — difficulty is distributed across several subtle Turn-2 requirements.
+- **Avocado fails structurally**, not on subtleties — it can't implement the sharded `--config` mode, which is the intended weak-model wall.
+
 Declared difficulty: **hard-balanced** – fixing online oscillation:
 - 49 tests strict flat persistence → Metacode 1/10 (artificial blocker, 48/49 pass)
 - 56 tests format-agnostic lenient >=9 → Metacode 8/10, Codex 7/10 (too easy, step2 100% for those reaching it)
