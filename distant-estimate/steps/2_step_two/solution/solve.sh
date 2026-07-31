@@ -28,13 +28,20 @@ type Edge struct {
     To       string  `json:"to"`
     Distance float64 `json:"distance"`
 }
+type TrafficEntryRaw struct {
+    From   string          `json:"from"`
+    To     string          `json:"to"`
+    Factor *float64        `json:"factor"`
+    Delay  *float64        `json:"delay"`
+}
 type TrafficEntry struct {
     From   string  `json:"from"`
     To     string  `json:"to"`
     Factor float64 `json:"factor"`
+    Delay  float64 `json:"delay"`
 }
 type TrafficFileObj struct {
-    Traffic []TrafficEntry `json:"traffic"`
+    Traffic []TrafficEntryRaw `json:"traffic"`
 }
 type SingleOut struct {
     Path     []string `json:"path"`
@@ -68,14 +75,14 @@ Flags:
   --from <NODE>      source node
   --to <NODE>        destination node
   --requests <PATH>  batch requests JSON array
-  --traffic <PATH>   traffic multipliers JSON
+  --traffic <PATH>   traffic multipliers JSON (factor + delay)
   --help, -h, help   show this help
 
 Graph JSON:
   {"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5}]}
 
 Traffic JSON:
-  {"traffic":[{"from":"A","to":"B","factor":2.5}]}
+  {"traffic":[{"from":"A","to":"B","factor":2.5,"delay":3}]}
 
 Examples:
   router --graph graph.json --from A --to C
@@ -106,6 +113,7 @@ func (pq PriorityQueue) Len() int { return len(pq) }
 func (pq PriorityQueue) Less(i,j int) bool {
     const eps=1e-9
     if math.Abs(pq[i].eff-pq[j].eff) > eps { return pq[i].eff < pq[j].eff }
+    if math.Abs(pq[i].raw-pq[j].raw) > eps { return pq[i].raw < pq[j].raw }
     return comparePaths(pq[i].path, pq[j].path) < 0
 }
 func (pq PriorityQueue) Swap(i,j int) { pq[i], pq[j] = pq[j], pq[i] }
@@ -138,64 +146,83 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
         if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
+        // DIRECTED
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
-                adj[e.To][e.From]=e.Distance
             }
         } else {
             adj[e.From][e.To]=e.Distance
-            adj[e.To][e.From]=e.Distance
         }
     }
     return adj, nodeSet, true
 }
 
-func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[string]float64) (map[string]float64, bool) {
-    if path == "" { return make(map[string]float64), true }
+type TrafficParsed struct {
+    Factor float64
+    Delay  float64
+}
+
+func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[string]float64) (map[string]TrafficParsed, bool) {
+    if path == "" { return make(map[string]TrafficParsed), true }
     data, err := os.ReadFile(path)
     if err != nil { return nil,false }
-    var obj TrafficFileObj
-    var entries []TrafficEntry
+    var rawEntries []TrafficEntryRaw
+    // Try object form first
     var generic map[string]json.RawMessage
     if err := json.Unmarshal(data, &generic); err == nil {
-        if raw, ok := generic["traffic"]; ok {
+        if _, ok := generic["traffic"]; ok {
+            var obj TrafficFileObj
             if err := json.Unmarshal(data, &obj); err != nil { return nil,false }
-            entries = obj.Traffic
-            if entries == nil { entries = []TrafficEntry{} }
-            _ = raw
+            // obj.Traffic is []TrafficEntryRaw, but we need to handle
+            rawEntries = obj.Traffic
         } else {
             return nil,false
         }
     } else {
-        if err := json.Unmarshal(data, &entries); err != nil { return nil,false }
+        // Try direct array of raw entries (may have factor as number, delay optional)
+        if err := json.Unmarshal(data, &rawEntries); err != nil {
+            // Also try to unmarshal as []TrafficEntry (strict) to catch factor string -> invalid
+            // If direct array fails, it's invalid
+            return nil,false
+        }
     }
-    if entries == nil { entries = []TrafficEntry{} }
-    factorMap := make(map[string]float64)
-    for _, te := range entries {
+    if rawEntries == nil { rawEntries = []TrafficEntryRaw{} }
+    factorMap := make(map[string]TrafficParsed)
+    for _, te := range rawEntries {
         if strings.TrimSpace(te.From)==""||strings.TrimSpace(te.To)=="" { return nil,false }
         if te.From==te.To { return nil,false }
-        if te.Factor<=0 || math.IsNaN(te.Factor) || math.IsInf(te.Factor,0) { return nil,false }
+        if te.Factor==nil { return nil,false }
+        if *te.Factor<=0 || math.IsNaN(*te.Factor) || math.IsInf(*te.Factor,0) { return nil,false }
+        // delay optional, default 0, must be >=0 if present
+        delay := 0.0
+        if te.Delay != nil {
+            if *te.Delay<0 || math.IsNaN(*te.Delay) || math.IsInf(*te.Delay,0) { return nil,false }
+            delay = *te.Delay
+        }
         if !nodeSet[te.From]||!nodeSet[te.To] { return nil,false }
+        // Must correspond to existing directed edge
         if _, ok := adj[te.From][te.To]; !ok { return nil,false }
-        a,b := te.From, te.To
-        if a > b { a,b = b,a }
-        key := a+"|"+b
-        factorMap[key]=te.Factor
+        key := te.From+"|"+te.To // DIRECTED key
+        factorMap[key]=TrafficParsed{Factor:*te.Factor, Delay:delay}
     }
     return factorMap, true
 }
 
-func getFactor(from,to string, factorMap map[string]float64) float64 {
-    if factorMap==nil { return 1.0 }
-    a,b := from,to
-    if a>b { a,b=b,a }
-    key := a+"|"+b
-    if f, ok := factorMap[key]; ok { return f }
-    return 1.0
+func getEffective(from,to string, raw float64, factorMap map[string]TrafficParsed) (float64, float64) {
+    // returns raw, effective
+    if factorMap==nil {
+        return raw, raw
+    }
+    key := from+"|"+to
+    if tp, ok := factorMap[key]; ok {
+        eff := raw*tp.Factor + tp.Delay
+        return raw, eff
+    }
+    return raw, raw
 }
 
-func dijkstra(adj map[string]map[string]float64, factorMap map[string]float64, source, dest string, nodeSet map[string]bool) ([]string, float64, float64, bool) {
+func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficParsed, source, dest string, nodeSet map[string]bool) ([]string, float64, float64, bool) {
     const eps=1e-9
     if !nodeSet[source]||!nodeSet[dest] { return nil,-1,-1,false }
     if source==dest { return []string{source},0,0,true }
@@ -211,15 +238,19 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]float64, s
         it:=heap.Pop(pq).(*Item)
         u:=it.node
         if it.eff > bestEff[u]+eps { continue }
-        if math.Abs(it.eff-bestEff[u])<=eps && comparePaths(it.path, bestPath[u])>0 { continue }
+        if math.Abs(it.eff-bestEff[u])<=eps {
+            if math.Abs(it.raw-bestRaw[u])>eps {
+                if it.raw > bestRaw[u]+eps { continue }
+            }
+            if comparePaths(it.path, bestPath[u])>0 { continue }
+        }
         if u==dest { break }
         neigh:=make([]string,0,len(adj[u]))
         for v:=range adj[u] { neigh=append(neigh,v) }
         sort.Strings(neigh)
         for _, v:=range neigh {
             rawEdge := adj[u][v]
-            factor := getFactor(u,v,factorMap)
-            effEdge := rawEdge*factor
+            _, effEdge := getEffective(u,v,rawEdge,factorMap)
             newEff := it.eff+effEdge
             newRaw := it.raw+rawEdge
             newPath := append(append([]string{}, it.path...), v)
@@ -227,9 +258,14 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]float64, s
                 bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
                 heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
             } else if math.Abs(newEff-bestEff[v])<=eps {
-                if comparePaths(newPath, bestPath[v])<0 {
+                if newRaw+eps < bestRaw[v] {
                     bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
                     heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
+                } else if math.Abs(newRaw-bestRaw[v])<=eps {
+                    if comparePaths(newPath, bestPath[v])<0 {
+                        bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
+                        heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
+                    }
                 }
             }
         }
@@ -245,11 +281,11 @@ func main() {
     fs.SetOutput(os.Stderr)
     var graphPath, fromNode, toNode, requestsPath, trafficPath, sourceAlt, destAlt string
     var helpFlag bool
-    fs.StringVar(&graphPath, "graph", "", "graph file")
+    fs.StringVar(&graphPath, "graph", "", "graph")
     fs.StringVar(&fromNode, "from", "", "from")
     fs.StringVar(&toNode, "to", "", "to")
-    fs.StringVar(&sourceAlt, "source", "", "source alt")
-    fs.StringVar(&destAlt, "destination", "", "dest alt")
+    fs.StringVar(&sourceAlt, "source", "", "source")
+    fs.StringVar(&destAlt, "destination", "", "dest")
     fs.StringVar(&requestsPath, "requests", "", "requests")
     fs.StringVar(&trafficPath, "traffic", "", "traffic")
     fs.BoolVar(&helpFlag, "help", false, "help")
@@ -361,4 +397,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step2 harder"
+cd /app && go build -o router . && echo "Build ok step2 directed harder factor+delay"

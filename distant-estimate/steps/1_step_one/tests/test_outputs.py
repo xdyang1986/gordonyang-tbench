@@ -535,3 +535,25 @@ def test_performance_500_nodes():
 def test_invalid_graph_file_not_found():
     proc = run(["--graph", "/nonexistent/path.json", "--from", "A", "--to", "B"])
     assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+
+def test_directed_vs_undirected():
+    graph={"nodes":["A","B","C"], "edges":[
+        {"from":"A","to":"B","distance":1},
+        {"from":"B","to":"C","distance":1},
+        {"from":"C","to":"A","distance":1}
+    ]}
+    gp=tmp(json.dumps(graph))
+    try:
+        proc=run(["--graph",gp,"--from","B","--to","A"])
+        assert proc.returncode==0, proc.stderr.decode()
+        out=json.loads(proc.stdout.decode().strip())
+        assert out["path"]==["B","C","A"], f"directed should be B-C-A got {out['path']}"
+        assert out["distance"]==2
+        proc2=run(["--graph",gp,"--from","A","--to","C"])
+        assert proc2.returncode==0
+        out2=json.loads(proc2.stdout.decode().strip())
+        assert out2["path"]==["A","B","C"] and out2["distance"]==2
+    finally:
+        import os
+        os.unlink(gp)
+

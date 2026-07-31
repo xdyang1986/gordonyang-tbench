@@ -76,8 +76,8 @@ type Item struct {
 type PriorityQueue []*Item
 func (pq PriorityQueue) Len() int { return len(pq) }
 func (pq PriorityQueue) Less(i,j int) bool {
-    const eps = 1e-9
-    if math.Abs(pq[i].dist - pq[j].dist) > eps { return pq[i].dist < pq[j].dist }
+    const eps=1e-9
+    if math.Abs(pq[i].dist-pq[j].dist) > eps { return pq[i].dist < pq[j].dist }
     return comparePaths(pq[i].path, pq[j].path) < 0
 }
 func (pq PriorityQueue) Swap(i,j int) { pq[i], pq[j] = pq[j], pq[i] }
@@ -106,18 +106,17 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     adj := make(map[string]map[string]float64)
     for _, nd := range gf.Nodes { adj[nd]=make(map[string]float64) }
     for _, e := range gf.Edges {
-        if strings.TrimSpace(e.From) == "" || strings.TrimSpace(e.To) == "" { return nil,nil,false }
+        if strings.TrimSpace(e.From)==""||strings.TrimSpace(e.To)=="" { return nil,nil,false }
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
         if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
+        // DIRECTED: only From->To, keep smallest
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
-                adj[e.To][e.From]=e.Distance
             }
         } else {
             adj[e.From][e.To]=e.Distance
-            adj[e.To][e.From]=e.Distance
         }
     }
     return adj, nodeSet, true
@@ -171,11 +170,11 @@ func main() {
     fs.SetOutput(os.Stderr)
     var graphPath, fromNode, toNode, requestsPath, sourceAlt, destAlt string
     var helpFlag bool
-    fs.StringVar(&graphPath, "graph", "", "graph file")
+    fs.StringVar(&graphPath, "graph", "", "graph")
     fs.StringVar(&fromNode, "from", "", "from")
     fs.StringVar(&toNode, "to", "", "to")
-    fs.StringVar(&sourceAlt, "source", "", "source alt")
-    fs.StringVar(&destAlt, "destination", "", "dest alt")
+    fs.StringVar(&sourceAlt, "source", "", "source")
+    fs.StringVar(&destAlt, "destination", "", "dest")
     fs.StringVar(&requestsPath, "requests", "", "requests")
     fs.BoolVar(&helpFlag, "help", false, "help")
     fs.BoolVar(&helpFlag, "h", false, "help")
@@ -191,7 +190,7 @@ func main() {
         if err!=nil { os.Exit(2) }
         var rawArr []json.RawMessage
         if err:=json.Unmarshal(data, &rawArr); err!=nil { os.Exit(2) }
-        type pair struct{src, dst string}
+        type pair struct{src,dst string}
         var pairs []pair
         valid:=true
         for _, raw:=range rawArr {
@@ -253,4 +252,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step1 harder"
+cd /app && go build -o router . && echo "Build ok step1 directed harder"

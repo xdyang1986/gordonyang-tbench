@@ -239,7 +239,8 @@ def test_traffic_extra_fields_ignored():
             f"extra fields should be ignored rc={proc.returncode} stderr={proc.stderr.decode()}"
         )
         out = json.loads(proc.stdout.decode().strip())
-        assert math.isclose(out["effective_distance"], 20, abs_tol=1e-6)
+        # effective = 10*2+99=119
+        assert math.isclose(out["effective_distance"],119, abs_tol=1e-6)
     finally:
         os.unlink(gp)
         os.unlink(tp)
@@ -718,3 +719,75 @@ def test_invalid_graph_still_exit2_with_traffic():
     finally:
         os.unlink(gp)
         os.unlink(tp)
+def test_traffic_secondary_raw_tie_break():
+    graph={"nodes":["A","B","C","D"], "edges":[
+        {"from":"A","to":"B","distance":10},
+        {"from":"B","to":"D","distance":1},
+        {"from":"A","to":"C","distance":2},
+        {"from":"C","to":"D","distance":2}
+    ]}
+    traffic={"traffic":[
+        {"from":"A","to":"B","factor":1,"delay":0},
+        {"from":"B","to":"D","factor":1,"delay":1},
+        {"from":"A","to":"C","factor":2,"delay":0},
+        {"from":"C","to":"D","factor":4,"delay":0}
+    ]}
+    gp=tmp(json.dumps(graph)); tp=tmp(json.dumps(traffic))
+    try:
+        proc=run(["--graph",gp,"--from","A","--to","D","--traffic",tp])
+        assert proc.returncode==0, proc.stderr.decode()
+        out=json.loads(proc.stdout.decode().strip())
+        assert out["path"]==["A","C","D"], f"expected raw secondary to pick A-C-D got {out['path']}"
+        assert math.isclose(out["distance"],4, abs_tol=1e-6)
+        assert math.isclose(out["effective_distance"],12, abs_tol=1e-6)
+    finally:
+        import os
+        os.unlink(gp); os.unlink(tp)
+
+
+def test_traffic_directed_reverse_invalid():
+    graph={"nodes":["A","B"], "edges":[{"from":"A","to":"B","distance":5}]}
+    traffic={"traffic":[{"from":"B","to":"A","factor":2}]}
+    gp=tmp(json.dumps(graph)); tp=tmp(json.dumps(traffic))
+    try:
+        proc=run(["--graph",gp,"--from","A","--to","B","--traffic",tp])
+        assert proc.returncode==2, f"reverse traffic should be invalid for directed graph, got {proc.returncode}"
+        assert proc.stdout.decode().strip()==""
+    finally:
+        import os
+        os.unlink(gp); os.unlink(tp)
+
+
+def test_traffic_delay_and_factor_combined():
+    graph={"nodes":["A","B"], "edges":[{"from":"A","to":"B","distance":10}]}
+    traffic={"traffic":[{"from":"A","to":"B","factor":2,"delay":5}]}
+    gp=tmp(json.dumps(graph)); tp=tmp(json.dumps(traffic))
+    try:
+        proc=run(["--graph",gp,"--from","A","--to","B","--traffic",tp])
+        assert proc.returncode==0
+        out=json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["distance"],10, abs_tol=1e-6)
+        assert math.isclose(out["effective_distance"],25, abs_tol=1e-6)
+        assert math.isclose(out["traffic_delay"],15, abs_tol=1e-6)
+    finally:
+        import os
+        os.unlink(gp); os.unlink(tp)
+
+
+def test_directed_vs_undirected_step2():
+    graph={"nodes":["A","B","C"], "edges":[
+        {"from":"A","to":"B","distance":1},
+        {"from":"B","to":"C","distance":1},
+        {"from":"C","to":"A","distance":1}
+    ]}
+    gp=tmp(json.dumps(graph))
+    try:
+        proc=run(["--graph",gp,"--from","B","--to","A"])
+        assert proc.returncode==0
+        out=json.loads(proc.stdout.decode().strip())
+        assert out["path"]==["B","C","A"] and out["distance"]==2, f"directed B->A should be B-C-A got {out['path']}"
+    finally:
+        import os
+        os.unlink(gp)
+
+
