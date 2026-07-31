@@ -2,38 +2,33 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/ingestion-batch-stream"
-description = "project description"
-authors = []
-keywords = []
+description = "Multi-turn data ingestion: first implement batch pipeline, then migrate to low-latency streaming for data freshness SLA."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["data-engineering", "batch", "streaming", "ingestion", "freshness", "ETL", "sqlite"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
 
 [metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
 difficulty = "hard"
-category = "iterate_on_feature"
-tags = ["iterate_on_feature"]
-
-[verifier]
-# Isolate grading from the agent so agent code can't read the oracle under
-# /tests at verify time. Opt-in — uncomment to enable (also requires a tests/ env def).
-# environment_mode = "separate"
-timeout_sec = 600.0
-# user = "nobody"  # non-root grader for in-process (Flow B) tasks; needs a root-free test.sh
-
-[agent]
-timeout_sec = 600.0
+category = "databases"
+category_usecase = "swap_implementation"
+category_subdomain = "data_infra"
+reward_type = "binary"
+languages = ["python"]
+tags = ["multi-turn", "context-following", "context-overriding", "batch", "streaming", "ingestion", "freshness", "ETL", "data-pipeline"]
 
 [environment]
 build_timeout_sec = 600.0
-cpus = 1
-memory_mb = 2048
+cpus = 2
+memory_mb = 4096
 storage_mb = 10240
 gpus = 0
 allow_internet = true
 mcp_servers = []
 
-[verifier.env]
-
 [environment.env]
-
 [solution.env]
 
 [[steps]]
@@ -45,7 +40,7 @@ min_reward = 1.0
 timeout_sec = 600.0
 
 [steps.agent]
-timeout_sec = 600.0
+timeout_sec = 1200.0
 
 [[steps]]
 name = "2_step_two"
@@ -57,4 +52,4 @@ inherit_prior_session = true
 timeout_sec = 600.0
 
 [steps.agent]
-timeout_sec = 600.0
+timeout_sec = 1200.0
