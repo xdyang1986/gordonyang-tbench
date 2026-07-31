@@ -855,3 +855,375 @@ def test_traffic_delay_and_factor_combined_detailed():
     finally:
         os.unlink(gp)
         os.unlink(tp)
+
+
+def test_traffic_secondary_raw_tie_break():
+    # Effective equal (12), raw differs (11 vs 4) -> pick raw smaller A-C-D even though B<C
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "D", "distance": 1},
+            {"from": "A", "to": "C", "distance": 2},
+            {"from": "C", "to": "D", "distance": 2},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 1, "delay": 0},
+            {"from": "B", "to": "D", "factor": 1, "delay": 1},
+            {"from": "A", "to": "C", "factor": 2, "delay": 0},
+            {"from": "C", "to": "D", "factor": 4, "delay": 0},
+        ]
+    }
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "C", "D"], (
+            f"secondary raw tie-break expects A-C-D raw 4 vs A-B-D raw 11, got {out['path']}"
+        )
+        import math
+
+        assert math.isclose(out["effective_distance"], 12, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_very_small_and_large():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1000}]}
+    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 1e-9}]}
+    import json, tempfile, os, math, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["effective_distance"], 1000 * 1e-9, abs_tol=1e-9)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_duplicate_different_direction_last_wins():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 10}]}
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2},
+            {"from": "B", "to": "A", "factor": 3},
+        ]
+    }
+    import json, tempfile, os, math, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["effective_distance"], 30, abs_tol=1e-6), (
+            f"last wins factor 3 should give 30, got {out['effective_distance']}"
+        )
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_missing_traffic_key_invalid():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps({"foo": []}))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_delay_negative_invalid():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 1, "delay": -1}]}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_factor_missing_invalid():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+    traffic = {"traffic": [{"from": "A", "to": "B"}]}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_batch_with_empty_source_no_route():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 2}]}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    rp = tmp(json.dumps([{"source": "", "destination": "B"}]))
+    try:
+        proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc.returncode == 1
+        out = json.loads(proc.stdout.decode().strip().splitlines()[0])
+        assert out["path"] == [] and out["effective_distance"] == -1
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rp)
+
+
+def test_traffic_5_way_effective_tie():
+    nodes = ["A", "B", "C", "D", "E", "G", "F"]
+    edges = [
+        {"from": "A", "to": "B", "distance": 5},
+        {"from": "B", "to": "F", "distance": 5},
+        {"from": "A", "to": "C", "distance": 5},
+        {"from": "C", "to": "F", "distance": 5},
+        {"from": "A", "to": "D", "distance": 5},
+        {"from": "D", "to": "F", "distance": 5},
+        {"from": "A", "to": "E", "distance": 5},
+        {"from": "E", "to": "F", "distance": 5},
+        {"from": "A", "to": "G", "distance": 5},
+        {"from": "G", "to": "F", "distance": 5},
+    ]
+    graph = {"nodes": nodes, "edges": edges}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(
+            [
+                "--graph",
+                gp,
+                "--from",
+                "A",
+                "--to",
+                "F",
+                "--traffic",
+                tmp(json.dumps([])),
+            ]
+        )
+        # Actually empty traffic array via direct format
+        # Use explicit traffic file with empty array
+        import os, json, tempfile
+
+        tp = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        tp.write(json.dumps([]))
+        tp.close()
+        proc = run(["--graph", gp, "--from", "A", "--to", "F", "--traffic", tp.name])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "F"], (
+            f"5-way effective tie should pick B, got {out['path']}"
+        )
+        os.unlink(tp.name)
+    finally:
+        os.unlink(gp)
+
+
+def test_traffic_extra_fields_mixed_ignored():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 10}]}
+    traffic = {
+        "traffic": [
+            {
+                "from": "A",
+                "to": "B",
+                "factor": 2,
+                "delay": 1,
+                "extra": "ignore",
+                "weight": 99,
+                "unknown": True,
+            }
+        ],
+        "top_extra": "ignore",
+        "another": 123,
+    }
+    import json, tempfile, os, math, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["effective_distance"], 21, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_large_batch_200_with_traffic():
+    nodes = [f"N{i}" for i in range(100)]
+    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(99)]
+    graph = {"nodes": nodes, "edges": edges}
+    traffic = {
+        "traffic": [
+            {"from": f"N{i}", "to": f"N{i + 1}", "factor": 2} for i in range(0, 99, 10)
+        ]
+    }
+    import json, tempfile, os, time, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15
+        )
+
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    reqs = [{"source": "N0", "destination": f"N{i % 100}"} for i in range(200)]
+    rp = tmp(json.dumps(reqs))
+    try:
+        start = time.time()
+        proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        elapsed = time.time() - start
+        assert proc.returncode == 0, (
+            f"rc={proc.returncode} stderr={proc.stderr.decode()[:200]}"
+        )
+        assert elapsed < 4.0, f"too slow 200 batch with traffic {elapsed}"
+        assert len(proc.stdout.decode().strip().splitlines()) == 200
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rp)

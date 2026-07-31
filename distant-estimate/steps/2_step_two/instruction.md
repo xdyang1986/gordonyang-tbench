@@ -1,7 +1,7 @@
-# Turn 2: Traffic-Aware Best Path Selection (Go) – Multi-Turn Step 2 – HARD
+# Turn 2: Traffic-Aware Best Path Selection (Go) – Multi-Turn Step 2 – EXTRA HARD
 
 ## Background
-Turn 1 built distance-based routing. Production now requires live congestion data. Extend same router binary (Turn1 code present via `inherit_prior_session`) to incorporate traffic multipliers and select best path by **effective distance** (physical distance * traffic factor). This is HARD – adds float factor parsing, dual JSON formats, extra-field tolerance, 3-way effective tie-breaks, large batches with traffic, validation of missing edge, whitespace, factor string.
+Turn 1 built distance-based routing. Production now requires live congestion data. Extend same router binary (Turn1 code present via `inherit_prior_session`) to incorporate traffic multipliers and delay and select best path by **effective distance** (physical distance * factor + delay). This is EXTRA HARD – adds float factor+delay parsing, dual JSON formats, extra-field tolerance, 3-level tie-break effective→raw→lex, 5-way ties, large batches with traffic, validation of missing edge, whitespace, scientific notation, duplicate last-wins with direction.
 
 Turn1 functionality must still work when --traffic not provided.
 
@@ -47,11 +47,15 @@ Rules:
 - Missing traffic entry for an edge → default factor 1.0 delay 0.0.
 - No self-traffic (from==to or whitespace trimmed equal) → invalid exit 2.
 
-### Routing Algorithm – Traffic-Aware (MUST) – BALANCED
+### Routing Algorithm – Traffic-Aware (MUST) – EXTRA HARD
 
 - Effective edge cost = `distance * factor + delay` (distance float, factor default 1.0, delay default 0.0). Example: distance 10, factor 2, delay 5 → effective 25.
 - Path selection with traffic: minimize **sum effective** using Dijkstra. Raw distance sum is still sum of physical distances along chosen path (sum distance, not effective).
-- Tie-breaking: When multiple paths have identical total effective_distance within 1e-9 tolerance, choose **lexicographically smallest path** case-sensitive (same as Turn1 but on effective). Compare element-by-element, smaller string wins, prefix shorter wins. Tests include 3-way effective tie: A-B-D, A-C-D, A-E-D all effective 10 (raw may differ), B<C<E so A-B-D must win regardless of discovery order. Must sort neighbors. **No secondary raw tie-break** – only effective → lexicographic (easier than 3-level).
+- Tie-breaking **EXTRA HARD 3-level**: When multiple paths have identical total effective_distance within 1e-9 tolerance, choose:
+  1. Smaller effective (primary)
+  2. If tie, smaller **raw distance** sum (secondary) — favors physically shorter route when congestion equal
+  3. If still tie (both effective and raw equal), lexicographically smallest path case-sensitive (tertiary) — compare element-by-element, smaller string wins, prefix shorter wins.
+  Tests include 3-way effective tie where raw equal (A-B-D, A-C-D, A-E-D all effective 10 raw 10, B<C<E so A-B-D wins) AND secondary raw tie-break where effective equal but raw differs (A-B-D effective 12 raw 11 vs A-C-D effective 12 raw 4 → A-C-D wins because raw smaller, even though B<C). Must sort neighbors and implement 3-level.
 - Source == destination: path [source], distance 0, effective 0, delay 0 (traffic_delay 0).
 - No path: same handling with extended fields.
 - Float handling: distances, factors, delays may be int, float, scientific notation; sum may be float; output float; tolerance 1e-6 for comparison. Factor may be <1 (faster lane) → negative traffic_delay allowed (effective < raw).
@@ -81,21 +85,21 @@ No path:
 
 Exit: 0 all routed, 1 some no route, 2 invalid
 
-### Business Rules & Edge Cases (MUST) – BALANCED
+### Business Rules & Edge Cases (MUST) – EXTRA HARD
 
 - Turn1 still passes without traffic (when --traffic not supplied, behavior identical to Turn1)
 - Traffic changes best path: direct edge short raw but high factor/delay → effective 50, alternative longer raw 12 factor1 → effective12, must pick alternative (minimize effective, not raw)
 - Factor <1 faster, negative traffic_delay allowed (effective < raw)
 - Batch order preserved, output order matches input order
 - Help keywords 6 (graph, from, to, requests, traffic, help)
-- Graph invalid → exit2 (including whitespace node IDs, duplicate nodes, self-loop, missing node ref, distance <=0, scientific notation valid)
-- Traffic invalid: invalid JSON, missing file, referenced edge not in graph, nodes whitespace/empty, factor <=0 or missing or string, delay <0 or string, self-loop, object without traffic key and not direct array → invalid exit2. Direct array form is valid alternative.
-- Requests invalid → exit2, but empty/whitespace source/destination in batch is **no route** not invalid (same as Turn1)
-- Unknown flags → exit2
-- Extra unknown fields in graph top-level, edge, requests, traffic (other than factor/delay) must be **ignored** (not invalid) – tests cover this
-- Stdlib only, no external require
-- Performance: 500 nodes, 2000 edges, 100 requests with traffic <2 sec, 100 requests heavy 500 nodes <2.5 sec
-- Float tolerance 1e-6 for effective, 1e-9 for tie detection, support scientific notation for distance/factor/delay
+- Graph invalid → exit2 (including whitespace node IDs, duplicate nodes, self-loop, missing node ref, distance <=0, scientific notation valid, extra fields ignored)
+- Traffic invalid: invalid JSON, missing file, referenced edge not in graph, nodes whitespace/empty, factor <=0 or missing or string, delay <0 or string or whitespace, self-loop, object without traffic key and not direct array → invalid exit2. Direct array form valid. Scientific notation valid for factor/delay.
+- Requests invalid → exit2 for missing fields / not-string, but empty/whitespace source/destination in batch is **no route** not invalid (same as Turn1) — must handle.
+- Unknown flags → exit2, including misspelling, --traffic not supported? No in Turn2 --traffic is supported, but unknown like --foobar → exit2. In Turn1 --traffic invalid, in Turn2 valid.
+- Extra unknown fields in graph top-level, edge, requests, traffic (other than factor/delay) must be **ignored** (not invalid) – tests cover this. Top-level traffic file extra fields ignored, but object must have traffic key or be direct array.
+- Stdlib only, no external require, binary /app/router
+- Performance **EXTRA HARD**: 1000 nodes 5000 edges 100 requests <2 sec, 500 nodes 200 requests <2.5 sec, 500 requests batch with traffic <4 sec
+- Float tolerance 1e-6 for effective, 1e-9 for tie detection, support scientific notation for distance/factor/delay, very small 1e-9 and large 1e9 factors
 
 ### Examples – HARD
 
