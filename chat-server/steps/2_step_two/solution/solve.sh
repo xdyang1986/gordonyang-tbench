@@ -1876,6 +1876,10 @@ func main() {
 		}
 		roomID := cmdArgs[0]
 		userID := cmdArgs[1]
+		if strings.TrimSpace(roomID) == "" || strings.TrimSpace(userID) == "" {
+			fmt.Fprintln(os.Stderr, "empty roomID or userID")
+			os.Exit(2)
+		}
 		err := withGlobalLock(func() error {
 			// check room exists
 			if isGlobalRoom(roomID) {
