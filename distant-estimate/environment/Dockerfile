@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y golang-go python3 python3-pip curl && r
 
 WORKDIR /app
 
+COPY go.mod /app/go.mod
+COPY main.go /app/main.go
+
 RUN mkdir -p /app/data /logs/verifier /tmp/codimango/gocache /tmp/codimango/gopath
 ENV GOCACHE=/tmp/codimango/gocache
 ENV GOPATH=/tmp/codimango/gopath
