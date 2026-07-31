@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import shutil
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 try:
     import yaml
@@ -54,7 +55,6 @@ def parse_iso(s):
                     return dt.replace(tzinfo=timezone.utc)
                 except ValueError:
                     continue
-        # fromisoformat handles +00:00 and offset
         iso = orig.replace('Z', '+00:00')
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is None:
@@ -125,6 +125,27 @@ def ensure_tables(conn):
       event_count INTEGER NOT NULL
     );
     """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      event_count INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      duration_sec INTEGER NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS fraud_alerts (
+      user_id TEXT NOT NULL,
+      window_start TEXT NOT NULL,
+      window_end TEXT NOT NULL,
+      purchase_count INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      PRIMARY KEY(user_id, window_start)
+    );
+    """)
     conn.commit()
 
 def main():
@@ -149,7 +170,6 @@ def main():
     os.makedirs(os.path.dirname(warehouse_db), exist_ok=True)
     os.makedirs("/app/logs", exist_ok=True)
 
-    # discovery strict
     try:
         all_files = os.listdir(incoming_dir)
     except OSError:
@@ -171,7 +191,6 @@ def main():
     valid_files_sorted = sorted(valid_files)
     full_paths = [os.path.join(incoming_dir, f) for f in valid_files_sorted]
 
-    # load prev checkpoint
     prev_checkpoint = {}
     checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.json")
     if os.path.exists(checkpoint_path):
@@ -270,7 +289,7 @@ def main():
                             "detected_at": now_iso()
                         })
                         continue
-                    if amount != amount:  # NaN
+                    if amount != amount:
                         num_invalid += 1
                         dead_letters.append({
                             "file": fn,
@@ -312,8 +331,6 @@ def main():
                             "detected_at": now_iso()
                         })
                         continue
-                    # future check: dt > now +1h
-                    # dt is aware UTC, now_dt aware
                     if dt > future_threshold:
                         num_invalid += 1
                         num_future_file += 1
@@ -398,7 +415,6 @@ def main():
                 INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, file_size, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (fn, stats["hash"], stats["size"], stats["num_lines"], stats["num_valid"], stats["num_invalid"], stats["num_future"], stats["num_outlier"], processed_at))
-        # daily_sales
         conn.execute("DELETE FROM daily_sales")
         conn.execute("""
             INSERT INTO daily_sales (date, total_amount, event_count)
@@ -409,7 +425,6 @@ def main():
             WHERE event_type='purchase'
             GROUP BY substr(event_time, 1, 10)
         """)
-        # user_stats
         conn.execute("DELETE FROM user_stats")
         conn.execute("""
             INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts, avg_amount)
@@ -427,9 +442,8 @@ def main():
             FROM events
             GROUP BY user_id
         """)
-        # daily_top_users: top 3 per date
+        # daily_top_users
         conn.execute("DELETE FROM daily_top_users")
-        # Get per date per user sums
         cur = conn.cursor()
         cur.execute("""
             SELECT substr(event_time, 1, 10) as date, user_id, SUM(amount) as total_amount
@@ -438,13 +452,10 @@ def main():
             GROUP BY date, user_id
         """)
         rows = cur.fetchall()
-        # group by date
-        from collections import defaultdict
         grouped = defaultdict(list)
         for date, user_id, total in rows:
             grouped[date].append((user_id, total))
         for date, ulist in grouped.items():
-            # sort by total_amount DESC, user_id ASC
             ulist_sorted = sorted(ulist, key=lambda x: (-x[1], x[0]))
             top3 = ulist_sorted[:3]
             for user_id, total in top3:
@@ -463,6 +474,91 @@ def main():
             WHERE event_type='purchase'
             GROUP BY hour
         """)
+        # sessions
+        conn.execute("DELETE FROM sessions")
+        cur.execute("SELECT user_id, event_id, event_time, event_type, amount FROM events ORDER BY user_id, event_time")
+        events_rows = cur.fetchall()
+        # group by user
+        user_events = defaultdict(list)
+        for user_id, event_id, event_time, event_type, amount in events_rows:
+            dt = parse_iso(event_time)
+            if dt is None:
+                continue
+            user_events[user_id].append((dt, event_time, event_id, event_type, amount))
+        for user_id, ev_list in user_events.items():
+            ev_list_sorted = sorted(ev_list, key=lambda x: x[0])
+            # sessionization
+            session_start_idx = 0
+            while session_start_idx < len(ev_list_sorted):
+                session_start_dt, session_start_str, _, _, _ = ev_list_sorted[session_start_idx]
+                session_events = [ev_list_sorted[session_start_idx]]
+                last_dt = session_start_dt
+                next_idx = session_start_idx + 1
+                while next_idx < len(ev_list_sorted):
+                    cur_dt, _, _, _, _ = ev_list_sorted[next_idx]
+                    gap = (cur_dt - last_dt).total_seconds()
+                    if gap > 1800:  # 30 min
+                        break
+                    session_events.append(ev_list_sorted[next_idx])
+                    last_dt = cur_dt
+                    next_idx += 1
+                # build session
+                start_time = session_events[0][1]  # keep original string for stability
+                end_time = session_events[-1][1]
+                start_dt = session_events[0][0]
+                end_dt = session_events[-1][0]
+                duration = int((end_dt - start_dt).total_seconds())
+                event_count = len(session_events)
+                total_amount = sum(ev[4] for ev in session_events if ev[3] == 'purchase')
+                session_id = f"{user_id}_{start_time}"
+                # ensure unique session_id if collision (same start_time duplicate rare)
+                # append count if collision
+                base_session_id = session_id
+                suffix = 0
+                while True:
+                    try:
+                        conn.execute("""
+                            INSERT INTO sessions (session_id, user_id, start_time, end_time, event_count, total_amount, duration_sec)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, (session_id, user_id, start_time, end_time, event_count, total_amount, duration))
+                        break
+                    except sqlite3.IntegrityError:
+                        suffix += 1
+                        session_id = f"{base_session_id}_{suffix}"
+                        if suffix > 10:
+                            break
+                session_start_idx = next_idx
+
+        # fraud_alerts sliding 1h window >5 purchases
+        conn.execute("DELETE FROM fraud_alerts")
+        for user_id, ev_list in user_events.items():
+            # only purchases
+            purchases = [(dt, et_str, amount) for dt, et_str, _, et_type, amount in ev_list if et_type == 'purchase']
+            if len(purchases) <= 5:
+                continue
+            purchases_sorted = sorted(purchases, key=lambda x: x[0])
+            # sliding window two pointers
+            left = 0
+            best_per_start = {}  # window_start -> (purchase_count, total_amount, window_end)
+            for right in range(len(purchases_sorted)):
+                while purchases_sorted[right][0] - purchases_sorted[left][0] > timedelta(seconds=3600):
+                    left += 1
+                window_count = right - left + 1
+                if window_count > 5:
+                    ws_dt, ws_str, _ = purchases_sorted[left]
+                    we_dt, we_str, _ = purchases_sorted[right]
+                    total_amt = sum(p[2] for p in purchases_sorted[left:right+1])
+                    # keep max count per window_start
+                    existing = best_per_start.get(ws_str)
+                    if existing is None or window_count > existing[0] or (window_count == existing[0] and total_amt > existing[1]):
+                        best_per_start[ws_str] = (window_count, total_amt, we_str)
+            # insert
+            for ws_str, (cnt, total_amt, we_str) in best_per_start.items():
+                conn.execute("""
+                    INSERT INTO fraud_alerts (user_id, window_start, window_end, purchase_count, total_amount)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, ws_str, we_str, cnt, total_amt))
+
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -488,18 +584,19 @@ def main():
     top_users_count = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM hourly_sales")
     hourly_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM sessions")
+    sessions_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM fraud_alerts")
+    fraud_count = cur.fetchone()[0]
     conn.close()
 
-    # dead-letter sorted
     dead_letters_sorted = sorted(dead_letters, key=lambda x: (x["file"], x["line_no"]))
     with open(dead_letter_path, 'w') as dl:
         for entry in dead_letters_sorted:
             dl.write(json.dumps(entry) + "\n")
-    # ensure exists even if empty
     if not os.path.exists(dead_letter_path):
         open(dead_letter_path, 'w').close()
 
-    # archive files
     archived = []
     for fn in per_file_stats.keys():
         src = os.path.join(incoming_dir, fn)
@@ -511,7 +608,6 @@ def main():
         except Exception as e:
             print(f"Warning: archive fail {fn}: {e}", file=sys.stderr)
 
-    # checkpoint atomic
     checkpoint_data = {
         "version": 2,
         "last_batch_time": now_iso(),
@@ -554,6 +650,8 @@ def main():
         "user_stats_count": user_stats_count,
         "daily_top_users_count": top_users_count,
         "hourly_sales_count": hourly_count,
+        "sessions_count": sessions_count,
+        "fraud_alerts_count": fraud_count,
         "archived_files": len(archived)
     }
     tmp_m = metrics_path + ".tmp"
@@ -561,14 +659,13 @@ def main():
         json.dump(metrics_data, out, indent=2)
     os.rename(tmp_m, metrics_path)
 
-    print(f"Processed {len(per_file_stats)} files, {total_events} unique events, {total_invalid_global} invalid ({total_future} future, {total_outlier} outlier), {user_stats_count} users, {daily_count} daily, {top_users_count} top_users, {hourly_count} hourly, archived {len(archived)}")
+    print(f"Processed {len(per_file_stats)} files, {total_events} events, {total_invalid_global} invalid, {user_stats_count} users, {daily_count} daily, {top_users_count} top_users, {hourly_count} hourly, {sessions_count} sessions, {fraud_count} fraud, archived {len(archived)}")
 
 if __name__ == "__main__":
     main()
 PYEOF
 
 chmod +x /app/batch_ingest.py
-
 cat > /app/config.yaml << 'YAML'
 mode: batch
 incoming_dir: /app/data/incoming
@@ -585,5 +682,4 @@ stream:
   freshness_sla_sec: 2
   offsets_file: /app/state/stream_offsets.json
 YAML
-
-echo "Batch ingestor v3 hard installed"
+echo "Batch ingestor v4 extra hard installed"

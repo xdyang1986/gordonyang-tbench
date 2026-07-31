@@ -1,159 +1,113 @@
-# Step 1: Batch Data Ingestion Pipeline — Hard Mode v3 (High Complexity)
+# Step 1: Batch Data Ingestion Pipeline — Extra Hard v4
 
 ## Context
-You work on e-commerce data platform at `/app`. Raw events land in `/app/data/incoming/` as JSONL files `events_<id>.jsonl` from multiple upstream producers. Producers write temp files (`*.tmp`, `*.part`, `*.gz`, hidden `.*`, files containing `..`), which must be robustly ignored. Business requires data quality SLOs, audit tables, archiving, and future/outlier detection.
+You work on the e-commerce data platform at `/app`. Raw events land in `/app/data/incoming/` as JSONL `events_<id>.jsonl` from multiple producers. Producers write temp files (`*.tmp`, `*.part`, `*.gz`, hidden `.*`, `..` in name) that must be ignored. Need data quality SLOs, audit tables, archiving, future/outlier filtering, sessionization, fraud detection.
 
-Directory layout (Dockerfile creates):
+Directories:
 ```
 /app/
   config.yaml
-  data/incoming/    # source
-  data/archive/     # you must create and move processed files here
-  state/            # checkpoint, dead_letter, manifest
+  data/incoming/
+  data/archive/     # you create
+  state/
   metrics/
   logs/
   warehouse.db
 ```
 
 ## Source Format
-Each valid file `events_<id>.jsonl` matches regex `^events_[A-Za-z0-9_.\-]+\.jsonl$` with middle part at least 1 char and not `..` and not starting with `.`. One JSON per line. Empty lines skip.
+Valid file regex `^events_[A-Za-z0-9_.\-]+\.jsonl$`, middle part >=1 char, no `..`, not starting with `.` after `events_`. One JSON per line, empty lines skip.
 
-Schema:
+Event schema:
 ```json
 {
   "event_id": "evt_123",
   "user_id": "user_42",
   "event_type": "purchase"|"view"|"cart",
   "amount": 12.34,
-  "event_time": "2024-01-15T10:23:00Z" // Z or +00:00 or +/-HH:MM, fractional seconds allowed
+  "event_time": "2024-01-15T10:23:00Z" // Z or +00:00 or +/-HH:MM, fractional allowed
 }
 ```
-Validation and reasons for dead-letter:
-- `invalid_json` JSON decode fails
-- `invalid_fields` missing required keys or not string/parseable
-- `invalid_type` event_type not in allowed set
-- `negative_amount` amount <0 or NaN
-- `outlier_amount` amount > 100000 (new)
-- `invalid_time` unparsable
-- `future_event` event_time > now UTC + 1 hour (new)
+Invalid reasons for dead-letter:
+- `invalid_json`, `invalid_fields`, `invalid_type`, `negative_amount`, `outlier_amount` (>100000), `invalid_time`, `future_event` (>now+1h)
 
-Dedup: keep latest `event_time` per `event_id`; equal time → last seen wins (lexicographic file order + line order). Must handle `Z` vs `+00:00` vs `+05:00` – normalize to UTC for comparison.
+Dedup: keep latest `event_time` per `event_id`; equal → last seen wins (lexicographic file order + line order). Must normalize timezone to UTC for comparison.
 
 ## Task: Implement /app/batch_ingest.py
 
-Runnable:
 ```
 python /app/batch_ingest.py
 python /app/batch_ingest.py --config /app/config.yaml
-python /app/batch_ingest.py --incremental   # skip unchanged files by hash (optional but must not break)
+python /app/batch_ingest.py --incremental
 ```
 
-### Requirements (All Mandatory)
+### Discovery (strict)
+- List incoming, filter regex, ignore hidden (`.*`), `..`, `*.tmp`, `*.part`, `*.gz`, `events_.jsonl` invalid.
+- Sorted lexicographically.
+- Create dirs if missing.
 
-1. **Discovery – strict:**
-   - List `incoming_dir`, filter by regex `^events_[A-Za-z0-9_.\-]+\.jsonl$`, middle part >=1 char, must NOT contain `..`, must NOT start with `.` after `events_`, must NOT end with `.tmp/.part/.gz`. Ignore hidden files (`.*`).
-   - Only files matching exactly `.jsonl` are valid. `events_001.jsonl.tmp` → ignore.
-   - Sorted lexicographically.
-   - Create incoming, archive, state, metrics, logs dirs if missing.
+### Parsing & Hashing
+- SHA256 hex + file_size per file.
+- Line-by-line (low memory), track per-file num_lines, num_valid, num_invalid, num_future, num_outlier.
+- Parse ISO8601 robustly supporting `Z`, `+00:00`, `+05:00`, `-08:00`, fractional.
 
-2. **Hashing & Line-by-Line:**
-   - SHA256 hex of full file content per file.
-   - Read line by line (low memory), track per-file: num_lines (total lines in file), num_valid, num_invalid (including future/outlier as invalid), num_future, num_outlier.
-   - Also track file_size, mtime.
+### Warehouse – 8 tables (extra hard):
 
-3. **Warehouse – 6 tables (was 4):**
-   ```sql
-   events(event_id PK, user_id, event_type, amount, event_time, processed_at)
-   daily_sales(date PK, total_amount, event_count)
-   ingestion_manifest(file_name PK, file_hash, file_size INTEGER, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
-   user_stats(user_id PK, first_seen, last_seen, total_purchases, total_amount REAL, total_views, total_carts, avg_amount REAL)
-   daily_top_users(date TEXT, user_id TEXT, total_amount REAL, PRIMARY KEY(date, user_id))
-   hourly_sales(hour TEXT PK, total_amount REAL, event_count INTEGER)
-   ```
-   - `events`: upsert `INSERT OR REPLACE`, processed_at now Z.
-   - `daily_sales`: recompute from scratch: per date `substr(event_time,1,10)` where purchase, SUM(amount), COUNT.
-   - `ingestion_manifest`: upsert per file with hash, file_size, counts, processed_at now. Must include future/outlier counts.
-   - `user_stats`: per user after dedup: first_seen MIN(event_time), last_seen MAX(event_time), total_purchases COUNT purchase, total_amount SUM purchase amounts, total_views COUNT view, total_carts COUNT cart, avg_amount = total_amount / total_purchases if purchases>0 else 0.
-   - `daily_top_users`: per date, per user purchase sum, keep only top 3 users per date by total_amount DESC (if tie, user_id ASC). So at most 3 rows per date.
-   - `hourly_sales`: per hour truncated: hour = substr(event_time,1,13) + ":00:00Z" where first 13 chars `YYYY-MM-DDTHH` → reconstruct as `YYYY-MM-DDTHH:00:00Z`. Only purchase events. SUM(amount), COUNT.
-   - All recomputations in single transaction with `BEGIN IMMEDIATE` and WAL journal mode (`PRAGMA journal_mode=WAL`).
-
-4. **Checkpoint – versioned atomic:**
-   - `/app/state/checkpoint.json` structure:
-     ```json
-     {
-       "version": 2,
-       "last_batch_time": "<now Z>",
-       "created_at": "<now Z>",
-       "files_processed": ["events_001.jsonl", ...],
-       "files": {
-         "events_001.jsonl": {"hash": "<sha256>", "size": 1234, "num_lines": 10, "num_valid": 8, "num_invalid": 2, "num_future": 0, "num_outlier": 0, "mtime": 1234567890.0},
-         ...
-       },
-       "archive": ["events_001.jsonl", ...],
-       "total_events": 5,
-       "total_invalid": 1,
-       "total_future": 0,
-       "total_outlier": 0,
-       "mode": "batch"
-     }
-     ```
-   - Must be written atomically: write to temp file then rename.
-   - `files_processed` sorted, equals keys of `files`. `archive` list equals files moved.
-
-5. **Dead-letter – sorted:**
-   - `/app/state/dead_letter.jsonl` overwrite each run, one JSON per invalid:
-     `{"file": "...", "line_no": 5, "content": "<raw 500>", "reason": "invalid_json|invalid_fields|invalid_type|negative_amount|outlier_amount|invalid_time|future_event", "detected_at": "<now Z>"}`
-   - Sorted by file ASC then line_no ASC.
-   - Must exist even if 0 invalid (empty).
-
-6. **Archiving:**
-   - After successful batch (transaction committed), move each processed valid file from `incoming_dir` to `/app/data/archive/` (create dir). Use `os.rename` or `shutil.move`. If file already exists in archive, overwrite.
-   - If incremental mode and file skipped due to hash match, still ensure it is in archive (if previously archived, keep).
-   - Checkpoint `archive` field must list archived files.
-
-7. **Metrics:**
-   - `/app/metrics/freshness.json`:
-     ```json
-     {
-       "mode": "batch",
-       "version": 2,
-       "last_batch_time": "...",
-       "total_events": 5,
-       "total_files_processed": 2,
-       "total_invalid": 1,
-       "total_future": 0,
-       "total_outlier": 0,
-       "warehouse_db": "/app/warehouse.db",
-       "max_event_time": "...",
-       "min_event_time": "...",
-       "freshness_sec": ...,
-       "manifest_count": 2,
-       "user_stats_count": 3,
-       "daily_top_users_count": 3,
-       "hourly_sales_count": 2,
-       "archived_files": 2
-     }
-     ```
-   - Atomic write.
-
-8. **Idempotency & Incremental:**
-   - Full rerun without changes: same counts, same hashes, archive still has files, but after archiving, incoming will be empty (since files moved). So second full run without new files should process 0 files, but DB remains same. Tests will re-create files after archive test.
-   - `--incremental`: if checkpoint exists with same hash, skip file (do not re-parse). Must still be counted? For simplicity, incremental still processes manifest but skips event parsing – DB unchanged.
-
-9. **Logging:** stdout summary with all counts, stderr per invalid with reason.
-
-10. **Robustness:** Must not crash on empty, hidden, tmp, .., gz, future, outlier, invalid. Must process line by line.
-
-### Example with new edge cases
-`events_001.jsonl`:
+```sql
+events(event_id PK, user_id, event_type, amount, event_time, processed_at)
+daily_sales(date PK, total_amount, event_count)
+ingestion_manifest(file_name PK, file_hash, file_size INT, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
+user_stats(user_id PK, first_seen, last_seen, total_purchases, total_amount REAL, total_views, total_carts, avg_amount REAL)
+daily_top_users(date TEXT, user_id TEXT, total_amount REAL, PK(date,user_id)) -- top 3 per date
+hourly_sales(hour TEXT PK, total_amount REAL, event_count INT) -- hour truncated YYYY-MM-DDTHH:00:00Z, purchases only
+sessions(session_id TEXT PK, user_id TEXT, start_time TEXT, end_time TEXT, event_count INT, total_amount REAL, duration_sec INT)
+fraud_alerts(user_id TEXT, window_start TEXT, window_end TEXT, purchase_count INT, total_amount REAL, PRIMARY KEY(user_id, window_start))
 ```
-{"event_id":"e1","user_id":"u1","event_type":"purchase","amount":10,"event_time":"2024-01-01T01:00:00Z"}
-{"event_id":"e1","user_id":"u1","event_type":"purchase","amount":15,"event_time":"2024-01-01T03:00:00+00:00"} // +00:00, latest wins
-{"event_id":"future1","user_id":"u2","event_type":"purchase","amount":5,"event_time":"2099-01-01T00:00:00Z"} // future → invalid
-{"event_id":"outlier","user_id":"u3","event_type":"purchase","amount":200000,"event_time":"2024-01-01T00:00:00Z"} // outlier → invalid
+
+- `events`: upsert REPLACE, processed_at now Z.
+- `daily_sales`: recompute from scratch per date `substr(event_time,1,10)` where purchase.
+- `ingestion_manifest`: upsert per file with hash, size, counts.
+- `user_stats`: per user after dedup: first_seen MIN(event_time), last_seen MAX(event_time), total_purchases COUNT purchase, total_amount SUM purchase, total_views COUNT view, total_carts COUNT cart, avg_amount = total_amount / total_purchases if >0 else 0.
+- `daily_top_users`: per date per user purchase sum, keep only top 3 per date by total_amount DESC, user_id ASC tie.
+- `hourly_sales`: per hour `substr(event_time,1,13)||':00:00Z'`, purchases only.
+- `sessions`: sessionization per user: sort user's events by event_time ascending, split into sessions where gap between consecutive events >30 minutes (1800 sec). For each session, session_id = `{user_id}_{start_time_iso}` where start_time is first event's event_time (use normalized Z format from DB? Keep original string of first event for id stability). start_time = first event_time, end_time = last event_time, event_count = count events in session (all types), total_amount = SUM purchase amounts in session, duration_sec = end_time - start_time in seconds (0 if single event). Use UTC parsed times for gap calc.
+- `fraud_alerts`: sliding 1-hour window fraud detection for purchases only: for each user, sort purchase events by event_time ascending, use two pointers sliding window where window duration <=1 hour (3600 sec). For any window where purchase_count >5, emit alert row: user_id, window_start = first event_time in window, window_end = last event_time in window, purchase_count, total_amount sum in window. Deduplicate alerts: if multiple windows have same window_start for same user, keep one with max purchase_count. Only emit if count >5.
+
+All recomputations in single transaction `BEGIN IMMEDIATE`, WAL mode `PRAGMA journal_mode=WAL`.
+
+### Checkpoint v2 atomic
+`/app/state/checkpoint.json`:
+```json
+{
+  "version": 2,
+  "last_batch_time": "<now Z>",
+  "created_at": "<now Z>",
+  "files_processed": [...],
+  "files": {"events_001.jsonl": {"hash": "...", "size": 1234, "num_lines": 10, "num_valid": 8, "num_invalid": 2, "num_future": 0, "num_outlier": 0, "mtime": 1234567890.0}},
+  "archive": [...],
+  "total_events": 5,
+  "total_invalid": 1,
+  "total_future": 0,
+  "total_outlier": 0,
+  "mode": "batch"
+}
 ```
-- e1 kept 15, future/outlier go to dead_letter, not in DB.
+Atomic write tmp→rename.
+
+### Dead-letter sorted
+`/app/state/dead_letter.jsonl` overwrite each run, sorted file ASC line_no ASC, reasons 7 types.
+
+### Archiving
+After commit, move each valid processed file from incoming to `/app/data/archive/` (overwrite). Checkpoint archive field list. Second full run with empty incoming should process 0 files but DB unchanged.
+
+### Metrics v2
+`/app/metrics/freshness.json` with mode batch, version 2, total_events, total_files_processed (only valid regex), total_invalid, total_future, total_outlier, max/min event_time, freshness_sec, manifest_count, user_stats_count, daily_top_users_count, hourly_sales_count, sessions_count, fraud_alerts_count, archived_files. Atomic write.
+
+### Idempotency & Incremental
+Full rerun idempotent. `--incremental` skip files where hash equals previous checkpoint hash.
+
+### Logging & Robustness
+stdout summary with all counts, stderr warnings, must not crash on empty, hidden, tmp, .., gz, future, outlier.
 
 ### Validation
-Tests will create files including tmp/part/gz/hidden/.. that must be ignored, future and outlier events, +00:00 and +05:00 times, verify 6 tables, manifest hash/size, checkpoint version 2 atomic, dead_letter sorted reasons, archive moves files, metrics counts, idempotency, incremental skip, hourly and daily_top_users top 3 logic.
+Tests will create files including tmp/part/gz/hidden/.., future/outlier, +00:00/+05:00 times, verify 8 tables, manifest hash/size, checkpoint version 2 atomic, dead_letter sorted 7 reasons, archive moves, metrics 14 fields, idempotency, incremental, daily_top_users top3, hourly, sessions split 30min gap, fraud >5 purchases in 1h sliding window.

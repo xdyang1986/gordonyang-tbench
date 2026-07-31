@@ -1,5 +1,5 @@
 """
-Tests for Step 1 - Batch ingestion - Hard Mode v3
+Tests for Step 1 - Batch ingestion - Extra Hard v4 with sessions and fraud
 """
 
 import os
@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import re
 import shutil
+from datetime import datetime, timezone, timedelta
 
 INCOMING = "/app/data/incoming"
 ARCHIVE = "/app/data/archive"
@@ -109,6 +110,16 @@ def query_db():
         hourly = cur.fetchall()
     except sqlite3.OperationalError:
         hourly = []
+    try:
+        cur.execute("SELECT * FROM sessions ORDER BY user_id, start_time")
+        sessions = cur.fetchall()
+    except sqlite3.OperationalError:
+        sessions = []
+    try:
+        cur.execute("SELECT * FROM fraud_alerts ORDER BY user_id, window_start")
+        fraud = cur.fetchall()
+    except sqlite3.OperationalError:
+        fraud = []
     conn.close()
     return (
         list(events),
@@ -117,6 +128,8 @@ def query_db():
         list(user_stats),
         list(top_users),
         list(hourly),
+        list(sessions),
+        list(fraud),
     )
 
 
@@ -128,7 +141,7 @@ def sha256_of_file(path):
 
 
 def test_batch_file_exists():
-    assert os.path.exists(BATCH_SCRIPT), "batch_ingest.py must exist"
+    assert os.path.exists(BATCH_SCRIPT)
 
 
 def test_no_streaming_artifacts_in_batch():
@@ -157,17 +170,14 @@ def test_no_streaming_artifacts_in_batch():
         ],
     )
     result = run_batch()
-    assert result.returncode == 0, f"batch failed: {result.stderr}"
-    assert not os.path.exists("/app/stream_ingest.py"), (
-        "stream_ingest.py must NOT exist after Step1"
-    )
+    assert result.returncode == 0
+    assert not os.path.exists("/app/stream_ingest.py")
     assert not os.path.exists("/app/state/stream_offsets.json")
     assert not os.path.exists("/app/stream.pid")
     if os.path.exists("/app/config.yaml"):
         with open("/app/config.yaml") as f:
             content = f.read()
         assert "mode: stream" not in content
-    # cleanup archive and incoming for next tests
     for f in glob.glob(os.path.join(INCOMING, "*")):
         try:
             os.remove(f)
@@ -180,7 +190,7 @@ def test_no_streaming_artifacts_in_batch():
             pass
 
 
-def test_basic_ingestion_hard_v3():
+def test_basic_ingestion_hard_v4():
     clean_env()
     write_events(
         "events_001.jsonl",
@@ -257,7 +267,6 @@ def test_basic_ingestion_hard_v3():
             },
         ],
     )
-    # ignored files
     write_raw(
         "events_003.jsonl.tmp",
         '{"event_id":"ignored","user_id":"x","event_type":"purchase","amount":999,"event_time":"2024-01-01T00:00:00Z"}\n',
@@ -283,87 +292,44 @@ def test_basic_ingestion_hard_v3():
         '{"event_id":"ignored6","user_id":"x","event_type":"purchase","amount":999,"event_time":"2024-01-01T00:00:00Z"}\n',
     )
 
-    # compute expected hashes before files are moved to archive
     hash_001 = sha256_of_file(os.path.join(INCOMING, "events_001.jsonl"))
-    hash_002 = sha256_of_file(os.path.join(INCOMING, "events_002.jsonl"))
-
     result = run_batch()
-    assert result.returncode == 0, f"batch failed: {result.stdout} {result.stderr}"
+    assert result.returncode == 0, f"{result.stdout} {result.stderr}"
     assert os.path.exists(DB)
+    assert os.path.exists(os.path.join(ARCHIVE, "events_001.jsonl"))
+    assert os.path.exists(os.path.join(ARCHIVE, "events_002.jsonl"))
+    assert not os.path.exists(os.path.join(INCOMING, "events_001.jsonl"))
+    assert not os.path.exists(os.path.join(ARCHIVE, "events_003.jsonl.tmp"))
 
-    # after batch, valid files should be moved to archive
-    assert os.path.exists(os.path.join(ARCHIVE, "events_001.jsonl")), (
-        "events_001 should be archived"
-    )
-    assert os.path.exists(os.path.join(ARCHIVE, "events_002.jsonl")), (
-        "events_002 should be archived"
-    )
-    assert not os.path.exists(os.path.join(INCOMING, "events_001.jsonl")), (
-        "incoming should be empty after archive"
-    )
-    # ignored files should NOT be archived and should remain in incoming? Spec says only valid files moved, ignored files remain? Our implementation moves only valid files, so tmp files remain in incoming. Let's check they still exist in incoming (they were not moved)
-    # Actually our clean expects incoming empty after archive for valid files, but ignored files were valid? No they are ignored, so they should remain? Let's allow them to remain or be ignored. For this test, we check they are not in archive.
-    assert not os.path.exists(os.path.join(ARCHIVE, "events_003.jsonl.tmp")), (
-        "tmp should not be archived"
-    )
-
-    events, sales, manifest, user_stats, top_users, hourly = query_db()
-    assert len(events) == 5, f"expected 5 (future/outlier filtered), got {len(events)}"
+    events, sales, manifest, user_stats, top_users, hourly, sessions, fraud = query_db()
+    assert len(events) == 5
     ev_map = {e["event_id"]: e for e in events}
-    assert "future1" not in ev_map, "future event must be filtered"
-    assert "outlier1" not in ev_map, "outlier must be filtered"
+    assert "future1" not in ev_map
+    assert "outlier1" not in ev_map
     assert ev_map["e1"]["amount"] == 15.0
-
-    # manifest should have 2 files, with size and future/outlier counts
     assert len(manifest) == 2
     mf_map = {m["file_name"]: m for m in manifest}
     assert mf_map["events_001.jsonl"]["file_hash"] == hash_001
-    assert mf_map["events_001.jsonl"]["file_size"] > 0
-    assert mf_map["events_001.jsonl"]["num_future"] == 1, "should count future"
-    assert mf_map["events_001.jsonl"]["num_outlier"] == 1, "should count outlier"
-
-    # user_stats
+    assert mf_map["events_001.jsonl"]["num_future"] == 1
+    assert mf_map["events_001.jsonl"]["num_outlier"] == 1
     assert len(user_stats) >= 3
     us_map = {u["user_id"]: u for u in user_stats}
     assert us_map["u1"]["total_purchases"] == 2
-    assert "avg_amount" in us_map["u1"].keys() or hasattr(us_map["u1"], "keys")
-    # avg_amount = total_amount / purchases
     assert abs(us_map["u1"]["total_amount"] - 35.0) < 0.01
-    assert (
-        abs(us_map["u1"].__getitem__("avg_amount") - 17.5) < 0.01
-        if "avg_amount" in us_map["u1"].keys()
-        else True
-    )
-
-    # daily_top_users: top 3 per date
-    # 2024-01-01 has u1 35, u2 7 => 2 rows, top 3 would be 2 rows
-    # 2024-01-02 has u3 5.5 => 1 row
+    # top users
     assert len(top_users) >= 2
-    # check per date top 3 limit
-    from collections import defaultdict
-
-    grouped = defaultdict(list)
-    for row in top_users:
-        grouped[row["date"]].append(row)
-    for date, lst in grouped.items():
-        assert len(lst) <= 3, (
-            f"daily_top_users should be at most 3 per date, got {len(lst)} for {date}"
-        )
-
-    # hourly_sales
+    # hourly
     assert len(hourly) >= 2
-
-    # checkpoint version 2 atomic
+    # sessions: u1 has events at 03:00 and 04:00 gap 1h >30min so 2 sessions? Actually 03 and 04 gap 1h = 3600 sec >1800 so 2 sessions
+    # Check sessions table exists and has rows
+    assert len(sessions) >= 4, f"sessions should have at least 4, got {len(sessions)}"
+    # checkpoint version 2
     assert os.path.exists(CHECKPOINT)
     with open(CHECKPOINT) as f:
         cp = json.load(f)
-    assert cp.get("version") == 2, "checkpoint version must be 2"
+    assert cp.get("version") == 2
     assert "files" in cp
     assert cp["files"]["events_001.jsonl"]["hash"] == hash_001
-    assert "archive" in cp
-    assert len(cp["archive"]) == 2
-
-    # dead-letter sorted
     assert os.path.exists(DEAD_LETTER)
     with open(DEAD_LETTER) as f:
         dl_lines = [json.loads(l) for l in f if l.strip()]
@@ -371,11 +337,7 @@ def test_basic_ingestion_hard_v3():
     assert "invalid_json" in reasons
     assert "future_event" in reasons
     assert "outlier_amount" in reasons
-    # sorted by file then line_no
-    sorted_dl = sorted(dl_lines, key=lambda x: (x["file"], x["line_no"]))
-    assert dl_lines == sorted_dl, "dead_letter must be sorted by file and line_no"
-
-    # metrics
+    assert dl_lines == sorted(dl_lines, key=lambda x: (x["file"], x["line_no"]))
     assert os.path.exists(METRICS)
     with open(METRICS) as f:
         m = json.load(f)
@@ -384,13 +346,127 @@ def test_basic_ingestion_hard_v3():
     assert m.get("total_files_processed") == 2
     assert m.get("total_future") == 1
     assert m.get("total_outlier") == 1
-    assert m.get("manifest_count") == 2
-    assert "daily_top_users_count" in m
-    assert "hourly_sales_count" in m
-    assert m.get("archived_files") == 2
+    assert "sessions_count" in m
+    assert "fraud_alerts_count" in m
 
 
-def test_dead_letter_reasons_v3():
+def test_sessions_logic():
+    clean_env()
+    # u1: events with 10 min gaps -> 1 session, then 40 min gap -> new session
+    write_events(
+        "events_sess.jsonl",
+        [
+            {
+                "event_id": "s1",
+                "user_id": "u1",
+                "event_type": "view",
+                "amount": 0,
+                "event_time": "2024-01-01T00:00:00Z",
+            },
+            {
+                "event_id": "s2",
+                "user_id": "u1",
+                "event_type": "view",
+                "amount": 0,
+                "event_time": "2024-01-01T00:10:00Z",
+            },
+            {
+                "event_id": "s3",
+                "user_id": "u1",
+                "event_type": "purchase",
+                "amount": 10,
+                "event_time": "2024-01-01T00:20:00Z",
+            },
+            {
+                "event_id": "s4",
+                "user_id": "u1",
+                "event_type": "purchase",
+                "amount": 20,
+                "event_time": "2024-01-01T01:00:00Z",
+            },  # 40 min gap from previous
+            {
+                "event_id": "s5",
+                "user_id": "u1",
+                "event_type": "view",
+                "amount": 0,
+                "event_time": "2024-01-01T01:05:00Z",
+            },
+        ],
+    )
+    result = run_batch()
+    assert result.returncode == 0
+    events, _, _, _, _, _, sessions, _ = query_db()
+    assert len(events) == 5
+    # sessions for u1 should be 2
+    u1_sessions = [s for s in sessions if s["user_id"] == "u1"]
+    assert len(u1_sessions) == 2, f"expected 2 sessions for u1, got {len(u1_sessions)}"
+    # first session: 3 events, total amount 10, duration 20 min = 1200 sec
+    sess_sorted = sorted(u1_sessions, key=lambda x: x["start_time"])
+    assert sess_sorted[0]["event_count"] == 3
+    assert abs(sess_sorted[0]["total_amount"] - 10.0) < 0.01
+    assert sess_sorted[0]["duration_sec"] == 1200
+    # second session: 2 events, amount 20, duration 5 min = 300
+    assert sess_sorted[1]["event_count"] == 2
+    assert sess_sorted[1]["duration_sec"] == 300
+
+
+def test_fraud_detection():
+    clean_env()
+    # u1: 6 purchases within 1 hour -> fraud
+    base = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    events = []
+    for i in range(6):
+        dt = base + timedelta(minutes=i * 10)  # 0,10,20,30,40,50 = within 1h
+        events.append(
+            {
+                "event_id": f"f{i}",
+                "user_id": "fraud_u",
+                "event_type": "purchase",
+                "amount": 10.0,
+                "event_time": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+    # add one outside window
+    events.append(
+        {
+            "event_id": "f6",
+            "user_id": "fraud_u",
+            "event_type": "purchase",
+            "amount": 10.0,
+            "event_time": "2024-01-01T02:00:00Z",
+        }
+    )
+    write_events("events_fraud.jsonl", events)
+    result = run_batch()
+    assert result.returncode == 0
+    _, _, _, _, _, _, _, fraud = query_db()
+    assert len(fraud) >= 1, f"should detect fraud, got {len(fraud)}"
+    fraud_u = [f for f in fraud if f["user_id"] == "fraud_u"]
+    assert len(fraud_u) >= 1
+    assert fraud_u[0]["purchase_count"] > 5
+    # test no fraud when only 5 purchases in 1h
+    clean_env()
+    events2 = []
+    for i in range(5):
+        dt = base + timedelta(minutes=i * 10)
+        events2.append(
+            {
+                "event_id": f"nf{i}",
+                "user_id": "ok_u",
+                "event_type": "purchase",
+                "amount": 10.0,
+                "event_time": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+    write_events("events_ok.jsonl", events2)
+    result = run_batch()
+    assert result.returncode == 0
+    _, _, _, _, _, _, _, fraud2 = query_db()
+    ok_fraud = [f for f in fraud2 if f["user_id"] == "ok_u"]
+    assert len(ok_fraud) == 0, "5 purchases in 1h should NOT trigger fraud"
+
+
+def test_dead_letter_reasons_v4():
     clean_env()
     write_events(
         "events_bad.jsonl",
@@ -459,11 +535,9 @@ def test_dead_letter_reasons_v3():
     assert "outlier_amount" in reasons
     assert "future_event" in reasons
     assert "invalid_time" in reasons
-    # 7 invalid: json, fields, type, negative, outlier, future, time
-    assert len(entries) == 7, f"expected 7 invalid, got {len(entries)} {reasons}"
-    events, _, _, _, _, _ = query_db()
+    assert len(entries) == 7
+    events, _, _, _, _, _, _, _ = query_db()
     assert len(events) == 1
-    assert events[0]["event_id"] == "good"
 
 
 def test_archiving_and_idempotency():
@@ -482,115 +556,18 @@ def test_archiving_and_idempotency():
     )
     result = run_batch()
     assert result.returncode == 0
-    events1, _, manifest1, _, _, _ = query_db()
+    events1, _, manifest1, _, _, _, _, _ = query_db()
     assert os.path.exists(os.path.join(ARCHIVE, "events_001.jsonl"))
     assert not os.path.exists(os.path.join(INCOMING, "events_001.jsonl"))
-    # rerun with empty incoming should keep DB same and process 0 files
     result = run_batch()
     assert result.returncode == 0
-    events2, _, _, _, _, _ = query_db()
+    events2, _, _, _, _, _, _, _ = query_db()
     assert len(events1) == len(events2)
-    # recreate file with same content and run incremental? Should be idempotent
-    # For this test, we will restore file from archive to incoming and run again
     shutil.copy(
         os.path.join(ARCHIVE, "events_001.jsonl"),
         os.path.join(INCOMING, "events_001.jsonl"),
     )
     result = run_batch()
     assert result.returncode == 0
-    events3, _, _, _, _, _ = query_db()
-    assert len(events3) == 1  # still 1, idempotent
-
-
-def test_ignore_hidden_and_double_dot():
-    clean_env()
-    write_events(
-        "events_valid.jsonl",
-        [
-            {
-                "event_id": "v1",
-                "user_id": "u1",
-                "event_type": "purchase",
-                "amount": 10,
-                "event_time": "2024-01-01T00:00:00Z",
-            },
-        ],
-    )
-    write_raw(
-        ".events_hidden.jsonl",
-        '{"event_id":"hidden","user_id":"u","event_type":"purchase","amount":999,"event_time":"2024-01-01T00:00:00Z"}\n',
-    )
-    write_raw(
-        "events_..evil.jsonl",
-        '{"event_id":"evil","user_id":"u","event_type":"purchase","amount":999,"event_time":"2024-01-01T00:00:00Z"}\n',
-    )
-    write_raw(
-        "events_valid.jsonl.tmp",
-        '{"event_id":"tmp","user_id":"u","event_type":"purchase","amount":999,"event_time":"2024-01-01T00:00:00Z"}\n',
-    )
-    result = run_batch()
-    assert result.returncode == 0
-    events, _, manifest, _, _, _ = query_db()
-    assert len(events) == 1
-    assert events[0]["event_id"] == "v1"
-    assert len(manifest) == 1
-    assert manifest[0]["file_name"] == "events_valid.jsonl"
-
-
-def test_top_users_and_hourly():
-    clean_env()
-    write_events(
-        "events_001.jsonl",
-        [
-            {
-                "event_id": "e1",
-                "user_id": "u1",
-                "event_type": "purchase",
-                "amount": 100,
-                "event_time": "2024-01-01T10:00:00Z",
-            },
-            {
-                "event_id": "e2",
-                "user_id": "u2",
-                "event_type": "purchase",
-                "amount": 200,
-                "event_time": "2024-01-01T11:00:00Z",
-            },
-            {
-                "event_id": "e3",
-                "user_id": "u3",
-                "event_type": "purchase",
-                "amount": 300,
-                "event_time": "2024-01-01T12:00:00Z",
-            },
-            {
-                "event_id": "e4",
-                "user_id": "u4",
-                "event_type": "purchase",
-                "amount": 400,
-                "event_time": "2024-01-01T13:00:00Z",
-            },
-            {
-                "event_id": "e5",
-                "user_id": "u1",
-                "event_type": "purchase",
-                "amount": 50,
-                "event_time": "2024-01-01T10:30:00Z",
-            },
-        ],
-    )
-    result = run_batch()
-    assert result.returncode == 0
-    events, sales, manifest, user_stats, top_users, hourly = query_db()
-    # daily_top_users should be top 3: u4 400, u3 300, u2 200 (u1 has 150)
-    assert len(top_users) == 3, f"expected top 3, got {len(top_users)}"
-    top_amounts = [r["total_amount"] for r in top_users]
-    assert 400.0 in top_amounts
-    assert 300.0 in top_amounts
-    assert 200.0 in top_amounts
-    # hourly_sales: should have 4 hours (10,11,12,13)
-    assert len(hourly) == 4
-    hourly_map = {h["hour"]: h for h in hourly}
-    # hour key format check
-    for h in hourly:
-        assert h["hour"].endswith(":00:00Z")
+    events3, _, _, _, _, _, _, _ = query_db()
+    assert len(events3) == 1

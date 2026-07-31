@@ -13,7 +13,8 @@ import hashlib
 import sqlite3
 import time
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 try:
     import yaml
@@ -26,6 +27,7 @@ DEFAULT_CONFIG = {
     "checkpoint_dir": "/app/state",
     "metrics_path": "/app/metrics/freshness.json",
     "dead_letter_path": "/app/state/dead_letter.jsonl",
+    "archive_dir": "/app/data/archive",
     "stream": {
         "poll_interval_ms": 200,
         "freshness_sla_sec": 2,
@@ -40,7 +42,6 @@ START_TIME = time.time()
 
 def handle_signal(signum, frame):
     global RUNNING
-    print(f"Received signal {signum}, shutting down...", file=sys.stderr)
     RUNNING = False
 
 signal.signal(signal.SIGTERM, handle_signal)
@@ -54,14 +55,14 @@ def load_config(path="/app/config.yaml"):
             if yaml:
                 with open(path, 'r') as f:
                     data = yaml.safe_load(f) or {}
-                    for k in ["incoming_dir", "warehouse_db", "checkpoint_dir", "metrics_path", "dead_letter_path", "mode"]:
+                    for k in ["incoming_dir", "warehouse_db", "checkpoint_dir", "metrics_path", "dead_letter_path", "archive_dir", "mode"]:
                         if k in data:
                             cfg[k] = data[k]
                     if "stream" in data and isinstance(data["stream"], dict):
                         for sk, sv in data["stream"].items():
                             cfg["stream"][sk] = sv
         except Exception as e:
-            print(f"Warning: could not read config {path}: {e}", file=sys.stderr)
+            print(f"Warning: config {e}", file=sys.stderr)
     return cfg
 
 def now_iso():
@@ -69,6 +70,7 @@ def now_iso():
 
 def parse_iso(s):
     try:
+        orig = s
         if s.endswith('Z'):
             s2 = s[:-1]
             for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
@@ -77,7 +79,7 @@ def parse_iso(s):
                     return dt.replace(tzinfo=timezone.utc)
                 except ValueError:
                     continue
-        iso = s.replace('Z', '+00:00')
+        iso = orig.replace('Z', '+00:00')
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -86,6 +88,7 @@ def parse_iso(s):
         return None
 
 def ensure_tables(conn):
+    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS events (
       event_id TEXT PRIMARY KEY,
@@ -107,9 +110,12 @@ def ensure_tables(conn):
     CREATE TABLE IF NOT EXISTS ingestion_manifest (
       file_name TEXT PRIMARY KEY,
       file_hash TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
       num_lines INTEGER NOT NULL,
       num_valid INTEGER NOT NULL,
       num_invalid INTEGER NOT NULL,
+      num_future INTEGER NOT NULL,
+      num_outlier INTEGER NOT NULL,
       processed_at TEXT NOT NULL
     );
     """)
@@ -121,7 +127,44 @@ def ensure_tables(conn):
       total_purchases INTEGER NOT NULL,
       total_amount REAL NOT NULL,
       total_views INTEGER NOT NULL,
-      total_carts INTEGER NOT NULL
+      total_carts INTEGER NOT NULL,
+      avg_amount REAL NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS daily_top_users (
+      date TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      total_amount REAL NOT NULL,
+      PRIMARY KEY(date, user_id)
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS hourly_sales (
+      hour TEXT PRIMARY KEY,
+      total_amount REAL NOT NULL,
+      event_count INTEGER NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      event_count INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      duration_sec INTEGER NOT NULL
+    );
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS fraud_alerts (
+      user_id TEXT NOT NULL,
+      window_start TEXT NOT NULL,
+      window_end TEXT NOT NULL,
+      purchase_count INTEGER NOT NULL,
+      total_amount REAL NOT NULL,
+      PRIMARY KEY(user_id, window_start)
     );
     """)
     conn.commit()
@@ -141,9 +184,8 @@ def write_metrics(metrics_path, total_events, total_files, max_event_time, last_
     is_meeting = True
     if last_delay_ms is not None:
         is_meeting = last_delay_ms <= (sla_sec * 1000 + 500)
-    # get counts for manifest and user_stats if possible
-    manifest_count = 0
-    user_stats_count = 0
+    manifest_count = user_stats_count = 0
+    daily_top = hourly_cnt = sessions_cnt = fraud_cnt = 0
     min_event_time = None
     try:
         conn = sqlite3.connect(warehouse_db)
@@ -152,12 +194,19 @@ def write_metrics(metrics_path, total_events, total_files, max_event_time, last_
         manifest_count = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM user_stats")
         user_stats_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM daily_top_users")
+        daily_top = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM hourly_sales")
+        hourly_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM sessions")
+        sessions_cnt = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM fraud_alerts")
+        fraud_cnt = cur.fetchone()[0]
         cur.execute("SELECT MIN(event_time) FROM events")
         min_event_time = cur.fetchone()[0]
         conn.close()
     except Exception:
         pass
-
     data = {
         "mode": "stream",
         "last_processed_time": now_iso(),
@@ -172,6 +221,10 @@ def write_metrics(metrics_path, total_events, total_files, max_event_time, last_
         "min_event_time": min_event_time,
         "manifest_count": manifest_count,
         "user_stats_count": user_stats_count,
+        "daily_top_users_count": daily_top,
+        "hourly_sales_count": hourly_cnt,
+        "sessions_count": sessions_cnt,
+        "fraud_alerts_count": fraud_cnt,
         "uptime_sec": time.time() - START_TIME
     }
     tmp = metrics_path + ".tmp"
@@ -205,10 +258,8 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
         return last_offset_bytes, 0, None, 0, 0
     if file_size < last_offset_bytes:
         last_offset_bytes = 0
-
     num_valid_file = 0
     num_invalid_file = 0
-
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         f.seek(last_offset_bytes)
         remaining = f.read()
@@ -245,18 +296,21 @@ def process_new_lines_for_file(filepath, conn, existing_times, last_offset_bytes
             if event_type not in ('purchase','view','cart'):
                 num_invalid_file += 1
                 continue
-            if amount < 0:
+            if amount < 0 or amount > 100000:
                 num_invalid_file += 1
                 continue
             dt = parse_iso(event_time)
             if dt is None:
                 num_invalid_file += 1
                 continue
+            # future check
+            if dt > datetime.now(timezone.utc) + timedelta(hours=1):
+                num_invalid_file += 1
+                continue
             existing = existing_times.get(event_id)
             if existing:
                 _, existing_dt = existing
                 if existing_dt and dt < existing_dt:
-                    # older, skip but count as valid (already seen)
                     num_valid_file += 1
                     continue
             processed_at = now_iso()
@@ -285,7 +339,7 @@ def recompute_aggregates(conn):
     """)
     conn.execute("DELETE FROM user_stats")
     conn.execute("""
-        INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts)
+        INSERT INTO user_stats (user_id, first_seen, last_seen, total_purchases, total_amount, total_views, total_carts, avg_amount)
         SELECT
             user_id,
             MIN(event_time) as first_seen,
@@ -293,10 +347,107 @@ def recompute_aggregates(conn):
             SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END) as total_purchases,
             SUM(CASE WHEN event_type='purchase' THEN amount ELSE 0 END) as total_amount,
             SUM(CASE WHEN event_type='view' THEN 1 ELSE 0 END) as total_views,
-            SUM(CASE WHEN event_type='cart' THEN 1 ELSE 0 END) as total_carts
+            SUM(CASE WHEN event_type='cart' THEN 1 ELSE 0 END) as total_carts,
+            CASE WHEN SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END) > 0
+                 THEN SUM(CASE WHEN event_type='purchase' THEN amount ELSE 0 END) *1.0 / SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END)
+                 ELSE 0 END as avg_amount
         FROM events
         GROUP BY user_id
     """)
+    # daily_top_users
+    conn.execute("DELETE FROM daily_top_users")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT substr(event_time, 1, 10) as date, user_id, SUM(amount) as total_amount
+        FROM events
+        WHERE event_type='purchase'
+        GROUP BY date, user_id
+    """)
+    rows = cur.fetchall()
+    grouped = defaultdict(list)
+    for date, user_id, total in rows:
+        grouped[date].append((user_id, total))
+    for date, ulist in grouped.items():
+        ulist_sorted = sorted(ulist, key=lambda x: (-x[1], x[0]))
+        top3 = ulist_sorted[:3]
+        for user_id, total in top3:
+            conn.execute("INSERT INTO daily_top_users (date, user_id, total_amount) VALUES (?, ?, ?)", (date, user_id, total))
+    # hourly_sales
+    conn.execute("DELETE FROM hourly_sales")
+    conn.execute("""
+        INSERT INTO hourly_sales (hour, total_amount, event_count)
+        SELECT substr(event_time, 1, 13) || ':00:00Z' as hour,
+               SUM(amount) as total_amount,
+               COUNT(*) as event_count
+        FROM events
+        WHERE event_type='purchase'
+        GROUP BY hour
+    """)
+    # sessions
+    conn.execute("DELETE FROM sessions")
+    cur.execute("SELECT user_id, event_id, event_time, event_type, amount FROM events ORDER BY user_id, event_time")
+    events_rows = cur.fetchall()
+    user_events = defaultdict(list)
+    for user_id, event_id, event_time, event_type, amount in events_rows:
+        dt = parse_iso(event_time)
+        if dt is None:
+            continue
+        user_events[user_id].append((dt, event_time, event_id, event_type, amount))
+    for user_id, ev_list in user_events.items():
+        ev_list_sorted = sorted(ev_list, key=lambda x: x[0])
+        idx = 0
+        while idx < len(ev_list_sorted):
+            start_dt, start_str, _, _, _ = ev_list_sorted[idx]
+            sess_events = [ev_list_sorted[idx]]
+            last_dt = start_dt
+            nxt = idx + 1
+            while nxt < len(ev_list_sorted):
+                cur_dt, _, _, _, _ = ev_list_sorted[nxt]
+                if (cur_dt - last_dt).total_seconds() > 1800:
+                    break
+                sess_events.append(ev_list_sorted[nxt])
+                last_dt = cur_dt
+                nxt += 1
+            end_time = sess_events[-1][1]
+            duration = int((sess_events[-1][0] - sess_events[0][0]).total_seconds())
+            total_amount = sum(ev[4] for ev in sess_events if ev[3] == 'purchase')
+            session_id = f"{user_id}_{sess_events[0][1]}"
+            base = session_id
+            suffix = 0
+            while True:
+                try:
+                    conn.execute("INSERT INTO sessions (session_id, user_id, start_time, end_time, event_count, total_amount, duration_sec) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 (session_id, user_id, sess_events[0][1], end_time, len(sess_events), total_amount, duration))
+                    break
+                except sqlite3.IntegrityError:
+                    suffix += 1
+                    session_id = f"{base}_{suffix}"
+                    if suffix > 10:
+                        break
+            idx = nxt
+    # fraud_alerts
+    conn.execute("DELETE FROM fraud_alerts")
+    for user_id, ev_list in user_events.items():
+        purchases = [(dt, et_str, amt) for dt, et_str, _, et_type, amt in ev_list if et_type == 'purchase']
+        if len(purchases) <= 5:
+            continue
+        purchases_sorted = sorted(purchases, key=lambda x: x[0])
+        left = 0
+        best = {}
+        for right in range(len(purchases_sorted)):
+            while purchases_sorted[right][0] - purchases_sorted[left][0] > timedelta(seconds=3600):
+                left += 1
+            cnt = right - left + 1
+            if cnt > 5:
+                ws_str = purchases_sorted[left][1]
+                we_str = purchases_sorted[right][1]
+                total_amt = sum(p[2] for p in purchases_sorted[left:right+1])
+                existing = best.get(ws_str)
+                if existing is None or cnt > existing[0] or (cnt == existing[0] and total_amt > existing[1]):
+                    best[ws_str] = (cnt, total_amt, we_str)
+        for ws_str, (cnt, total_amt, we_str) in best.items():
+            conn.execute("INSERT INTO fraud_alerts (user_id, window_start, window_end, purchase_count, total_amount) VALUES (?, ?, ?, ?, ?)",
+                         (user_id, ws_str, we_str, cnt, total_amt))
     conn.commit()
 
 def list_valid_files(incoming_dir):
@@ -306,11 +457,18 @@ def list_valid_files(incoming_dir):
         return []
     valid = []
     for fn in all_files:
-        if VALID_FILENAME_RE.match(fn):
-            middle = fn[7:-6]
-            if len(middle) == 0:
-                continue
-            valid.append(fn)
+        if fn.startswith('.'):
+            continue
+        if '..' in fn:
+            continue
+        if not VALID_FILENAME_RE.match(fn):
+            continue
+        middle = fn[7:-6]
+        if len(middle) == 0:
+            continue
+        if middle.startswith('.'):
+            continue
+        valid.append(fn)
     return sorted(valid)
 
 def backfill_once(cfg):
@@ -318,37 +476,28 @@ def backfill_once(cfg):
     warehouse_db = cfg['warehouse_db']
     metrics_path = cfg['metrics_path']
     offsets_file = cfg['stream']['offsets_file']
-
     os.makedirs(incoming_dir, exist_ok=True)
     os.makedirs(os.path.dirname(warehouse_db), exist_ok=True)
     os.makedirs(os.path.dirname(offsets_file), exist_ok=True)
     os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
     os.makedirs("/app/logs", exist_ok=True)
-
     valid_files = list_valid_files(incoming_dir)
-    full_paths = [os.path.join(incoming_dir, f) for f in valid_files]
-
     conn = sqlite3.connect(warehouse_db)
     ensure_tables(conn)
     existing_times = get_existing_event_times(conn)
     offsets = load_offsets(offsets_file)
     total_new = 0
     latest_max_time = None
-
-    for fn, fp in zip(valid_files, full_paths):
-        # compute hash
+    for fn in valid_files:
+        fp = os.path.join(incoming_dir, fn)
         try:
             with open(fp, 'rb') as hf:
                 file_hash = hashlib.sha256(hf.read()).hexdigest()
         except Exception:
             file_hash = ""
-
         prev = offsets.get(fn, {})
         last_offset = prev.get('offset', 0) if isinstance(prev, dict) else 0
-
         new_offset, count, max_time, num_valid, num_invalid = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fn not in offsets))
-
-        # force process remainder for --once
         try:
             actual_size = os.path.getsize(fp)
             if new_offset < actual_size:
@@ -372,8 +521,14 @@ def backfill_once(cfg):
                         if event_type not in ('purchase','view','cart'):
                             num_invalid+=1
                             continue
+                        if amount <0 or amount>100000:
+                            num_invalid+=1
+                            continue
                         dt=parse_iso(event_time)
                         if not dt:
+                            num_invalid+=1
+                            continue
+                        if dt > datetime.now(timezone.utc) + timedelta(hours=1):
                             num_invalid+=1
                             continue
                         existing = existing_times.get(event_id)
@@ -392,32 +547,26 @@ def backfill_once(cfg):
                 new_offset = actual_size
         except Exception as e:
             print(f"backfill extra error {fp}: {e}", file=sys.stderr)
-
         conn.commit()
-        # update manifest
         try:
             conn.execute("""
-                INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, num_lines, num_valid, num_invalid, processed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (fn, file_hash, 0, num_valid, num_invalid, now_iso()))
+                INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, file_size, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (fn, file_hash, os.path.getsize(fp), 0, num_valid, num_invalid, 0, 0, now_iso()))
             conn.commit()
         except Exception:
             pass
-
         try:
             stat = os.stat(fp)
             offsets[fn] = {"offset": new_offset, "lines": 0, "mtime": stat.st_mtime, "size": stat.st_size, "hash": file_hash}
         except OSError:
             offsets[fn] = {"offset": new_offset, "lines": 0, "mtime": time.time(), "size": new_offset, "hash": file_hash}
-
         total_new += count
         if max_time and (latest_max_time is None or (max_time[1] and latest_max_time[1] and max_time[1] > latest_max_time[1])):
             latest_max_time = max_time
-
         if count > 0:
             with open("/app/logs/stream.log", "a") as logf:
                 logf.write(f"{now_iso()} backfill {fn} {count} events offset {new_offset}\n")
-
     recompute_aggregates(conn)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM events")
@@ -426,10 +575,8 @@ def backfill_once(cfg):
     max_et_row = cur.fetchone()
     max_event_time_str = max_et_row[0] if max_et_row else (latest_max_time[0] if latest_max_time else None)
     conn.close()
-
     write_offsets(offsets_file, offsets)
     write_metrics(metrics_path, total_events, len(valid_files), max_event_time_str, last_delay_ms=0, warehouse_db=warehouse_db)
-
     print(f"Backfill done: {len(valid_files)} files, total_events={total_events}, new_processed={total_new}")
     return total_events
 
@@ -445,15 +592,12 @@ def stream_loop(cfg):
         with open(pid_path, 'w') as f:
             f.write(str(os.getpid()))
     except Exception as e:
-        print(f"Warning: could not write pid file {pid_path}: {e}", file=sys.stderr)
-
+        print(f"Warning: pid {e}", file=sys.stderr)
     conn = sqlite3.connect(warehouse_db, check_same_thread=False, timeout=10.0)
     ensure_tables(conn)
     existing_times = get_existing_event_times(conn)
     offsets = load_offsets(offsets_file)
-
     print(f"Starting streaming loop poll_interval={poll_ms}ms incoming={incoming_dir}")
-
     try:
         while RUNNING:
             loop_start = time.time()
@@ -461,7 +605,6 @@ def stream_loop(cfg):
             any_new = 0
             latest_delay_ms = None
             latest_max = None
-
             for fn in valid_files:
                 fp = os.path.join(incoming_dir, fn)
                 prev = offsets.get(fn, {})
@@ -474,7 +617,6 @@ def stream_loop(cfg):
                         file_hash = hashlib.sha256(hf.read()).hexdigest()
                 except OSError:
                     continue
-
                 if fn not in offsets:
                     detection_delay = time.time() - curr_mtime
                     latest_delay_ms = int(detection_delay * 1000) if latest_delay_ms is None else min(latest_delay_ms, int(detection_delay*1000))
@@ -483,17 +625,15 @@ def stream_loop(cfg):
                         last_offset = 0
                     elif curr_size == last_offset:
                         continue
-
                 new_offset, count, max_time, num_valid, num_invalid = process_new_lines_for_file(fp, conn, existing_times, last_offset, is_new_file=(fn not in offsets))
-
                 if count > 0 or num_valid > 0:
                     conn.commit()
                     any_new += count
                     try:
                         conn.execute("""
-                            INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, num_lines, num_valid, num_invalid, processed_at)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (fn, file_hash, 0, num_valid, num_invalid, now_iso()))
+                            INSERT OR REPLACE INTO ingestion_manifest (file_name, file_hash, file_size, num_lines, num_valid, num_invalid, num_future, num_outlier, processed_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (fn, file_hash, curr_size, 0, num_valid, num_invalid, 0, 0, now_iso()))
                         conn.commit()
                     except Exception:
                         pass
@@ -511,9 +651,7 @@ def stream_loop(cfg):
                     if max_time:
                         if latest_max is None or max_time[1] > latest_max[1]:
                             latest_max = max_time
-
                 offsets[fn] = {"offset": new_offset, "mtime": curr_mtime, "size": curr_size, "lines": 0, "hash": file_hash}
-
             if any_new > 0:
                 recompute_aggregates(conn)
                 cur = conn.cursor()
@@ -537,7 +675,6 @@ def stream_loop(cfg):
                         write_metrics(metrics_path, total_events, len(valid_files), max_et, last_delay_ms=0, warehouse_db=warehouse_db)
                 except Exception:
                     pass
-
             elapsed = time.time() - loop_start
             to_sleep = poll_sec - elapsed
             if to_sleep > 0:
@@ -583,6 +720,8 @@ def ensure_config_updated():
         data['metrics_path'] = '/app/metrics/freshness.json'
     if 'dead_letter_path' not in data:
         data['dead_letter_path'] = '/app/state/dead_letter.jsonl'
+    if 'archive_dir' not in data:
+        data['archive_dir'] = '/app/data/archive'
     if 'stream' not in data or not isinstance(data['stream'], dict):
         data['stream'] = {}
     data['stream']['poll_interval_ms'] = data['stream'].get('poll_interval_ms', 200)
@@ -596,7 +735,7 @@ def ensure_config_updated():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='/app/config.yaml')
-    parser.add_argument('--once', action='store_true', help='backfill only and exit')
+    parser.add_argument('--once', action='store_true')
     args = parser.parse_args()
     cfg = load_config(args.config)
     os.makedirs(cfg['incoming_dir'], exist_ok=True)
@@ -606,6 +745,7 @@ def main():
     os.makedirs("/app/logs", exist_ok=True)
     os.makedirs(os.path.dirname(cfg['warehouse_db']), exist_ok=True)
     os.makedirs(os.path.dirname(cfg.get('dead_letter_path', '/app/state/dead_letter.jsonl')), exist_ok=True)
+    os.makedirs(cfg.get('archive_dir', '/app/data/archive'), exist_ok=True)
     ensure_config_updated()
     cfg = load_config(args.config)
     backfill_once(cfg)
@@ -627,6 +767,7 @@ warehouse_db: /app/warehouse.db
 checkpoint_dir: /app/state
 metrics_path: /app/metrics/freshness.json
 dead_letter_path: /app/state/dead_letter.jsonl
+archive_dir: /app/data/archive
 stream:
   poll_interval_ms: 200
   freshness_sla_sec: 2
@@ -635,4 +776,4 @@ batch:
   dedup_strategy: latest_event_time
 YAML
 
-echo "Stream ingestor oracle hard mode installed"
+echo "Stream ingestor v4 extra hard installed"
