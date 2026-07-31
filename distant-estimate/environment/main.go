@@ -7,7 +7,9 @@ import (
 
 // Starter skeleton – implements help only.
 // The ground-truth solution overwrites this file.
-// Keep help keywords: graph, from, to, requests, traffic, help
+// Turn1 help must contain: graph, from, to, requests, help (5 keywords)
+// Turn2 help must also contain traffic (6 keywords total)
+// Build via go build -o router . from /app, stdlib only
 
 func main() {
 	if len(os.Args) == 1 {
@@ -24,19 +26,15 @@ func main() {
 			os.Exit(0)
 		}
 	}
-	// TODO for agent:
-	// 1. Parse flags --graph (required), --from/--to or --source/--destination, --requests (batch), --traffic (optional)
-	// 2. Graph is UNDIRECTED (or DIRECTED per instruction – read instruction.md carefully). Nodes non-empty TrimSpace, unique, case-sensitive. Edges from/to must exist, distance >0 float, extra fields ignored. Invalid → exit 2 no stdout.
-	// 3. Requests: JSON array of {source,destination} or {from,to}, extra fields ignored, empty TrimSpace → no route.
-	// 4. Traffic: JSON may be {"traffic":[...]} or direct array [...]. Each entry from,to must be nodes, edge must exist undirected, factor required >0 int/float, delay optional >=0 default 0, extra fields ignored, duplicate last-wins, self-loop invalid. Missing entry → factor 1.0 delay 0. Effective = distance* factor + delay.
-	// 5. Routing: Dijkstra minimizing effective distance (if no traffic, effective=distance). Tie-break 3-level: effective (eps 1e-9) → raw distance → lexicographically smallest path case-sensitive (sort neighbors).
-	// 6. Output:
-	//    Single no traffic: {"path":[...],"distance":N} exit0, no path {"path":[],"distance":-1} exit1, invalid exit2
-	//    Single with traffic: {"path":[...],"distance":raw,"effective_distance":eff,"traffic_delay":eff-raw} + same no path -1 fields
-	//    Batch: one JSON line per request in order with source,destination,path,distance (+ effective,traffic_delay if traffic)
-	//    Batch exit 0 all routed, 1 some no route, 2 invalid
-	// 7. Help must contain keywords graph, from, to, requests, traffic, help
-	// 8. Performance: 500 nodes 2000 edges 100 requests <2s
+	// TODO for agent (balanced difficulty):
+	// Turn1 (HARD but solvable): distance-based Dijkstra, undirected graph, nodes non-empty TrimSpace unique case-sensitive, edges from/to must exist, distance >0 int/float/scientific notation (1e3), extra top-level/edge fields ignored, duplicate edges keep min distance, invalid → exit2.
+	// Requests: JSON array of {source,destination} or {from,to}, prefer source/destination if both present, extra fields ignored, empty or whitespace-only source/dest → no route (not invalid) with [] and -1, output order preserved. Unknown flag (including --traffic in Turn1) → exit2.
+	// Routing: Dijkstra minimizing sum distance, tie-break lexicographically smallest path within 1e-9 tolerance (sort neighbors, compare path element-wise case-sensitive, shorter wins if prefix). Performance 500 nodes 2000 edges 100 req <2s, 200 req <3s.
+	// Output single: {"path":[...],"distance":N} exit0, no path {"path":[],"distance":-1} exit1, invalid exit2. Batch one JSON line per request in order with source,destination,path,distance. Exit 0 all routed, 1 some no route, 2 invalid.
+	// Help Turn1: must contain graph, from, to, requests, help (5 keywords), bare no args → help exit0.
+	// Turn2 (BALANCED): extends same binary, adds --traffic flag, help must now contain traffic keyword (6 total). Traffic JSON may be {"traffic":[...]} or direct array [...]. Each entry from,to must be nodes, edge must exist undirected, factor required >0 int/float/scientific, delay optional >=0 default 0 int/float/scientific, extra unknown fields (other than factor/delay) ignored, duplicate last-wins (A-B and B-A same undirected, last wins), self-loop invalid, missing entry → factor1 delay0, invalid → exit2.
+	// Routing Turn2: effective = distance*factor + delay, minimize sum effective, raw = sum distance along chosen path, delay = effective-raw. Tie-break on effective (1e-9) → lexicographically smallest (2-level, NOT raw secondary). Source==dest 0 values. No path -1 for all distance fields. Output with traffic: includes distance, effective_distance, traffic_delay. Batch with traffic includes those extra fields.
+	// Performance with traffic 500 nodes 2000 edges 100 req <2.5s. Stdlib only.
 	fmt.Fprintln(os.Stderr, "not implemented – extend this file")
 	os.Exit(2)
 }

@@ -24,12 +24,12 @@ New flag:
 - Unknown flag (including misspelling) → exit 2, no stdout.
 - Invalid traffic file (unreadable, invalid JSON, validation) → exit 2, no stdout.
 
-### Traffic JSON Format (MUST) – HARDER
+### Traffic JSON Format (MUST) – BALANCED (HARD but documented)
 
 ```json
 {
   "traffic": [
-    {"from":"A","to":"B","factor":2.5, "extra":"ignore"},
+    {"from":"A","to":"B","factor":2.5, "delay":3, "extra":"ignore"},
     {"from":"B","to":"C","factor":0.5}
   ],
   "extra_top":"ignore"
@@ -41,20 +41,20 @@ Rules:
   1. Object-wrapped: `{"traffic": [ {...}, ... ] }`
   2. Direct array: `[{"from":"A","to":"B","factor":1.5}]`
 - Each entry: `from`, `to` strings non-empty (whitespace-only invalid → exit2), must be nodes existing in graph, and edge between them must exist in graph undirected (if graph has A-B, traffic A-B valid, B-A also valid). If references non-existing node or non-existing graph edge → invalid exit 2.
-- `factor` – required number >0, may be int or float. Must be >0. If <=0, missing, NaN, Inf, or not a number (string `"2.5"`, bool, object) → exit 2. Extra unknown fields inside traffic entry or top-level object must be **ignored**, not invalid (e.g., `{"from":"A","to":"B","factor":2,"delay":5}` is valid, factor 2).
-- Duplicate traffic entries for same unordered pair: **last occurrence wins**. If duplicate with different directions (A->B and B->A), treat as same undirected edge, last wins.
-- Missing traffic entry for an edge → default factor 1.0.
+- `factor` – required number >0, may be int, float, or scientific notation (e.g., `1e-2`=0.01). Must be >0. If <=0, missing, NaN, Inf, or not a number (string `"2.5"`, bool, object) → exit 2.
+- `delay` – **optional** number >=0, default 0. May be int, float, scientific notation. If present, must be >=0, not NaN/Inf, not string. If <0 or invalid → exit 2. If duplicate traffic entries, last wins including delay. Extra unknown fields **other than factor/delay** inside traffic entry or top-level object must be **ignored**, not invalid (e.g., `{"from":"A","to":"B","factor":2,"extra":"ignore"}` valid; `{"from":"A","to":"B","factor":2,"delay":5,"unknown":1}` valid with delay 5).
+- Duplicate traffic entries for same unordered pair: **last occurrence wins**. If duplicate with different directions (A->B and B->A), treat as same undirected edge, last wins (factor and delay both from last).
+- Missing traffic entry for an edge → default factor 1.0 delay 0.0.
 - No self-traffic (from==to or whitespace trimmed equal) → invalid exit 2.
 
-### Routing Algorithm – Traffic-Aware (MUST) – HARD
+### Routing Algorithm – Traffic-Aware (MUST) – BALANCED
 
-- Effective edge cost = `distance * factor` (distance is float, factor default 1.0)
-- Path selection with traffic: minimize **sum effective** using Dijkstra.
-- Still compute raw distance sum along selected path.
-- Tie-breaking: Same as Turn1 but on effective_distance within 1e-9 tolerance – if multiple paths have identical effective_distance, choose lexicographically smallest path case-sensitive. If still tie? Shorter wins. Tests include 3-way effective tie: A-B-D, A-C-D, A-E-D all effective 10 (raw may differ), B<C<E so A-B-D wins regardless of discovery order. Must sort neighbors.
-- Source == destination: path [source], distance 0, effective 0, delay 0.
+- Effective edge cost = `distance * factor + delay` (distance float, factor default 1.0, delay default 0.0). Example: distance 10, factor 2, delay 5 → effective 25.
+- Path selection with traffic: minimize **sum effective** using Dijkstra. Raw distance sum is still sum of physical distances along chosen path (sum distance, not effective).
+- Tie-breaking: When multiple paths have identical total effective_distance within 1e-9 tolerance, choose **lexicographically smallest path** case-sensitive (same as Turn1 but on effective). Compare element-by-element, smaller string wins, prefix shorter wins. Tests include 3-way effective tie: A-B-D, A-C-D, A-E-D all effective 10 (raw may differ), B<C<E so A-B-D must win regardless of discovery order. Must sort neighbors. **No secondary raw tie-break** – only effective → lexicographic (easier than 3-level).
+- Source == destination: path [source], distance 0, effective 0, delay 0 (traffic_delay 0).
 - No path: same handling with extended fields.
-- Float handling: distances and factors float, sum may be float; output float; tolerance 1e-6 for comparison.
+- Float handling: distances, factors, delays may be int, float, scientific notation; sum may be float; output float; tolerance 1e-6 for comparison. Factor may be <1 (faster lane) → negative traffic_delay allowed (effective < raw).
 
 ### Output Format Extended (MUST) – HARD
 
@@ -81,21 +81,21 @@ No path:
 
 Exit: 0 all routed, 1 some no route, 2 invalid
 
-### Business Rules & Edge Cases (MUST) – HARDER
+### Business Rules & Edge Cases (MUST) – BALANCED
 
-- Turn1 still passes without traffic
-- Traffic changes best path: direct edge short but high factor 10 → effective 50, alternative longer raw 12 factor1 → effective12, must pick alternative
-- Factor <1 faster, negative delay allowed
-- Batch order preserved
-- Help keywords 6
-- Graph invalid → exit2 (including whitespace node IDs)
-- Traffic invalid: invalid JSON, missing file, referenced edge not in graph, nodes whitespace, factor <=0, factor string, self-loop, extra top-level without traffic key (when expecting object?) – but direct array is valid alternative, object must have traffic key, array missing traffic key invalid
-- Requests invalid → exit2
+- Turn1 still passes without traffic (when --traffic not supplied, behavior identical to Turn1)
+- Traffic changes best path: direct edge short raw but high factor/delay → effective 50, alternative longer raw 12 factor1 → effective12, must pick alternative (minimize effective, not raw)
+- Factor <1 faster, negative traffic_delay allowed (effective < raw)
+- Batch order preserved, output order matches input order
+- Help keywords 6 (graph, from, to, requests, traffic, help)
+- Graph invalid → exit2 (including whitespace node IDs, duplicate nodes, self-loop, missing node ref, distance <=0, scientific notation valid)
+- Traffic invalid: invalid JSON, missing file, referenced edge not in graph, nodes whitespace/empty, factor <=0 or missing or string, delay <0 or string, self-loop, object without traffic key and not direct array → invalid exit2. Direct array form is valid alternative.
+- Requests invalid → exit2, but empty/whitespace source/destination in batch is **no route** not invalid (same as Turn1)
 - Unknown flags → exit2
-- Extra unknown fields in graph top-level, edge, requests, traffic must be **ignored** (not invalid) – tests cover this
-- Stdlib only
-- Performance: 500 nodes, 2000 edges, 100 requests with traffic <2 sec
-- Float tolerance
+- Extra unknown fields in graph top-level, edge, requests, traffic (other than factor/delay) must be **ignored** (not invalid) – tests cover this
+- Stdlib only, no external require
+- Performance: 500 nodes, 2000 edges, 100 requests with traffic <2 sec, 100 requests heavy 500 nodes <2.5 sec
+- Float tolerance 1e-6 for effective, 1e-9 for tie detection, support scientific notation for distance/factor/delay
 
 ### Examples – HARD
 

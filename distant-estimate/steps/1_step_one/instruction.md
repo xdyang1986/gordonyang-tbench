@@ -45,7 +45,8 @@ Flags:
 
 Rules:
 - `nodes` – required array of non-empty unique strings (node IDs). At least 1. **Whitespace-only strings** e.g., `"   "` or `""` are considered empty → invalid graph exit 2. Node IDs are case-sensitive: `"A"` and `"a"` are distinct, not duplicate. May contain letters, numbers, hyphen, underscore (e.g., `Node-A_1`). Unique check is exact string match.
-- `edges` – required array. Each edge has `from` (string), `to` (string), `distance` (number >0). Distance may be integer **or float** >0 (e.g., 2.5). `from` and `to` must exist in nodes, trimmed whitespace invalid (if from/to is empty or whitespace-only → invalid). `from` != `to` (no self loops). Extra unknown fields inside edge objects or top-level (e.g., `"extra"`) must be **ignored**, not cause invalid.
+- `edges` – required array. Each edge has `from` (string), `to` (string), `distance` (number >0). Distance may be integer, **float**, or **scientific notation** >0 (e.g., 2.5, `1e3` =1000). `from` and `to` must exist in nodes, trimmed whitespace invalid (if from/to is empty or whitespace-only → invalid). `from` != `to` (no self loops). Extra unknown fields inside edge objects or top-level (e.g., `"extra"`) must be **ignored**, not cause invalid.
+- `--traffic` flag is **NOT supported** in Turn1 – if provided, exit 2 (unknown flag). Turn1 only supports --graph, --from/--to, --requests, --help.
 - Graph is **undirected**: edge A-B can be traversed both ways with same distance. Duplicate edges between same unordered pair are allowed; keep smallest distance for routing.
 - Invalid graph: empty/duplicate nodes, empty/whitespace node ID, edge referencing non-existing node, distance <=0 or missing or not a number, self-loop, invalid JSON (trailing comma, etc.), unreadable file → exit 2, no stdout. Tests check negative, zero, self-loop, duplicate, empty, whitespace, non-numeric distance, missing fields, extra top-level ignored (should NOT be invalid).
 
@@ -61,12 +62,13 @@ When `--requests` is used:
 ```
 
 - File must be JSON array. If not array or invalid JSON → exit 2 no stdout.
-- Each element: object containing `source`/`destination` **or** `from`/`to`. If both forms present, prefer `source`/`destination`. Values must be strings. If value not string → invalid exit 2. If string is empty → treat as **no route** (not invalid) – output empty path -1, counts as no route. Whitespace-only also considered empty for requests? For requests, treat empty string as no route, whitespace-only as no route (not invalid) to allow batch partial failures. Extra unknown fields in request objects (e.g., `priority`) must be **ignored**.
+- Each element: object containing `source`/`destination` **or** `from`/`to`. If both forms present, prefer `source`/`destination`. Values must be strings. If value not string → invalid exit 2. If string is empty or whitespace-only → treat as **no route** (not invalid) – output empty path -1, counts as no route, batch continues. This includes `""`, `"   "`. Extra unknown fields in request objects (e.g., `priority`) must be **ignored**.
+- Example batch with empty source is **no route**, not invalid: `{"source":"","destination":"B"}` → `{"source":"","destination":"B","path":[],"distance":-1}` exit 1 if any no route.
 - Output order must match input order.
 
 ### Routing Algorithm – Distance-Based Shortest Path (MUST) – HARD
 
-- Use Dijkstra minimizing sum of `distance` (float) along path.
+- Use Dijkstra minimizing sum of `distance` (float) along path. Distance may be scientific notation, parse as float.
 - If source == destination: path = [source], distance = 0.
 - If no path: special handling.
 - **Tie-breaking HARD:** When multiple paths have identical total distance within 1e-9 tolerance, choose **lexicographically smallest path**:
@@ -74,7 +76,8 @@ When `--requests` is used:
   - At first differing index, smaller string wins (e.g., B < C)
   - If one is prefix of other, shorter wins (rare but handle)
   - Tests include **3-way equal distance tie**: A-B-D (5+5), A-C-D (5+5), A-E-D (5+5) – B<C<E so A-B-D must win regardless of discovery order. Implementation must sort neighbors or use priority queue with lexicographic secondary.
-- Performance: 500 nodes, 2000 edges, 100 requests <2 sec in Go. Tests include linear chain 100 nodes and large batch 100 requests – must be efficient (<2 sec).
+  - Additional tie test: request contains both `source` and `from` keys – must prefer `source`/`destination` over `from`/`to`.
+- Performance: 500 nodes, 2000 edges, 100 requests <2 sec, 200 requests <3 sec in Go. Tests include linear chain 100 nodes, 500 nodes with shortcuts, large batch 100 and 200 requests – must be efficient (<2 sec).
 
 ### Output Format (MUST)
 

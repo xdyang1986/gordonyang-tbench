@@ -104,7 +104,6 @@ func (pq PriorityQueue) Len() int { return len(pq) }
 func (pq PriorityQueue) Less(i,j int) bool {
     const eps=1e-9
     if math.Abs(pq[i].eff-pq[j].eff) > eps { return pq[i].eff < pq[j].eff }
-    if math.Abs(pq[i].raw-pq[j].raw) > eps { return pq[i].raw < pq[j].raw }
     return comparePaths(pq[i].path, pq[j].path) < 0
 }
 func (pq PriorityQueue) Swap(i,j int) { pq[i], pq[j] = pq[j], pq[i] }
@@ -223,12 +222,7 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
         it:=heap.Pop(pq).(*Item)
         u:=it.node
         if it.eff > bestEff[u]+eps { continue }
-        if math.Abs(it.eff-bestEff[u])<=eps {
-            if math.Abs(it.raw-bestRaw[u])>eps {
-                if it.raw > bestRaw[u]+eps { continue }
-            }
-            if comparePaths(it.path, bestPath[u])>0 { continue }
-        }
+        if math.Abs(it.eff-bestEff[u])<=eps && comparePaths(it.path, bestPath[u])>0 { continue }
         if u==dest { break }
         neigh:=make([]string,0,len(adj[u]))
         for v:=range adj[u] { neigh=append(neigh,v) }
@@ -243,14 +237,9 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
                 bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
                 heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
             } else if math.Abs(newEff-bestEff[v])<=eps {
-                if newRaw+eps < bestRaw[v] {
+                if comparePaths(newPath, bestPath[v])<0 {
                     bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
                     heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
-                } else if math.Abs(newRaw-bestRaw[v])<=eps {
-                    if comparePaths(newPath, bestPath[v])<0 {
-                        bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
-                        heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
-                    }
                 }
             }
         }
