@@ -618,6 +618,46 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 		fmt.Fprintf(os.Stderr, "Failed to read ops.log %s: %v\n", opsLogPath, err)
 		opsEntries = []map[string]interface{}{}
 	}
+	// Sort ops.log entries by ts ascending, stable for equal ts (harder)
+	// Parse ts as int64 from float64/int/json number
+	type entryWithIdx struct {
+		e   map[string]interface{}
+		idx int
+		ts  int64
+	}
+	tmp := make([]entryWithIdx, 0, len(opsEntries))
+	for i, e := range opsEntries {
+		var ts int64
+		if v, ok := e["ts"]; ok {
+			switch vt := v.(type) {
+			case float64:
+				ts = int64(vt)
+			case int:
+				ts = int64(vt)
+			case int64:
+				ts = vt
+			case json.Number:
+				if iv, err := vt.Int64(); err == nil {
+					ts = iv
+				}
+			default:
+				ts = 0
+			}
+		}
+		tmp = append(tmp, entryWithIdx{e: e, idx: i, ts: ts})
+	}
+	sort.SliceStable(tmp, func(i, j int) bool {
+		if tmp[i].ts == tmp[j].ts {
+			return tmp[i].idx < tmp[j].idx
+		}
+		return tmp[i].ts < tmp[j].ts
+	})
+	// Rebuild sorted
+	sortedEntries := make([]map[string]interface{}, 0, len(tmp))
+	for _, t := range tmp {
+		sortedEntries = append(sortedEntries, t.e)
+	}
+	opsEntries = sortedEntries
 
 	currentData := make(map[int]map[string]interface{})
 	currentVersions := make(map[int]int)
