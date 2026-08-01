@@ -13,19 +13,36 @@ Tests context-following (reuse 8-table schema) and context-overriding (batch hou
 
 ## Completion Rates
 
-| Model | Step | Pass Rate (reaching) | Last Updated |
-|---|---|---|---|
-| Oracle | 1_step_one | 3/3 | 2026-07-31 v4 extra hard |
-| Oracle | 2_step_two | 3/3 | 2026-07-31 v4 |
-| Oracle Full | 1→2 | 3/3 Mean 1.0 | 2026-07-31 |
-| meta/avocado_dvsc_tester | 1_step_one | Expected 1/5 to 2/5 after v4 (was 5/5 easy) – sessions gap 30min and fraud sliding window >5 are hard | – |
-| meta/avocado_dvsc_tester | 2_step_two | Expected 1/5 to 2/5 | – |
-| claude-opus-4-8 | 1_step_one | Expected 1/5 to 3/5 after v4 – extra tables top3/hourly/sessions/fraud tough | – |
-| claude-opus-4-8 | 2_step_two | Expected 2/5 | – |
-| claude-sonnet-4-6 | 1_step_one | Expected 0/5 to 2/5 after v4 – previously 10/10 easy – now 8 tables, archiving, future/outlier, sessions gap, fraud sliding window cause failure | – |
-| claude-sonnet-4-6 | 2_step_two | Expected 0/5 to 1/5 | – |
+### Latest online validation (commit `c0254c3`)
 
-Cascade expected: GOOD – Step1 hard filter (sessionization 30min gap calc, fraud sliding window two-pointer >5), Step2 streaming SLA.
+**Status: PASSING** (structural 10/10, oracle 3/3, contamination MEDIUM, provenance clean). Full multi-turn pass rates per agent (all stages completed):
+
+| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 | Mean |
+|-------|---------------|-----------------|--------|--------|------|
+| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | 1.00 |
+| Codex | gpt-5.5 | **0/10 (0%)** | 0/10 | – | 0.00 |
+| Metacode | meta/avocado-5.14-code | 6/10 (60%) | 8/10 | 6/8 | 0.70 |
+| Agent | claude-code / claude-opus-4-8 | 8/10 (80%) | 10/10 | 8/10 | 0.90 |
+
+Turn 2 only runs after a Turn-1 pass, so Turn-2 denominators equal Turn-1 passes.
+
+Calibration read: **polarized**. Oracle 100% and Opus 80% (Turn 1 flawless 10/10) confirm the task is solvable; avocado at 60% is on the easy edge for the weighted calibration model; codex is artificially stuck at 0% by a single under-specified field-name (see below), not by genuine difficulty.
+
+### Failure analysis (from trial ctrf verifier output)
+
+| Model | Where it fails | # tests | Root cause |
+|-------|----------------|---------|------------|
+| Codex (Turn 1, **10/10 trials**) | `test_basic_ingestion_hard_v4` | 1/7 | Dead-letter record used field key **`file_name`** but the test sorts by **`file`** (`KeyError: 'file'`). Spec says "sorted **file** ASC line_no ASC" but the `ingestion_manifest` PK is `file_name`, priming the wrong key. |
+| Avocado (Turn 1, ~2/8) | `test_basic_ingestion_hard_v4` | 1/7 | Same `file`/`file_name` dead-letter key issue (intermittent). |
+| Avocado (Turn 2) | `test_streaming_freshness_sla` | 1/6 | `last_event_delay_ms` computed against a stale/historical baseline (~68e9 ms) instead of the freshly-streamed event → fails the `<5000` freshness SLA. |
+
+Key observations:
+- **Codex is one test short in every trial (0/10).** All 10 fail *only* `test_basic_ingestion_hard_v4`, and always on the same line: the dead-letter schema key. This is a single, universal Turn-1 gate.
+- ⚠️ **Fairness note:** that discriminator is a schema key-name (`file` vs `file_name`) that the spec only implies via the phrase "sorted file ASC", while the explicit `ingestion_manifest` schema uses `file_name`. Codex reasonably reused `file_name` and is blocked on all 10 trials. Consider either (a) adding an explicit dead-letter record schema (`{file, line_no, raw_line, reason}`) to the instruction, or (b) accepting both keys in the test — otherwise this reads as an under-specification trap rather than a difficulty signal.
+- **Avocado (final 6/10):** clears Turn 1 8/10 and Turn 2 6/8, losing to the same dead-letter key (2 Turn-1 fails) and the streaming freshness SLA (Turn-2 fails) — genuine hard requirements, but 60% overall is on the easy edge for the weighted model.
+- **Opus (final 8/10):** Turn 1 flawless (10/10); its only 2 losses are on Turn 2 (streaming freshness SLA), confirming the streaming step is the real strong-model discriminator once the Turn-1 dead-letter key is handled.
+
+Cascade: Step1 hard filter (sessionization 30min gap, fraud sliding window two-pointer >5, plus the dead-letter key), Step2 streaming <5s freshness SLA.
 
 ## Model Analysis
 
