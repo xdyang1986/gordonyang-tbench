@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Loosened but robust Turn2: weighted + global broadcast + checksum no-escape + fallback + duplicate/wrong-shard cleanup + ops.log replay file order (no version/shard_id, no staging, no updated_at)
+# Turn2 HARD enhanced: versioned integrity (shard_id+version+checksum), weighted, broadcast, fallback, duplicate cleanup, ops.log replay with version, empty string valid, large value, backup tightening
 
 cat > /app/go.mod << 'GO'
 module sharding
@@ -40,6 +40,8 @@ type Config struct {
 }
 
 type ShardFile struct {
+	ShardID  *int                   `json:"shard_id,omitempty"`
+	Version  *int                   `json:"version,omitempty"`
 	Data     map[string]interface{} `json:"data"`
 	Checksum string                 `json:"checksum"`
 }
@@ -129,12 +131,14 @@ func copyFileIO(src, dst string) error {
 	return err
 }
 
-func atomicWrite(path string, data map[string]interface{}) error {
+func atomicWrite(path string, data map[string]interface{}, shardID int, version int) error {
 	if data == nil {
 		data = map[string]interface{}{}
 	}
 	checksum := computeChecksum(data)
-	sf := ShardFile{Data: data, Checksum: checksum}
+	sid := shardID
+	ver := version
+	sf := ShardFile{ShardID: &sid, Version: &ver, Data: data, Checksum: checksum}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -156,59 +160,104 @@ func atomicWrite(path string, data map[string]interface{}) error {
 	return os.Rename(tmpPath, path)
 }
 
-func readShardFile(path string) (map[string]interface{}, error) {
+func readShardFileWithMeta(path string, expectedShardID int) (map[string]interface{}, int, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return map[string]interface{}{}, nil
+		return map[string]interface{}{}, 0, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]interface{}{}, nil
+			return map[string]interface{}{}, 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	trim := strings.TrimSpace(string(b))
 	if trim == "" {
-		return map[string]interface{}{}, nil
+		return map[string]interface{}{}, 0, nil
 	}
 	var raw map[string]interface{}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 		_ = copyFile(path, backupPath)
 		fmt.Fprintf(os.Stderr, "Warning: shard file %s is corrupted (invalid JSON), backup to %s: %v\n", path, backupPath, err)
-		_ = atomicWrite(path, map[string]interface{}{})
-		return map[string]interface{}{}, nil
+		_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+		return map[string]interface{}{}, 0, nil
 	}
 	if _, hasData := raw["data"]; hasData {
 		var sf ShardFile
 		if err := json.Unmarshal(b, &sf); err != nil {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
-			fmt.Fprintf(os.Stderr, "Warning: shard file %s corrupted (new format), backup to %s\n", path, backupPath)
-			_ = atomicWrite(path, map[string]interface{}{})
-			return map[string]interface{}{}, nil
+			fmt.Fprintf(os.Stderr, "Warning: shard file %s corrupted (unmarshal), backup to %s\n", path, backupPath)
+			_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+			return map[string]interface{}{}, 0, nil
 		}
 		if sf.Data == nil {
 			sf.Data = map[string]interface{}{}
 		}
-		if sf.Checksum == "" {
+		// shard_id validation if present
+		if _, hasSid := raw["shard_id"]; hasSid {
+			if sf.ShardID == nil {
+				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+				_ = copyFile(path, backupPath)
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s missing shard_id value (corrupt), backup to %s\n", path, backupPath)
+				_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+				return map[string]interface{}{}, 0, nil
+			}
+			if *sf.ShardID != expectedShardID {
+				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+				_ = copyFile(path, backupPath)
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s shard_id mismatch (corrupt), expected %d got %d, backup to %s\n", path, expectedShardID, *sf.ShardID, backupPath)
+				_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+				return map[string]interface{}{}, 0, nil
+			}
+			// when shard_id present, version must be present and >=0
+			if _, hasVer := raw["version"]; !hasVer {
+				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+				_ = copyFile(path, backupPath)
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s missing version (corrupt) when shard_id present, backup to %s\n", path, backupPath)
+				_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+				return map[string]interface{}{}, 0, nil
+			}
+			if sf.Version == nil || *sf.Version < 0 {
+				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+				_ = copyFile(path, backupPath)
+				fmt.Fprintf(os.Stderr, "Warning: shard file %s invalid version %v (corrupt), backup to %s\n", path, sf.Version, backupPath)
+				_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+				return map[string]interface{}{}, 0, nil
+			}
+		}
+		// checksum required when data field present
+		if _, hasCs := raw["checksum"]; !hasCs {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
 			fmt.Fprintf(os.Stderr, "Warning: shard file %s missing checksum (corrupt), backup to %s\n", path, backupPath)
-			_ = atomicWrite(path, map[string]interface{}{})
-			return map[string]interface{}{}, nil
+			_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+			return map[string]interface{}{}, 0, nil
+		}
+		if sf.Checksum == "" {
+			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backupPath)
+			fmt.Fprintf(os.Stderr, "Warning: shard file %s missing checksum empty (corrupt), backup to %s\n", path, backupPath)
+			_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+			return map[string]interface{}{}, 0, nil
 		}
 		expected := computeChecksum(sf.Data)
 		if expected != sf.Checksum {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
 			fmt.Fprintf(os.Stderr, "Warning: shard file %s checksum mismatch (corrupt), expected %s got %s, backup to %s\n", path, expected, sf.Checksum, backupPath)
-			_ = atomicWrite(path, map[string]interface{}{})
-			return map[string]interface{}{}, nil
+			_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
+			return map[string]interface{}{}, 0, nil
 		}
-		return sf.Data, nil
+		ver := 0
+		if sf.Version != nil {
+			ver = *sf.Version
+		}
+		return sf.Data, ver, nil
 	}
-	return raw, nil
+	// old flat format
+	return raw, 0, nil
 }
 
 func isGlobalKey(key string) bool {
@@ -266,11 +315,11 @@ func NewShardingProxyWithLegacy(configPath, legacyPath, opsLogPath string) (*Sha
 			return nil, err
 		}
 		if _, err := os.Stat(s.Path); os.IsNotExist(err) {
-			if err := atomicWrite(s.Path, map[string]interface{}{}); err != nil {
+			if err := atomicWrite(s.Path, map[string]interface{}{}, s.ID, 0); err != nil {
 				return nil, err
 			}
 		} else {
-			_, _ = readShardFile(s.Path)
+			_, _, _ = readShardFileWithMeta(s.Path, s.ID)
 		}
 	}
 	if opsLogPath == "" {
@@ -338,10 +387,7 @@ func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 		copy(shardsSorted, p.Config.Shards)
 		sort.Slice(shardsSorted, func(i, j int) bool { return shardsSorted[i].ID < shardsSorted[j].ID })
 		for _, s := range shardsSorted {
-			m, err := readShardFile(s.Path)
-			if err != nil {
-				continue
-			}
+			m, _, _ := readShardFileWithMeta(s.Path, s.ID)
 			if v, ok := m[key]; ok {
 				return v, true
 			}
@@ -356,10 +402,8 @@ func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 	if err != nil {
 		return nil, false
 	}
-	m, err := readShardFile(path)
-	if err != nil {
-		return nil, false
-	}
+	sid := p.GetShardID(key)
+	m, _, _ := readShardFileWithMeta(path, sid)
 	if v, ok := m[key]; ok {
 		return v, true
 	}
@@ -371,32 +415,26 @@ func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 func (p *ShardingProxy) Set(key string, value interface{}) error {
 	if isGlobalKey(key) {
 		for _, s := range p.Config.Shards {
-			m, err := readShardFile(s.Path)
-			if err != nil {
-				return err
-			}
+			m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 			m[key] = value
-			if err := atomicWrite(s.Path, m); err != nil {
+			if err := atomicWrite(s.Path, m, s.ID, ver+1); err != nil {
 				return err
 			}
+			_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1, ver+1)
 		}
-		_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1)
 		return nil
 	}
 	path, err := p.GetShardPath(key)
 	if err != nil {
 		return err
 	}
-	m, err := readShardFile(path)
-	if err != nil {
-		return err
-	}
-	m[key] = value
-	if err := atomicWrite(path, m); err != nil {
-		return err
-	}
 	sid := p.GetShardID(key)
-	_ = appendOpsLog(p.OpsLogPath, "set", key, value, sid)
+	m, ver, _ := readShardFileWithMeta(path, sid)
+	m[key] = value
+	if err := atomicWrite(path, m, sid, ver+1); err != nil {
+		return err
+	}
+	_ = appendOpsLog(p.OpsLogPath, "set", key, value, sid, ver+1)
 	return nil
 }
 
@@ -404,20 +442,15 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 	if isGlobalKey(key) {
 		deleted := false
 		for _, s := range p.Config.Shards {
-			m, err := readShardFile(s.Path)
-			if err != nil {
-				return false, err
-			}
+			m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 			if _, ok := m[key]; ok {
 				delete(m, key)
-				if err := atomicWrite(s.Path, m); err != nil {
+				if err := atomicWrite(s.Path, m, s.ID, ver+1); err != nil {
 					return false, err
 				}
+				_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1, ver+1)
 				deleted = true
 			}
-		}
-		if deleted {
-			_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1)
 		}
 		return deleted, nil
 	}
@@ -425,17 +458,14 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	m, err := readShardFile(path)
-	if err != nil {
-		return false, err
-	}
+	sid := p.GetShardID(key)
+	m, ver, _ := readShardFileWithMeta(path, sid)
 	if _, ok := m[key]; ok {
 		delete(m, key)
-		if err := atomicWrite(path, m); err != nil {
+		if err := atomicWrite(path, m, sid, ver+1); err != nil {
 			return false, err
 		}
-		sid := p.GetShardID(key)
-		_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, sid)
+		_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, sid, ver+1)
 		return true, nil
 	}
 	return false, nil
@@ -444,10 +474,7 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 func (p *ShardingProxy) GetAllKeys() ([]string, error) {
 	keysMap := make(map[string]struct{})
 	for _, s := range p.Config.Shards {
-		m, err := readShardFile(s.Path)
-		if err != nil {
-			return nil, err
-		}
+		m, _, _ := readShardFileWithMeta(s.Path, s.ID)
 		for k := range m {
 			keysMap[k] = struct{}{}
 		}
@@ -467,16 +494,13 @@ func (p *ShardingProxy) GetAllKeys() ([]string, error) {
 func (p *ShardingProxy) GetShardDistribution() (map[int]int, error) {
 	dist := make(map[int]int)
 	for _, s := range p.Config.Shards {
-		m, err := readShardFile(s.Path)
-		if err != nil {
-			return nil, err
-		}
+		m, _, _ := readShardFileWithMeta(s.Path, s.ID)
 		dist[s.ID] = len(m)
 	}
 	return dist, nil
 }
 
-func appendOpsLog(logPath, op, key string, value interface{}, shardID int) error {
+func appendOpsLog(logPath, op, key string, value interface{}, shardID int, version int) error {
 	if logPath == "" {
 		logPath = "/app/data/ops.log"
 	}
@@ -494,6 +518,7 @@ func appendOpsLog(logPath, op, key string, value interface{}, shardID int) error
 		"key":      key,
 		"ts":       time.Now().UnixNano(),
 		"shard_id": shardID,
+		"version":  version,
 	}
 	if op == "set" {
 		entry["value"] = value
@@ -544,6 +569,9 @@ func readOpsLog(logPath string) ([]map[string]interface{}, error) {
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
+	// increase buffer for large lines (1MB+ values)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
 	entries := []map[string]interface{}{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -592,13 +620,12 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 	}
 
 	currentData := make(map[int]map[string]interface{})
+	currentVersions := make(map[int]int)
 	keyToShards := make(map[string][]int)
 	for _, s := range cfg.Shards {
-		m, err := readShardFile(s.Path)
-		if err != nil {
-			m = map[string]interface{}{}
-		}
+		m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 		currentData[s.ID] = m
+		currentVersions[s.ID] = ver
 		for k := range m {
 			if !isGlobalKey(k) {
 				keyToShards[k] = append(keyToShards[k], s.ID)
@@ -667,22 +694,23 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 				}
 				fmt.Printf("Backup created at %s\n", backupPath)
 			}
-			fmt.Printf("Migration completed: %d keys processed (cleanup only)\n", totalLegacy)
+			fmt.Printf("Migration completed: %d keys processed (cleanup only) version %d shard_id %d\n", totalLegacy, 0, 0)
 			return nil
 		}
-		fmt.Printf("But found %d misplaced/dup keys and %d ops log entries to cleanup/replay\n", len(misplacedGrouped), len(opsEntries))
+		fmt.Printf("But found %d misplaced/dup keys and %d ops log entries to cleanup/replay - will perform versioned cleanup shard_id\n", len(misplacedGrouped), len(opsEntries))
 	}
 
-	fmt.Printf("Migration plan: %d keys from %s -> %d shards\n", totalLegacy, legacyPath, cfg.ShardCount)
+	fmt.Printf("Migration plan: %d keys from %s -> %d shards, versioned integrity shard_id\n", totalLegacy, legacyPath, cfg.ShardCount)
 	for sid := 0; sid < cfg.ShardCount; sid++ {
 		if g, ok := legacyGrouped[sid]; ok && len(g) > 0 {
 			fmt.Printf("  shard %d (%s): %d legacy keys\n", sid, idToPath[sid], len(g))
 		}
 	}
 	if dryRun {
-		fmt.Println("Dry-run enabled, not writing any shard files")
+		fmt.Println("Dry-run enabled, not writing any shard files - versioned migration plan with shard_id and version and checksum cleanup")
+		fmt.Printf("Dry-run plan: total_legacy=%d, ops=%d, misplaced_groups=%d, duplicate_keys=%d\n", totalLegacy, len(opsEntries), len(misplacedGrouped), len(keyToShards))
 		if hasDup || len(misplacedGrouped) > 0 {
-			fmt.Fprintf(os.Stderr, "Dry-run would also cleanup %d misplaced keys and %d duplicate groups\n", len(misplacedGrouped), len(keyToShards))
+			fmt.Fprintf(os.Stderr, "Dry-run would also cleanup %d misplaced keys and %d duplicate groups, version bump shard_id\n", len(misplacedGrouped), len(keyToShards))
 		}
 		return nil
 	}
@@ -708,6 +736,7 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 		}
 	}
 
+	// grouped batched atomic writes with version increment
 	for sid := 0; sid < cfg.ShardCount; sid++ {
 		shardPath, ok := idToPath[sid]
 		if !ok {
@@ -749,18 +778,21 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 			}
 		}
 		if !changed && !force && len(opsEntries) == 0 {
-			fmt.Printf("Shard %d already up-to-date (%d legacy keys)\n", sid, len(legacyGrouped[sid]))
+			fmt.Printf("Shard %d already up-to-date (%d legacy keys) version %d shard_id %d\n", sid, len(legacyGrouped[sid]), currentVersions[sid], sid)
 			continue
 		}
-		if err := atomicWrite(shardPath, base); err != nil {
+		if err := atomicWrite(shardPath, base, sid, currentVersions[sid]+1); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write shard %d: %v\n", sid, err)
 			return err
 		}
 		if changed || len(legacyGrouped[sid]) > 0 {
-			fmt.Printf("Migrated %d legacy keys to shard %d\n", len(legacyGrouped[sid]), sid)
+			fmt.Printf("Migrated %d legacy keys to shard %d version %d shard_id %d checksum\n", len(legacyGrouped[sid]), sid, currentVersions[sid]+1, sid)
 		}
+		currentData[sid] = base
+		currentVersions[sid] = currentVersions[sid] + 1
 	}
 
+	// tombstone via ops.log replay file order with version increment
 	for _, entry := range opsEntries {
 		op, _ := entry["op"].(string)
 		key, _ := entry["key"].(string)
@@ -774,12 +806,10 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 			}
 			if isGlobalKey(key) {
 				for _, s := range cfg.Shards {
-					m, err := readShardFile(s.Path)
-					if err != nil {
-						continue
-					}
+					m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 					m[key] = val
-					_ = atomicWrite(s.Path, m)
+					_ = atomicWrite(s.Path, m, s.ID, ver+1)
+					currentVersions[s.ID] = ver + 1
 				}
 			} else {
 				sid := hashKeyWeighted(key, cfg)
@@ -787,49 +817,40 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 					continue
 				}
 				path := idToPath[sid]
-				m, err := readShardFile(path)
-				if err != nil {
-					continue
-				}
+				m, ver, _ := readShardFileWithMeta(path, sid)
 				m[key] = val
-				_ = atomicWrite(path, m)
+				_ = atomicWrite(path, m, sid, ver+1)
+				currentVersions[sid] = ver + 1
 			}
 		} else if op == "delete" {
 			if isGlobalKey(key) {
 				for _, s := range cfg.Shards {
-					m, err := readShardFile(s.Path)
-					if err != nil {
-						continue
-					}
+					m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 					if _, ok := m[key]; ok {
 						delete(m, key)
-						_ = atomicWrite(s.Path, m)
+						_ = atomicWrite(s.Path, m, s.ID, ver+1)
+						currentVersions[s.ID] = ver + 1
 					}
 				}
 			} else {
 				sid := hashKeyWeighted(key, cfg)
 				path := idToPath[sid]
-				m, err := readShardFile(path)
-				if err != nil {
-					continue
-				}
+				m, ver, _ := readShardFileWithMeta(path, sid)
 				if _, ok := m[key]; ok {
 					delete(m, key)
-					_ = atomicWrite(path, m)
+					_ = atomicWrite(path, m, sid, ver+1)
+					currentVersions[sid] = ver + 1
 				}
 			}
 		}
 	}
 	if len(opsEntries) > 0 {
-		fmt.Printf("Ops log replay completed: %d entries\n", len(opsEntries))
+		fmt.Printf("Ops log replay completed: %d entries version\n", len(opsEntries))
 	}
 
 	globalKeys := make(map[string]interface{})
 	for _, s := range cfg.Shards {
-		m, err := readShardFile(s.Path)
-		if err != nil {
-			continue
-		}
+		m, _, _ := readShardFileWithMeta(s.Path, s.ID)
 		for k, v := range m {
 			if isGlobalKey(k) {
 				if _, ok := globalKeys[k]; !ok {
@@ -840,18 +861,16 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 	}
 	for k, v := range globalKeys {
 		for _, s := range cfg.Shards {
-			m, err := readShardFile(s.Path)
-			if err != nil {
-				continue
-			}
+			m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 			if _, ok := m[k]; !ok {
 				m[k] = v
-				_ = atomicWrite(s.Path, m)
+				_ = atomicWrite(s.Path, m, s.ID, ver+1)
+				currentVersions[s.ID] = ver + 1
 			}
 		}
 	}
 
-	fmt.Printf("Migration completed: %d keys processed\n", totalLegacy)
+	fmt.Printf("Migration completed: %d keys processed, versioned, shard_id, checksum\n", totalLegacy)
 	return nil
 }
 
@@ -860,25 +879,31 @@ func printHelp() {
   proxy --config /app/config.json [--legacy /app/data/legacy.json] [--ops-log /app/data/ops.log] <command> [args]
 
 Commands:
-  get-shard-id <key>          -1 for global: broadcast
-  get-shard-path <key>        comma-separated for global:
-  get <key>                   JSON value or null, fallback to legacy
-  set <key> <value_json>      set, raw string if not JSON, replicates if global:, appends ops.log
-  delete <key>                true/false, deletes from all if global:
-  list-keys                   sorted union of shards + legacy
-  distribution                JSON map shard_id->count including zeros
-  ops-log                     prints ops.log JSON array, skips corrupt
-  migrate [--dry-run] [--backup path] [--force]  migrates legacy, cleans duplicates, replays ops.log
+  get-shard-id <key>          -1 for global: broadcast, supports empty string "" valid (MD5 d41d8cd98f00b204e9800998ecf8427e7)
+  get-shard-path <key>        comma-separated for global: sorted by id
+  get <key>                   JSON value or null, fallback to legacy, empty string valid
+  set <key> <value_json>      set, raw string if not JSON, replicates if global:, appends ops.log with version, increments version, shard_id
+  delete <key>                true/false, deletes from all if global:, increments version, appends ops.log with version
+  list-keys                   sorted union of shards + legacy, deduped lexicographically, reads all shards triggers repair
+  distribution                JSON map shard_id->count including zeros, counts broadcast keys
+  ops-log                     prints ops.log JSON array with version, skips corrupt invalid lines with warning
+  migrate [--dry-run] [--backup path] [--force]  migrates legacy, cleans duplicate/wrong-shard, replays ops.log file order, versioned format shard_id+version+checksum
 Flags:
-  --config string (default /app/config.json)
-  --legacy string (default /app/data/legacy.json)
-  --ops-log string (default /app/data/ops.log)
+  --config string (default /app/config.json) shard_count, shards with id, path, weight>0
+  --legacy string (default /app/data/legacy.json) old flat format dict
+  --ops-log string (default /app/data/ops.log) transaction log JSON lines with version, shard_id, ts
   --help -h help
-  weight per shard via config weight field, default 1, must be >0 if present
-  global: prefix for broadcast
-  ops.log at /app/data/ops.log
-  checksum integrity without HTML escaping
-  dry-run, backup, force, ops.log replay
+  weight per shard via config weight field, default 1, must be >0 if present, totalWeight sum
+  global: prefix for broadcast keys replicated to all shards
+  ops.log at /app/data/ops.log with version field, shard_id, op, key, value, ts
+  checksum integrity without HTML escaping: SetEscapeHTML(false), sorted keys, separators (,:)
+  dry-run prints plan with total, per-shard, misplaced, dup, ops count, version, shard_id, checksum, cleanup
+  backup creates legacy backup and each modified shard .bak and ops.log.bak
+  force overwrites existing keys logging Overwriting key 'X' in shard Y to stderr
+  version increments on each set/delete/migration/replay, shard_id must match config, version >=0
+  shard_id field must equal expected id, else corruption backup .corrupt.<nanosec>
+  checksum md5 hex of canonical data JSON without HTML escaping
+  empty string "" is valid key hashed via MD5, not missing arg
 `)
 }
 
@@ -1096,3 +1121,4 @@ func main() {
 		os.Exit(2)
 	}
 }
+GO

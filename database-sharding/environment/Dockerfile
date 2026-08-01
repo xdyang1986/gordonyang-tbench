@@ -15,16 +15,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && 
 # Create initial config with 4 shards, some with explicit weights (to test weighted routing)
 RUN printf '{\n  "shard_count": 4,\n  "shards": [\n    {"id": 0, "path": "/app/data/shard_0.json", "weight": 1},\n    {"id": 1, "path": "/app/data/shard_1.json", "weight": 2},\n    {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},\n    {"id": 3, "path": "/app/data/shard_3.json", "weight": 1}\n  ]\n}\n' > /app/config.json
 
-# Create empty shard files in new format with checksum and empty ops.log
+# Create empty shard files in versioned format with shard_id+version+checksum and empty ops.log (enhanced hard for step2)
 RUN python3 << 'PY'
 import json, hashlib
-def write_shard(p,d):
+def write_shard_versioned(p,d,sid,ver=0):
     cs=hashlib.md5(json.dumps(d, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    open(p,'w').write(json.dumps({"data":d,"checksum":cs}, indent=2))
+    open(p,'w').write(json.dumps({"shard_id":sid,"version":ver,"data":d,"checksum":cs}, indent=2))
 for i in range(4):
-    write_shard(f'/app/data/shard_{i}.json', {})
+    write_shard_versioned(f'/app/data/shard_{i}.json', {}, i, 0)
 open('/app/data/ops.log','w').write('')
-print("Created empty shards with checksum and empty ops.log")
+print("Created empty versioned shards with shard_id, version, checksum and empty ops.log")
 
 # Legacy data old flat format (120 users + 30 orders) plus some global keys
 import random
