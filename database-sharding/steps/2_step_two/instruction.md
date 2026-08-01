@@ -49,18 +49,18 @@ Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) 
 - `list-keys` union shards + legacy, deduped sorted lexicographically exact, reads all shards (triggers init repair). Must include global keys once even if replicated.
 - `distribution` counts only shards, includes all ids even zero (explicit 4 keys), counts broadcast keys in each shard (so sum >= unique).
 - `ops-log` command: prints ops.log as JSON array, skips invalid lines with warning.
-- `set` value_json: JSON; if not valid JSON, treat as raw string value.
-- `delete` returns "true"/"false"
+- `set` value_json: JSON; if not valid JSON, treat as raw string value. **Self-healing**: for normal keys, after writing to correct weighted shard, must also clean up duplicate/misplaced copies in other shards (delete from wrong shards with version bump). For global keys, write to all shards.
+- `delete` returns "true"/"false". **Self-healing**: for normal keys, must delete from all shards where key exists (to clean duplicates), not just designated shard, with version bump per shard; for global, deletes from all.
 
 **Empty string key handling – EXPLICIT:**
 
 - Empty string `""` **IS valid** for this task and must be hashed via MD5, MD5("") = `d41d8cd98f00b204e9800998ecf8427e7`, routed via weighted algorithm, and support `set ""`, `get ""`. This is distinct from missing key argument. `get-shard-id ""` must succeed exit 0 and compute weighted shard id, not exit 2. Missing key argument (zero args) must exit 2, no stdout. Must handle `""` as valid in all commands.
 
-**Help explicitly required (enhanced for versioned hard):**
+**Help explicitly required (enhanced for versioned hard v2 with ts-sorted and staging):**
 
-- Bare proxy with **no command** (`proxy`, `proxy --config X`, `proxy --config X --legacy Y`, `proxy --config X --legacy Y --ops-log Z`) must print help to stdout containing ALL of: `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `migrate`, `config`, `legacy`, `weight`, `global`, `ops.log`, `dry-run`, `backup`, `force`, `version`, `shard_id`, `checksum` and exit 0.
+- Bare proxy with **no command** (`proxy`, `proxy --config X`, `proxy --config X --legacy Y`, `proxy --config X --legacy Y --ops-log Z`) must print help to stdout containing ALL of: `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `migrate`, `config`, `legacy`, `weight`, `global`, `ops.log`, `dry-run`, `backup`, `force`, `version`, `shard_id`, `checksum`, `staging`, `timestamp`, `ts` and exit 0.
 - `--help`, `-h`, `help` must also print same help and exit 0.
-- `migrate --help` (any order, `migrate --help` or `--help migrate` or `migrate -h`) must print help containing `dry-run`, `backup`, `force`, `version`, `shard_id` and exit 0.
+- `migrate --help` (any order, `migrate --help` or `--help migrate` or `migrate -h`) must print help containing `dry-run`, `backup`, `force`, `version`, `shard_id`, `staging`, `timestamp` and exit 0.
 - Unknown command or unknown migrate flag/arg must exit 2, no stdout on invalid config (only stderr).
 
 ### 2. Hard Migration subcommand (same binary) – weighted, broadcast, versioned, duplicate cleanup, log replay
@@ -87,7 +87,7 @@ Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-h
 
 - **Group legacy keys**: For normal keys, weighted destination; for `global:` keys, destination = all shards. Must group per shard for batched writes.
 
-- **Batched atomic writes**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via `os.CreateTemp` in same dir + `os.Rename`, version = old version +1 if changed (or +1 per write). Source inspection checks `CreateTemp`+`Rename` and grouping map (`grouped` or `map[int]`) and `SetEscapeHTML`. Direct per-key writes considered reward hacking and will fail source inspection. Must also increment version on ops.log replay.
+- **Batched atomic writes + staging (harder)**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via `os.CreateTemp` in same dir + `os.Rename`, version = old version +1 if changed. Must create staging dir `/app/data/staging` and write grouped files there first via atomic write (`staging/shard_<id>.json` with versioned format), then also write to final shard path atomically (two-phase). Source inspection checks `CreateTemp`+`Rename` and grouping map (`grouped` or `map[int]`) and `SetEscapeHTML` and `staging`. Direct per-key writes considered reward hacking. Must also increment version on ops.log replay.
 
 - **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), **replay ops.log sorted by ts ascending**, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. This ensures deletes prevent legacy resurrection and later ts wins. Example: legacy has `k=v`, ops.log has `delete k` ts=200 → after migration, `k` deleted. Must also handle global keys in replay (replicate/delete all). If ops.log has set k=v1 ts=100 then set k=v2 ts=50, ts-sorted must apply 50 then 100 → final v1 (later ts) wins, not file order.
 
