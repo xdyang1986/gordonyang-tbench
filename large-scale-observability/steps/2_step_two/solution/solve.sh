@@ -2,7 +2,6 @@
 set -e
 mkdir -p /app/observability
 
-# Re-apply full solution (same as step1, but ensures step2 scaling features are present)
 cat > /app/observability/tracing.go <<'GO'
 package observability
 
@@ -17,6 +16,7 @@ import (
 	"time"
 )
 
+// ---------- Types ----------
 type SpanContext struct {
 	TraceID      string
 	SpanID       string
@@ -66,6 +66,7 @@ type ReadableSpan struct {
 	ServiceName   string
 }
 
+// Interfaces
 type Span interface {
 	End()
 	AddAttribute(key string, value interface{})
@@ -90,6 +91,7 @@ type Tracer interface {
 	Start(ctx context.Context, name string, opts ...SpanStartOption) (context.Context, Span)
 }
 
+// IDGenerator
 type IDGenerator interface {
 	NewTraceID() string
 	NewSpanID() string
@@ -108,6 +110,7 @@ func (g *defaultIDGenerator) NewSpanID() string {
 	return hex.EncodeToString(b)
 }
 
+// Sampling
 type SamplingDecision int
 
 const (
@@ -130,6 +133,7 @@ type Sampler interface {
 	Description() string
 }
 
+// AlwaysOn
 type alwaysOnSampler struct{}
 
 func NewAlwaysOnSampler() Sampler { return &alwaysOnSampler{} }
@@ -138,6 +142,7 @@ func (s *alwaysOnSampler) ShouldSample(p SamplingParameters) SamplingDecision {
 }
 func (s *alwaysOnSampler) Description() string { return "AlwaysOnSampler" }
 
+// AlwaysOff
 type alwaysOffSampler struct{}
 
 func NewAlwaysOffSampler() Sampler { return &alwaysOffSampler{} }
@@ -146,6 +151,7 @@ func (s *alwaysOffSampler) ShouldSample(p SamplingParameters) SamplingDecision {
 }
 func (s *alwaysOffSampler) Description() string { return "AlwaysOffSampler" }
 
+// TraceIDRatio
 type traceIDRatioSampler struct {
 	fraction float64
 }
@@ -163,14 +169,21 @@ func (s *traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingDecisio
 	if s.fraction >= 1 {
 		return DecisionRecordAndSample
 	}
+	// parse first 16 hex chars -> 8 bytes -> uint64
 	if len(p.TraceID) < 16 {
 		return DecisionDrop
 	}
+	// take first 16 chars
 	sub := p.TraceID[:16]
 	val, err := strconv.ParseUint(sub, 16, 64)
 	if err != nil {
+		// fallback: hash-like using hex decode?
 		return DecisionDrop
 	}
+	// compare val / maxUint64 < fraction
+	// Equivalent to val < fraction * maxUint64
+	// max uint64 = 2^64-1 ~ 1.84e19, but using float may lose precision, use float64 ratio
+	// compute threshold
 	threshold := s.fraction * float64(^uint64(0))
 	if float64(val) < threshold {
 		return DecisionRecordAndSample
@@ -178,6 +191,7 @@ func (s *traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingDecisio
 	return DecisionDrop
 }
 
+// ParentBased
 type parentBasedSampler struct {
 	root Sampler
 }
@@ -201,6 +215,7 @@ func (s *parentBasedSampler) ShouldSample(p SamplingParameters) SamplingDecision
 	return DecisionDrop
 }
 
+// Tracer options
 type tracerConfig struct {
 	serviceName string
 	processor   SpanProcessor
@@ -223,6 +238,7 @@ func WithSampler(s Sampler) TracerOption {
 	return func(c *tracerConfig) { c.sampler = s }
 }
 
+// Span start options
 type spanStartConfig struct {
 	attributes []Attribute
 	kind       SpanKind
@@ -241,6 +257,7 @@ func WithParent(sc SpanContext) SpanStartOption {
 	return func(c *spanStartConfig) { c.parent = &sc }
 }
 
+// context key
 type spanContextKey struct{}
 
 func ContextWithSpanContext(ctx context.Context, sc SpanContext) context.Context {
@@ -251,6 +268,7 @@ func SpanContextFromContext(ctx context.Context) (SpanContext, bool) {
 	return sc, ok
 }
 
+// Inject / Extract
 var (
 	hex32Regex = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 	hex16Regex = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
@@ -288,6 +306,7 @@ func Extract(carrier map[string]string) context.Context {
 	}
 	parentID := carrier["parent-id"]
 	if parentID != "" && !hex16Regex.MatchString(parentID) {
+		// allow empty but if present must be valid; otherwise treat as invalid and ignore parent-id
 		parentID = ""
 	}
 	sampledStr := carrier["sampled"]
@@ -307,6 +326,7 @@ func Extract(carrier map[string]string) context.Context {
 	return ContextWithSpanContext(context.Background(), sc)
 }
 
+// InMemoryExporter
 type InMemoryExporter struct {
 	mu    sync.Mutex
 	spans []ReadableSpan
@@ -318,7 +338,10 @@ func NewInMemoryExporter() *InMemoryExporter {
 func (e *InMemoryExporter) ExportSpans(ctx context.Context, spans []ReadableSpan) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// copy
 	for _, s := range spans {
+		// deep copy attributes map
+		// ensure not sharing
 		cpy := s
 		if s.Attributes != nil {
 			cpy.Attributes = make(map[string]interface{}, len(s.Attributes))
@@ -351,6 +374,7 @@ func (e *InMemoryExporter) GetCount() int {
 	return len(e.spans)
 }
 
+// SimpleSpanProcessor
 type simpleSpanProcessor struct {
 	exporter SpanExporter
 }
@@ -365,6 +389,7 @@ func (p *simpleSpanProcessor) OnEnd(span ReadableSpan) {
 func (p *simpleSpanProcessor) Shutdown(ctx context.Context) error   { return nil }
 func (p *simpleSpanProcessor) ForceFlush(ctx context.Context) error { return nil }
 
+// tracerImpl and spanImpl
 type tracerImpl struct {
 	serviceName string
 	processor   SpanProcessor
@@ -378,6 +403,7 @@ func NewTracer(serviceName string, opts ...TracerOption) Tracer {
 		idGen:       &defaultIDGenerator{},
 		sampler:     NewAlwaysOnSampler(),
 	}
+	// apply options
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -385,6 +411,8 @@ func NewTracer(serviceName string, opts ...TracerOption) Tracer {
 		cfg.serviceName = serviceName
 	}
 	if cfg.processor == nil {
+		// default no-op? Use in-memory? For safety, use noop processor that does nothing unless provided.
+		// But we will use simple processor with in-memory if none? To avoid nil, create noop.
 		cfg.processor = &simpleSpanProcessor{exporter: NewInMemoryExporter()}
 	}
 	if cfg.idGen == nil {
@@ -426,10 +454,12 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 	for _, o := range opts {
 		o(cfg)
 	}
+	// determine parent
 	var parentSC *SpanContext
 	if cfg.parent != nil {
 		parentSC = cfg.parent
 	} else if sc, ok := SpanContextFromContext(ctx); ok {
+		// copy
 		tmp := sc
 		parentSC = &tmp
 	}
@@ -449,6 +479,7 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 	}
 	spanID := t.idGen.NewSpanID()
 
+	// sampling
 	samplingParams := SamplingParameters{
 		TraceID:       traceID,
 		SpanName:      name,
@@ -461,6 +492,8 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 	sampled := decision == DecisionRecordAndSample
 	recording := sampled
 
+	// For AlwaysOn default, sampled true
+	// Build SpanContext
 	sc := SpanContext{
 		TraceID:      traceID,
 		SpanID:       spanID,
@@ -485,10 +518,12 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 		recording:    recording,
 	}
 
+	// initial attributes from options
 	for _, a := range cfg.attributes {
 		if len(span.attributes) >= 128 {
 			break
 		}
+		// truncate string value >1024
 		val := a.Value
 		if s, ok := val.(string); ok && len(s) > 1024 {
 			val = s[:1024]
@@ -496,7 +531,9 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 		span.attributes[a.Key] = val
 	}
 
+	// if recording, call OnStart? optional
 	if recording {
+		// readable for OnStart could be empty at start
 		rs := ReadableSpan{
 			Name:         span.name,
 			SpanContext:  span.spanContext,
@@ -532,6 +569,7 @@ func (s *spanImpl) End() {
 	}
 	s.ended = true
 	s.endTime = time.Now()
+	// snapshot
 	attrs := copyMap(s.attributes)
 	events := append([]SpanEvent(nil), s.events...)
 	sc := s.spanContext
@@ -619,6 +657,7 @@ func (s *spanImpl) IsRecording() bool {
 	return s.recording && !s.ended
 }
 
+// Batch processor options and implementation
 type batchConfig struct {
 	batchSize          int
 	queueSize          int
@@ -709,9 +748,12 @@ func (b *batchSpanProcessor) run() {
 	for {
 		select {
 		case <-b.stopCh:
+			// flush remaining queue and batch
 			b.mu.Lock()
+			// drain queue
 			closeDrain := func() []ReadableSpan {
 				var remaining []ReadableSpan
+				// drain channel without blocking
 				for {
 					select {
 					case span, ok := <-b.queue:
@@ -735,6 +777,7 @@ func (b *batchSpanProcessor) run() {
 			return
 		case span, ok := <-b.queue:
 			if !ok {
+				// channel closed, flush
 				b.mu.Lock()
 				batchToExport := b.batch
 				b.batch = nil
@@ -775,7 +818,16 @@ func (b *batchSpanProcessor) exportWithTimeout(spans []ReadableSpan) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), b.exportTimeout)
 	defer cancel()
-	_ = b.exporter.ExportSpans(ctx, spans)
+	done := make(chan error, 1)
+	go func() {
+		done <- b.exporter.ExportSpans(ctx, spans)
+	}()
+	select {
+	case <-ctx.Done():
+		return
+	case <-done:
+		return
+	}
 }
 
 func (b *batchSpanProcessor) OnStart(ctx context.Context, span ReadableSpan) {}
@@ -787,6 +839,7 @@ func (b *batchSpanProcessor) OnEnd(span ReadableSpan) {
 		return
 	}
 	b.mu.Unlock()
+	// non-blocking send
 	select {
 	case b.queue <- span:
 	default:
@@ -799,6 +852,7 @@ func (b *batchSpanProcessor) OnEnd(span ReadableSpan) {
 func (b *batchSpanProcessor) ForceFlush(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
+		// flush batch
 		b.mu.Lock()
 		if len(b.batch) > 0 {
 			batchCopy := b.batch
@@ -807,6 +861,7 @@ func (b *batchSpanProcessor) ForceFlush(ctx context.Context) error {
 			b.exportWithTimeout(batchCopy)
 			b.mu.Lock()
 		}
+		// drain queue
 		var toExport []ReadableSpan
 		for {
 			select {
@@ -875,6 +930,7 @@ func (b *batchSpanProcessor) DroppedCount() int {
 func (b *batchSpanProcessor) QueueLen() int {
 	return len(b.queue)
 }
+
 GO
 
 cat > /app/observability/metrics.go <<'GO'
@@ -886,6 +942,7 @@ import (
 	"sync"
 )
 
+// Interfaces
 type Counter interface {
 	Inc()
 	Add(delta float64)
@@ -902,6 +959,7 @@ type Histogram interface {
 	Observe(v float64)
 }
 
+// MetricOption for Counter/Gauge/Histogram creation
 type metricDesc struct {
 	labels      map[string]string
 	description string
@@ -938,13 +996,14 @@ func WithBuckets(buckets []float64) MetricOption {
 	}
 }
 
+// Provider options
 type providerConfig struct {
 	maxCardinality int
-	overflowMode   string
+	overflowMode   string // drop or aggregate
 }
 
 type MetricsProviderOption func(*providerConfig)
-type MetricsOption func(*providerConfig)
+type MetricsOption func(*providerConfig) // alias for backward compat
 
 func WithMaxCardinality(n int) MetricsProviderOption {
 	return func(c *providerConfig) { c.maxCardinality = n }
@@ -952,6 +1011,9 @@ func WithMaxCardinality(n int) MetricsProviderOption {
 func WithCardinalityOverflowHandling(mode string) MetricsProviderOption {
 	return func(c *providerConfig) { c.overflowMode = mode }
 }
+
+// For compatibility, allow MetricsOption to be used as provider option
+// Actually identical type
 
 type MetricFamily struct {
 	Name    string
@@ -981,6 +1043,7 @@ type MetricsProvider interface {
 	DroppedSeriesCount() int
 }
 
+// implementation types
 var (
 	metricNameRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 	labelKeyRegex   = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -988,17 +1051,21 @@ var (
 
 var defaultHistogramBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
 
+// noop instruments
 type noopCounter struct{}
+
 func (n *noopCounter) Inc()              {}
 func (n *noopCounter) Add(delta float64) {}
 
 type noopGauge struct{}
+
 func (n *noopGauge) Set(v float64)     {}
 func (n *noopGauge) Inc()              {}
 func (n *noopGauge) Dec()              {}
 func (n *noopGauge) Add(delta float64) {}
 
 type noopHistogram struct{}
+
 func (n *noopHistogram) Observe(v float64) {}
 
 type counterImpl struct {
@@ -1071,6 +1138,7 @@ func newHistogramImpl(labels map[string]string, buckets []float64) *histogramImp
 	if len(buckets) == 0 {
 		buckets = append([]float64(nil), defaultHistogramBuckets...)
 	} else {
+		// sort buckets
 		cp := append([]float64(nil), buckets...)
 		sort.Float64s(cp)
 		buckets = cp
@@ -1086,6 +1154,7 @@ func (h *histogramImpl) Observe(v float64) {
 	defer h.mu.Unlock()
 	h.count++
 	h.sum += v
+	// cumulative count: increment all buckets where v <= upperBound
 	for i, ub := range h.buckets {
 		if v <= ub {
 			h.bucketCounts[i]++
@@ -1108,6 +1177,7 @@ func copyLabels(in map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
+		// truncate value >256? for safety
 		if len(v) > 256 {
 			v = v[:256]
 		}
@@ -1125,6 +1195,8 @@ func labelsKey(labels map[string]string) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	// build string
+	// using fmt could be fine, but simple concatenation
 	s := ""
 	for i, k := range keys {
 		if i > 0 {
@@ -1147,6 +1219,7 @@ func isValidLabels(labels map[string]string) bool {
 	return true
 }
 
+// provider impl
 type metricsProvider struct {
 	mu                 sync.RWMutex
 	counters           map[string]map[string]*counterImpl
@@ -1206,6 +1279,8 @@ func (p *metricsProvider) Counter(name string, opts ...MetricOption) Counter {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// check type conflict: if name exists as gauge or histogram, return noop? For simplicity, allow but separate storage, but if same name used as different type, treat as conflict -> noop for new?
+	// We'll allow same name across types? Better to prevent mixed types: if name in gauges or histograms, return noop.
 	if _, ok := p.gauges[name]; ok {
 		return &noopCounter{}
 	}
@@ -1220,16 +1295,23 @@ func (p *metricsProvider) Counter(name string, opts ...MetricOption) Counter {
 	if existing, ok := inner[key]; ok {
 		return existing
 	}
+	// cardinality check
 	if p.maxCardinality > 0 && len(inner) >= p.maxCardinality {
+		// limit reached
 		if p.overflowMode == "aggregate" {
 			if oc, ok := p.overflowCounters[name]; ok {
 				return oc
 			}
+			// create overflow
 			overflowLabels := map[string]string{"__overflow__": "true"}
 			oc := &counterImpl{labels: overflowLabels}
 			p.overflowCounters[name] = oc
+			// still count as dropped? No, for aggregate mode, we should not count as dropped but as overflow aggregated
+			// But for test we will not count dropped for aggregate, or count? We'll increment dropped for tracking but overflow still works.
+			// Use dropped for both modes? For aggregate, we should not increment dropped as it's handled.
 			return oc
 		} else {
+			// drop
 			p.droppedMu.Lock()
 			p.dropped++
 			p.droppedMu.Unlock()
@@ -1388,6 +1470,7 @@ func (p *metricsProvider) Collect() []MetricFamily {
 			}
 			fam.Metrics = append(fam.Metrics, sample)
 		}
+		// overflow
 		if oc, ok := p.overflowCounters[name]; ok {
 			sample := MetricSample{
 				Labels: copyLabels(oc.labels),
@@ -1459,6 +1542,7 @@ func (p *metricsProvider) DroppedSeriesCount() int {
 	defer p.droppedMu.Unlock()
 	return int(p.dropped)
 }
+
 GO
 
 cat > /app/observability/logger.go <<'GO'
@@ -1520,7 +1604,7 @@ func levelToInt(l string) int {
 	case "error":
 		return 3
 	default:
-		return 1
+		return 1 // info default
 	}
 }
 func intToLevelStr(i int) string {
@@ -1558,6 +1642,7 @@ func NewLogger(serviceName string, opts ...LoggerOption) Logger {
 }
 
 func (l *loggerImpl) With(fields ...Field) Logger {
+	// copy existing fields
 	newFields := append([]Field(nil), l.fields...)
 	newFields = append(newFields, fields...)
 	return &loggerImpl{
@@ -1572,12 +1657,14 @@ func (l *loggerImpl) log(ctx context.Context, level int, msg string, fields ...F
 	if level < l.minLevel {
 		return
 	}
+	// build map
 	m := make(map[string]interface{})
 	m["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
 	m["level"] = intToLevelStr(level)
 	m["service"] = l.serviceName
 	m["message"] = msg
 
+	// trace correlation
 	if ctx != nil {
 		if sc, ok := SpanContextFromContext(ctx); ok {
 			m["trace_id"] = sc.TraceID
@@ -1588,15 +1675,19 @@ func (l *loggerImpl) log(ctx context.Context, level int, msg string, fields ...F
 			}
 		}
 	}
+	// logger base fields
 	for _, f := range l.fields {
 		m[f.Key] = f.Value
 	}
+	// per-call fields
 	for _, f := range fields {
 		m[f.Key] = f.Value
 	}
 
+	// marshal
 	b, err := json.Marshal(m)
 	if err != nil {
+		// fallback
 		b = []byte(`{"error":"marshal failed"}`)
 	}
 	b = append(b, '\n')
@@ -1617,11 +1708,12 @@ func (l *loggerImpl) Debug(ctx context.Context, msg string, fields ...Field) {
 func (l *loggerImpl) Warn(ctx context.Context, msg string, fields ...Field) {
 	l.log(ctx, 2, msg, fields...)
 }
+
 GO
 
 cat > /app/observability/doc.go <<'GO'
 package observability
 GO
 
-echo "Step2 solution applied (large-scale)"
+echo "Solution applied"
 cd /app && go mod tidy && go build ./... && go vet ./...
