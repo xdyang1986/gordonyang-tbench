@@ -9,38 +9,35 @@ This multi-turn T-Bench task builds a Go CLI router in two phases:
 Why naive fails: simple BFS ignores weights; sorting only by distance without lexicographic tie-break fails deterministic tests; forgetting undirected nature; not handling duplicate edges with minimal distance; missing exit code distinction (0 all routed, 1 some no route, 2 invalid); ignoring batch order; traffic mode requiring effective-distance minimization not raw, requiring recomputed raw sum along traffic-chosen path; handling both `{source,destination}` and `{from,to}` request keys; handling traffic file dual formats; floating tolerance; backup help keyword checks.
 
 ## Completion Rates
-**Latest online validation — commit `c85906b` ("Balance difficulty: Turn1 hard but solvable"), status: PASSING.**
-Aggregate: avgReward **0.839** across 28 trials. Structural 10/10 pass, contamination LOW, provenance CLEAN.
 
-| Gate | Model | Pass | Rate | Mean reward |
-|------|-------|------|------|-------------|
-| Oracle | oracle | 3/3 | 100% | 1.00 |
-| Metacode | meta/avocado-5.14-code | 5/10 | 50% | 0.55 |
-| Codex | gpt-5.5 | 10/10 | 100% | 1.00 |
-| Agent | claude-opus-4-8 | 10/10 | 100% | 1.00 |
+**Latest online validation — commit `2c6713a`, status: PASSING.** Structural 10/10 pass, oracle 3/3, contamination LOW, provenance CLEAN. All stages completed.
 
-The **metacode/avocado gate at 5/10 (0.55)** is the discriminating calibration signal — it passes at least once and fails at least once, satisfying the calibration requirement.
+| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 | Mean |
+|-------|---------------|-----------------|--------|--------|------|
+| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | 1.00 |
+| Agent | claude-code / claude-opus-4-8 | 5/10 (50%) | 5/10 | 5/5 | 0.50 |
+| Metacode | meta/avocado-5.14-code | 3/10 (30%) | 3/10 | 3/3 | 0.30 |
+| Codex | gpt-5.5 | 1/10 (10%) | 1/10 | 1/1 | 0.10 |
 
-Metacode (avocado) per-trial breakdown (10 trials):
-- **5 full pass** (reward 1.0) — both turns solved.
-- **1 partial** (reward 0.5) — Turn1 solved, `firstFailedStep = 2_step_two` (Turn2 traffic-aware routing failed).
-- **4 fail** (reward 0.0) — `firstFailedStep = 1_step_one` (could not complete Turn1 distance routing).
-
-This confirms the intended difficulty shape: **Turn1 is the primary gate** for the weak model (4/10 can't finish it), and Turn2 adds a further discriminating step (1 more trial drops there). Codex (gpt-5.5) and Opus solve it cleanly (too easy for the strong models), while avocado sits in the target 40–60% band.
-
-> Calibration target satisfied: metacode/avocado passes ≥1 and fails ≥1 out of 10 (5/10). Oracle 3/3 confirms the task is solvable; codex 10/10 confirms no environmental blockers.
+Turn 2 only runs after a Turn-1 pass, so Turn-2 denominators equal Turn-1 passes.
 
 ## Model Analysis
-Empirical from the latest online run (commit `c85906b`):
 
-- **Oracle: 3/3 (100%)** — reference solution is correct and deterministic across randomized graph/traffic fixtures.
-- **Metacode / avocado-5.14-code: 5/10 (50%)** — the discriminating model. Failure distribution:
-  - **Turn1 failure (4/10):** cannot complete distance-based Dijkstra routing to the point of passing all Turn1 tests within the step budget — the harder-but-solvable Turn1 (36 tests) blocks the weak model outright before Turn2 is ever reached.
-  - **Turn2 failure after Turn1 pass (1/10):** solves distance routing but fails the traffic-aware extension (effective-distance minimization / dual traffic-file format / tie-break on effective distance).
-- **Codex / gpt-5.5: 10/10 (100%)** — strong model solves both turns reliably; confirms the task has no setup/build friction.
-- **Agent / Opus 4.8: 10/10 (100%)** — clean pass, consistent with codex; Opus is above the discrimination band for this calibration.
+**Turn 1 is the sole discriminator.** Every agent that clears Turn 1 passes Turn 2 (conditional Turn-2 pass rate is 100% for all: codex 1/1, avocado 3/3, opus 5/5, oracle 3/3). Difficulty is entirely in the distance-based Dijkstra CLI, not the traffic-aware extension.
 
-Interpretation: difficulty is concentrated in **Turn1 completion for the weak model** (the primary gate), with **Turn2 traffic-aware routing** as the secondary discriminator. These are reasoning/spec-adherence gaps (Dijkstra + lexicographic tie-break, then effective-distance re-selection and dual-format traffic parsing), not environment issues — the binary builds and graph parsing is straightforward, as evidenced by 100% oracle and codex pass rates.
+### Failure analysis (from trial ctrf verifier output)
+
+| Model | Dominant Turn-1 failure | Frequency | Root cause |
+|-------|-------------------------|-----------|------------|
+| Codex (gpt-5.5) | `test_from_to_equals_syntax` | **9/9 failing trials** | CLI doesn't accept equals-sign flag syntax `--graph=… --from=A --to=B`; hand-rolled arg parser only handles space-separated `--from A` form (Go's `flag` package would handle both for free). |
+| Metacode (avocado) | `test_from_to_equals_syntax` | **7/7 failing trials** | Same equals-syntax parsing gap (one trial additionally failed `test_edge_string_distance_invalid`). |
+| Agent (opus-4-8) | `test_batch_with_missing_field_invalid` | 4/5 failing trials | Batch request missing `destination` (`[{"source":"A"}]`) must exit 2; model returned no-route/exit 1 instead. One additional trial had a catastrophic build/run failure (all tests failed). |
+
+Key observations:
+- **`test_from_to_equals_syntax` is the primary wall** for the weaker models — codex and avocado fail it in essentially every losing trial. It's a CLI-robustness discriminator: agents using Go's stdlib `flag` package pass automatically; those hand-parsing `os.Args` and expecting `--from A` (space form) miss the `--from=A` equals form.
+- **Opus is above that wall** (handles equals syntax) and instead trips on a subtler spec detail: exit-code-2 validation for a batch request with a missing field.
+- **Turn 2 (traffic-aware routing) is not discriminating** in this run — no model that reached it ever failed it. If more difficulty is desired, it belongs in Turn 2, since Turn 1 already carries the entire signal.
+- Oracle 3/3 confirms solvability; the codex/avocado failures are spec-adherence (flag parsing), not environmental.
 
 ## Anti-Cheating Analysis
 - Hardcoded outputs: Tests use randomized graphs and traffic (generated per test), multiple graph shapes (triangle, diamond, line, disconnected, duplicate edges). No fixed output can pass.
