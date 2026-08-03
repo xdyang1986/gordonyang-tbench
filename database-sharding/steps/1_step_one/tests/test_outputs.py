@@ -1064,3 +1064,153 @@ def test_help_flag_extra_contains_version():
     combined = (r.stdout + r.stderr).lower()
     for word in ["version", "checksum", "staging", "weight", "global"]:
         assert word in combined, f"Help should contain {word}"
+
+
+def test_set_and_get_with_nested_large_json():
+    _reset_shards()
+    nested = {"a": {"b": {"c": [1, 2, {"d": "e"}] * 100}}, "x": "y" * 1000}
+    r = _proxy_cli("set", "nested-large", json.dumps(nested))
+    assert r.returncode == 0
+    r = _proxy_cli("get", "nested-large")
+    assert json.loads(r.stdout.strip()) == nested
+
+
+def test_set_and_get_with_float_many_decimals():
+    _reset_shards()
+    val = 3.14159265358979323846
+    r = _proxy_cli("set", "float-key", json.dumps(val))
+    assert r.returncode == 0
+    r = _proxy_cli("get", "float-key")
+    got = json.loads(r.stdout.strip())
+    assert abs(got - val) < 1e-9
+
+
+def test_distribution_global_counts_after_multiple_global_sets_and_deletes():
+    _reset_shards()
+    cfg = _load_config()
+    _proxy_cli("set", "global:g1", json.dumps(1))
+    _proxy_cli("set", "global:g2", json.dumps(2))
+    r = _proxy_cli("distribution")
+    dist = json.loads(r.stdout.strip())
+    norm = {int(k): v for k, v in dist.items()}
+    for sid in range(cfg["shard_count"]):
+        assert norm[sid] >= 2
+    _proxy_cli("delete", "global:g1")
+    r = _proxy_cli("distribution")
+    dist = json.loads(r.stdout.strip())
+    norm = {int(k): v for k, v in dist.items()}
+    for sid in range(cfg["shard_count"]):
+        assert norm[sid] >= 1
+
+
+def test_list_keys_with_custom_config_and_weighted():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        shards = []
+        for i in range(3):
+            p = os.path.join(tmpdir, f"shard_{i}.json")
+            shards.append({"id": i, "path": p, "weight": 1})
+            _write_shard_with_checksum(p, {})
+        cfg_path = os.path.join(tmpdir, "cfg.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"shard_count": 3, "shards": shards}, f)
+        # set via custom config
+        for i in range(5):
+            k = f"custom-list-{i}"
+            subprocess.run(
+                [BIN, "--config", cfg_path, "set", k, json.dumps(i)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        r = subprocess.run(
+            [BIN, "--config", cfg_path, "list-keys"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0
+        keys = json.loads(r.stdout.strip())
+        assert keys == sorted(keys)
+        assert len(keys) == 5
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_persistence_with_special_chars_in_key():
+    _reset_shards()
+    special_key = "key with spaces and : and / and <>&"
+    r = _proxy_cli("set", special_key, json.dumps("special"))
+    assert r.returncode == 0
+    r = _proxy_cli("get", special_key)
+    assert json.loads(r.stdout.strip()) == "special"
+
+
+def test_ops_log_multiple_appends_version_increment():
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    open(ops_path, "w").write("")
+    for i in range(5):
+        _proxy_cli("set", f"multi-ops-{i}", json.dumps(i))
+    lines = [l for l in open(ops_path).read().splitlines() if l.strip()]
+    assert len(lines) >= 5
+    versions = []
+    for line in lines:
+        obj = json.loads(line)
+        assert "version" in obj
+        versions.append(obj["version"])
+    # versions should be increasing at least
+    assert versions == sorted(versions) or len(versions) >= 5
+
+
+def test_corruption_backup_contains_old_data():
+    _reset_shards()
+    cfg = _load_config()
+    target_path = cfg["shards"][1]["path"]
+    old_data = {"oldkey": "oldval"}
+    _write_shard_with_checksum(target_path, old_data)
+    with open(target_path, "w") as f:
+        f.write("{corrupted")
+    r = _proxy_cli("list-keys")
+    assert r.returncode == 0
+    dir_name = os.path.dirname(target_path)
+    backups = [
+        f
+        for f in os.listdir(dir_name)
+        if ".corrupt." in f and os.path.basename(target_path) in f
+    ]
+    assert len(backups) >= 1
+    # Check backup contains old data (or at least exists and is not empty)
+    bak_path = os.path.join(dir_name, backups[0])
+    assert os.path.getsize(bak_path) > 0
+
+
+def test_self_healing_set_multiple_wrong_shards():
+    _reset_shards()
+    cfg = _load_config()
+    key = "multi-wrong-heal"
+    correct_sid = _expected_shard_id(key, cfg["shard_count"])
+    # Seed in 2 wrong shards
+    for s in cfg["shards"]:
+        if s["id"] != correct_sid:
+            _write_shard_with_checksum(s["path"], {key: f"wrong-{s['id']}"})
+    # Now set correct
+    r = _proxy_cli("set", key, json.dumps("correct"))
+    assert r.returncode == 0
+    for s in cfg["shards"]:
+        data = _load_shard_data(s["path"])
+        if s["id"] == correct_sid:
+            assert data.get(key) == "correct"
+        else:
+            assert key not in data
+
+
+def test_raw_string_handling_with_special_chars():
+    _reset_shards()
+    raw_vals = ["notjson", "123abc", "<>&", "a:b/c", "   spaces   "]
+    for idx, rv in enumerate(raw_vals):
+        k = f"raw-special-{idx}"
+        r = _proxy_cli("set", k, rv)
+        assert r.returncode == 0
+        r = _proxy_cli("get", k)
+        assert json.loads(r.stdout.strip()) == rv

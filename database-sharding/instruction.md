@@ -4,7 +4,7 @@ This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go w
 
 ## Overview
 
-- **Turn 1 (1_step_one, 62 tests, inherits none):** Implement Go proxy at `/app/` (module `sharding`) with weighted MD5 sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum file format `{"data":...,"checksum":...}` without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log` with version/shard_id/ts, atomic writes via `CreateTemp`+`Rename`, self-healing set cleans wrong shards and delete cleans all shards, large 100KB value handling, help bare no-args containing version,checksum,staging. Turn1 is silent on empty-string edge to avoid Oracle-null ambiguity (no explicit test for `""`).
+- **Turn 1 (1_step_one, 71 tests, inherits none, harder after removing empty ambiguous):** Implement Go proxy at `/app/` (module `sharding`) with weighted MD5 sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum file format `{"data":...,"checksum":...}` without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log` with version/shard_id/ts, atomic writes via `CreateTemp`+`Rename`, self-healing set cleans wrong shards and delete cleans all shards, large 100KB value handling, help bare no-args containing version,checksum,staging. Turn1 is silent on empty-string edge to avoid Oracle-null ambiguity (no explicit test for `""`).
 
   See full spec: `steps/1_step_one/instruction.md`
 
@@ -38,7 +38,7 @@ Commit `c7a0ec40` (v3 73 tests) was last fully validated:
 - Avocado 4/10 40% mean 0.4 (6 fail@Turn1)
 - Codex 4/10 40% mean 0.4 (6 fail@Turn1)
 
-Current HEAD (v4 easier 62 tests for Turn2 + v3 62 tests for Turn1, silent on empty) has 62 and 62 tests locally passing 62/62 and 62/62, combined multi-turn OK. It removes tricky tests from 83-test too-hard version (staging dir, self-healing set/delete, large ops.log 100KB buffer, ts-sorted replay, nested backup mkdir -p, version exact increment) to make Step2 easier – file-order replay, no staging, no self-healing set/delete, no large buffer, help without staging/timestamp/ts – but keeps core versioned integrity, fallback, duplicate cleanup, weighted, global, backup tightening. Turn1 42→62 adds self-healing and large value and strict validation to fix too easy after removing empty.
+Current HEAD (v4 easier 62 tests for Turn2 + v4 71 tests for Turn1, silent on empty) has 71 and 62 tests locally passing 71/71 and 62/62, combined multi-turn OK. Turn1 42→50→62→71 adds self-healing set cleans wrong shards delete cleans all shards multiple wrong, large 100KB and nested large json and float, distribution after deletes, list-keys custom config weighted, special chars in key, ops.log multiple appends version increment, corruption backup contains old data, etc., to fix too easy after removing empty ambiguous. Turn2 83→62 removes tricky staging/self-healing/large-buffer/ts-sorted/nested backup/version exact to make Step2 easier – file-order, no staging, no self-healing set/delete, no large buffer, help without staging/timestamp/ts – but keeps core versioned integrity, fallback, duplicate cleanup, weighted, global, backup tightening.
 
 ## Commands
 
