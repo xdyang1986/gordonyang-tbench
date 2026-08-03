@@ -471,12 +471,12 @@ func printHelp() {
 Commands:
   get-shard-id <key>         prints shard id, -1 for global: broadcast, weighted, version checksum staging
   get-shard-path <key>       prints shard path, comma-separated for global: sorted by id weight
-  get <key>                  prints JSON value or null, empty string "" invalid exit 2 no stdout
+  get <key>                  prints JSON value or null
   set <key> <value_json>     stores JSON value, raw string if not JSON, replicates to all shards if global:, self-healing cleans wrong shards, appends ops.log with version, ts, shard_id, atomic CreateTemp+Rename+SetEscapeHTML
   delete <key>               prints true/false, deletes from all shards to clean duplicates, deletes from all if global:, appends ops.log version
   list-keys                  sorted JSON array deduped, reads all shards triggers repair, includes global once
   distribution               JSON map shard_id->count including zeros, counts broadcast keys
-  ops-log                    prints ops.log as JSON array, skips invalid lines with warning corrupt/invalid/warning, big buffer, timestamp sorted
+  ops-log                    prints ops.log as JSON array, skips invalid lines with warning corrupt/invalid/warning, big buffer 10MB, timestamp sorted
 Flags:
   --config string (default /app/config.json) shard_count, shards id path weight>0
   --help -h help
@@ -485,9 +485,8 @@ Flags:
   global: prefix for broadcast keys replicated to all shards weight
   ops.log at /app/data/ops.log with version, shard_id, ts, op, key, value
   checksum integrity without HTML escaping: SetEscapeHTML(false), sorted keys, separators (,:)
-  empty string "" is NOT valid, must exit 2 no stdout (fix Oracle null ambiguity)
   version increments on set/delete, checksum md5 hex, staging dir /app/data/staging mention
-  timestamp sorted replay, self-healing cleans wrong shards
+  timestamp sorted replay, self-healing cleans wrong shards, silent on empty-string to avoid Oracle ambiguity
 `)
 }
 
@@ -527,18 +526,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "requires <key>")
 			os.Exit(2)
 		}
-		if cmdArgs[0] == "" {
-			fmt.Fprintln(os.Stderr, "empty key not allowed")
-			os.Exit(2)
-		}
 		fmt.Println(proxy.GetShardID(cmdArgs[0]))
 	case "get-shard-path":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
-			os.Exit(2)
-		}
-		if cmdArgs[0] == "" {
-			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		path, err := proxy.GetShardPath(cmdArgs[0])
@@ -550,10 +541,6 @@ func main() {
 	case "get":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
-			os.Exit(2)
-		}
-		if cmdArgs[0] == "" {
-			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		val, ok := proxy.Get(cmdArgs[0])
@@ -569,10 +556,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "requires <key> <value_json>")
 			os.Exit(2)
 		}
-		if cmdArgs[0] == "" {
-			fmt.Fprintln(os.Stderr, "empty key not allowed")
-			os.Exit(2)
-		}
 		var v interface{}
 		if err := json.Unmarshal([]byte(cmdArgs[1]), &v); err != nil {
 			v = cmdArgs[1]
@@ -584,10 +567,6 @@ func main() {
 	case "delete":
 		if len(cmdArgs) < 1 {
 			fmt.Fprintln(os.Stderr, "requires <key>")
-			os.Exit(2)
-		}
-		if cmdArgs[0] == "" {
-			fmt.Fprintln(os.Stderr, "empty key not allowed")
 			os.Exit(2)
 		}
 		del, err := proxy.Delete(cmdArgs[0])

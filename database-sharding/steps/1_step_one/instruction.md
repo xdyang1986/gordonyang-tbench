@@ -77,14 +77,9 @@ proxy --config /app/config.json distribution -> JSON map shard_id (string) -> co
 proxy --config /app/config.json ops-log -> prints ops.log lines as JSON array sorted by ts optional, skips invalid JSON line with warning containing "corrupt"/"invalid"/"warning", exit 0
 ```
 
-Exit codes: 0 success (including help, get null), 1 I/O error, 2 invalid input (bad config, duplicate id, empty path, negative id, id>=count, weight<=0 if present, bad args, unknown command, missing key, empty key).
+Exit codes: 0 success (including help, get null), 1 I/O error, 2 invalid input (bad config, duplicate id, empty path, negative id, id>=count, weight<=0 if present, bad args, unknown command, missing key).
 
-For invalid config, **no stdout**, only stderr.
-
-**Empty string key handling – EXPLICIT to fix Oracle null ambiguity (hard):**
-
-- Empty string `""` **is NOT considered legitimate** for this task and must be treated as invalid input: `get-shard-id ""`, `get ""`, `set ""`, `delete ""`, `get-shard-path ""` must **exit 2 with no stdout** (only stderr). This is distinct from missing key argument (zero args) which also exits 2. Empty string is provided (len 1, value empty) but invalid. This avoids Oracle null ambiguity.
-- Missing key argument (e.g., `proxy get-shard-id` with zero args) must also exit 2 no stdout.
+For invalid config, **no stdout**, only stderr. Missing key argument (e.g., `proxy get-shard-id` with zero args) must exit 2 no stdout. Turn1 is silent on empty-string edge to avoid Oracle-null ambiguity – empty string `""` is not tested explicitly in this turn.
 
 ### Weighted Sharding Algorithm (MUST, not just mod)
 
@@ -132,7 +127,7 @@ Shard file format:
   - Create file if missing, open with `O_APPEND` atomically, `SetEscapeHTML(false)`.
   - If ops.log contains invalid JSON line (corruption), skip that line on read (ops-log command) and log warning to stderr containing "corrupt"/"invalid"/"warning". Must use `bufio.Scanner` with large buffer 10*1024*1024 to handle 100KB+ lines (default 64KB fails), not `json.Decoder` which can infinite loop on invalid line.
 
-- `list-keys` sorted, deduped, `distribution` includes zeros, counts include broadcast keys in each shard. Empty string "" is invalid, so list-keys should never include "" (since set "" fails).
+- `list-keys` sorted, deduped, `distribution` includes zeros, counts include broadcast keys in each shard.
 
 - **Large value handling:** must handle 100KB+ JSON value atomically with valid checksum and no HTML escaping. Test with 100KB string via set/get.
 
@@ -141,7 +136,7 @@ Shard file format:
 On startup, validate, else exit 2 stderr, no stdout:
 - shard_count>0, len(shards)>0, ids unique, non-negative, <count, path non-empty, weight>0 if present (missing → default 1 for routing, but present <=0 invalid)
 - Config missing/invalid JSON → exit 2, no stdout
-- For this task, empty string key "" is invalid → exit 2 no stdout (separate from missing key arg)
+- Turn1 is silent on empty-string edge – empty not tested to avoid Oracle-null ambiguity
 
 ### Constraints
 
@@ -149,15 +144,16 @@ On startup, validate, else exit 2 stderr, no stdout:
 - Builds via `go build -o <binary> .`
 - Respect `--config`
 - No hardcoded `/tmp/proxy`, use `/tmp/codimango` if tmp needed
-- Must use `bufio.Scanner` for ops.log with big buffer, not `json.Decoder`
-- Must handle empty string as invalid exit 2
+- Must use `bufio.Scanner` for ops.log with big buffer 10MB, not `json.Decoder` which can infinite loop
+- Turn1 silent on empty-string, no explicit empty test to avoid ambiguous expectations
 
 ### Success
 
 - Weighted routing correct, broadcast global: works (replicates to all)
 - Durable new-format files with valid checksum (no HTML escaping), ops.log appended with version, ts, shard_id
 - Sorted list-keys exact, distribution includes zeros, accounts for broadcast
-- Config validation exit 2 no stdout, corruption backup/recreate including missing checksum, raw-string handling, help and bare help exit 0 containing version,checksum,staging, empty string invalid exit 2
-- Self-healing set/delete cleans duplicates, large 100KB value handling, atomic CreateTemp+Rename+SetEscapeHTML, staging dir mention
+- Config validation exit 2 no stdout for duplicate id, empty path, negative id, id>=count, weight<=0, missing shard_count, invalid json, missing file, unknown command, missing key arg
+- Corruption backup/recreate including missing checksum, raw-string handling, help and bare help exit 0 containing version,checksum,staging
+- Self-healing set/delete cleans duplicates, large 100KB value handling, atomic CreateTemp+Rename+SetEscapeHTML, staging dir mention, ops.log big buffer 10MB, timestamp handling
 
 Legacy ignored for now.
