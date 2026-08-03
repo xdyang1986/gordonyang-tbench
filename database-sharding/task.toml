@@ -2,7 +2,47 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/database-sharding"
-description = "Hard multi-turn Go sharding proxy. Turn1 HARD v3 50 tests after removing empty ambiguous (silent on empty, not tested to avoid Oracle-null): weighted MD5 big-endian, global broadcast -1 and comma-separated sorted, checksum without HTML escaping SetEscapeHTML false sorted keys, config validation duplicate id empty path negative id id>=count weight<=0 missing shard_count invalid json missing file no stdout unknown command missing key arg, corruption backup .corrupt.<nanosec> warning corrupt/checksum, self-healing set cleans wrong shard duplicates delete cleans all shards, large 100KB value atomic CreateTemp+Rename+SetEscapeHTML, distribution zeros and global counts, list-keys sorted exact with global, ops.log with version shard_id ts big buffer 10MB skips invalid warning, help bare must contain version,checksum,staging. Turn2 HARD v4 83 tests versioned {shard_id,version,data,checksum} ts-sorted replay staging self-healing large ops.log etc."]
+description = "Hard multi-turn Go sharding proxy. Turn1 HARD v3 50 tests after removing empty ambiguous (silent on empty, not tested to avoid Oracle-null): weighted MD5, global broadcast -1 and comma-separated sorted, checksum without HTML escaping SetEscapeHTML false sorted keys, config validation duplicate id empty path negative id id>=count weight<=0 missing shard_count exit 2 no stdout, corruption backup .corrupt.<nanosec> warning corrupt/checksum, self-healing set cleans wrong shard duplicates delete cleans all shards, large 100KB value, distribution zeros and global counts, list-keys sorted exact with global, ops.log with version shard_id ts and big Scanner buffer 10MB skips invalid with warning, help bare must contain get-shard-id,set,get,delete,list-keys,distribution,config,global,weight,ops.log,version,checksum,staging. Turn2 HARD v4 83 tests: versioned integrity {shard_id,version,data,checksum} shard_id must match config version increments on set/delete/migration/replay, checksum no HTML escaping, corruption shard_id mismatch/missing version/negative version/missing checksum/checksum mismatch backup .corrupt.<nanosec> warning, fallback legacy, duplicate/misplaced cleanup only correct weighted shard retains non-global global replicated to all, migration dry-run mentioning version/shard_id/checksum/cleanup/staging/timestamp backup tightening legacy .bak + each modified shard .bak + ops.log.bak content check nested mkdir -p force overwrite stderr, corrupted shard handling, ops.log TIMESTAMP-SORTED by ts ascending stable file-order tie-breaker later ts wins with version field global tombstone, staging dir /app/data/staging two-phase atomic CreateTemp+Rename, self-healing set/delete, large 100KB value and large ops.log replay 100KB big buffer, empty in list-keys sorted first for step2 valid MD5 d41d8, unknown command exit 2 missing key args exit 2 no stdout, config validation all edge cases no stdout, help bare must contain get-shard-id,set,get,delete,list-keys,distribution,migrate,config,legacy,weight,global,ops.log,dry-run,backup,force,version,shard_id,checksum,staging,timestamp,ts and migrate --help must contain dry-run,backup,force,version,shard_id,staging,timestamp, stdlib only grouped batched writes."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "database", "sharding", "proxy", "migration", "weighted", "broadcast", "checksum"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "migration"
+category_subdomain = "distributed_systems"
+tags = ["iterate_on_feature", "database", "sharding", "proxy", "migration", "golang", "distributed-systems", "weighted", "broadcast"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 70
+junior_time_estimate_min = 130
+languages = ["go"]
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
 min_reward = 1.0
 inherit_prior_session = true
 
