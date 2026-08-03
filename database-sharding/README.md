@@ -44,8 +44,7 @@ Turn1 proxy breaks historical reads. Legacy file `/app/data/legacy.json` old fla
 
 ## Completion Rates
 
-### Latest online validation — commit `c7a0ec4` ("v3 hard, 73 tests, ts-sorted + staging + self-healing"), status: PASSING
-
+Latest online validation — commit `c7a0ec4` ("v3 hard, 73 tests, ts-sorted + staging + self-healing"), status: **PASSING**.
 Structural 10/10 pass, contamination MEDIUM (passed), provenance CLEAN. Agentic-review 1/1 pass.
 
 | Gate | Model | Full pass | Mean reward | `firstFailedStep` breakdown |
@@ -55,90 +54,25 @@ Structural 10/10 pass, contamination MEDIUM (passed), provenance CLEAN. Agentic-
 | Agent | claude-opus-4-8 | 9/10 (90%) | 0.95 | 9 PASS, 1 fail@Turn2 |
 | Codex | gpt-5.5 | 4/10 (40%) | 0.40 | 4 PASS, **6 fail@Turn1** |
 
-**Turn1 is the discriminator.** Both weaker gates (avocado and codex) land at exactly 4/10, and *all* 6 of each one's failures occur at Turn1 (`1_step_one`) — they never reach Turn2. Opus clears Turn1 reliably and passes Turn2 in 9/10 trials (single Turn2 failure). This is a well-calibrated hard result: avocado/codex at 40% sits in the target band (pass ≥1, fail ≥1), while Opus at 90% confirms the task is solvable end-to-end. Historical aggregate: avgReward **0.484** over **1613** trials (spans all commits below).
+**Turn1 is the discriminator.** Both weaker gates (avocado and codex) land at exactly 4/10, and *all* 6 of each one's failures occur at Turn1 (`1_step_one`) — they never reach Turn2. Opus clears Turn1 reliably and passes Turn2 in 9/10 trials (single Turn2 failure). This is a well-calibrated hard result: avocado/codex at 40% sits in the target band (pass ≥1, fail ≥1), while Opus at 90% confirms the task is solvable end-to-end. Aggregate over all recorded trials for this task: avgReward **0.484** over **1613** trials.
 
-> **Freshness note:** current HEAD (`2e35703`) is the **v4 / 83-test** version (`a86c539` "v4 hard 83 tests with self-healing + staging + ts-sorted + large ops.log", + task.toml update). The v4 commits have **not been validated online yet** — the latest validated commit is `c7a0ec4` (v3 / 73 tests). The table above reflects `c7a0ec4`; the progression below is prior history.
-
-### Prior progression
-
-Online validation progression showing difficulty tuning from too easy to too hard to sweet spot, based on `codimango api jobs list database-sharding` and `codimango api tasks show`:
-
-- **b8a5cc1 initial simple Go (20 tests, flat JSON)**: Avocado 8/10 (90%) mean 0.9 too easy, Codex 4/10 (70%) – too easy for `hard`.
-
-- **aeb59be fix grading and mem risk (added checksum, corruption, help)**: Codex 0/10 (0%) mean 0, Claude 0/10 (0%) mean 0.5, Avocado 0/10 (0%) mean 0.35 – 0% too hard, plus failed jobs.
-
-- **a8df89e final harden turn2 extra-hard with version+shard_id+staging+updated_at (43 tests)**: **Codex 0/10 mean 0, Claude 0/10 mean 0.5 + failed jobs, Avocado 0/10 mean 0.35 + failed jobs, plus 0/10 failed for all** – **0% for all, too hard**, TBR notes: *many opus trials failed over timeout and the one turn 2 metacode failure had the metacode harness fail (bad luck!)* – harness crash from `json.Decoder` infinite loop on corrupt ops.log line `not valid json line`.
-
-- **937859b and 91c588a intermediate hard with versioned files (8 shard_id, versioned, no staging/updated_at, 42/43 tests)**: **Codex 0/10 mean 0 (0%), Avocado 2/10 mean 0.25 (20%), Claude running 5/10 mean 1 (100% so far), Oracle 3/3** – harder than loosened, still 0% for Codex too hard, 20% Avocado borderline, flagged as too hard per "step2 is still too hard".
-
-- **8089743 loosen step2 a bit (loosened but robust, data+checksum only, 3 shard_id, no version, no staging/updated_at, 42/43 tests) – sweet spot, validation passing, structural 9/9 PASS after Dockerfile baked pytest**: 
-  - Oracle **3/3** – 100% pass, mean 1.0, status=validated, commit=8089743f, per-step oracle Turn1 42/42, Turn2 43/43, tbdReview *Both milestones fail before and pass after their cumulative solutions (42/42 and 43/43), with no cross-milestone leakage*
-  - Codex gpt-5.5: **3/10** – 30% full pass, 7 fail, mean 0.3 – all 7 failures fail **only** `test_get_shard_id_uses_md5` with empty-string key `""` (41/42) – after explicit spec fix that empty is NOT valid (exit 2), those 7 would become 10/10 for Turn1, moving discrimination to Turn2.
-  - Avocado 5.14: **4/10 mean 0.45** – 40-45% full pass, Turn1 41/42 same empty-string edge, Turn2 partial trial `2f693034` reward 0.5 had 18+ Turn2 failures due to missing `migrate`/legacy flag parsing (`unknown command: --legacy`), help missing `migrate`
-  - Opus: **9/10 mean 0.95** on 8089743, 10/10 on `c2b16f3`, aggregate tbdReview **Opus 34/63 passed (54%) – sweet spot, challenging but solvable, Oracle 21/21 (100%)** across sub-tests
-  - Overall avgReward 0.63, total_score **16/18**, is_memorizable false (was HIGH), contamination MEDIUM
-
-- **c2b16f3 loosen turn2 no version to fix too hard (same logic as 8089743)**: **Codex 1/10 mean 0.1 (10%)**, **Avocado 4/10 mean 0.45 (40%)**, Claude 10/10 mean 1 – **1/10 Codex, 4/10 Avocado, 10/10 Claude – balanced hard with some full passes**, not 0% too-hard
-
-- **Latest commit 0145eb2 (added explicit empty-string NOT valid) – validation FAILED, Oracle 0/3**: Failure analysis from CTRF `test-stdout.txt` shows **only** `test_empty_string_not_legitimate_key` failed: `get-shard-id ""` returned exit 0 `1` (treated "" as valid hashed) but expected exit 2 per clarified spec that "" NOT valid. This happened because Turn1 solution at that commit still treated empty as valid (old), but tests now expect exit 2. **Fixed in c56d79e**: both golden solutions now check `if key=="" { exit 2 no stdout }`, local **Turn1 43/43, Turn2 43/43** passed, pending online validation. After fix, Codex that previously treated "" as invalid (exit 2) will now **pass** empty-string invalid test, increasing Turn1 full pass from 3/10 to 10/10, moving discrimination to harder Turn2 features (weighted, global, fallback, duplicate cleanup, log replay) as intended per TBR note about harness crash.
-
-- **Latest with fix c56d79e local**: **Turn1 43/43, Turn2 43/43** – Oracle should be 3/3 after empty-string fix.
-
-| Model | Commit | Full Task Pass | Mean Reward | Turn1 Sub | Turn2 Sub | Notes |
-|-------|--------|----------------|-------------|-----------|-----------|-------|
-| Oracle | 8089743 | 3/3 | 1.0 | 42/42 | 43/43 | validation passing, 9/9 structural |
-| Codex | 8089743 | 3/10 | 0.3 | 41/42 fails only "" | blocked by Turn1 | Empty-string sole discriminator, now fixed explicit invalid |
-| Avocado | 8089743 | 4/10 | 0.45 | 41/42 same edge | 25/43 in partial (18 fail) | Help + fallback + flag parsing gaps in Turn2 |
-| Opus | 8089743 | 9/10 | 0.95 | 42/42 | 43/43 in passes | 34/63 aggregate 54% sweet spot |
-| Codex | a8df89e extra-hard | 0/10 | 0 | 0/10 | 0/10 | 0% too hard, many timeouts, harness crash |
-| Codex | 937859b versioned (8 ids) | 0/10 | 0 | - | - | 0% Codex too hard, Avocado 2/10 (20%) – needs loosening → 8089743 |
-| Avocado | c2b16f3 loosened no version | 4/10 | 0.45 | - | - | 40% balanced, Codex 1/10 (10%) – sweet spot for hard |
-| Oracle | 0145eb2 (empty-string explicit added but Turn1 solution not updated) | 0/3 | 0 | 42/43 fails empty test | - | Fixed in c56d79e: now 43/43 locally |
-
-Progression showing need to loosen and explicit empty-string handling:
-- `b8a5cc1` easy: 8/10 Avocado (90%) too easy
-- `aeb59be` 0/10 all (0%) too hard, plus failed jobs
-- `a8df89e` extra-hard version+staging+updated_at: 0/10 all (0%) too hard with timeouts/harness crash
-- `937859b` versioned (8 ids, no staging): 0/10 Codex (0%), 2/10 Avocado (20%) still too hard per "step2 is still too hard"
-- `8089743` loosened no version (3 ids, no version, no staging): 3/10 Codex (30%), 4/10 Avocado (45%) – sweet spot, validation passing
-- `0145eb2` adds explicit empty-string NOT valid but Turn1 solution still old valid → Oracle 0/3 failed (fixed in c56d79e to 43/43)
+> **Freshness note:** current HEAD (`2e35703`) is the **v4 / 83-test** version (`a86c539` "v4 hard 83 tests with self-healing + staging + ts-sorted + large ops.log", + task.toml update). The v4 commits have **not been validated online yet** — the numbers above are for the latest validated commit `c7a0ec4` (v3 / 73 tests).
 
 ## Model Analysis
 
-Derived from `codimango api jobs list` and downloaded CTRF artifacts (`test-stdout.txt`) for commits `8089743`, `937859b`, `a8df89e`, `0145eb2`, all trials `status=completed` clean except where noted as harness crash/timeout (now fixed via self-contained verifier).
+Derived from the latest online run (commit `c7a0ec4`) via `codimango api jobs list database-sharding` and per-trial `firstFailedStep`.
 
-- **Empty-string key ambiguity – explicit fix per latest Request changes decision (addresses Human Checks 3/2/3 and Oracle null concern):**
-  - Concern: Empty string being treated as legitimate key is ambiguous – Oracle DB famously treats "" as null, no previous data with empty key, human might faultlessly treat "" as null/invalid. Turn1 discrimination hinged on unstated desire (some see obviously required as valid, others opposite) – caused Request changes.
-  - **Fix**: Both Turn1 and Turn2 instructions now have explicit section **Empty String Key Handling – Explicit to Avoid Oracle Null Ambiguity** stating **"" IS NOT a legitimate key** and must be treated as **invalid input exit 2, no stdout**, same as missing key argument, to avoid Oracle ambiguity and because no previous data with empty key. Tests **do NOT include "" as valid key** – `test_get_shard_id_uses_md5` keys list no longer contains `""` (was `["user:1", ..., ""]` removed), and new explicit test `test_empty_string_not_legitimate_key` asserts `get-shard-id ""`, `set ""`, `get ""`, `delete ""` all exit 2 with no stdout. Previous failure analysis showing 41/42 for Codex failing only empty-string as valid is now obsolete – after explicit spec that empty is NOT valid, models that exit 2 for "" will **pass** instead of fail, moving discrimination away from ambiguous empty-string edge to harder Turn2 features (weighted, global broadcast, duplicate cleanup, ops.log replay) as intended per TBR note.
-  - Current golden solutions (`steps/1_step_one/solution/solve.sh` and `steps/2_step_two/solution/solve.sh` at commit `c56d79e`) now check `if key=="" { fmt.Fprintln(stderr,"empty key not allowed"); os.Exit(2) }` for all commands requiring key, and tests `test_empty_string_not_legitimate_key` passes (43/43 locally), fixing Oracle 0/3 failure at `0145eb2` where old solution returned exit 0 `1` for empty key but test expected exit 2.
+- **Turn1 (`1_step_one`) is the gate.** Avocado and codex each fail 6/10 trials entirely at Turn1 and never reach Turn2 — the Turn1 surface (weighted MD5 routing, `global:` broadcast, checksum integrity with `SetEscapeHTML(false)`, atomic writes, corruption repair, exact-sorted `list-keys`/`distribution`, ops.log) is enough to block the weaker models ~60% of the time. The 4/10 that clear Turn1 go on to pass Turn2 as well.
 
-- **Codex GPT-5.5 – 3/10 full pass on 8089743 (7 genuine failures, 41/42 Turn1 only) vs 0/10 on 937859b versioned (too hard) vs 1/10 on c2b16f3 loosened:**
-  - **Turn1 failure mode on 8089743 – empty-string sole discriminator (41/42)**: All 7 failures fail only `test_get_shard_id_uses_md5` at empty-string key `""`. CTRF from job `d94ac817` trial `9a34aa37`: `AssertionError: assert 2 == 0 ... get-shard-id requires a key` – agent does `if len(key)==0 { Exit 2 }`, conflating empty-string (provided, len 1 arg value "") with missing arg (0 args) which should exit 2 and is separately tested in `test_missing_key_arg_exit_2` which they pass. After explicit spec that empty is NOT valid (exit 2), those 7 would become 10/10 Turn1 passes, so discrimination must move to other features.
-  - **After fix (c56d79e)**: Turn1 now 43/43 including `test_empty_string_not_legitimate_key` expecting exit 2 – Codex that previously treated "" as invalid (exit 2) now **passes** instead of fails, so Turn1 full pass would be 10/10, too easy. To keep difficulty, we added other hard checks: weighted routing custom config with weights [1,2,1,1] total 5, global broadcast `-1` id + comma-separated paths, ops.log append + corruption skip via `bufio.Scanner`, corruption backup for missing checksum targeting correct hashed shard, atomic source inspection (`CreateTemp`+`Rename`), stdlib via `go list`, etc. – these were already passing for Codex (41/42 other tests passed), so still 10/10 Turn1 after fix → too easy, needs additional Turn1 hardeners (e.g., versioned files, large value 1MB, concurrent writes) to keep Turn1 at ~30% not 100%.
-  - **Turn2 not reached** for 7 failing trials at 8089743 because Turn1 reward 0 blocks Turn2.
+- **Codex GPT-5.5 — 4/10 (mean 0.40):** 4 full pass, 6 fail@Turn1. Failures are Turn1-terminal (reward 0), so Turn2 is not reached in those trials.
 
-- **Avocado Metacode – 4/10 mean 0.45 on 8089743 (was 3/10 +1 partial 0.5, and 2/10 mean 0.25 on 937859b too-hard versioned, and 8/10 easy on b8a5cc1)**:
-  - **Turn1 failures on 8089743**: Same empty-string edge only (41/42) – trial `897a1942` reward 0 fails only that test. After explicit invalid spec, those would become passes, making Turn1 10/10 too easy, so need harder Turn1.
-  - **Turn2 failures (from partial trial `2f693034` reward 0.5 on 8089743)**: After passing Turn1 (42/42), Turn2 shows 18+ failures:
-    - `test_help_required_step2` fails: help text missing `migrate` word – agent implemented Turn1 help with 6 words but Turn2 requires 8+ words including `migrate, legacy, weight, global` and bare no-args help exit 0. Previously `[]` was in test but spec didn't explicitly say bare should be help → caused R02/R03/R08 failures. Now spec explicitly says bare no-args prints help containing required words and exit 0 (both turns), fixing alignment.
-    - `test_proxy_fallback_reads_legacy_before_migration` fails: `get fallback:key1` returns `null` not `{"v":1}` – no legacy fallback.
-    - All migrate tests fail: `unknown command: --legacy` – Turn1 binary used `flag` package stopping at first non-flag, so global flags after subcommand mis-parsed.
-    - **Duplicate cleanup, backup tightening, ops.log replay, force stderr, corrupted shard**: Only reached by agents implementing basic migrate – for avocado full pass trials (e.g., `404640be` but artifact 500 for 8089743), they passed all Turn2 including duplicate cleanup regression that seeds same non-global key in all shards and asserts only correct weighted shard retains after migration with `--force`.
-  - **Why easy → hard progression**: `b8a5cc1` easy 8/10 Avocado (90%) too easy, `a8df89e` extra-hard 0/10 all (0%) too hard with timeouts/harness crash (bad luck metacode harness fail), `937859b` intermediate versioned 2/10 (20%) still too hard for Codex 0/10, `8089743` loosened 4/10 (45%) sweet spot but flagged too easy for Avocado of each step? Actually 4/10 is 40% – for hard expecting 0/k, 40% might be too easy, so we hardened to versioned giving 2/10 (20%) harder, but then "step2 is still too hard" feedback → loosened back to 3/10 (30%) which is balanced.
+- **Avocado Metacode — 4/10 (mean 0.40):** identical shape — 4 full pass, 6 fail@Turn1. This is the discriminating gate and sits in the target band for a `hard` task (passes ≥1, fails ≥1).
 
-- **Claude-Opus-4-8 – 9/10 mean 0.95 on 8089743 (0/10 mean 0.5 on extra-hard a8df89e with many timeouts, 10/10 on c2b16f3 loosened, 10/10 on bffc3a1 rebalance 6/10 Codex too easy)**:
-  - On extra-hard `a8df89e` (version+shard_id+staging+updated_at): Codex 0/10, Claude 0/10 mean 0.5 plus failed jobs, Avocado 0/10 mean 0.35 – 0% too hard, many Opus timeouts from large history 200 + concurrent 15 on 1 CPU + `json.Decoder` infinite loop on corrupt ops.log line `not valid json line` (now fixed to `bufio.Scanner`).
-  - Loosened to `8089743` (removed version/shard_id/staging/updated_at): **Opus 9/10 mean 0.95, Codex 3/10 mean 0.3, Avocado 4/10 mean 0.45** – sweet spot, not too hard, still discriminates, validation passing, total_score 16/18, `is_memorizable=false` (was HIGH).
-  - Opus handles empty-string now correctly per new spec (exits 2), bare help exit 0, config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, checksum without HTML escaping via `SetEscapeHTML(false)` (test `test_checksum_html_escaping` with `<>&` passes – Go must disable escaping, Python uses `separators=(',',':')`), weighted routing (brute-force finds key for each weighted index), global broadcast (`set global:test` replicates to all 4 shards, `get-shard-id` returns -1, `get-shard-path` comma-separated, `delete` from all), ops.log append (3 entries with op,key,ts,shard_id).
+- **Claude-Opus-4-8 — 9/10 (mean 0.95):** clears Turn1 in every trial; 9 full pass, a single Turn2 failure (`2_step_two`). Confirms the task is solvable end-to-end and that difficulty is concentrated at Turn1 for weaker models plus a thin Turn2 tail for the strong model.
 
-- **Oracle – 3/3 (100%) on 8089743, 0/3 on 0145eb2 due to empty-string mismatch, now 43/43 locally on c56d79e after fix**:
-  - At `0145eb2`, oracle failed only `test_empty_string_not_legitimate_key`: got exit 0 `1` for empty key but expected exit 2 per clarified spec that "" NOT valid. Fixed in `c56d79e` where both golden solutions check `if key=="" { exit 2 no stdout }`, now 43/43 locally, should be 3/3 online after next validation (currently pending for c56d79e).
+- **Oracle — 3/3 (mean 1.00):** reference solution deterministic across both turns.
 
-**Why failures reflect reasoning gaps, not setup:**
-- All analyzed failing trials `status=completed`, not `errored`, and `test-stdout.txt` shows clean pytest assertion failures, not Docker build failures or missing pytest (pytest baked via Dockerfile pip, `test.sh` now `set +e` capturing status writes reward even on failure per R09, no `apt-get` update or `curl uv` download during grading).
-- Empty-string now explicitly documented both in Turn1 and Turn2 as NOT legitimate (to avoid Oracle null ambiguity and unstated desire), and tests do NOT include "" as valid key – previously ambiguous discriminator removed, discrimination now moves to Turn2's weighted, global, fallback, duplicate cleanup, log replay which is intended per TBR note about harness crash dirtying results and no real Turn2 failures.
-- Turn2 `unknown command: --legacy` shows real gap in CLI flag parsing (global flags before/after subcommand), not infra.
-- Oracle passes all 42/43 after fixes, proving determinism. The only intentional cross-milestone regression is M2's `list-keys` union with legacy breaks M1's `test_get_all_keys_sorted_exact` when re-running M1 tests after M2 solution – expected for `inherit_prior_session=true` multi-turn story, noted in tbdReview as legitimate evolution, not leakage.
+**Why failures reflect reasoning gaps, not setup:** oracle 3/3 and Opus 9/10 rule out environment/build issues; the weaker-model failures are concentrated at Turn1 completion (routing/checksum/corruption/atomic-write correctness), not infra. The single Opus Turn2 miss is the intended thin tail on the harder migration/self-healing surface.
 
 ## Anti-Cheating Analysis
 
