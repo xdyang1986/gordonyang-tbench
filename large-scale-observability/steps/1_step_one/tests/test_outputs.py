@@ -1485,6 +1485,237 @@ def test_tracing_with_race():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tracing_custom_id_generator():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    type fixedGen struct{}
+    func (f *fixedGen) NewTraceID() string { return "0102030405060708090a0b0c0d0e0f10" }
+    func (f *fixedGen) NewSpanID() string { return "0102030405060708" }
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewSimpleSpanProcessor(exp)
+        gen := &fixedGen{}
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc), observability.WithIDGenerator(gen))
+        _, span := tracer.Start(context.Background(), "fixed")
+        sc := span.SpanContext()
+        if sc.TraceID != "0102030405060708090a0b0c0d0e0f10" { panic("custom traceID not used") }
+        if sc.SpanID != "0102030405060708" { panic("custom spanID not used") }
+        span.End()
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"custom id gen failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_service_name_override():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewSimpleSpanProcessor(exp)
+        tracer := observability.NewTracer("original", observability.WithSpanProcessor(proc), observability.WithServiceName("override"))
+        _, span := tracer.Start(context.Background(), "op")
+        span.End()
+        s := exp.GetSpans()[0]
+        if s.ServiceName != "override" { panic(fmt.Sprintf("expected override got %s", s.ServiceName)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"service name override failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_context_with_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        sc := observability.SpanContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        defer func(){
+            if r:=recover(); r!=nil { panic(fmt.Sprintf("panic on nil ctx: %v", r)) }
+        }()
+        ctx := observability.ContextWithSpanContext(context.Background(), sc)
+        _ = ctx
+        fmt.Println("OK")
+        // Also test that impl should handle nil ctx without panic by returning background
+        // Our new impl should handle nil
+        ctx2 := observability.ContextWithSpanContext(nil, sc)
+        _, ok := observability.SpanContextFromContext(ctx2)
+        if !ok { panic("nil ctx should still produce context with span after fix") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"context nil failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_inject_nil_carrier():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        observability.Inject(context.Background(), nil)
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"inject nil carrier failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_extract_nil_carrier():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        ctx := observability.Extract(nil)
+        _, ok := observability.SpanContextFromContext(ctx)
+        if ok { panic("nil carrier should yield no span") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"extract nil carrier failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_withlabels_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("nil_labels")
+        c.Inc()
+        c2 := prov.Counter("nil_labels2", observability.WithLabels(nil))
+        c2.Inc()
+        fams := prov.Collect()
+        var found bool
+        for _, fam := range fams {
+            if fam.Name=="nil_labels" || fam.Name=="nil_labels2" { found=true }
+        }
+        if !found { panic("nil labels should be treated as empty") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"withlabels nil failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_description():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("desc_counter", observability.WithDescription("number of requests"))
+        c.Inc()
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="desc_counter" {
+                if fam.Help != "number of requests" { panic(fmt.Sprintf("help expected got '%s'", fam.Help)) }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("desc_counter not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"description failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_histogram_unsorted_buckets():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        h := prov.Histogram("unsorted", observability.WithBuckets([]float64{10,1,5}))
+        h.Observe(2)
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="unsorted" {
+                buckets := fam.Metrics[0].Buckets
+                if buckets[0].UpperBound != 1 || buckets[1].UpperBound != 5 || buckets[2].UpperBound != 10 {
+                    panic(fmt.Sprintf("buckets not sorted: %v", buckets))
+                }
+                if buckets[0].Count != 0 || buckets[1].Count != 1 {
+                    panic(fmt.Sprintf("counts wrong: %v", buckets))
+                }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"unsorted buckets failed: {proc.stdout} {proc.stderr}"
+
+def test_logger_with_output_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        logger := observability.NewLogger("svc", observability.WithOutput(nil))
+        logger.Info(context.Background(), "should not panic")
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"logger nil output failed: {proc.stdout} {proc.stderr}"
+
+def test_logger_level_case_insensitive():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "bytes"
+        "context"
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        buf := &bytes.Buffer{}
+        logger := observability.NewLogger("svc", observability.WithOutput(buf), observability.WithLevel("ERROR"))
+        logger.Info(context.Background(), "filtered")
+        logger.Error(context.Background(), "pass")
+        _ = fmt.Sprintf("x")
+        out := strings.TrimSpace(buf.String())
+        if out=="" { panic("error should pass") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"level case insensitive failed: {proc.stdout} {proc.stderr}"
+
 def test_tracing_traceflags():
     code=textwrap.dedent("""
     package main

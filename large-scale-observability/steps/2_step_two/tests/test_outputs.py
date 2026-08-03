@@ -1501,6 +1501,183 @@ def test_tracing_race_with_sampler():
     )
 
 
+def test_sampler_ratio_small_large():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "crypto/rand"
+        "encoding/hex"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func randID() string { b:=make([]byte,16); rand.Read(b); return hex.EncodeToString(b) }
+    func main(){
+        small := observability.NewTraceIDRatioSampler(0.01)
+        large := observability.NewTraceIDRatioSampler(0.99)
+        n:=20000
+        smallCount:=0
+        largeCount:=0
+        for i:=0;i<n;i++{
+            tid := randID()
+            p := observability.SamplingParameters{TraceID:tid, SpanName:"t"}
+            if small.ShouldSample(p)==observability.DecisionRecordAndSample { smallCount++ }
+            if large.ShouldSample(p)==observability.DecisionRecordAndSample { largeCount++ }
+        }
+        sr := float64(smallCount)/float64(n)
+        lr := float64(largeCount)/float64(n)
+        fmt.Printf("small %f large %f\\n", sr, lr)
+        if sr < 0.005 || sr > 0.02 { panic(fmt.Sprintf("small ratio 0.01 out of range %f", sr)) }
+        if lr < 0.97 || lr > 1.0 { panic(fmt.Sprintf("large ratio 0.99 out of range %f", lr)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"small large ratio failed: {proc.stdout} {proc.stderr}"
+
+def test_batch_processor_queue_size_edge():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithQueueSize(1), observability.WithBatchSize(1))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<5;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        // Should not deadlock, exported should be at least 1 and at most 5
+        exported := len(exp.GetSpans())
+        if exported <1 || exported>5 { panic(fmt.Sprintf("edge queue size exported %d", exported)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"queue size edge failed: {proc.stdout} {proc.stderr}"
+
+def test_batch_processor_default_options():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithBatchSize(0), observability.WithQueueSize(0), observability.WithBatchTimeout(0), observability.WithExportTimeout(0))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        _, s := tracer.Start(context.Background(), "op")
+        s.End()
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        if len(exp.GetSpans())!=1 { panic("default options should still work") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"default options failed: {proc.stdout} {proc.stderr}"
+
+def test_batch_processor_error_handling():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    type errExporter struct{
+        count int
+    }
+    func (e *errExporter) ExportSpans(ctx context.Context, spans []observability.ReadableSpan) error {
+        e.count += len(spans)
+        return fmt.Errorf("export error")
+    }
+    func main(){
+        exp := &errExporter{}
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithBatchSize(5), observability.WithQueueSize(100))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<10;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        // Should not panic even though exporter returns error, and count should be 10
+        if exp.count != 10 { panic(fmt.Sprintf("expected count 10 got %d", exp.count)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"error handling failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_histogram_buckets_dedup_sorted():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        // duplicate buckets
+        h := prov.Histogram("dup_buckets", observability.WithBuckets([]float64{5,5,1,10,1}))
+        h.Observe(2)
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="dup_buckets" {
+                // implementation may keep duplicates or dedup, but should be sorted and at least 3 unique?
+                // We check sorted
+                prev := -1.0
+                for _, b := range fam.Metrics[0].Buckets {
+                    if b.UpperBound < prev { panic("buckets not sorted") }
+                    prev = b.UpperBound
+                }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"dup buckets failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_counter_add_nan_inf():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "math"
+        "ride-observability/observability"
+        "fmt"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("nan_counter")
+        c.Add(math.NaN())
+        c.Add(math.Inf(1))
+        c.Add(math.Inf(-1))
+        c.Inc()
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="nan_counter" {
+                if fam.Metrics[0].Value != 1 { panic(fmt.Sprintf("NaN/Inf should be ignored, expected 1 got %f", fam.Metrics[0].Value)) }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"nan inf counter failed: {proc.stdout} {proc.stderr}"
+
 def test_logger_with_nil_context():
     code=textwrap.dedent("""
     package main
