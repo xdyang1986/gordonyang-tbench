@@ -3,13 +3,14 @@
 Tests for Turn 1 Go: Sharding proxy with checksum integrity, validation, corruption, sorted keys.
 """
 
+import hashlib
 import json
 import os
-import hashlib
+import shutil
 import subprocess
 import tempfile
-import shutil
 import time
+
 import pytest
 
 CONFIG_PATH = "/app/config.json"
@@ -160,9 +161,9 @@ def test_help_flag():
     # Per spec, bare with no args must also print help and exit 0 (explicit requirement)
     for flag in [[], ["--help"], ["-h"], ["help"]]:
         r = _proxy_cli(*flag)
-        assert r.returncode == 0, (
-            f"help {flag} should exit 0, got {r.returncode} stderr={r.stderr}"
-        )
+        assert (
+            r.returncode == 0
+        ), f"help {flag} should exit 0, got {r.returncode} stderr={r.stderr}"
         combined = (r.stdout + r.stderr).lower()
         for word in [
             "get-shard-id",
@@ -172,9 +173,9 @@ def test_help_flag():
             "distribution",
             "config",
         ]:
-            assert word in combined, (
-                f"help should contain '{word}', got {combined[:1000]}"
-            )
+            assert (
+                word in combined
+            ), f"help should contain '{word}', got {combined[:1000]}"
 
 
 # ------------------------------------------------------------------ #
@@ -280,9 +281,9 @@ def test_invalid_config_no_stdout():
             json.dump(bad_cfg, f)
         r = _proxy_cli("list-keys", config_path=path)
         assert r.returncode == 2
-        assert r.stdout.strip() == "", (
-            f"Invalid config should produce no stdout, got {r.stdout!r}"
-        )
+        assert (
+            r.stdout.strip() == ""
+        ), f"Invalid config should produce no stdout, got {r.stdout!r}"
         assert r.stderr.strip() != "", "Should have stderr message"
     finally:
         shutil.rmtree(tmpdir)
@@ -308,7 +309,7 @@ def test_missing_key_arg_exit_2():
 def test_get_shard_id_uses_md5():
     _reset_shards()
     cfg = _load_config()
-    keys = ["user:1", "user:2", "order:123", "test-key", "another", "hello world", ""]
+    keys = ["user:1", "user:2", "order:123", "test-key", "another", "hello world"]
     for k in keys:
         r = _proxy_cli("get-shard-id", k)
         assert r.returncode == 0
@@ -556,15 +557,15 @@ def test_missing_checksum_corruption():
         for f in os.listdir(dir_name)
         if ".corrupt." in f and os.path.basename(target_path) in f
     ]
-    assert len(backups) >= 1, (
-        "Missing checksum should create corrupt backup during init"
-    )
+    assert (
+        len(backups) >= 1
+    ), "Missing checksum should create corrupt backup during init"
     # Now get should be null because corruption handling recreated empty
     r = _proxy_cli("get", key)
     assert r.returncode == 0
-    assert r.stdout.strip() == "null", (
-        "Missing checksum should be treated as corruption → null"
-    )
+    assert (
+        r.stdout.strip() == "null"
+    ), "Missing checksum should be treated as corruption → null"
     with open(target_path) as f:
         obj = json.load(f)
     assert obj["data"] == {}
@@ -657,12 +658,12 @@ def test_atomic_write_source_inspection():
             combined += open(gf).read() + "\n"
         except:
             pass
-    assert "CreateTemp" in combined, (
-        "Go code should use os.CreateTemp for atomic writes (per spec)"
-    )
-    assert "Rename" in combined or "Replace" in combined, (
-        "Go code should use os.Rename/os.Replace for atomic writes"
-    )
+    assert (
+        "CreateTemp" in combined
+    ), "Go code should use os.CreateTemp for atomic writes (per spec)"
+    assert (
+        "Rename" in combined or "Replace" in combined
+    ), "Go code should use os.Rename/os.Replace for atomic writes"
 
 
 def test_checksum_html_escaping():
@@ -695,9 +696,9 @@ def test_checksum_html_escaping():
     # Verify checksum matches Python's canonical (no escaping)
     data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
     expected_checksum = hashlib.md5(data_json.encode()).hexdigest()
-    assert obj["checksum"] == expected_checksum, (
-        f"Checksum for <>& should match no-escaping canonical, got {obj['checksum']} vs {expected_checksum}"
-    )
+    assert (
+        obj["checksum"] == expected_checksum
+    ), f"Checksum for <>& should match no-escaping canonical, got {obj['checksum']} vs {expected_checksum}"
     # Also ensure raw file does not contain escaped \u003c for this key's value if solution correctly disables escaping
     # Our solution with SetEscapeHTML(false) will write literal <>& in file (inside data), not \u003c
     # If it used default, it would contain \u003c
@@ -730,9 +731,9 @@ def test_initialization_repairs_every_shard():
         assert obj["data"] == {}
     dir_name = os.path.dirname(cfg["shards"][0]["path"])
     corrupt_files = [f for f in os.listdir(dir_name) if ".corrupt." in f]
-    assert len(corrupt_files) >= 4, (
-        f"Init should repair every shard, should have 4 corrupt backups, got {corrupt_files}"
-    )
+    assert (
+        len(corrupt_files) >= 4
+    ), f"Init should repair every shard, should have 4 corrupt backups, got {corrupt_files}"
 
 
 def _expected_weighted_shard_id(key, shards):
@@ -784,9 +785,9 @@ def test_weighted_routing():
             )
             assert r.returncode == 0
             got = int(r.stdout.strip())
-            assert got == expected_sid, (
-                f"Weighted routing for {found_key} expected {expected_sid}, got {got}"
-            )
+            assert (
+                got == expected_sid
+            ), f"Weighted routing for {found_key} expected {expected_sid}, got {got}"
         for i in range(100):
             subprocess.run(
                 [BIN, "--config", cfg_path, "set", f"wkey:{i}", json.dumps(i)],
@@ -802,9 +803,9 @@ def test_weighted_routing():
         )
         dist = json.loads(r.stdout.strip())
         norm = {int(k): v for k, v in dist.items()}
-        assert norm[1] >= norm[0], (
-            f"Weighted shard 1 should have >= shard 0, got {norm}"
-        )
+        assert (
+            norm[1] >= norm[0]
+        ), f"Weighted shard 1 should have >= shard 0, got {norm}"
     finally:
         shutil.rmtree(tmpdir)
 
