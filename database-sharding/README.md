@@ -44,6 +44,23 @@ Turn1 proxy breaks historical reads. Legacy file `/app/data/legacy.json` old fla
 
 ## Completion Rates
 
+### Latest online validation — commit `c7a0ec4` ("v3 hard, 73 tests, ts-sorted + staging + self-healing"), status: PASSING
+
+Structural 10/10 pass, contamination MEDIUM (passed), provenance CLEAN. Agentic-review 1/1 pass.
+
+| Gate | Model | Full pass | Mean reward | `firstFailedStep` breakdown |
+|------|-------|-----------|-------------|-----------------------------|
+| Oracle | oracle | 3/3 (100%) | 1.00 | 3 PASS |
+| Metacode | meta/avocado-5.14-code | 4/10 (40%) | 0.40 | 4 PASS, **6 fail@Turn1** |
+| Agent | claude-opus-4-8 | 9/10 (90%) | 0.95 | 9 PASS, 1 fail@Turn2 |
+| Codex | gpt-5.5 | 4/10 (40%) | 0.40 | 4 PASS, **6 fail@Turn1** |
+
+**Turn1 is the discriminator.** Both weaker gates (avocado and codex) land at exactly 4/10, and *all* 6 of each one's failures occur at Turn1 (`1_step_one`) — they never reach Turn2. Opus clears Turn1 reliably and passes Turn2 in 9/10 trials (single Turn2 failure). This is a well-calibrated hard result: avocado/codex at 40% sits in the target band (pass ≥1, fail ≥1), while Opus at 90% confirms the task is solvable end-to-end. Historical aggregate: avgReward **0.484** over **1613** trials (spans all commits below).
+
+> **Freshness note:** current HEAD (`2e35703`) is the **v4 / 83-test** version (`a86c539` "v4 hard 83 tests with self-healing + staging + ts-sorted + large ops.log", + task.toml update). The v4 commits have **not been validated online yet** — the latest validated commit is `c7a0ec4` (v3 / 73 tests). The table above reflects `c7a0ec4`; the progression below is prior history.
+
+### Prior progression
+
 Online validation progression showing difficulty tuning from too easy to too hard to sweet spot, based on `codimango api jobs list database-sharding` and `codimango api tasks show`:
 
 - **b8a5cc1 initial simple Go (20 tests, flat JSON)**: Avocado 8/10 (90%) mean 0.9 too easy, Codex 4/10 (70%) – too easy for `hard`.
