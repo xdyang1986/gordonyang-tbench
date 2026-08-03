@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Turn2 HARD enhanced: versioned integrity (shard_id+version+checksum), weighted, broadcast, fallback, duplicate cleanup, ops.log replay with version, empty string valid, large value, backup tightening
+# Turn2 HARD easier: versioned integrity (shard_id+version+checksum), weighted, broadcast, fallback, duplicate cleanup, ops.log replay file order, empty valid, large value, backup tightening – no tricky staging/self-healing/large buffer/ts-sorted
 
 cat > /app/go.mod << 'GO'
 module sharding
@@ -195,7 +195,6 @@ func readShardFileWithMeta(path string, expectedShardID int) (map[string]interfa
 		if sf.Data == nil {
 			sf.Data = map[string]interface{}{}
 		}
-		// shard_id validation if present
 		if _, hasSid := raw["shard_id"]; hasSid {
 			if sf.ShardID == nil {
 				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
@@ -211,7 +210,6 @@ func readShardFileWithMeta(path string, expectedShardID int) (map[string]interfa
 				_ = atomicWrite(path, map[string]interface{}{}, expectedShardID, 0)
 				return map[string]interface{}{}, 0, nil
 			}
-			// when shard_id present, version must be present and >=0
 			if _, hasVer := raw["version"]; !hasVer {
 				backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 				_ = copyFile(path, backupPath)
@@ -227,7 +225,6 @@ func readShardFileWithMeta(path string, expectedShardID int) (map[string]interfa
 				return map[string]interface{}{}, 0, nil
 			}
 		}
-		// checksum required when data field present
 		if _, hasCs := raw["checksum"]; !hasCs {
 			backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
 			_ = copyFile(path, backupPath)
@@ -256,7 +253,6 @@ func readShardFileWithMeta(path string, expectedShardID int) (map[string]interfa
 		}
 		return sf.Data, ver, nil
 	}
-	// old flat format
 	return raw, 0, nil
 }
 
@@ -435,17 +431,6 @@ func (p *ShardingProxy) Set(key string, value interface{}) error {
 		return err
 	}
 	_ = appendOpsLog(p.OpsLogPath, "set", key, value, sid, ver+1)
-	// Self-healing: clean up duplicate/misplaced copies in other shards (harder)
-	for _, s := range p.Config.Shards {
-		if s.ID == sid {
-			continue
-		}
-		otherM, otherVer, _ := readShardFileWithMeta(s.Path, s.ID)
-		if _, ok := otherM[key]; ok {
-			delete(otherM, key)
-			_ = atomicWrite(s.Path, otherM, s.ID, otherVer+1)
-		}
-	}
 	return nil
 }
 
@@ -465,23 +450,21 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 		}
 		return deleted, nil
 	}
-	// For normal keys, delete from all shards to clean duplicates (harder self-healing)
-	deleted := false
-	sid := p.GetShardID(key)
-	for _, s := range p.Config.Shards {
-		m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
-		if _, ok := m[key]; ok {
-			delete(m, key)
-			if err := atomicWrite(s.Path, m, s.ID, ver+1); err != nil {
-				return false, err
-			}
-			if s.ID == sid {
-				_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, sid, ver+1)
-			}
-			deleted = true
-		}
+	path, err := p.GetShardPath(key)
+	if err != nil {
+		return false, err
 	}
-	return deleted, nil
+	sid := p.GetShardID(key)
+	m, ver, _ := readShardFileWithMeta(path, sid)
+	if _, ok := m[key]; ok {
+		delete(m, key)
+		if err := atomicWrite(path, m, sid, ver+1); err != nil {
+			return false, err
+		}
+		_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, sid, ver+1)
+		return true, nil
+	}
+	return false, nil
 }
 
 func (p *ShardingProxy) GetAllKeys() ([]string, error) {
@@ -582,7 +565,6 @@ func readOpsLog(logPath string) ([]map[string]interface{}, error) {
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
-	// increase buffer for large lines (1MB+ values)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 	entries := []map[string]interface{}{}
@@ -631,46 +613,6 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 		fmt.Fprintf(os.Stderr, "Failed to read ops.log %s: %v\n", opsLogPath, err)
 		opsEntries = []map[string]interface{}{}
 	}
-	// Sort ops.log entries by ts ascending, stable for equal ts (harder)
-	// Parse ts as int64 from float64/int/json number
-	type entryWithIdx struct {
-		e   map[string]interface{}
-		idx int
-		ts  int64
-	}
-	tmp := make([]entryWithIdx, 0, len(opsEntries))
-	for i, e := range opsEntries {
-		var ts int64
-		if v, ok := e["ts"]; ok {
-			switch vt := v.(type) {
-			case float64:
-				ts = int64(vt)
-			case int:
-				ts = int64(vt)
-			case int64:
-				ts = vt
-			case json.Number:
-				if iv, err := vt.Int64(); err == nil {
-					ts = iv
-				}
-			default:
-				ts = 0
-			}
-		}
-		tmp = append(tmp, entryWithIdx{e: e, idx: i, ts: ts})
-	}
-	sort.SliceStable(tmp, func(i, j int) bool {
-		if tmp[i].ts == tmp[j].ts {
-			return tmp[i].idx < tmp[j].idx
-		}
-		return tmp[i].ts < tmp[j].ts
-	})
-	// Rebuild sorted
-	sortedEntries := make([]map[string]interface{}, 0, len(tmp))
-	for _, t := range tmp {
-		sortedEntries = append(sortedEntries, t.e)
-	}
-	opsEntries = sortedEntries
 
 	currentData := make(map[int]map[string]interface{})
 	currentVersions := make(map[int]int)
@@ -789,14 +731,7 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 		}
 	}
 
-	// Create staging directory for two-phase migration (harder)
-	stagingDir := "/app/data/staging"
-	if err := os.MkdirAll(stagingDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create staging dir: %v\n", err)
-		return err
-	}
-
-	// grouped batched atomic writes with version increment and staging
+	// grouped batched atomic writes with version increment
 	for sid := 0; sid < cfg.ShardCount; sid++ {
 		shardPath, ok := idToPath[sid]
 		if !ok {
@@ -841,18 +776,12 @@ func migrate(legacyPath, configPath, opsLogPath string, dryRun bool, backupPath 
 			fmt.Printf("Shard %d already up-to-date (%d legacy keys) version %d shard_id %d\n", sid, len(legacyGrouped[sid]), currentVersions[sid], sid)
 			continue
 		}
-		// Two-phase: write to staging first, then final (harder)
-		stagingPath := filepath.Join(stagingDir, fmt.Sprintf("shard_%d.json", sid))
-		if err := atomicWrite(stagingPath, base, sid, currentVersions[sid]+1); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to write staging shard %d: %v\n", sid, err)
-			return err
-		}
 		if err := atomicWrite(shardPath, base, sid, currentVersions[sid]+1); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write shard %d: %v\n", sid, err)
 			return err
 		}
 		if changed || len(legacyGrouped[sid]) > 0 {
-			fmt.Printf("Migrated %d legacy keys to shard %d version %d shard_id %d checksum staging\n", len(legacyGrouped[sid]), sid, currentVersions[sid]+1, sid)
+			fmt.Printf("Migrated %d legacy keys to shard %d version %d shard_id %d checksum\n", len(legacyGrouped[sid]), sid, currentVersions[sid]+1, sid)
 		}
 		currentData[sid] = base
 		currentVersions[sid] = currentVersions[sid] + 1
@@ -945,33 +874,31 @@ func printHelp() {
   proxy --config /app/config.json [--legacy /app/data/legacy.json] [--ops-log /app/data/ops.log] <command> [args]
 
 Commands:
-  get-shard-id <key>          -1 for global: broadcast, supports empty string "" valid (MD5 d41d8cd98f00b204e9800998ecf8427e7) weighted
-  get-shard-path <key>        comma-separated for global: sorted by id weight
+  get-shard-id <key>          -1 for global: broadcast, supports empty string "" valid (MD5 d41d8cd98f00b204e9800998ecf8427e7)
+  get-shard-path <key>        comma-separated for global: sorted by id
   get <key>                   JSON value or null, fallback to legacy, empty string valid
-  set <key> <value_json>      set, raw string if not JSON, replicates if global:, appends ops.log with version, increments version, shard_id, self-healing cleans wrong shard duplicates
-  delete <key>                true/false, deletes from all shards to clean duplicates, deletes from all if global:, increments version, appends ops.log with version
-  list-keys                   sorted union of shards + legacy, deduped lexicographically, reads all shards triggers repair, empty string sorted first
+  set <key> <value_json>      set, raw string if not JSON, replicates if global:, appends ops.log with version, increments version, shard_id
+  delete <key>                true/false, deletes from all if global:, increments version, appends ops.log with version
+  list-keys                   sorted union of shards + legacy, deduped lexicographically, reads all shards triggers repair
   distribution                JSON map shard_id->count including zeros, counts broadcast keys
-  ops-log                     prints ops.log JSON array with version, sorted by ts, skips corrupt invalid lines with warning
-  migrate [--dry-run] [--backup path] [--force]  migrates legacy, cleans duplicate/wrong-shard, replays ops.log sorted by ts timestamp, versioned format shard_id+version+checksum, staging dir /app/data/staging two-phase
+  ops-log                     prints ops.log JSON array with version, skips corrupt invalid lines with warning
+  migrate [--dry-run] [--backup path] [--force]  migrates legacy, cleans duplicate/wrong-shard, replays ops.log file order, versioned format shard_id+version+checksum
 Flags:
   --config string (default /app/config.json) shard_count, shards with id, path, weight>0
   --legacy string (default /app/data/legacy.json) old flat format dict
-  --ops-log string (default /app/data/ops.log) transaction log JSON lines with version, shard_id, ts sorted ascending
+  --ops-log string (default /app/data/ops.log) transaction log JSON lines with version, shard_id, ts
   --help -h help
   weight per shard via config weight field, default 1, must be >0 if present, totalWeight sum
-  global: prefix for broadcast keys replicated to all shards weight
+  global: prefix for broadcast keys replicated to all shards
   ops.log at /app/data/ops.log with version field, shard_id, op, key, value, ts
   checksum integrity without HTML escaping: SetEscapeHTML(false), sorted keys, separators (,:)
-  dry-run prints plan with total, per-shard, misplaced, dup, ops count, version, shard_id, checksum, cleanup, staging
+  dry-run prints plan with total, per-shard, misplaced, dup, ops count, version, shard_id, checksum, cleanup
   backup creates legacy backup and each modified shard .bak and ops.log.bak
   force overwrites existing keys logging Overwriting key 'X' in shard Y to stderr
   version increments on each set/delete/migration/replay, shard_id must match config, version >=0
   shard_id field must equal expected id, else corruption backup .corrupt.<nanosec>
   checksum md5 hex of canonical data JSON without HTML escaping
   empty string "" is valid key hashed via MD5, not missing arg
-  staging dir /app/data/staging for two-phase migration
-  timestamp sorted replay by ts stable file order tie-breaker
 `)
 }
 
@@ -1042,9 +969,7 @@ func main() {
 			a := cmdArgs[i]
 			if strings.HasPrefix(a, "--") {
 				if a == "--dry-run" || a == "--force" {
-					// known
 				} else if strings.HasPrefix(a, "--backup=") {
-					// known
 				} else if a == "--backup" {
 					if i+1 < len(cmdArgs) {
 						i++
