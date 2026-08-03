@@ -396,6 +396,7 @@ func (b *batchSpanProcessor) QueueLen() int { return 0 }
 GO
 
 cat > /app/observability/metrics.go <<'GO'
+
 package observability
 
 import (

@@ -865,54 +865,40 @@ func (b *batchSpanProcessor) OnEnd(span ReadableSpan) {
 }
 
 func (b *batchSpanProcessor) ForceFlush(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		// flush batch
-		b.mu.Lock()
-		if len(b.batch) > 0 {
-			batchCopy := b.batch
-			b.batch = make([]ReadableSpan, 0, b.batchSize)
-			b.mu.Unlock()
-			b.exportWithTimeout(batchCopy)
+	// Export any pending batch first
+	b.mu.Lock()
+	if len(b.batch) > 0 {
+		bc := b.batch
+		b.batch = make([]ReadableSpan, 0, b.batchSize)
+		b.mu.Unlock()
+		b.exportWithTimeout(bc)
+	} else {
+		b.mu.Unlock()
+	}
+
+	// Wait for queue to be drained by background goroutine, periodically flushing batch
+	for {
+		if b.QueueLen() == 0 {
 			b.mu.Lock()
-		}
-		// drain queue
-		var toExport []ReadableSpan
-		for {
-			select {
-			case span := <-b.queue:
-				toExport = append(toExport, span)
-				if len(toExport) >= b.batchSize {
-					b.mu.Unlock()
-					b.exportWithTimeout(toExport)
-					toExport = nil
-					b.mu.Lock()
-				}
-			default:
-				goto drainDone
+			if len(b.batch) == 0 && b.QueueLen() == 0 {
+				b.mu.Unlock()
+				return nil
 			}
-		}
-	drainDone:
-		if len(toExport) > 0 {
+			if len(b.batch) > 0 {
+				bc := b.batch
+				b.batch = make([]ReadableSpan, 0, b.batchSize)
+				b.mu.Unlock()
+				b.exportWithTimeout(bc)
+				continue
+			}
 			b.mu.Unlock()
-			b.exportWithTimeout(toExport)
-			b.mu.Lock()
+			return nil
 		}
-		if len(b.batch) > 0 {
-			bc := b.batch
-			b.batch = nil
-			b.mu.Unlock()
-			b.exportWithTimeout(bc)
-		} else {
-			b.mu.Unlock()
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -1752,4 +1738,5 @@ cat > /app/observability/doc.go <<'GO'
 package observability
 GO
 
+echo "Solution applied"
 cd /app && go mod tidy && go build ./... && go vet ./...
