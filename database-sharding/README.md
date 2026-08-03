@@ -4,7 +4,7 @@
 
 This is a **two-turn** Terminal-Bench task simulating a real production incident where a single DB is outgrown and a quick sharding attempt forgets existing data.
 
-**Turn 1 – 50 tests – Sharding Proxy with Integrity, Validation, Corruption Repair, Weighted Routing, Broadcast, Self-Healing, Ops Log, Large Value (Hard, silent on empty-string to avoid Oracle-null ambiguity):**
+**Turn 1 – 62 tests – Sharding Proxy with Integrity, Validation, Corruption Repair, Weighted Routing, Broadcast, Self-Healing, Ops Log, Large Value, Config Validation (Hard, silent on empty-string to avoid Oracle-null ambiguity, 50→62 after removing empty):**
 Traffic outgrown single DB, 4 shards provisioned in `/app/config.json` with optional `weight` (default 1 if missing, weight<=0 if present → invalid config exit 2). For Turn1, use **weighted MD5** `shard_id = MD5(key) big-endian % totalWeight` where totalWeight = sum(weights) iterating shards sorted by ID subtracting weight (not simple mod for hard). Special **broadcast keys** prefixed `global:` must be replicated to **all shards** (`get-shard-id` returns -1, `get-shard-path` returns comma-separated sorted paths, `set` writes to all, `get` checks all in id order first-found, `delete` deletes from all). Shard files use **checksum integrity format** `{"data":{...},"checksum":md5_hex(canonical)}` where canonical is **sorted keys, no spaces, without HTML escaping**: Python `json.dumps(data, sort_keys=True, separators=(',', ':'))` must match Go `json.Marshal` with `SetEscapeHTML(false)` disabled. Atomic writes via `os.CreateTemp` in same dir + `os.Rename` (source-inspected, plus `SetEscapeHTML`), corruption handling (invalid JSON, checksum mismatch, **missing checksum** → backup `<path>.corrupt.<nanosec>` + stderr warning containing corrupt/checksum, recreate empty), sorted exact `list-keys` (deduplicated lexicographically, reads all shards triggers repair of every shard), distribution including zero counts (explicit 4 keys, counts include broadcast keys), raw-string handling (invalid JSON value stored as string), transaction log `/app/data/ops.log` append-only with version/shard_id/ts, `ops-log` command skips invalid lines with warning using `bufio.Scanner` with 10MB buffer (not `json.Decoder` which can infinite loop). **Self-healing**: `set` for normal key after writing to correct weighted shard must clean duplicate/misplaced copies in other shards, `delete` for normal must delete from all shards where exists. **Large value**: 100KB string via set/get atomically. **Help**: bare proxy with no args must print help containing `get-shard-id,set,get,delete,list-keys,distribution,config,global,weight,ops.log,version,checksum,staging` and exit 0, as must `--help`/`-h`/`help`; unknown command → exit 2. Config validation exit 2 no stdout for duplicate id, empty path, negative id, id>=count, weight<=0, missing shard_count, invalid json, missing file. **Empty string handling for Turn1: silent on empty-string edge to avoid Oracle-null ambiguity – empty `""` is NOT tested explicitly** (no test for `""` as valid nor invalid), so implementations may treat it as valid hash or invalid exit 2 and still pass Turn1.
 
 **Turn 2 – 83 tests – Robust Legacy Migration with Weighted, Broadcast, Fallback, Versioned Integrity, Timestamp-Sorted Replay, Staging, Self-Healing:**
@@ -39,16 +39,16 @@ Latest fully validated online — commit `c7a0ec40` (v3 hard, 73 tests, ts-sorte
 | Agent | claude-opus-4-8 | 9/10 (90%) | 0.95 |
 | Codex | gpt-5.5 | 4/10 (40%) | 0.40 |
 
-Turn1 was the discriminator (6 fail@Turn1 for avocado and codex). Current HEAD is **v4 83 tests for Turn2 + 50 tests for Turn1 after removing empty ambiguous (silent on empty)**:
-- Turn1 50 tests: weighted, global, checksum, corruption, self-healing set/delete cleans duplicates, large 100KB, distribution zeros+global, list-keys sorted with global, ops.log version/shard_id/ts big buffer, help with version,checksum,staging, no empty-string test
+Turn1 was the discriminator (6 fail@Turn1 for avocado and codex). Current HEAD is **v4 83 tests for Turn2 + 62 tests for Turn1 after removing empty ambiguous (silent on empty, 42→50→62)**:
+- Turn1 62 tests: weighted, global, checksum, corruption, self-healing set cleans wrong shard delete cleans all shards, large 100KB, distribution zeros+global and after delete, list-keys sorted exact with global, ops.log version/shard_id/ts big buffer 10MB skips invalid, help with version,checksum,staging,timestamp,ts, config validation duplicate id empty path negative id id>=count weight<=0 missing shard_count invalid json missing file no stdout unknown command missing key arg, no empty-string test to fix ambiguous
 - Turn2 83 tests: versioned integrity shard_id+version, ts-sorted replay later-ts wins, staging two-phase, self-healing, large ops.log 100KB big buffer, empty in list-keys sorted first for step2 valid MD5 d41d8cd98f00b204e9800998ecf8427e7, etc.
 
 Current HEAD has been validated locally:
-- Step1: **50/50 PASS** with golden solution (weighted, global, self-healing, large value, empty silent)
+- Step1: **62/62 PASS** with golden solution (weighted, global, self-healing, large value, empty silent)
 - Step2: **83/83 PASS** with golden solution (versioned, ts-sorted, staging, self-healing, large ops.log)
 - Combined multi-turn OK
 
-The v4 83-test version adds material hardening (43→83 tests, staging, ts-sorted, self-healing, large ops.log) over v3 73 tests, expected to bring Opus down from 9/10 toward 4-5/10 target for hard.
+The v4 83-test version adds material hardening (43→83 tests, staging, ts-sorted, self-healing, large ops.log) over v3 73 tests, expected to bring Opus down from 9/10 toward 4-5/10 target for hard, and Turn1 42→62 adds self-healing and large value and strict validation to fix too easy after removing empty.
 
 ## Model Analysis
 

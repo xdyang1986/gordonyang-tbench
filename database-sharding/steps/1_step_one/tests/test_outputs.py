@@ -903,3 +903,172 @@ def test_global_broadcast_distribution_counts():
     norm = {int(k): v for k, v in dist.items()}
     for v in norm.values():
         assert v >= 1
+
+
+def test_set_missing_value_arg_exit_2():
+    _reset_shards()
+    r = _proxy_cli("set", "only-key")
+    assert r.returncode == 2
+    assert r.stdout.strip() == ""
+
+
+def test_get_shard_id_global_returns_minus1():
+    _reset_shards()
+    r = _proxy_cli("get-shard-id", "global:anything")
+    assert r.returncode == 0
+    assert int(r.stdout.strip()) == -1
+
+
+def test_get_shard_path_global_returns_comma_sorted():
+    _reset_shards()
+    cfg = _load_config()
+    r = _proxy_cli("get-shard-path", "global:test")
+    assert r.returncode == 0
+    paths = r.stdout.strip().split(",")
+    assert len(paths) == cfg["shard_count"]
+    # Sorted by id
+    expected_ids = sorted([s["id"] for s in cfg["shards"]])
+    expected_paths = [
+        next(s["path"] for s in cfg["shards"] if s["id"] == eid) for eid in expected_ids
+    ]
+    assert paths == expected_paths
+
+
+def test_set_global_then_get_and_distribution():
+    _reset_shards()
+    cfg = _load_config()
+    _proxy_cli("set", "global:myglobal", json.dumps({"x": 1}))
+    r = _proxy_cli("get", "global:myglobal")
+    assert json.loads(r.stdout.strip()) == {"x": 1}
+    r = _proxy_cli("distribution")
+    dist = json.loads(r.stdout.strip())
+    norm = {int(k): v for k, v in dist.items()}
+    for sid in range(cfg["shard_count"]):
+        assert norm[sid] >= 1
+        data = _load_shard_data([s["path"] for s in cfg["shards"] if s["id"] == sid][0])
+        assert "global:myglobal" in data
+
+
+def test_delete_global_and_distribution():
+    _reset_shards()
+    _proxy_cli("set", "global:todelete", json.dumps("v"))
+    r = _proxy_cli("delete", "global:todelete")
+    assert r.stdout.strip() == "true"
+    cfg = _load_config()
+    for s in cfg["shards"]:
+        assert "global:todelete" not in _load_shard_data(s["path"])
+
+
+def test_distribution_after_deletes_includes_zeros():
+    _reset_shards()
+    cfg = _load_config()
+
+    # Set 1 key in shard 0 only
+    def find_key(sid):
+        for i in range(5000):
+            k = f"zero-test-{i}"
+            if _expected_shard_id(k, cfg["shard_count"]) == sid:
+                return k
+        return None
+
+    k0 = find_key(0)
+    assert k0
+    _proxy_cli("set", k0, json.dumps(1))
+    _proxy_cli("delete", k0)
+    r = _proxy_cli("distribution")
+    dist = json.loads(r.stdout.strip())
+    norm = {int(k): v for k, v in dist.items()}
+    assert len(norm) == cfg["shard_count"]
+    for sid in range(cfg["shard_count"]):
+        assert sid in norm
+
+
+def test_ops_log_replay_with_large_value():
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    open(ops_path, "w").write("")
+    large_val = "Y" * (100 * 1024)
+    _proxy_cli("set", "large-ops-step1", json.dumps(large_val))
+    # Verify ops.log has large line and version
+    lines = [l for l in open(ops_path).read().splitlines() if l.strip()]
+    assert len(lines) >= 1
+    entry = json.loads(lines[-1])
+    assert "version" in entry and "shard_id" in entry
+    r = _proxy_cli("ops-log")
+    assert r.returncode == 0
+    arr = json.loads(r.stdout.strip())
+    assert any(e.get("key") == "large-ops-step1" for e in arr)
+
+
+def test_list_keys_after_set_and_delete_and_migration():
+    _reset_shards()
+    keys = [f"lk:{i}" for i in range(5)]
+    for k in keys:
+        _proxy_cli("set", k, json.dumps(1))
+    _proxy_cli("delete", keys[0])
+    _proxy_cli("delete", keys[1])
+    r = _proxy_cli("list-keys")
+    got = json.loads(r.stdout.strip())
+    assert keys[0] not in got and keys[1] not in got
+    assert got == sorted(got)
+    for k in keys[2:]:
+        assert k in got
+
+
+def test_persistence_with_html_escaping_and_large_combined():
+    _reset_shards()
+    special = "<script>alert('&')</script>" + "Z" * 1024
+    r = _proxy_cli("set", "html-large", json.dumps(special))
+    assert r.returncode == 0
+    r = _proxy_cli("get", "html-large")
+    assert json.loads(r.stdout.strip()) == special
+    cfg = _load_config()
+    sid = _expected_shard_id("html-large", cfg["shard_count"])
+    path = [s["path"] for s in cfg["shards"] if s["id"] == sid][0]
+    raw = open(path).read()
+    assert "<" in raw  # No HTML escaping
+    obj = _load_shard_full(path)
+    assert obj["data"]["html-large"] == special
+
+
+def test_initialization_repairs_every_shard_with_corrupt_count_4():
+    _reset_shards()
+    cfg = _load_config()
+    for s in cfg["shards"]:
+        with open(s["path"], "w") as f:
+            f.write("{corrupted json")
+    r = _proxy_cli("list-keys")
+    assert r.returncode == 0
+    dir_name = os.path.dirname(cfg["shards"][0]["path"])
+    corrupt_files = [f for f in os.listdir(dir_name) if ".corrupt." in f]
+    assert len(corrupt_files) >= 4
+    for s in cfg["shards"]:
+        assert _load_shard_data(s["path"]) == {}
+
+
+def test_set_overwrites_preserves_other_keys():
+    _reset_shards()
+    _proxy_cli("set", "k1", json.dumps(1))
+    _proxy_cli("set", "k2", json.dumps(2))
+    _proxy_cli("set", "k1", json.dumps(3))
+    r = _proxy_cli("get", "k1")
+    assert json.loads(r.stdout.strip()) == 3
+    r = _proxy_cli("get", "k2")
+    assert json.loads(r.stdout.strip()) == 2
+
+
+def test_help_contains_timestamp_ts_and_version():
+    _reset_shards()
+    r = _proxy_cli("--help")
+    assert r.returncode == 0
+    combined = (r.stdout + r.stderr).lower()
+    for word in [
+        "timestamp",
+        "ts",
+        "version",
+        "checksum",
+        "staging",
+        "weight",
+        "global",
+    ]:
+        assert word in combined, f"Help should contain {word}"

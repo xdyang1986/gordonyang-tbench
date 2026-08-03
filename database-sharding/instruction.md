@@ -4,7 +4,7 @@ This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go w
 
 ## Overview
 
-- **Turn 1 (1_step_one, 50 tests, inherits none):** Implement Go proxy at `/app/` (module `sharding`) with weighted MD5 sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum file format `{"data":...,"checksum":...}` without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log` with version/shard_id/ts, atomic writes via `CreateTemp`+`Rename`, self-healing set cleans wrong shards and delete cleans all shards, large 100KB value handling, help bare no-args containing version,checksum,staging. Turn1 is silent on empty-string edge to avoid Oracle-null ambiguity (no explicit test for `""`).
+- **Turn 1 (1_step_one, 62 tests, inherits none):** Implement Go proxy at `/app/` (module `sharding`) with weighted MD5 sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum file format `{"data":...,"checksum":...}` without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<nanosec>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log` with version/shard_id/ts, atomic writes via `CreateTemp`+`Rename`, self-healing set cleans wrong shards and delete cleans all shards, large 100KB value handling, help bare no-args containing version,checksum,staging. Turn1 is silent on empty-string edge to avoid Oracle-null ambiguity (no explicit test for `""`).
 
   See full spec: `steps/1_step_one/instruction.md`
 
@@ -38,7 +38,7 @@ Commit `c7a0ec40` (v3 73 tests) was last fully validated:
 - Avocado 4/10 40% mean 0.4 (6 fail@Turn1)
 - Codex 4/10 40% mean 0.4 (6 fail@Turn1)
 
-Current HEAD (v4 83 tests + v3 50 tests, Turn1 silent on empty) has 50 and 83 tests locally passing 50/50 and 83/83, combined multi-turn OK. It adds timestamp-sorted ops.log replay, staging two-phase, self-healing set/delete, large ops.log 100KB requiring big buffer, empty handling silent for Turn1 to fix ambiguous.
+Current HEAD (v4 83 tests + v3 62 tests, Turn1 silent on empty) has 62 and 83 tests locally passing 62/62 and 83/83, combined multi-turn OK. It adds timestamp-sorted ops.log replay, staging two-phase, self-healing set/delete, large ops.log 100KB requiring big buffer, empty handling silent for Turn1 to fix ambiguous, more config validation and large value and distribution checks for Turn1 hard.
 
 ## Commands
 
