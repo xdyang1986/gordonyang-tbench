@@ -1,0 +1,66 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/large-scale-observability"
+description = "Multi-turn Go observability for ride-hailing (like Uber): Step1 builds core tracing with W3C-style propagation, metrics (counter/gauge/histogram) and structured contextual logging with design quality (thread-safety, interfaces, context propagation). Step2 hardens for large scale — TraceID ratio & parent-based sampling, async BatchSpanProcessor with queue/backpressure/shutdown, metrics cardinality limiting with overflow handling, high-concurrency correctness, and resource limits. Graded via black-box Go harnesses exercising the observability package API under concurrency and scale."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "observability", "tracing", "metrics", "logging", "sampling", "batch", "scalability", "uber", "ride-sharing"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "implement_new_feature"
+category_subdomain = "distributed_systems"
+tags = ["iterate_on_feature", "go", "observability", "tracing", "metrics", "logging", "distributed-systems", "sampling", "scalability"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 90
+junior_time_estimate_min = 180
+languages = ["go"]
+reward_type = "binary"
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1200.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 20480
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
