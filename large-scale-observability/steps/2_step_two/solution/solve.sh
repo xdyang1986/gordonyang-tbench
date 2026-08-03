@@ -1752,5 +1752,4 @@ cat > /app/observability/doc.go <<'GO'
 package observability
 GO
 
-echo "Solution applied"
 cd /app && go mod tidy && go build ./... && go vet ./...
