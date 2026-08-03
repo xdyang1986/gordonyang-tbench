@@ -261,9 +261,15 @@ func WithParent(sc SpanContext) SpanStartOption {
 type spanContextKey struct{}
 
 func ContextWithSpanContext(ctx context.Context, sc SpanContext) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return context.WithValue(ctx, spanContextKey{}, sc)
 }
 func SpanContextFromContext(ctx context.Context) (SpanContext, bool) {
+	if ctx == nil {
+		return SpanContext{}, false
+	}
 	sc, ok := ctx.Value(spanContextKey{}).(SpanContext)
 	return sc, ok
 }
@@ -405,6 +411,9 @@ func NewTracer(serviceName string, opts ...TracerOption) Tracer {
 	}
 	// apply options
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(cfg)
 	}
 	if cfg.serviceName == "" {
@@ -452,6 +461,9 @@ func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOp
 		kind: SpanKindInternal,
 	}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(cfg)
 	}
 	// determine parent
@@ -709,6 +721,9 @@ func NewBatchSpanProcessor(exporter SpanExporter, opts ...BatchSpanProcessorOpti
 		exportTimeout: 30 * time.Second,
 	}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(cfg)
 	}
 	if cfg.batchSize <= 0 {
@@ -937,10 +952,15 @@ cat > /app/observability/metrics.go <<'GO'
 package observability
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"sync"
 )
+
+func isNaNOrInf(f float64) bool {
+	return math.IsNaN(f) || math.IsInf(f, 0)
+}
 
 // Interfaces
 type Counter interface {
@@ -1080,7 +1100,7 @@ func (c *counterImpl) Inc() {
 	c.mu.Unlock()
 }
 func (c *counterImpl) Add(delta float64) {
-	if delta < 0 {
+	if delta < 0 || isNaNOrInf(delta) {
 		return
 	}
 	c.mu.Lock()
@@ -1150,11 +1170,13 @@ func newHistogramImpl(labels map[string]string, buckets []float64) *histogramImp
 	}
 }
 func (h *histogramImpl) Observe(v float64) {
+	if isNaNOrInf(v) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.count++
 	h.sum += v
-	// cumulative count: increment all buckets where v <= upperBound
 	for i, ub := range h.buckets {
 		if v <= ub {
 			h.bucketCounts[i]++
@@ -1241,6 +1263,9 @@ func NewMetricsProvider(opts ...MetricsProviderOption) MetricsProvider {
 		overflowMode:   "drop",
 	}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(cfg)
 	}
 	if cfg.overflowMode != "aggregate" {
@@ -1265,6 +1290,9 @@ func (p *metricsProvider) Counter(name string, opts ...MetricOption) Counter {
 	}
 	desc := &metricDesc{}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(desc)
 	}
 	labels := desc.labels
@@ -1336,6 +1364,9 @@ func (p *metricsProvider) Gauge(name string, opts ...MetricOption) Gauge {
 	}
 	desc := &metricDesc{}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(desc)
 	}
 	labels := desc.labels
@@ -1396,6 +1427,9 @@ func (p *metricsProvider) Histogram(name string, opts ...MetricOption) Histogram
 	}
 	desc := &metricDesc{}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(desc)
 	}
 	labels := desc.labels
@@ -1628,6 +1662,9 @@ func NewLogger(serviceName string, opts ...LoggerOption) Logger {
 		level:  "info",
 	}
 	for _, o := range opts {
+		if o == nil {
+			continue
+		}
 		o(cfg)
 	}
 	if cfg.output == nil {
