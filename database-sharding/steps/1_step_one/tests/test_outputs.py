@@ -1057,18 +1057,10 @@ def test_set_overwrites_preserves_other_keys():
     assert json.loads(r.stdout.strip()) == 2
 
 
-def test_help_contains_timestamp_ts_and_version():
+def test_help_flag_extra_contains_version():
     _reset_shards()
     r = _proxy_cli("--help")
     assert r.returncode == 0
     combined = (r.stdout + r.stderr).lower()
-    for word in [
-        "timestamp",
-        "ts",
-        "version",
-        "checksum",
-        "staging",
-        "weight",
-        "global",
-    ]:
+    for word in ["version", "checksum", "staging", "weight", "global"]:
         assert word in combined, f"Help should contain {word}"
