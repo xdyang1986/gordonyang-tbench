@@ -1,0 +1,60 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/computer-resource-optimization"
+description = "Hard multi-turn Go cluster management system. Turn1 implements core cluster management with nodes, jobs, allocation, persistence integrity, atomic writes, corruption handling, concurrent safety, large scale. Turn2 adds large-scale efficiency: weighted sharding, best-fit scheduling optimization, pagination, node health heartbeat TTL, rate limiting per-node token bucket, snapshot/restore dir+file, ops-log with invalid skipping, distribution, presence, performance 10k nodes <2s."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "cluster", "resource-management", "scheduling", "sharding", "optimization", "concurrency", "distributed-systems"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "iterate_on_feature"
+category_subdomain = "distributed_systems"
+tags = ["iterate_on_feature", "go", "cluster", "scheduling", "resource-optimization", "sharding", "concurrency", "presence", "rate-limiting"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 90.0
+junior_time_estimate_min = 180.0
+languages = ["go"]
+reward_type = "binary"
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1200.0
