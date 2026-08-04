@@ -1471,15 +1471,80 @@ def test_ops_log_replay_sorted_by_ts():
         for s in cfg["shards"]:
             _write_shard_versioned(s["path"], {}, s["id"], 0)
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
-        assert r.returncode == 0
+        assert r.returncode == 0, f"Migration with out-of-order ts failed: {r.stderr}"
         got = json.loads(_proxy_cli("get", key).stdout.strip())
-        # File-order would give early (second line) as final, ts-sorted must give late (ts 100) as final if we sort ascending? Actually ascending: 50 then 100, final late
-        # For file-order easier version, final would be early (since file order second line is early), but for ts-sorted harder, final late
-        # Our current easy solution uses file-order, so it would give early, but we are adding ts-sorted test to a file-order solution – this test would fail for file-order solution
-        # To keep easier, we should NOT require ts-sorted, so we change this test to expect file-order for easier version: final early
-        # For balanced hard, we want file-order? Let's keep file-order expectation to make it easier: final early
-        assert got == "early-ts-50", (
-            f"File-order replay should make second file entry win, got {got}"
+        # TS-sorted harder: file has ts=100 then ts=50, sorted ascending 50->100, final late-ts-100 must win, not file-order early
+        assert got == "late-ts-100", (
+            f"TS-sorted replay should make later ts win, got {got}, file order was late then early"
         )
     finally:
         shutil.rmtree(tmpdir)
+
+
+def test_migration_staging_dir_exists_and_versioned():
+    _reset_shards()
+    cfg = _load_config()
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({"stagekey": "stageval"}, f)
+        staging_dir = "/app/data/staging"
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0, (
+            f"Migration with staging should succeed, stderr={r.stderr}"
+        )
+        assert os.path.exists(staging_dir), (
+            "Staging dir /app/data/staging must be created during migration"
+        )
+        staged_files = os.listdir(staging_dir)
+        assert len(staged_files) >= 1, (
+            f"Staging dir should contain shard files, got {staged_files}"
+        )
+        for fname in staged_files:
+            fpath = os.path.join(staging_dir, fname)
+            obj = _load_shard_full(fpath)
+            assert obj is not None
+            assert (
+                "shard_id" in obj
+                and "version" in obj
+                and "checksum" in obj
+                and "data" in obj
+            )
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_self_healing_set_cleans_wrong_shard():
+    _reset_shards()
+    cfg = _load_config()
+    key = "self-heal-key"
+    correct_sid = _expected_shard_id(key, cfg["shard_count"])
+    wrong_sid = (correct_sid + 1) % cfg["shard_count"]
+    wrong_path = [s["path"] for s in cfg["shards"] if s["id"] == wrong_sid][0]
+    _write_shard_versioned(wrong_path, {key: "wrong-old"}, wrong_sid, 0)
+    r = _proxy_cli("set", key, json.dumps("correct-new"))
+    assert r.returncode == 0
+    for s in cfg["shards"]:
+        data = _load_shard_data(s["path"])
+        if s["id"] == correct_sid:
+            assert key in data and data[key] == "correct-new"
+        else:
+            assert key not in data, f"Wrong shard {s['id']} should be cleaned after set"
+
+
+def test_self_healing_delete_cleans_all_shards():
+    _reset_shards()
+    cfg = _load_config()
+    key = "delete-heal-key"
+    for s in cfg["shards"][:2]:
+        _write_shard_versioned(s["path"], {key: "dup"}, s["id"], 0)
+    r = _proxy_cli("delete", key)
+    assert r.returncode == 0
+    for s in cfg["shards"]:
+        data = _load_shard_data(s["path"])
+        assert key not in data, (
+            f"Shard {s['id']} should not have {key} after delete-heal"
+        )
