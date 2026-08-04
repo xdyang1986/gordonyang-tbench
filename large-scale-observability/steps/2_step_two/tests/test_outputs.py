@@ -1783,3 +1783,103 @@ def test_batch_processor_forceflush_concurrent():
     """)
     proc = go_run_program(code)
     assert proc.returncode==0, f"forceflush concurrent failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_processor_queue_size_zero_defaults():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        // queue size 0 should default to 2048 and not panic
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithQueueSize(0))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        _, s := tracer.Start(nil, "op")
+        s.End()
+        // Should not panic
+        fmt.Println("OK")
+        _ = proc
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"queue zero defaults failed: {proc.stdout} {proc.stderr}"
+
+def test_sampler_ratio_extreme_small():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "crypto/rand"
+        "encoding/hex"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func randID() string { b:=make([]byte,16); rand.Read(b); return hex.EncodeToString(b) }
+    func main(){
+        sampler := observability.NewTraceIDRatioSampler(0.001)
+        n:=20000
+        c:=0
+        for i:=0;i<n;i++{
+            if sampler.ShouldSample(observability.SamplingParameters{TraceID:randID(), SpanName:"t"})==observability.DecisionRecordAndSample { c++ }
+        }
+        ratio := float64(c)/float64(n)
+        fmt.Printf("ratio 0.001 observed %f\\n", ratio)
+        if ratio > 0.01 { panic(fmt.Sprintf("0.001 ratio should be <=0.01, got %f", ratio)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"extreme small ratio failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_cardinality_histogram():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider(observability.WithMaxCardinality(2))
+        h1 := prov.Histogram("hcard", observability.WithLabels(map[string]string{"id":"1"}))
+        h2 := prov.Histogram("hcard", observability.WithLabels(map[string]string{"id":"2"}))
+        h3 := prov.Histogram("hcard", observability.WithLabels(map[string]string{"id":"3"}))
+        h1.Observe(1)
+        h2.Observe(2)
+        h3.Observe(3)
+        fams := prov.Collect()
+        var count int
+        for _, fam := range fams {
+            if fam.Name=="hcard" { count=len(fam.Metrics) }
+        }
+        if count>2 { panic(fmt.Sprintf("hist cardinality expected <=2 got %d", count)) }
+        if prov.DroppedSeriesCount() <1 { panic("dropped should >=1") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"hist cardinality failed: {proc.stdout} {proc.stderr}"
+
+def test_batch_processor_shutdown_idempotent():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithQueueSize(10), observability.WithBatchSize(5))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<5;i++{ _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        proc.Shutdown(context.Background())
+        // second shutdown should not panic
+        err := proc.Shutdown(context.Background())
+        if err!=nil { fmt.Printf("second shutdown err %v (allowed)\n", err) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"shutdown idempotent failed: {proc.stdout} {proc.stderr}"
