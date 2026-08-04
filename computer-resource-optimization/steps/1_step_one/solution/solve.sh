@@ -2624,5 +2624,5 @@ func main() {
 
 EOGO
 
-go build -o /tmp/cluster_manager .
+go build -o ./cluster-manager .
 echo "oracle built for turn"

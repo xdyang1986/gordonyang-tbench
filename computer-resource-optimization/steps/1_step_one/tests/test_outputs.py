@@ -16,7 +16,7 @@ import tempfile
 import pytest
 
 APP = "/app"
-BIN = "/tmp/cluster_manager"
+BIN = "/app/cluster-manager"
 DATA_DIR = "/app/data"
 DATA_FILE = "/app/data/cluster.json"
 LOCK_FILE = DATA_FILE + ".lock"

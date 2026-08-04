@@ -11,21 +11,14 @@ workstream = "swe_public_repo"
 [metadata]
 difficulty = "hard"
 category = "software-engineering"
-category_usecase = "iterate_on_feature"
+category_usecase = "resource_optimization"
 category_subdomain = "distributed_systems"
-tags = ["iterate_on_feature", "go", "cluster", "scheduling", "resource-optimization", "sharding", "concurrency", "presence", "rate-limiting"]
+tags = ["resource-optimization", "go", "cluster", "scheduling", "sharding", "concurrency", "presence", "rate-limiting"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
 expert_time_estimate_min = 90.0
 junior_time_estimate_min = 180.0
 languages = ["go"]
-reward_type = "binary"
-
-[verifier]
-timeout_sec = 600.0
-
-[agent]
-timeout_sec = 600.0
 
 [environment]
 build_timeout_sec = 600.0

@@ -14,7 +14,7 @@ import shutil
 import pytest
 
 APP = "/app"
-BIN = "/tmp/cluster_manager"
+BIN = "/app/cluster-manager"
 CONFIG_PATH = "/app/config.json"
 DATA_DIR = "/app/data"
 
