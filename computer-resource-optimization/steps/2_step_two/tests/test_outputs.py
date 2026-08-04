@@ -334,3 +334,162 @@ def test_raw_unescaped_and_unicode():
     assert found
     run_config("add-node", "node-🌍", "4", "1024", "0")
     assert "🌍" in json.loads(run_config("get-node", "node-🌍").stdout)["id"]
+
+def test_config_missing_count_empty_shards():
+    clean_all()
+    bad = {"shards": [{"id": 0, "path": "/app/data/shard_0.json"}]}
+    write_config(bad)
+    assert run_config("list-nodes").returncode == 2
+    bad = {"shard_count": 2, "shards": []}
+    write_config(bad)
+    assert run_config("list-nodes").returncode == 2
+    clean_all()
+
+def test_get_shard_id_empty_string():
+    clean_all()
+    r = run_config("get-shard-id", "")
+    assert r.returncode == 0
+    assert int(r.stdout.strip()) in [0,1,2,3]
+
+def test_get_shard_path_normal():
+    clean_all()
+    run_config("add-node", "nodeA", "4", "1024", "0")
+    sid = int(run_config("get-shard-id", "nodeA").stdout.strip())
+    r = run_config("get-shard-path", "nodeA")
+    assert r.returncode == 0
+    cfg = default_config()
+    for s in cfg["shards"]:
+        if s["id"] == sid:
+            assert r.stdout.strip() == s["path"]
+
+def test_distribution_with_global():
+    clean_all()
+    run_config("add-node", "node-0", "4", "1024", "0")
+    run_config("add-node", "global:cfg1", "4", "1024", "0")
+    dist = json.loads(run_config("distribution").stdout)
+    assert sum(dist.values()) >= 4
+    for sid in ["0","1","2","3"]:
+        assert dist[sid] >= 1
+
+def test_global_broadcast():
+    clean_all()
+    assert run_config("add-node", "global:shared", "4", "1024", "0").returncode == 0
+    found = False
+    for s in default_config()["shards"]:
+        if os.path.exists(s["path"]) and "global:shared" in open(s["path"]).read():
+            found = True
+            break
+    assert found
+
+def test_global_remove_from_all():
+    clean_all()
+    run_config("add-node", "global:to-del", "4", "1024", "0")
+    r = run_config("remove-node", "global:to-del")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+    for s in default_config()["shards"]:
+        if os.path.exists(s["path"]):
+            assert "global:to-del" not in open(s["path"]).read()
+
+def test_global_allocate():
+    clean_all()
+    run_config("add-node", "global:g1", "10", "10240", "0")
+    run_config("add-job", "job1", "1", "256", "0")
+    assert run_config("allocate", "job1", "global:g1").returncode == 0
+
+def test_best_fit_tie_breaker_id():
+    clean_all()
+    run_config("add-node", "nodeA", "4", "1024", "0")
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    run_config("add-job", "job1", "1", "256", "0")
+    assert json.loads(run_config("schedule", "job1").stdout)["node_id"] == "nodeA"
+
+def test_schedule_no_fit_no_side_effects():
+    clean_all()
+    run_config("add-node", "node1", "1", "256", "0")
+    run_config("add-job", "job1", "2", "512", "0")
+    before = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
+    r = run_config("schedule", "job1")
+    assert r.returncode == 1 and "no fit" in r.stderr.lower() and r.stdout.strip() == ""
+    after = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
+    assert before == after
+
+def test_heartbeat_nonexist_fails():
+    clean_all()
+    run_config("add-node", "nodeA", "4", "1024", "0")
+    assert run_config("heartbeat", "noexist").returncode == 2
+
+def test_presence_multiple_nodes_ttl():
+    clean_all()
+    cfg = default_config()
+    cfg["node_heartbeat_ttl_seconds"] = 2
+    write_config(cfg)
+    for nid in ["n1","n2","n3"]:
+        run_config("add-node", nid, "4", "1024", "0")
+        run_config("heartbeat", nid)
+    assert len(json.loads(run_config("list-healthy").stdout)) == 3
+    time.sleep(3)
+    assert json.loads(run_config("list-healthy").stdout) == []
+    run_config("heartbeat", "n2")
+    assert json.loads(run_config("list-healthy").stdout) == ["n2"]
+
+def test_rate_limit_no_side_effects():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 1}
+    write_config(cfg)
+    run_config("add-node", "nodeA", "10", "10240", "0")
+    run_config("add-job", "job0", "1", "256", "0")
+    run_config("add-job", "job1", "1", "256", "0")
+    run_config("allocate", "job0", "nodeA")
+    before_jobs = json.loads(run_config("get-node", "nodeA").stdout)["jobs"][:]
+    before_ops = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
+    r = run_config("allocate", "job1", "nodeA")
+    assert r.returncode == 1
+    after_jobs = json.loads(run_config("get-node", "nodeA").stdout)["jobs"]
+    assert before_jobs == after_jobs
+    after_ops = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
+    assert before_ops == after_ops
+
+def test_snapshot_file_mode_contains_keys():
+    clean_all()
+    run_config("add-node", "node1", "4", "1024", "0")
+    run_config("snapshot", "/tmp/backup.json")
+    obj = json.loads(open("/tmp/backup.json").read())
+    for k in ["shards", "jobs", "presence", "rate_limit", "ops_log"]:
+        assert k in obj
+
+def test_restore_dir_resets_non_backed():
+    clean_all()
+    run_config("add-node", "node1", "4", "1024", "0")
+    run_config("snapshot", "/tmp/backup")
+    run_config("add-node", "node2", "4", "1024", "0")
+    assert run_config("restore", "/tmp/backup").returncode == 0
+    assert len(json.loads(run_config("list-nodes").stdout)) == 1
+
+def test_ops_log_large_100():
+    clean_all()
+    for i in range(50):
+        run_config("add-node", f"node-{i}", "4", "1024", "0")
+    logs = json.loads(run_config("ops-log").stdout)
+    assert len(logs) >= 50
+
+def test_file_lock_cleanup_sharded():
+    clean_all()
+    run_config("add-node", "node1", "4", "1024", "0")
+    assert not os.path.exists("/app/data/global.lock")
+    run_config("add-job", "job1", "1", "256", "0")
+    assert not os.path.exists("/app/data/global.lock")
+    run_config("allocate", "job1", "node1")
+    assert not os.path.exists("/app/data/global.lock")
+
+def test_idempotent_sharded():
+    clean_all()
+    run_config("add-node", "node1", "4", "1024", "0")
+    assert run_config("add-node", "node1", "8", "2048", "0").returncode == 0
+    assert json.loads(run_config("get-node", "node1").stdout)["total"]["cpu"] == 4
+
+def test_edge_validation_sharded():
+    clean_all()
+    assert run_config("add-node", "", "4", "1024", "0").returncode == 2
+    assert run_config("get-node", "nonexist-shard-node").returncode == 2
+    assert run_config("list-nodes", "-1", "0").returncode == 2

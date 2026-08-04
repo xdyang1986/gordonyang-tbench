@@ -341,3 +341,86 @@ def test_node_jobs_sorted_and_free():
     node = json.loads(run_cli("get-node", "node1").stdout)
     assert node["jobs"] == sorted(node["jobs"])
     assert node["free"]["cpu"] == 7
+
+def test_allocate_nonexist_fails():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    assert run_cli("allocate", "nojob", "node1").returncode == 2
+    run_cli("add-job", "job1", "1", "256", "0")
+    assert run_cli("allocate", "job1", "nonode").returncode == 2
+
+def test_node_id_special_chars():
+    clean_data()
+    for nid in ["node-dash", "node_underscore", "node.dot", "node:colon"]:
+        assert run_cli("add-node", nid, "4", "1024", "0").returncode == 0
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 4
+
+def test_empty_file_handling():
+    clean_data()
+    open(DATA_FILE, "w").write("")
+    assert json.loads(run_cli("list-nodes").stdout) == []
+    assert json.loads(run_cli("list-jobs").stdout) == []
+
+def test_missing_file_handling():
+    clean_data()
+    assert json.loads(run_cli("list-nodes").stdout) == []
+
+def test_large_id_10kb():
+    clean_data()
+    big_id = "n" * 5000
+    assert run_cli("add-node", big_id, "4", "1024", "0").returncode == 0
+    assert json.loads(run_cli("get-node", big_id).stdout)["id"] == big_id
+
+def test_concurrent_allocate_diff_nodes():
+    clean_data()
+    for i in range(20):
+        run_cli("add-node", f"node{i}", "4", "1024", "0")
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+    def alloc_pair(i):
+        run_cli("allocate", f"job{i}", f"node{i}")
+    threads = [threading.Thread(target=alloc_pair, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for i in range(20):
+        assert len(json.loads(run_cli("get-node", f"node{i}").stdout)["jobs"]) == 1
+
+def test_concurrent_add_node():
+    clean_data()
+    def add_node(i):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    threads = [threading.Thread(target=add_node, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 20
+
+def test_deallocate_then_reallocate():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-node", "node2", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("deallocate", "job1")
+    assert run_cli("allocate", "job1", "node2").returncode == 0
+    assert json.loads(run_cli("get-job", "job1").stdout)["node_id"] == "node2"
+
+def test_remove_node_after_deallocate():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("remove-job", "job1")
+    r = run_cli("remove-node", "node1")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+
+def test_list_pagination_single_file():
+    clean_data()
+    for i in range(15):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+    assert len(json.loads(run_cli("list-nodes", "5", "0").stdout)) == 5
+    assert len(json.loads(run_cli("list-nodes", "5", "5").stdout)) == 5
+    assert len(json.loads(run_cli("list-nodes", "0", "0").stdout)) == 15
+    assert json.loads(run_cli("list-nodes", "5", "100").stdout) == []

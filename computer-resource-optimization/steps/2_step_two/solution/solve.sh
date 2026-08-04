@@ -2623,6 +2623,7 @@ func main() {
 }
 
 
+
 EOGO
 
 go build -o ./cluster-manager .
