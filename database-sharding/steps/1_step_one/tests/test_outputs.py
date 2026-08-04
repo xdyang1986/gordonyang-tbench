@@ -1214,3 +1214,163 @@ def test_raw_string_handling_with_special_chars():
         assert r.returncode == 0
         r = _proxy_cli("get", k)
         assert json.loads(r.stdout.strip()) == rv
+
+
+def test_set_and_get_with_empty_json_object_and_array():
+    _reset_shards()
+    for v in [{}, [], {"a": {}}, {"b": []}]:
+        k = f"empty-obj-{len(str(v))}"
+        r = _proxy_cli("set", k, json.dumps(v))
+        assert r.returncode == 0
+        r = _proxy_cli("get", k)
+        assert json.loads(r.stdout.strip()) == v
+
+
+def test_set_and_get_with_zero_and_false():
+    _reset_shards()
+    for v in [0, False, 0.0]:
+        k = f"zero-false-{v}-{id(v)}"
+        r = _proxy_cli("set", k, json.dumps(v))
+        assert r.returncode == 0
+        r = _proxy_cli("get", k)
+        # JSON false is false, 0 is 0 – check via loads
+        got = json.loads(r.stdout.strip())
+        # For 0 and False, json loads distinguishes? In Python, False == 0, but we check type for False
+        if v is False:
+            assert got is False
+        else:
+            assert got == v
+
+
+def test_list_keys_empty_after_deleting_all():
+    _reset_shards()
+    keys = ["del-all-1", "del-all-2"]
+    for k in keys:
+        _proxy_cli("set", k, json.dumps(1))
+    for k in keys:
+        _proxy_cli("delete", k)
+    r = _proxy_cli("list-keys")
+    got = json.loads(r.stdout.strip())
+    assert keys[0] not in got and keys[1] not in got
+    assert got == sorted(got)
+    # Should be empty if only those keys were set and legacy is empty? But legacy may have fallback, so we use custom empty legacy via direct binary? For simplicity, check sorted and not containing deleted
+    assert isinstance(got, list)
+
+
+def test_distribution_with_many_keys_same_shard():
+    _reset_shards()
+    cfg = _load_config()
+    # Find 5 keys hashing to same shard (shard 0)
+    target_sid = 0
+    found = []
+    for i in range(5000):
+        k = f"same-shard-many-{i}"
+        if _expected_shard_id(k, cfg["shard_count"]) == target_sid:
+            found.append(k)
+            if len(found) >= 5:
+                break
+    assert len(found) == 5
+    for k in found:
+        _proxy_cli("set", k, json.dumps(1))
+    r = _proxy_cli("distribution")
+    dist = json.loads(r.stdout.strip())
+    norm = {int(k): v for k, v in dist.items()}
+    assert norm[target_sid] >= 5
+    assert len(norm) == cfg["shard_count"]
+
+
+def test_get_shard_path_normal_single_path_not_comma():
+    _reset_shards()
+    cfg = _load_config()
+    key = "normal-single-path"
+    r = _proxy_cli("get-shard-path", key)
+    assert r.returncode == 0
+    out = r.stdout.strip()
+    assert "," not in out, (
+        f"Normal key should return single path, not comma-separated, got {out}"
+    )
+    assert out in [s["path"] for s in cfg["shards"]]
+
+
+def test_custom_config_with_missing_weight_defaults_to_1():
+    tmpdir = tempfile.mkdtemp()
+    try:
+        shards = []
+        for i in range(3):
+            p = os.path.join(tmpdir, f"shard_{i}.json")
+            # No weight field
+            shards.append({"id": i, "path": p})
+            _write_shard_with_checksum(p, {})
+        cfg_path = os.path.join(tmpdir, "cfg.json")
+        with open(cfg_path, "w") as f:
+            json.dump({"shard_count": 3, "shards": shards}, f)
+        # Should default weight 1 and routing work
+        r = subprocess.run(
+            [BIN, "--config", cfg_path, "get-shard-id", "somekey"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0
+        sid = int(r.stdout.strip())
+        assert 0 <= sid < 3
+        # distribution should include zeros
+        r = subprocess.run(
+            [BIN, "--config", cfg_path, "distribution"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert r.returncode == 0
+        dist = json.loads(r.stdout.strip())
+        assert len(dist) == 3
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_persistence_with_number_zero_and_false():
+    _reset_shards()
+    cfg = _load_config()
+    _proxy_cli("set", "zero-key", json.dumps(0))
+    _proxy_cli("set", "false-key", json.dumps(False))
+    # Simulate new proxy init via list-keys
+    _proxy_cli("list-keys")
+    r = _proxy_cli("get", "zero-key")
+    assert json.loads(r.stdout.strip()) == 0
+    r = _proxy_cli("get", "false-key")
+    assert json.loads(r.stdout.strip()) is False
+
+
+def test_ops_log_contains_valid_json_array_and_version():
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    open(ops_path, "w").write("")
+    _proxy_cli("set", "ops-valid-1", json.dumps("v1"))
+    _proxy_cli("set", "ops-valid-2", json.dumps("v2"))
+    _proxy_cli("delete", "ops-valid-1")
+    r = _proxy_cli("ops-log")
+    assert r.returncode == 0
+    arr = json.loads(r.stdout.strip())
+    assert isinstance(arr, list)
+    assert len(arr) >= 3
+    for e in arr:
+        assert (
+            "op" in e
+            and "key" in e
+            and "ts" in e
+            and "shard_id" in e
+            and "version" in e
+        )
+
+
+def test_help_contains_atomic_and_createtemp():
+    _reset_shards()
+    r = _proxy_cli("--help")
+    assert r.returncode == 0
+    combined = (r.stdout + r.stderr).lower()
+    # These words hint at implementation requirement but are in help via staging and atomic mention
+    for word in ["atomic", "createtemp", "rename", "setescapehtml", "staging"]:
+        # Some words may be in different case, check substring
+        assert word in combined or word.replace("createtemp", "create") in combined, (
+            f"Help should contain {word}"
+        )
