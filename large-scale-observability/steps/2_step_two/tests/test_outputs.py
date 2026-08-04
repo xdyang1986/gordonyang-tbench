@@ -1783,3 +1783,98 @@ def test_batch_processor_forceflush_concurrent():
     """)
     proc = go_run_program(code)
     assert proc.returncode==0, f"forceflush concurrent failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_tight_tolerance():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "crypto/rand"
+        "encoding/hex"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func randID() string { b:=make([]byte,16); rand.Read(b); return hex.EncodeToString(b) }
+    func main(){
+        sampler := observability.NewTraceIDRatioSampler(0.1)
+        n:=20000
+        c:=0
+        for i:=0;i<n;i++{
+            if sampler.ShouldSample(observability.SamplingParameters{TraceID:randID(), SpanName:"t"})==observability.DecisionRecordAndSample { c++ }
+        }
+        ratio := float64(c)/float64(n)
+        fmt.Printf("ratio %f\\n", ratio)
+        if ratio < 0.08 || ratio > 0.12 { panic(fmt.Sprintf("tight 0.1 tolerance 0.08-0.12 failed, got %f", ratio)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"tight tolerance failed: {proc.stdout} {proc.stderr}"
+
+def test_batch_processor_high_contention():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithQueueSize(50000), observability.WithBatchSize(100))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        var wg sync.WaitGroup
+        n:=500
+        wg.Add(n)
+        for i:=0;i<n;i++{
+            go func(idx int){
+                defer wg.Done()
+                for j:=0;j<100;j++{
+                    _, s := tracer.Start(context.Background(), fmt.Sprintf("op-%d-%d", idx, j))
+                    s.End()
+                }
+            }(i)
+        }
+        wg.Wait()
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        if len(exp.GetSpans()) != n*100 { panic(fmt.Sprintf("expected %d got %d", n*100, len(exp.GetSpans()))) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code, timeout=60)
+    assert proc.returncode==0, f"high contention failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_cardinality_overflow_aggregate_histogram():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider(observability.WithMaxCardinality(1), observability.WithCardinalityOverflowHandling("aggregate"))
+        h1 := prov.Histogram("agg_hist", observability.WithLabels(map[string]string{"id":"1"}))
+        h2 := prov.Histogram("agg_hist", observability.WithLabels(map[string]string{"id":"2"}))
+        h1.Observe(1)
+        h2.Observe(2)
+        h2.Observe(3)
+        fams := prov.Collect()
+        var count int
+        var overflowCount uint64
+        for _, fam := range fams {
+            if fam.Name=="agg_hist" {
+                count=len(fam.Metrics)
+                for _, m := range fam.Metrics {
+                    if m.Labels["__overflow__"]=="true" { overflowCount=m.Count }
+                }
+            }
+        }
+        if count!=2 { panic(fmt.Sprintf("expected 2 (1+overflow) got %d", count)) }
+        if overflowCount!=2 { panic(fmt.Sprintf("overflow count expected 2 got %d", overflowCount)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"agg hist overflow failed: {proc.stdout} {proc.stderr}"

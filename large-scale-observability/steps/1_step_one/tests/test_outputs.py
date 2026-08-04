@@ -977,6 +977,35 @@ def test_metrics_collect_copy():
     assert proc.returncode == 0, f"collect copy failed: {proc.stdout} {proc.stderr}"
 
 
+def test_metrics_label_truncate():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        long := strings.Repeat("a", 500)
+        c := prov.Counter("truncate_test", observability.WithLabels(map[string]string{"id": long}))
+        c.Inc()
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="truncate_test" {
+                v := fam.Metrics[0].Labels["id"]
+                if len(v) > 256 { panic(fmt.Sprintf("label value should be truncated to 256, got %d", len(v))) }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"label truncate failed: {proc.stdout} {proc.stderr}"
+
+
 def test_metrics_gauge_negative():
     code = textwrap.dedent("""
     package main
@@ -1483,6 +1512,113 @@ def test_tracing_custom_id_generator():
     proc = go_run_program(code)
     assert proc.returncode==0, f"custom id gen failed: {proc.stdout} {proc.stderr}"
 
+def test_tracing_service_name_override():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewSimpleSpanProcessor(exp)
+        tracer := observability.NewTracer("original", observability.WithSpanProcessor(proc), observability.WithServiceName("override"))
+        _, span := tracer.Start(context.Background(), "op")
+        span.End()
+        s := exp.GetSpans()[0]
+        if s.ServiceName != "override" { panic(fmt.Sprintf("expected override got %s", s.ServiceName)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"service name override failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_context_with_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        sc := observability.SpanContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        defer func(){
+            if r:=recover(); r!=nil { panic(fmt.Sprintf("panic on nil ctx: %v", r)) }
+        }()
+        ctx := observability.ContextWithSpanContext(context.Background(), sc)
+        _ = ctx
+        fmt.Println("OK")
+        // Also test that impl should handle nil ctx without panic by returning background
+        // Our new impl should handle nil
+        ctx2 := observability.ContextWithSpanContext(nil, sc)
+        _, ok := observability.SpanContextFromContext(ctx2)
+        if !ok { panic("nil ctx should still produce context with span after fix") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"context nil failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_inject_nil_carrier():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        observability.Inject(context.Background(), nil)
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"inject nil carrier failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_extract_nil_carrier():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        ctx := observability.Extract(nil)
+        _, ok := observability.SpanContextFromContext(ctx)
+        if ok { panic("nil carrier should yield no span") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"extract nil carrier failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_withlabels_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("nil_labels")
+        c.Inc()
+        c2 := prov.Counter("nil_labels2", observability.WithLabels(nil))
+        c2.Inc()
+        fams := prov.Collect()
+        var found bool
+        for _, fam := range fams {
+            if fam.Name=="nil_labels" || fam.Name=="nil_labels2" { found=true }
+        }
+        if !found { panic("nil labels should be treated as empty") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"withlabels nil failed: {proc.stdout} {proc.stderr}"
+
 def test_metrics_description():
     code=textwrap.dedent("""
     package main
@@ -1539,6 +1675,47 @@ def test_metrics_histogram_unsorted_buckets():
     proc = go_run_program(code)
     assert proc.returncode==0, f"unsorted buckets failed: {proc.stdout} {proc.stderr}"
 
+def test_logger_with_output_nil():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        logger := observability.NewLogger("svc", observability.WithOutput(nil))
+        logger.Info(context.Background(), "should not panic")
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"logger nil output failed: {proc.stdout} {proc.stderr}"
+
+def test_logger_level_case_insensitive():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "bytes"
+        "context"
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        buf := &bytes.Buffer{}
+        logger := observability.NewLogger("svc", observability.WithOutput(buf), observability.WithLevel("ERROR"))
+        logger.Info(context.Background(), "filtered")
+        logger.Error(context.Background(), "pass")
+        _ = fmt.Sprintf("x")
+        out := strings.TrimSpace(buf.String())
+        if out=="" { panic("error should pass") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"level case insensitive failed: {proc.stdout} {proc.stderr}"
+
 def test_tracing_traceflags():
     code=textwrap.dedent("""
     package main
@@ -1560,3 +1737,114 @@ def test_tracing_traceflags():
     """)
     proc = go_run_program(code)
     assert proc.returncode==0, f"traceflags failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracing_large_attr_100kb():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        proc := observability.NewSimpleSpanProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        _, span := tracer.Start(context.Background(), "big")
+        huge := strings.Repeat("a", 100*1024)
+        span.AddAttribute("huge", huge)
+        span.End()
+        s := exp.GetSpans()[0]
+        v := s.Attributes["huge"].(string)
+        if len(v) != 1024 { panic(fmt.Sprintf("100KB should truncate to 1024, got %d", len(v))) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"100kb truncate failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_histogram_no_observations():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        _ = prov.Histogram("empty_hist")
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="empty_hist" {
+                m := fam.Metrics[0]
+                if m.Count !=0 { panic("empty hist count should be 0") }
+                if m.Sum !=0 { panic("sum 0") }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"empty hist failed: {proc.stdout} {proc.stderr}"
+
+def test_tracing_many_tracers_isolation():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        var wg sync.WaitGroup
+        n:=100
+        wg.Add(n)
+        for i:=0;i<n;i++{
+            go func(idx int){
+                defer wg.Done()
+                exp := observability.NewInMemoryExporter()
+                proc := observability.NewSimpleSpanProcessor(exp)
+                tracer := observability.NewTracer(fmt.Sprintf("svc-%d", idx), observability.WithSpanProcessor(proc))
+                _, span := tracer.Start(context.Background(), "op")
+                span.End()
+                if len(exp.GetSpans())!=1 { panic("isolation") }
+                if exp.GetSpans()[0].ServiceName != fmt.Sprintf("svc-%d", idx) { panic("service name") }
+            }(i)
+        }
+        wg.Wait()
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"many tracers isolation failed: {proc.stdout} {proc.stderr}"
+
+def test_metrics_counter_add_zero():
+    code=textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("zero_add")
+        c.Add(0)
+        c.Inc()
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="zero_add" {
+                if fam.Metrics[0].Value !=1 { panic(fmt.Sprintf("expected 1 got %f", fam.Metrics[0].Value)) }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode==0, f"zero add failed: {proc.stdout} {proc.stderr}"
