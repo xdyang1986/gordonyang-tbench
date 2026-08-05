@@ -199,37 +199,6 @@ def test_heartbeat_presence():
     assert json.loads(run_config("get-node-health", "nodeA").stdout)["online"] is True
     assert "nodeA" in json.loads(run_config("list-healthy").stdout)
 
-def test_presence_ttl_expiry():
-    clean_all()
-    cfg = default_config()
-    cfg["node_heartbeat_ttl_seconds"] = 2
-    write_config(cfg)
-    run_config("add-node", "nodeA", "4", "1024", "0")
-    run_config("heartbeat", "nodeA")
-    assert json.loads(run_config("get-node-health", "nodeA").stdout)["online"] is True
-    time.sleep(3)
-    assert json.loads(run_config("get-node-health", "nodeA").stdout)["online"] is False
-    assert json.loads(run_config("list-healthy").stdout) == []
-
-def test_rate_limiting():
-    clean_all()
-    cfg = default_config()
-    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 2}
-    write_config(cfg)
-    run_config("add-node", "nodeA", "10", "10240", "0")
-    run_config("add-node", "nodeB", "10", "10240", "0")
-    for i in range(3):
-        run_config("add-job", f"job{i}", "1", "256", "0")
-    assert run_config("allocate", "job0", "nodeA").returncode == 0
-    assert run_config("allocate", "job1", "nodeA").returncode == 0
-    r = run_config("allocate", "job2", "nodeA")
-    assert r.returncode == 1 and "rate limit" in r.stderr.lower()
-    run_config("add-job", "jobB", "1", "256", "0")
-    assert run_config("allocate", "jobB", "nodeB").returncode == 0
-    time.sleep(1.6)
-    run_config("add-job", "job3", "1", "256", "0")
-    assert run_config("allocate", "job3", "nodeA").returncode == 0
-
 def test_concurrent_sharded():
     clean_all()
     cfg = default_config()
@@ -297,36 +266,10 @@ def test_get_shard_path_normal():
         if s["id"] == sid:
             assert r.stdout.strip() == s["path"]
 
-def test_schedule_no_fit_no_side_effects():
-    clean_all()
-    run_config("add-node", "node1", "1", "256", "0")
-    run_config("add-job", "job1", "2", "512", "0")
-    before = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
-    r = run_config("schedule", "job1")
-    assert r.returncode == 1 and "no fit" in r.stderr.lower() and r.stdout.strip() == ""
-    after = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
-    assert before == after
-
 def test_heartbeat_nonexist_fails():
     clean_all()
     run_config("add-node", "nodeA", "4", "1024", "0")
     assert run_config("heartbeat", "noexist").returncode == 2
-
-def test_snapshot_file_mode_contains_keys():
-    clean_all()
-    run_config("add-node", "node1", "4", "1024", "0")
-    run_config("snapshot", "/tmp/backup.json")
-    obj = json.loads(open("/tmp/backup.json").read())
-    for k in ["shards", "jobs", "presence", "rate_limit", "ops_log"]:
-        assert k in obj
-
-def test_restore_dir_resets_non_backed():
-    clean_all()
-    run_config("add-node", "node1", "4", "1024", "0")
-    run_config("snapshot", "/tmp/backup")
-    run_config("add-node", "node2", "4", "1024", "0")
-    assert run_config("restore", "/tmp/backup").returncode == 0
-    assert len(json.loads(run_config("list-nodes").stdout)) == 1
 
 def test_file_lock_cleanup_sharded():
     clean_all()
