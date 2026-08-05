@@ -216,6 +216,7 @@ Commands:
   add-job <jobID> <cpu> <memory> <gpu>        Add a job
   remove-job <jobID>                          Remove a job
   list-jobs <limit> <offset>                  Sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-nodes.
+  get-job <jobID>                             Get job details
   allocate <jobID> <nodeID>                   Allocate job to node
   deallocate <jobID>                          Deallocate job from its node
   schedule <jobID>                            Schedule job using first-fit
@@ -228,8 +229,6 @@ Flags:
 
 Pagination contract (MUST):
   list-nodes <limit> <offset> — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-jobs.
-  Both support optional args: list-nodes, list-nodes <limit>, list-nodes <limit> <offset> – same for list-jobs.
-  Invalid limit/offset → exit2.
 `
 	fmt.Print(help)
 }
@@ -626,7 +625,8 @@ func main() {
 		}
 		if chosen == nil {
 			releaseLock(lockPath)
-			exitNoFit("no fit")
+			fmt.Fprintln(os.Stderr, "no fit")
+			os.Exit(1)
 		}
 		chosen.Used.CPU += job.Required.CPU
 		chosen.Used.Memory += job.Required.Memory
