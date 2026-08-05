@@ -184,10 +184,41 @@ type Sampler interface {
 	Description() string
 }
 
-func NewAlwaysOnSampler() Sampler { panic("not implemented: sampling required for step2") }
-func NewAlwaysOffSampler() Sampler { panic("not implemented") }
-func NewTraceIDRatioSampler(fraction float64) Sampler { panic("not implemented") }
-func NewParentBasedSampler(root Sampler) Sampler { panic("not implemented") }
+type alwaysOnSampler struct{}
+func NewAlwaysOnSampler() Sampler { return &alwaysOnSampler{} }
+func (s *alwaysOnSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample }
+func (s *alwaysOnSampler) Description() string { return "AlwaysOnSampler" }
+
+type alwaysOffSampler struct{}
+func NewAlwaysOffSampler() Sampler { return &alwaysOffSampler{} }
+func (s *alwaysOffSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionDrop }
+func (s *alwaysOffSampler) Description() string { return "AlwaysOffSampler" }
+
+type traceIDRatioSampler struct{ fraction float64 }
+func NewTraceIDRatioSampler(fraction float64) Sampler { return &traceIDRatioSampler{fraction: fraction} }
+func (s *traceIDRatioSampler) Description() string { return fmt.Sprintf("TraceIDRatioBased{%.4f}", s.fraction) }
+func (s *traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingDecision {
+	if s.fraction <= 0 { return DecisionDrop }
+	if s.fraction >= 1 { return DecisionRecordAndSample }
+	if len(p.TraceID) < 16 { return DecisionDrop }
+	val, err := strconv.ParseUint(p.TraceID[:16], 16, 64)
+	if err != nil { return DecisionDrop }
+	threshold := s.fraction * float64(^uint64(0))
+	if float64(val) < threshold { return DecisionRecordAndSample }
+	return DecisionDrop
+}
+
+type parentBasedSampler struct{ root Sampler }
+func NewParentBasedSampler(root Sampler) Sampler {
+	if root == nil { root = NewAlwaysOnSampler() }
+	return &parentBasedSampler{root: root}
+}
+func (s *parentBasedSampler) Description() string { return fmt.Sprintf("ParentBased{root=%s}", s.root.Description()) }
+func (s *parentBasedSampler) ShouldSample(p SamplingParameters) SamplingDecision {
+	if !p.HasParent { return s.root.ShouldSample(p) }
+	if p.ParentContext.Sampled { return DecisionRecordAndSample }
+	return DecisionDrop
+}
 
 // Tracer options - helpers implemented
 type tracerConfig struct {

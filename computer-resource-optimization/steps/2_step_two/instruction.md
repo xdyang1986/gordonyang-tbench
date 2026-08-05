@@ -51,9 +51,14 @@ Validation: bad config (invalid JSON, shard_count≤0, duplicate id, empty path,
 - Jobs stored in `jobs_path` wrapper checksum file (map jobID -> job)
 - `add-node <nodeID> <cpu> <mem> <gpu>`: idempotent, creates in designated shard via weighted hash, handles empty ID exit2, invalid resources exit2. If `global:` prefix, treat as broadcast? For cluster, global: returns -1 for get-shard-id but still stored in all shards? Simpler: global: nodes treated as broadcast to all shards for high availability (replicate). But for allocation, any copy can be used. To keep tests simple, implement global: broadcast: create in ALL shards, get-shard-id returns -1, get-shard-path returns comma-separated sorted list. If not global, single shard.
 - `remove-node <nodeID>`: prints true/false, checks allocated jobs via jobs file, fails exit2 if node has jobs, else removes from all shards where it exists (for global). Exit0 even if not exist.
-- `list-nodes [limit] [offset]`: now supports pagination for large scale. limit optional integer ≥0, 0/omit=all, offset optional integer ≥0 default 0. Returns sorted nodes array sliced by `sorted[offset:offset+limit]` if limit>0 else `[offset:]`. Invalid limit/offset (negative, non-int) → exit2. Performance: 1000 and 2000 nodes <2s O(n log n) not O(n²).
+- `list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`. Now supports pagination for large scale. limit optional integer ≥0, 0/omit=all, offset optional integer ≥0 default 0. Returns sorted nodes array sliced by `sorted[offset:offset+limit]` if limit>0 else `[offset:]`. Invalid limit/offset (negative, non-int) → exit2. Performance: 1000 and 2000 nodes <2s O(n log n) not O(n²).
 - `get-node <nodeID>`: works across shards, finds node in its shard (or any for global).
-- `add-job`, `remove-job`, `list-jobs [limit] [offset]`, `get-job` similar, jobs stored in jobs file with pagination. `list-jobs` pagination same semantics, performance 1000 and 500 <2s.
+- `add-job`, `remove-job`, `list-jobs <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-nodes., `get-job` similar, jobs stored in jobs file with pagination. `list-jobs` pagination same semantics, performance 1000 and 500 <2s.
+
+**Pagination contract (MUST):**
+- `list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`.
+- Both support optional args: `list-nodes`, `list-nodes <limit>`, `list-nodes <limit> <offset>` – same for list-jobs.
+- Invalid limit/offset (negative, non-int) → exit2.
 - `allocate`, `deallocate`, `schedule`, `status` work across shards: allocation needs to read nodes union and jobs, update appropriate shard file and jobs file atomically under global lock, append ops log.
 - `schedule <jobID>`: **NOW BEST-FIT instead of first-fit for efficiency**. Among all nodes that fit, choose node with smallest sufficient free resources to reduce fragmentation. Scoring: minimal (free_cpu - req_cpu), tie-breaker minimal (free_mem - req_mem), then minimal (free_gpu - req_gpu), then smallest node ID lexicographically for determinism. Must be deterministic. If job already allocated exit2, if no fit exit1 stderr "no fit" no stdout. Prints JSON scheduled.
 

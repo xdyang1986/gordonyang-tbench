@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 mkdir -p /app/observability
+
 cat > /app/observability/tracing.go <<'GO'
 package observability
 
@@ -393,6 +394,7 @@ func (b *batchSpanProcessor) DroppedCount() int { return 0 }
 func (b *batchSpanProcessor) QueueLen() int { return 0 }
 
 GO
+
 cat > /app/observability/metrics.go <<'GO'
 
 package observability
@@ -681,6 +683,7 @@ func (p *metricsProvider) Collect() []MetricFamily {
 func (p *metricsProvider) DroppedSeriesCount() int { return 0 }
 
 GO
+
 cat > /app/observability/logger.go <<'GO'
 package observability
 
@@ -849,7 +852,9 @@ func (l *loggerImpl) Warn(ctx context.Context, msg string, fields ...Field) {
 }
 
 GO
+
 cat > /app/observability/doc.go <<'GO'
 package observability
 GO
+
 cd /app && go mod tidy && go build ./... && go vet ./...

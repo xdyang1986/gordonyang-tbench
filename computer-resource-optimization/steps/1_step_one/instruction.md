@@ -18,17 +18,22 @@ Commands:
 ```
 add-node <nodeID> <cpu> <memory> <gpu>          -> idempotent exit0, fail exit2 if empty ID or cpu<=0 or memory<=0 or gpu<0 or not int, handles 200 nodes sorted, special chars <>&
 remove-node <nodeID>                            -> prints true/false, removes node only if no allocated jobs else fail exit2, exit0 even if not exist
-list-nodes                                      -> JSON array sorted by id asc, each element full node object
+list-nodes <limit> <offset>                     -> sorted by id asc; limit=0 returns all; offset beyond the end returns []. JSON array sorted by id asc, each element full node object. Same for list-jobs. Limit and offset optional, invalid → exit2. Performance 100 and 200 <2s
 get-node <nodeID>                               -> JSON node, exit2 if not exist or empty ID
 add-job <jobID> <cpu> <memory> <gpu>            -> idempotent exit0, fail exit2 if empty ID or invalid resources, handles 200 jobs sorted, special chars <>&, Unicode emoji
 remove-job <jobID>                              -> prints true/false, if allocated deallocates first then removes, exit0 even if not exist
-list-jobs                                       -> JSON array sorted by id asc
+list-jobs <limit> <offset>                      -> sorted by id asc; limit=0 returns all; offset beyond the end returns []. JSON array sorted by id asc. Same pagination contract as list-nodes. Limit and offset optional, invalid → exit2
 get-job <jobID>                                 -> JSON job, exit2 if not exist or empty ID
 allocate <jobID> <nodeID>                       -> allocates job to node if enough free, else fail exit2 stderr "insufficient", job must exist else exit2, node must exist else exit2, if already allocated to different node exit2, same node idempotent exit0, prints JSON allocation
 deallocate <jobID>                              -> prints true/false, true if deallocated, false if not allocated, exit2 if job not exist, idempotent
 schedule <jobID>                                -> auto-schedules using first-fit sorted node IDs asc, first node that fits, if job already allocated exit2, if no fit exit1 stderr "no fit" no stdout, prints JSON {"job_id":...,"node_id":...,"scheduled":true}
 status                                          -> JSON cluster status: {"total_nodes":int,"total_jobs":int,"allocated_jobs":int,"pending_jobs":int,"total_resources":{"cpu":int,"memory":int,"gpu":int},"used_resources":{"cpu":int,"memory":int,"gpu":int}}
 ```
+
+**Pagination contract (MUST):**
+- `list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`.
+- Both support optional args: `list-nodes`, `list-nodes <limit>`, `list-nodes <limit> <offset>` – same for list-jobs.
+- Invalid limit/offset (negative, non-int) → exit2.
 
 Node JSON: `{"id":"node1","total":{"cpu":4,"memory":1024,"gpu":1},"used":{"cpu":1,"memory":256,"gpu":0},"free":{"cpu":3,"memory":768,"gpu":1},"jobs":["job1"]}` jobs sorted.
 

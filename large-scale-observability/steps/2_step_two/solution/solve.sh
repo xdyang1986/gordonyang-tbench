@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 mkdir -p /app/observability
+
 cat > /app/observability/tracing.go <<'GO'
 package observability
 
@@ -932,6 +933,7 @@ func (b *batchSpanProcessor) QueueLen() int {
 }
 
 GO
+
 cat > /app/observability/metrics.go <<'GO'
 package observability
 
@@ -1562,6 +1564,7 @@ func (p *metricsProvider) DroppedSeriesCount() int {
 }
 
 GO
+
 cat > /app/observability/logger.go <<'GO'
 package observability
 
@@ -1730,7 +1733,10 @@ func (l *loggerImpl) Warn(ctx context.Context, msg string, fields ...Field) {
 }
 
 GO
+
 cat > /app/observability/doc.go <<'GO'
 package observability
 GO
+
+echo "Solution applied"
 cd /app && go mod tidy && go build ./... && go vet ./...
