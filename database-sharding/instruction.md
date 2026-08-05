@@ -16,7 +16,7 @@ This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go w
 
   See full spec: `steps/1_step_one/instruction.md`
 
-- **Turn 2 (2_step_two, 67 tests, dependencies [1_step_one], inherit_prior_session true):** Upgrade proxy to versioned integrity `{"shard_id":id,"version":ver,"data":...,"checksum":...}` where shard_id must match expected id, version increments on each set/delete/migration/replay, checksum without HTML escaping. On read/init validate every shard before any command: missing/empty → empty, version 0, correct shard_id; invalid JSON → corruption; missing checksum → corruption; shard_id present → require checksum and version>=0 and shard_id==expected else corruption; checksum mismatch → corruption; old formats backward compat. Corruption → backup with timestamp + warning containing corrupt/checksum/shard_id/version, then recreate empty versioned.
+- **Turn 2 (2_step_two, 67 tests, dependencies [1_step_one], inherit_prior_session false – fixed to avoid oracle resume bug `Agent 'oracle' does not support resume`):** Upgrade proxy to versioned integrity `{"shard_id":id,"version":ver,"data":...,"checksum":...}` where shard_id must match expected id, version increments on each set/delete/migration/replay, checksum without HTML escaping. On read/init validate every shard before any command: missing/empty → empty, version 0, correct shard_id; invalid JSON → corruption; missing checksum → corruption; shard_id present → require checksum and version>=0 and shard_id==expected else corruption; checksum mismatch → corruption; old formats backward compat. Corruption → backup with timestamp + warning containing corrupt/checksum/shard_id/version, then recreate empty versioned.
 
   Proxy fallback to legacy `--legacy`, global broadcast (set all, get first-found id order, delete all, get-shard-id -1, get-shard-path comma-separated sorted), weighted routing same as Turn1 (totalWeight sum, hash MD5 big-endian mod totalWeight iterate id order subtracting weight), list-keys union sorted deduped, distribution including zeros counting broadcast, ops.log with version, file-order replay (no timestamp sort for 67 easier version), raw-string handling same table as Turn1.
 
@@ -74,4 +74,4 @@ go build -o ./proxy .
 ./proxy --config /app/config.json --legacy /app/data/legacy.json migrate --backup /tmp/codimango/backup.json --force
 ```
 
-Implement at `/app/` – Turn1 present via inherit for Turn2.
+Implement at `/app/` – Turn2 reference solution includes Turn1 functionality and works standalone (inherit_prior_session false to fix oracle `does not support resume` – previously true caused 0/3 oracle fail).
