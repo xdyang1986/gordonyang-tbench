@@ -10,8 +10,8 @@ keywords = ["go", "location-tracking", "gps", "uber", "ride-sharing", "accuracy"
 difficulty = "hard"
 category = "iterate_on_feature"
 tags = ["iterate_on_feature", "go", "location", "gps-accuracy", "multi-turn"]
-category_usecase = "feature"
-category_subdomain = "geospatial"
+category_usecase = "extend_behavior"
+category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
 
