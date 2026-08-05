@@ -47,7 +47,26 @@ task.toml
 ## Running
 Verifier is pytest that generates ephemeral Go modules importing `ride-observability` from `/app` and runs `go run`.
 
-Reference solution passes 23 tests step1, 21 tests step2.
+Reference solution passes 53 tests step1, 60 tests step2.
 
 ## Difficulty
 Hard, ~90min expert, 180min junior.
+
+## Latest Run Analysis
+
+Latest online validation — commit `e899930b` ("Clarify spec for 3 under-specified Turn1 tests that even Opus fails"). Well-calibrated: both turns carry signal, oracle solvable, weak model is the low gate.
+
+| Gate | Model | Full pass | Turn 1 | Turn 2 (of T1 passers) | Mean reward |
+|------|-------|-----------|--------|------------------------|-------------|
+| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | 1.00 |
+| Codex | gpt-5.5 | 7/10 (70%) | 8/10 | 7/8 | 0.75 |
+| Agent | claude-opus-4-8 | 4/10 (40%) | 10/10 | 4/10 | 0.70 |
+| Metacode | meta/avocado-5.14-code | 2/10 (20%) | 7/10 | 2/7 | 0.45 |
+
+**Both turns discriminate:**
+- **Turn 1** — mild weak-model gate via `test_metrics_collect_copy` (Collect() must return a copy, not an alias): avocado 7/10, codex 8/10, Opus 10/10. Real failures (52/53), not flakes.
+- **Turn 2** — main discriminator via `test_batch_batch_size_limit` (BatchSpanProcessor must chunk exports to ≤ `WithBatchSize`, not flush the whole queue): catches even Opus (4/10). Failures are near-misses (59/60).
+
+**Calibration:** spread is healthy — oracle 3/3 confirms solvability, codex 7 / Opus 4 / avocado 2 are all non-zero and <100%, with the weak model as the low gate. Notable inversion: Opus (4/10) scores below Codex (7/10) because Opus trips Turn 2's batch-size chunking more often.
+
+Note: the "clarify spec" commit resolved a prior too-hard state (commit `88e3063a`: codex 0/10, Opus 0/10, avocado 0/9) by clarifying three under-specified Turn-1 tests (`test_metrics_label_truncate`, `test_tracing_event_limit`, `test_metrics_collect_copy`); two of the three ceased to be walls, leaving `collect_copy` as a mild Turn-1 gate.
