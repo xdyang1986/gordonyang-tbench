@@ -146,7 +146,11 @@ Tracer behavior (must satisfy design quality):
 - SpanID always new.
 - Store Span in context internally (context key private). New context returned carries this span's SpanContext.
 - `Span.End()` computes EndTime, calls processor OnEnd. Should be callable once (idempotent or second call no-op). Must be concurrency-safe.
-- `AddAttribute`, `AddEvent`, `SetStatus` must be concurrency-safe (protect with mutex). Attributes capped at 128 per span: if exceed, ignore additional? Or evict oldest? For step1: limit 128, drop beyond.
+- `AddAttribute`, `AddEvent`, `SetStatus` must be concurrency-safe (protect with mutex).
+- **Resource limits — must be implemented for design quality (these are checked):**
+  - **Span Attributes**: max 128 per span. If more than 128 added (via `WithAttributes` or `AddAttribute`), ignore excess beyond 128 (keep first 128). Truncate string attribute values longer than 1024 chars to exactly 1024.
+  - **Span Events**: max 128 events per span. If more than 128 `AddEvent` calls, drop excess beyond 128 (keep first 128). Events must store Name, Timestamp (set at AddEvent time), and Attributes. Limit applies to total events, including initial? For step1, only `AddEvent` path matters.
+  - **Attribute value size**: string values >1024 truncated to 1024.
 - StartTime set at Start, EndTime set at End.
 - `IsRecording()` returns true if Sampled true and not ended.
 - `SimpleSpanProcessor`: OnEnd exports synchronously via exporter. Must be thread-safe.
@@ -239,11 +243,12 @@ Rules:
 
 - Name must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Return no-op or handle invalid? For this task: if invalid name, return no-op instrument that does nothing but Collect does NOT include invalid metric.
 - Labels must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Invalid label keys cause metric to be no-op.
-- Counter only inc positive? Add delta can be >=0 only. If negative, ignore.
+- **Label value handling (checked by `test_metrics_label_truncate`):** label values may be long (e.g., 500 chars). To prevent high cardinality via long values, **truncate label values longer than 256 chars to 256 chars** (keep first 256). Do **not** drop the metric entirely for long values — truncate. This is required.
+- Counter only inc positive? Add delta can be >=0 only. If negative, ignore. **Also ignore NaN and Inf for Counter Add and Histogram Observe** (do nothing).
 - Same metric name + same label set should return same instrument instance (reuse). Same name but different label values -> different time series (distinct MetricSample entries).
 - Thread safety: Inc/Add/Observe/Set may be called concurrently; must use atomic or mutex and not race. Test 100 goroutines x 1000 inc.
-- `Collect()` returns snapshot of all metrics at call time. Must not expose internal mutable maps.
-- Histogram: default buckets if not provided: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. On Observe, increment count, sum, bucket counts (cumulative? Use inclusive). Return in Collect: Buckets with cumulative counts, plus Count and Sum.
+- `Collect()` returns snapshot of all metrics at call time. **Must return deep copy — must not expose internal mutable maps (checked by `test_metrics_collect_copy`):** mutating the returned `MetricFamily.Metrics[0].Value` or `Labels` map must not affect the provider's internal state; next `Collect()` must return original values. So you must copy both slice and maps.
+- Histogram: default buckets if not provided: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. On Observe, increment count, sum, bucket counts (cumulative? Use inclusive). Return in Collect: Buckets with cumulative counts, plus Count and Sum. Buckets should be sorted ascending even if input unsorted.
 - Counter/Gauge value stored as float64.
 
 Design quality:
