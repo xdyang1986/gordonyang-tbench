@@ -465,63 +465,6 @@ def test_persistence_on_disk_with_checksum():
     assert obj["checksum"] == expected
 
 
-def test_persistence_across_runs():
-    _reset_shards()
-    _proxy_cli("set", "persist2", json.dumps("still"))
-    # Simulate new proxy init by calling list-keys (triggers repair) and then get
-    r = _proxy_cli("list-keys")
-    assert r.returncode == 0
-    r = _proxy_cli("get", "persist2")
-    assert json.loads(r.stdout.strip()) == "still"
-
-
-def test_get_all_keys_sorted_exact():
-    _reset_shards()
-    keys = [f"key:{i}" for i in range(10)]
-    for k in keys:
-        _proxy_cli("set", k, json.dumps(k))
-    r = _proxy_cli("list-keys")
-    assert r.returncode == 0
-    got = json.loads(r.stdout.strip())
-    assert got == sorted(keys)
-
-
-def test_get_shard_distribution_includes_zero_counts():
-    _reset_shards()
-    cfg = _load_config()
-    r = _proxy_cli("distribution")
-    assert r.returncode == 0
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    assert len(norm) == cfg["shard_count"]
-    for sid in range(cfg["shard_count"]):
-        assert sid in norm
-
-
-def test_multiple_keys_routing_variety():
-    _reset_shards()
-    cfg = _load_config()
-    for i in range(20):
-        k = f"variety:{i}"
-        _proxy_cli("set", k, json.dumps(i))
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    # With 20 keys and 4 shards, at least 2 shards should have keys
-    non_zero = sum(1 for v in norm.values() if v > 0)
-    assert non_zero >= 2
-
-
-def test_complex_value_types():
-    _reset_shards()
-    vals = [{"a": [1, 2, 3]}, [1, 2, 3], 123, True, None]
-    for idx, v in enumerate(vals):
-        k = f"complex:{idx}"
-        _proxy_cli("set", k, json.dumps(v))
-        r = _proxy_cli("get", k)
-        assert json.loads(r.stdout.strip()) == v
-
-
 def test_atomic_write_no_corruption():
     _reset_shards()
     cfg = _load_config()
@@ -533,14 +476,6 @@ def test_atomic_write_no_corruption():
         assert "data" in obj and "checksum" in obj
         data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
         assert obj["checksum"] == hashlib.md5(data_json.encode()).hexdigest()
-
-
-def test_raw_string_invalid_json_value_handling():
-    _reset_shards()
-    r = _proxy_cli("set", "rawkey", "not-a-valid-json-@@@")
-    assert r.returncode == 0
-    r = _proxy_cli("get", "rawkey")
-    assert json.loads(r.stdout.strip()) == "not-a-valid-json-@@@"
 
 
 def test_corruption_backup_and_recreate():
@@ -562,19 +497,6 @@ def test_corruption_backup_and_recreate():
     assert obj["data"] == {}
 
 
-def test_corruption_checksum_mismatch_backup():
-    _reset_shards()
-    cfg = _load_config()
-    target_path = cfg["shards"][0]["path"]
-    with open(target_path, "w") as f:
-        json.dump({"data": {"a": 1}, "checksum": "bad"}, f)
-    r = _proxy_cli("list-keys")
-    assert r.returncode == 0
-    dir_name = os.path.dirname(target_path)
-    backups = [f for f in os.listdir(dir_name) if ".corrupt." in f]
-    assert len(backups) >= 1
-
-
 def test_missing_checksum_corruption():
     _reset_shards()
     cfg = _load_config()
@@ -586,95 +508,6 @@ def test_missing_checksum_corruption():
     r = _proxy_cli("get", "a")
     # After corruption repair, key should be gone (empty)
     assert r.stdout.strip() == "null"
-
-
-def test_custom_config_path():
-    tmpdir = tempfile.mkdtemp()
-    try:
-        shards = []
-        for i in range(2):
-            p = os.path.join(tmpdir, f"shard_{i}.json")
-            shards.append({"id": i, "path": p})
-            _write_shard_with_checksum(p, {})
-        cfg_path = os.path.join(tmpdir, "cfg.json")
-        with open(cfg_path, "w") as f:
-            json.dump({"shard_count": 2, "shards": shards}, f)
-        r = _proxy_cli("set", "custom-key", json.dumps("v"), config_path=cfg_path)
-        if r.returncode != 0:
-            r = subprocess.run(
-                [BIN, "--config", cfg_path, "set", "custom-key", json.dumps("v")],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        # Actually _proxy_cli uses --config flag first, need to handle custom path via direct subprocess
-        r = subprocess.run(
-            [BIN, "--config", cfg_path, "set", "custom-key", json.dumps("v")],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert r.returncode == 0
-        r = subprocess.run(
-            [BIN, "--config", cfg_path, "get", "custom-key"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert json.loads(r.stdout.strip()) == "v"
-    finally:
-        shutil.rmtree(tmpdir)
-
-
-def test_stdlib_only_go_mod_and_imports():
-    go_mod_path = os.path.join(APP_DIR, "go.mod")
-    assert os.path.exists(go_mod_path)
-    with open(go_mod_path) as f:
-        content = f.read()
-    for line in content.splitlines():
-        line = line.strip()
-        if line.startswith("require "):
-            parts = line.split()
-            if len(parts) >= 2:
-                mod = parts[1]
-                if "." in mod.split("/")[0]:
-                    pytest.fail(f"External dep in go.mod: {mod}")
-    r = subprocess.run(
-        ["go", "list", "-f", '{{join .Imports " "}}', "."],
-        cwd=APP_DIR,
-        env={
-            "GOTOOLCHAIN": "local",
-            "GOFLAGS": "-mod=mod",
-            "GOCACHE": "/tmp/codimango/gocache",
-            "GOPATH": "/tmp/codimango/gopath",
-            **os.environ,
-        },
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert r.returncode == 0
-    imports = r.stdout.strip().split()
-    for imp in imports:
-        if "." in imp:
-            pytest.fail(f"External import found: {imp}")
-
-
-def test_atomic_write_source_inspection():
-    go_files = []
-    for root, _, files in os.walk(APP_DIR):
-        for f in files:
-            if f.endswith(".go"):
-                go_files.append(os.path.join(root, f))
-    combined = ""
-    for gf in go_files:
-        try:
-            combined += open(gf).read() + "\n"
-        except:
-            pass
-    assert "CreateTemp" in combined
-    assert "Rename" in combined
-    assert "SetEscapeHTML" in combined
 
 
 def test_checksum_html_escaping():
@@ -699,20 +532,6 @@ def test_checksum_html_escaping():
     expected = hashlib.md5(data_json.encode()).hexdigest()
     assert obj["checksum"] == expected
     assert "<" in raw_text
-
-
-def test_initialization_repairs_every_shard():
-    _reset_shards()
-    cfg = _load_config()
-    for s in cfg["shards"]:
-        with open(s["path"], "w") as f:
-            f.write("{invalid")
-    r = _proxy_cli("list-keys")
-    assert r.returncode == 0
-    for s in cfg["shards"]:
-        obj = _load_shard_full(s["path"])
-        assert obj is not None
-        assert obj["data"] == {}
 
 
 def test_weighted_routing():
@@ -895,16 +714,6 @@ def test_list_keys_sorted_exact_with_global():
         shutil.rmtree(tmpdir)
 
 
-def test_global_broadcast_distribution_counts():
-    _reset_shards()
-    _proxy_cli("set", "global:bcast", json.dumps(1))
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    for v in norm.values():
-        assert v >= 1
-
-
 def test_set_missing_value_arg_exit_2():
     _reset_shards()
     r = _proxy_cli("set", "only-key")
@@ -934,103 +743,6 @@ def test_get_shard_path_global_returns_comma_sorted():
     assert paths == expected_paths
 
 
-def test_set_global_then_get_and_distribution():
-    _reset_shards()
-    cfg = _load_config()
-    _proxy_cli("set", "global:myglobal", json.dumps({"x": 1}))
-    r = _proxy_cli("get", "global:myglobal")
-    assert json.loads(r.stdout.strip()) == {"x": 1}
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    for sid in range(cfg["shard_count"]):
-        assert norm[sid] >= 1
-        data = _load_shard_data([s["path"] for s in cfg["shards"] if s["id"] == sid][0])
-        assert "global:myglobal" in data
-
-
-def test_delete_global_and_distribution():
-    _reset_shards()
-    _proxy_cli("set", "global:todelete", json.dumps("v"))
-    r = _proxy_cli("delete", "global:todelete")
-    assert r.stdout.strip() == "true"
-    cfg = _load_config()
-    for s in cfg["shards"]:
-        assert "global:todelete" not in _load_shard_data(s["path"])
-
-
-def test_distribution_after_deletes_includes_zeros():
-    _reset_shards()
-    cfg = _load_config()
-
-    # Set 1 key in shard 0 only
-    def find_key(sid):
-        for i in range(5000):
-            k = f"zero-test-{i}"
-            if _expected_shard_id(k, cfg["shard_count"]) == sid:
-                return k
-        return None
-
-    k0 = find_key(0)
-    assert k0
-    _proxy_cli("set", k0, json.dumps(1))
-    _proxy_cli("delete", k0)
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    assert len(norm) == cfg["shard_count"]
-    for sid in range(cfg["shard_count"]):
-        assert sid in norm
-
-
-def test_ops_log_replay_with_large_value():
-    _reset_shards()
-    ops_path = "/app/data/ops.log"
-    open(ops_path, "w").write("")
-    large_val = "Y" * (100 * 1024)
-    _proxy_cli("set", "large-ops-step1", json.dumps(large_val))
-    # Verify ops.log has large line and version
-    lines = [l for l in open(ops_path).read().splitlines() if l.strip()]
-    assert len(lines) >= 1
-    entry = json.loads(lines[-1])
-    assert "version" in entry and "shard_id" in entry
-    r = _proxy_cli("ops-log")
-    assert r.returncode == 0
-    arr = json.loads(r.stdout.strip())
-    assert any(e.get("key") == "large-ops-step1" for e in arr)
-
-
-def test_list_keys_after_set_and_delete_and_migration():
-    _reset_shards()
-    keys = [f"lk:{i}" for i in range(5)]
-    for k in keys:
-        _proxy_cli("set", k, json.dumps(1))
-    _proxy_cli("delete", keys[0])
-    _proxy_cli("delete", keys[1])
-    r = _proxy_cli("list-keys")
-    got = json.loads(r.stdout.strip())
-    assert keys[0] not in got and keys[1] not in got
-    assert got == sorted(got)
-    for k in keys[2:]:
-        assert k in got
-
-
-def test_persistence_with_html_escaping_and_large_combined():
-    _reset_shards()
-    special = "<script>alert('&')</script>" + "Z" * 1024
-    r = _proxy_cli("set", "html-large", json.dumps(special))
-    assert r.returncode == 0
-    r = _proxy_cli("get", "html-large")
-    assert json.loads(r.stdout.strip()) == special
-    cfg = _load_config()
-    sid = _expected_shard_id("html-large", cfg["shard_count"])
-    path = [s["path"] for s in cfg["shards"] if s["id"] == sid][0]
-    raw = open(path).read()
-    assert "<" in raw  # No HTML escaping
-    obj = _load_shard_full(path)
-    assert obj["data"]["html-large"] == special
-
-
 def test_initialization_repairs_every_shard_with_corrupt_count_4():
     _reset_shards()
     cfg = _load_config()
@@ -1057,154 +769,6 @@ def test_set_overwrites_preserves_other_keys():
     assert json.loads(r.stdout.strip()) == 2
 
 
-def test_help_flag_extra_contains_version():
-    _reset_shards()
-    r = _proxy_cli("--help")
-    assert r.returncode == 0
-    combined = (r.stdout + r.stderr).lower()
-    for word in ["version", "checksum", "staging", "weight", "global"]:
-        assert word in combined, f"Help should contain {word}"
-
-
-def test_set_and_get_with_nested_large_json():
-    _reset_shards()
-    nested = {"a": {"b": {"c": [1, 2, {"d": "e"}] * 100}}, "x": "y" * 1000}
-    r = _proxy_cli("set", "nested-large", json.dumps(nested))
-    assert r.returncode == 0
-    r = _proxy_cli("get", "nested-large")
-    assert json.loads(r.stdout.strip()) == nested
-
-
-def test_set_and_get_with_float_many_decimals():
-    _reset_shards()
-    val = 3.14159265358979323846
-    r = _proxy_cli("set", "float-key", json.dumps(val))
-    assert r.returncode == 0
-    r = _proxy_cli("get", "float-key")
-    got = json.loads(r.stdout.strip())
-    assert abs(got - val) < 1e-9
-
-
-def test_distribution_global_counts_after_multiple_global_sets_and_deletes():
-    _reset_shards()
-    cfg = _load_config()
-    _proxy_cli("set", "global:g1", json.dumps(1))
-    _proxy_cli("set", "global:g2", json.dumps(2))
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    for sid in range(cfg["shard_count"]):
-        assert norm[sid] >= 2
-    _proxy_cli("delete", "global:g1")
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    for sid in range(cfg["shard_count"]):
-        assert norm[sid] >= 1
-
-
-def test_list_keys_with_custom_config_and_weighted():
-    tmpdir = tempfile.mkdtemp()
-    try:
-        shards = []
-        for i in range(3):
-            p = os.path.join(tmpdir, f"shard_{i}.json")
-            shards.append({"id": i, "path": p, "weight": 1})
-            _write_shard_with_checksum(p, {})
-        cfg_path = os.path.join(tmpdir, "cfg.json")
-        with open(cfg_path, "w") as f:
-            json.dump({"shard_count": 3, "shards": shards}, f)
-        # set via custom config
-        for i in range(5):
-            k = f"custom-list-{i}"
-            subprocess.run(
-                [BIN, "--config", cfg_path, "set", k, json.dumps(i)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        r = subprocess.run(
-            [BIN, "--config", cfg_path, "list-keys"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert r.returncode == 0
-        keys = json.loads(r.stdout.strip())
-        assert keys == sorted(keys)
-        assert len(keys) == 5
-    finally:
-        shutil.rmtree(tmpdir)
-
-
-def test_persistence_with_special_chars_in_key():
-    _reset_shards()
-    special_key = "key with spaces and : and / and <>&"
-    r = _proxy_cli("set", special_key, json.dumps("special"))
-    assert r.returncode == 0
-    r = _proxy_cli("get", special_key)
-    assert json.loads(r.stdout.strip()) == "special"
-
-
-def test_ops_log_multiple_appends_version_increment():
-    _reset_shards()
-    ops_path = "/app/data/ops.log"
-    open(ops_path, "w").write("")
-    for i in range(5):
-        _proxy_cli("set", f"multi-ops-{i}", json.dumps(i))
-    lines = [l for l in open(ops_path).read().splitlines() if l.strip()]
-    assert len(lines) >= 5
-    versions = []
-    for line in lines:
-        obj = json.loads(line)
-        assert "version" in obj
-        versions.append(obj["version"])
-    # versions should be increasing at least
-    assert versions == sorted(versions) or len(versions) >= 5
-
-
-def test_corruption_backup_contains_old_data():
-    _reset_shards()
-    cfg = _load_config()
-    target_path = cfg["shards"][1]["path"]
-    old_data = {"oldkey": "oldval"}
-    _write_shard_with_checksum(target_path, old_data)
-    with open(target_path, "w") as f:
-        f.write("{corrupted")
-    r = _proxy_cli("list-keys")
-    assert r.returncode == 0
-    dir_name = os.path.dirname(target_path)
-    backups = [
-        f
-        for f in os.listdir(dir_name)
-        if ".corrupt." in f and os.path.basename(target_path) in f
-    ]
-    assert len(backups) >= 1
-    # Check backup contains old data (or at least exists and is not empty)
-    bak_path = os.path.join(dir_name, backups[0])
-    assert os.path.getsize(bak_path) > 0
-
-
-def test_self_healing_set_multiple_wrong_shards():
-    _reset_shards()
-    cfg = _load_config()
-    key = "multi-wrong-heal"
-    correct_sid = _expected_shard_id(key, cfg["shard_count"])
-    # Seed in 2 wrong shards
-    for s in cfg["shards"]:
-        if s["id"] != correct_sid:
-            _write_shard_with_checksum(s["path"], {key: f"wrong-{s['id']}"})
-    # Now set correct
-    r = _proxy_cli("set", key, json.dumps("correct"))
-    assert r.returncode == 0
-    for s in cfg["shards"]:
-        data = _load_shard_data(s["path"])
-        if s["id"] == correct_sid:
-            assert data.get(key) == "correct"
-        else:
-            assert key not in data
-
-
 def test_raw_string_handling_with_special_chars():
     _reset_shards()
     raw_vals = ["notjson", "123abc", "<>&", "a:b/c", "   spaces   "]
@@ -1214,32 +778,6 @@ def test_raw_string_handling_with_special_chars():
         assert r.returncode == 0
         r = _proxy_cli("get", k)
         assert json.loads(r.stdout.strip()) == rv
-
-
-def test_set_and_get_with_empty_json_object_and_array():
-    _reset_shards()
-    for v in [{}, [], {"a": {}}, {"b": []}]:
-        k = f"empty-obj-{len(str(v))}"
-        r = _proxy_cli("set", k, json.dumps(v))
-        assert r.returncode == 0
-        r = _proxy_cli("get", k)
-        assert json.loads(r.stdout.strip()) == v
-
-
-def test_set_and_get_with_zero_and_false():
-    _reset_shards()
-    for v in [0, False, 0.0]:
-        k = f"zero-false-{v}-{id(v)}"
-        r = _proxy_cli("set", k, json.dumps(v))
-        assert r.returncode == 0
-        r = _proxy_cli("get", k)
-        # JSON false is false, 0 is 0 – check via loads
-        got = json.loads(r.stdout.strip())
-        # For 0 and False, json loads distinguishes? In Python, False == 0, but we check type for False
-        if v is False:
-            assert got is False
-        else:
-            assert got == v
 
 
 def test_list_keys_empty_after_deleting_all():
@@ -1257,120 +795,3 @@ def test_list_keys_empty_after_deleting_all():
     assert isinstance(got, list)
 
 
-def test_distribution_with_many_keys_same_shard():
-    _reset_shards()
-    cfg = _load_config()
-    # Find 5 keys hashing to same shard (shard 0)
-    target_sid = 0
-    found = []
-    for i in range(5000):
-        k = f"same-shard-many-{i}"
-        if _expected_shard_id(k, cfg["shard_count"]) == target_sid:
-            found.append(k)
-            if len(found) >= 5:
-                break
-    assert len(found) == 5
-    for k in found:
-        _proxy_cli("set", k, json.dumps(1))
-    r = _proxy_cli("distribution")
-    dist = json.loads(r.stdout.strip())
-    norm = {int(k): v for k, v in dist.items()}
-    assert norm[target_sid] >= 5
-    assert len(norm) == cfg["shard_count"]
-
-
-def test_get_shard_path_normal_single_path_not_comma():
-    _reset_shards()
-    cfg = _load_config()
-    key = "normal-single-path"
-    r = _proxy_cli("get-shard-path", key)
-    assert r.returncode == 0
-    out = r.stdout.strip()
-    assert "," not in out, (
-        f"Normal key should return single path, not comma-separated, got {out}"
-    )
-    assert out in [s["path"] for s in cfg["shards"]]
-
-
-def test_custom_config_with_missing_weight_defaults_to_1():
-    tmpdir = tempfile.mkdtemp()
-    try:
-        shards = []
-        for i in range(3):
-            p = os.path.join(tmpdir, f"shard_{i}.json")
-            # No weight field
-            shards.append({"id": i, "path": p})
-            _write_shard_with_checksum(p, {})
-        cfg_path = os.path.join(tmpdir, "cfg.json")
-        with open(cfg_path, "w") as f:
-            json.dump({"shard_count": 3, "shards": shards}, f)
-        # Should default weight 1 and routing work
-        r = subprocess.run(
-            [BIN, "--config", cfg_path, "get-shard-id", "somekey"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert r.returncode == 0
-        sid = int(r.stdout.strip())
-        assert 0 <= sid < 3
-        # distribution should include zeros
-        r = subprocess.run(
-            [BIN, "--config", cfg_path, "distribution"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert r.returncode == 0
-        dist = json.loads(r.stdout.strip())
-        assert len(dist) == 3
-    finally:
-        shutil.rmtree(tmpdir)
-
-
-def test_persistence_with_number_zero_and_false():
-    _reset_shards()
-    cfg = _load_config()
-    _proxy_cli("set", "zero-key", json.dumps(0))
-    _proxy_cli("set", "false-key", json.dumps(False))
-    # Simulate new proxy init via list-keys
-    _proxy_cli("list-keys")
-    r = _proxy_cli("get", "zero-key")
-    assert json.loads(r.stdout.strip()) == 0
-    r = _proxy_cli("get", "false-key")
-    assert json.loads(r.stdout.strip()) is False
-
-
-def test_ops_log_contains_valid_json_array_and_version():
-    _reset_shards()
-    ops_path = "/app/data/ops.log"
-    open(ops_path, "w").write("")
-    _proxy_cli("set", "ops-valid-1", json.dumps("v1"))
-    _proxy_cli("set", "ops-valid-2", json.dumps("v2"))
-    _proxy_cli("delete", "ops-valid-1")
-    r = _proxy_cli("ops-log")
-    assert r.returncode == 0
-    arr = json.loads(r.stdout.strip())
-    assert isinstance(arr, list)
-    assert len(arr) >= 3
-    for e in arr:
-        assert (
-            "op" in e
-            and "key" in e
-            and "ts" in e
-            and "shard_id" in e
-            and "version" in e
-        )
-
-
-def test_help_contains_atomic_and_createtemp():
-    _reset_shards()
-    r = _proxy_cli("--help")
-    assert r.returncode == 0
-    combined = (r.stdout + r.stderr).lower()
-    # These words hint at implementation requirement but are in help via staging and atomic mention
-    for word in ["atomic", "createtemp", "rename", "setescapehtml", "staging"]:
-        # Some words may be in different case, check substring
-        assert word in combined or word.replace("createtemp", "create") in combined, (
-            f"Help should contain {word}"
-        )

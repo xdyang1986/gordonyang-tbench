@@ -1042,6 +1042,9 @@ def test_migrate_backup_tightened():
 
 
 def test_atomic_write_source_inspection_migrate():
+    # Revised per review: do not assert on variable names "grouped" or "map[int]" – that's identifier-name check.
+    # Instead assert observable atomic behavior: CreateTemp+Rename and SetEscapeHTML, which are required for durability.
+    # Batched write observable (one write per shard) is enforced via behavior tests (distribution, idempotent, etc.), not variable names.
     go_files = []
     for root, _, files in os.walk(APP_DIR):
         for f in files:
@@ -1053,10 +1056,9 @@ def test_atomic_write_source_inspection_migrate():
             combined += open(gf).read() + "\n"
         except:
             pass
-    assert "CreateTemp" in combined
-    assert "Rename" in combined
-    assert "grouped" in combined.lower() or "map[int]" in combined
-    assert "SetEscapeHTML" in combined
+    assert "CreateTemp" in combined, "Go code should use CreateTemp for atomic writes"
+    assert "Rename" in combined, "Go code should use Rename for atomic writes"
+    assert "SetEscapeHTML" in combined, "Must disable HTML escaping for checksum"
 
 
 def test_stdlib_go_list_imports():
