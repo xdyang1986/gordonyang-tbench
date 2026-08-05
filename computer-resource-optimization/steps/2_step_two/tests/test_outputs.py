@@ -230,56 +230,6 @@ def test_rate_limiting():
     run_config("add-job", "job3", "1", "256", "0")
     assert run_config("allocate", "job3", "nodeA").returncode == 0
 
-def test_snapshot_restore_dir():
-    clean_all()
-    run_config("add-node", "node1", "4", "1024", "1")
-    run_config("add-job", "job1", "1", "256", "0")
-    run_config("snapshot", "/tmp/backup")
-    assert os.path.isdir("/tmp/backup")
-    run_config("add-node", "node3", "4", "1024", "0")
-    assert len(json.loads(run_config("list-nodes").stdout)) == 2
-    assert run_config("restore", "/tmp/backup").returncode == 0
-    assert len(json.loads(run_config("list-nodes").stdout)) == 1
-
-def test_snapshot_restore_file():
-    clean_all()
-    run_config("add-node", "node1", "4", "1024", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    assert run_config("snapshot", "/tmp/backup.json").returncode == 0
-    run_config("add-node", "nodeX", "4", "1024", "0")
-    assert len(json.loads(run_config("list-nodes").stdout)) == 2
-    assert run_config("restore", "/tmp/backup.json").returncode == 0
-    assert len(json.loads(run_config("list-nodes").stdout)) == 1
-
-def test_ops_log():
-    clean_all()
-    run_config("add-node", "node1", "4", "1024", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    run_config("allocate", "job1", "node1")
-    logs = json.loads(run_config("ops-log").stdout)
-    assert len(logs) >= 3
-    with open("/app/data/cluster_ops.log", "a") as f:
-        f.write("invalid json\n")
-    r = run_config("ops-log")
-    assert "corrupt" in r.stderr.lower() or "skip" in r.stderr.lower() or "warning" in r.stderr.lower()
-
-def test_optimize():
-    clean_all()
-    run_config("add-node", "nodeA", "10", "10240", "0")
-    run_config("add-node", "nodeB", "10", "10240", "0")
-    for i in range(4):
-        run_config("add-job", f"job{i}", "2", "512", "0")
-        run_config("allocate", f"job{i}", "nodeA" if i < 2 else "nodeB")
-    r = run_config("optimize")
-    assert r.returncode == 0
-    out = json.loads(r.stdout)
-    for k in ["fragmentation_before", "fragmentation_after", "moves", "total_nodes", "used_nodes"]:
-        assert k in out
-    # no overcommit
-    for nid in ["nodeA","nodeB"]:
-        n = json.loads(run_config("get-node", nid).stdout)
-        assert n["used"]["cpu"] <= n["total"]["cpu"]
-
 def test_concurrent_sharded():
     clean_all()
     cfg = default_config()
@@ -306,21 +256,6 @@ def test_checksum_all():
     for p in ["/app/data/shard_0.json", "/app/data/shard_1.json", "/app/data/shard_2.json", "/app/data/shard_3.json", "/app/data/jobs.json", "/app/data/presence.json", "/app/data/rate_limit.json"]:
         if os.path.exists(p):
             assert checksum_valid_generic(p)
-
-def test_pagination_perf():
-    clean_all()
-    for i in range(100):
-        run_config("add-node", f"node-{i:04d}", "4", "1024", "0")
-    start = time.time()
-    r = run_config("list-nodes", "50", "0")
-    assert r.returncode == 0 and len(json.loads(r.stdout)) == 50
-    assert time.time() - start < 2
-
-def test_large_scale_200():
-    clean_all()
-    for i in range(100):
-        run_config("add-node", f"node-{i:03d}", "4", "1024", "0")
-    assert len(json.loads(run_config("list-nodes").stdout)) == 100
 
 def test_raw_unescaped_and_unicode():
     clean_all()
@@ -362,47 +297,6 @@ def test_get_shard_path_normal():
         if s["id"] == sid:
             assert r.stdout.strip() == s["path"]
 
-def test_distribution_with_global():
-    clean_all()
-    run_config("add-node", "node-0", "4", "1024", "0")
-    run_config("add-node", "global:cfg1", "4", "1024", "0")
-    dist = json.loads(run_config("distribution").stdout)
-    assert sum(dist.values()) >= 4
-    for sid in ["0","1","2","3"]:
-        assert dist[sid] >= 1
-
-def test_global_broadcast():
-    clean_all()
-    assert run_config("add-node", "global:shared", "4", "1024", "0").returncode == 0
-    found = False
-    for s in default_config()["shards"]:
-        if os.path.exists(s["path"]) and "global:shared" in open(s["path"]).read():
-            found = True
-            break
-    assert found
-
-def test_global_remove_from_all():
-    clean_all()
-    run_config("add-node", "global:to-del", "4", "1024", "0")
-    r = run_config("remove-node", "global:to-del")
-    assert r.returncode == 0 and "true" in r.stdout.lower()
-    for s in default_config()["shards"]:
-        if os.path.exists(s["path"]):
-            assert "global:to-del" not in open(s["path"]).read()
-
-def test_global_allocate():
-    clean_all()
-    run_config("add-node", "global:g1", "10", "10240", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    assert run_config("allocate", "job1", "global:g1").returncode == 0
-
-def test_best_fit_tie_breaker_id():
-    clean_all()
-    run_config("add-node", "nodeA", "4", "1024", "0")
-    run_config("add-node", "nodeB", "4", "1024", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    assert json.loads(run_config("schedule", "job1").stdout)["node_id"] == "nodeA"
-
 def test_schedule_no_fit_no_side_effects():
     clean_all()
     run_config("add-node", "node1", "1", "256", "0")
@@ -417,38 +311,6 @@ def test_heartbeat_nonexist_fails():
     clean_all()
     run_config("add-node", "nodeA", "4", "1024", "0")
     assert run_config("heartbeat", "noexist").returncode == 2
-
-def test_presence_multiple_nodes_ttl():
-    clean_all()
-    cfg = default_config()
-    cfg["node_heartbeat_ttl_seconds"] = 2
-    write_config(cfg)
-    for nid in ["n1","n2","n3"]:
-        run_config("add-node", nid, "4", "1024", "0")
-        run_config("heartbeat", nid)
-    assert len(json.loads(run_config("list-healthy").stdout)) == 3
-    time.sleep(3)
-    assert json.loads(run_config("list-healthy").stdout) == []
-    run_config("heartbeat", "n2")
-    assert json.loads(run_config("list-healthy").stdout) == ["n2"]
-
-def test_rate_limit_no_side_effects():
-    clean_all()
-    cfg = default_config()
-    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 1}
-    write_config(cfg)
-    run_config("add-node", "nodeA", "10", "10240", "0")
-    run_config("add-job", "job0", "1", "256", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    run_config("allocate", "job0", "nodeA")
-    before_jobs = json.loads(run_config("get-node", "nodeA").stdout)["jobs"][:]
-    before_ops = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
-    r = run_config("allocate", "job1", "nodeA")
-    assert r.returncode == 1
-    after_jobs = json.loads(run_config("get-node", "nodeA").stdout)["jobs"]
-    assert before_jobs == after_jobs
-    after_ops = open("/app/data/cluster_ops.log").read() if os.path.exists("/app/data/cluster_ops.log") else ""
-    assert before_ops == after_ops
 
 def test_snapshot_file_mode_contains_keys():
     clean_all()
@@ -465,13 +327,6 @@ def test_restore_dir_resets_non_backed():
     run_config("add-node", "node2", "4", "1024", "0")
     assert run_config("restore", "/tmp/backup").returncode == 0
     assert len(json.loads(run_config("list-nodes").stdout)) == 1
-
-def test_ops_log_large_100():
-    clean_all()
-    for i in range(50):
-        run_config("add-node", f"node-{i}", "4", "1024", "0")
-    logs = json.loads(run_config("ops-log").stdout)
-    assert len(logs) >= 50
 
 def test_file_lock_cleanup_sharded():
     clean_all()

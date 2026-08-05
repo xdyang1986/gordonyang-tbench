@@ -85,11 +85,11 @@ Best-fit vs first-fit difference tested: first-fit would pick nodeA (sorted ID) 
 ### New Commands (MUST)
 
 ```
-get-shard-id <nodeID>            -> int, weighted hash, -1 for global:
-get-shard-path <nodeID>          -> path single for normal, comma-separated sorted list for global:
+get-shard-id <nodeID>            -> int, weighted hash, -1 for global:. Empty-string key "" is valid, hashed via MD5 (d41d8cd98f00b204e9800998ecf8427e), returns exit 0
+get-shard-path <nodeID>          -> path single for normal, comma-separated sorted list for global:. Empty-string key "" is valid, hashed, returns exit 0
 distribution                     -> JSON map shard_id (string) -> count nodes including global in each shard (if global broadcast, counts in each), handles 200 nodes, includes zeros
-list-nodes [limit] [offset]      -> pagination offset, limit0=all, offset0 default, performance 1000 and 2000 <2s
-list-jobs [limit] [offset]       -> pagination
+list-nodes <limit> <offset>      -> pagination contract: sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-jobs. Performance 1000 and 2000 <2s
+list-jobs <limit> <offset>       -> pagination contract: sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-nodes.
 heartbeat <nodeID>               -> updates presence
 get-presence <nodeID>            -> alias for health
 get-node-health <nodeID>         -> health JSON

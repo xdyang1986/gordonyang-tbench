@@ -2083,6 +2083,10 @@ func main() {
 			exitInvalid("get-shard-path requires 1")
 		}
 		nodeID := cmdArgs[0]
+		// Empty-string "" is valid and hashed, whitespace invalid
+		if strings.TrimSpace(nodeID) == "" && nodeID != "" {
+			exitInvalid("empty nodeID")
+		}
 		if isGlobalKey(nodeID) {
 			paths := []string{}
 			shardsSorted := make([]Shard, len(cfg.Shards))
@@ -2621,6 +2625,7 @@ func main() {
 		os.Exit(2)
 	}
 }
+
 
 
 
