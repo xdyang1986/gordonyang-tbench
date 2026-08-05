@@ -1,0 +1,58 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/location-accuracy"
+description = "Multi-turn Go task: Step1 implements a vehicle location tracking service for a ride-sharing platform (like Uber) supporting update/get/list/near with persistence. Step2 improves accuracy to avoid inaccurate pickup/dropoff via GPS outlier filtering, accuracy-based rejection, stale detection, road-snapping, and motion-based estimation with confidence scoring and pickup/dropoff validation."
+authors = []
+keywords = ["go", "location-tracking", "gps", "uber", "ride-sharing", "accuracy", "geospatial", "cli"]
+
+[metadata]
+difficulty = "hard"
+category = "iterate_on_feature"
+tags = ["iterate_on_feature", "go", "location", "gps-accuracy", "multi-turn"]
+category_usecase = "feature"
+category_subdomain = "geospatial"
+reward_type = "binary"
+languages = ["go"]
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+[environment.env]
+[solution.env]
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
