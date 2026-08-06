@@ -356,28 +356,78 @@ func pointOnSegment(px, py, x1, y1, x2, y2 float64) bool {
 	return true
 }
 
+func crossesAntimeridianPoly(poly []Point) bool {
+	if len(poly) == 0 {
+		return false
+	}
+	minLng := poly[0].Lng
+	maxLng := poly[0].Lng
+	for _, p := range poly[1:] {
+		if p.Lng < minLng {
+			minLng = p.Lng
+		}
+		if p.Lng > maxLng {
+			maxLng = p.Lng
+		}
+	}
+	diff := maxLng - minLng
+	if diff < 0 {
+		diff = -diff
+	}
+	// World-spanning (360) should not be treated as small crossing
+	if diff >= 360-eps {
+		return false
+	}
+	return diff > 180
+}
+
 func pointInPolygon(lat, lng float64, poly []Point) bool {
-	px := lng
+	// Handle antimeridian crossing by shifting negative lngs +360
+	usePoly := poly
+	useLng := lng
+	if crossesAntimeridianPoly(poly) {
+		shifted := make([]Point, len(poly))
+		for i, p := range poly {
+			if p.Lng < 0 {
+				shifted[i] = Point{Lat: p.Lat, Lng: p.Lng + 360}
+			} else {
+				shifted[i] = p
+			}
+		}
+		usePoly = shifted
+		if lng < 0 {
+			useLng = lng + 360
+		}
+		// If after shifting, the polygon still has large span, we may need to handle case where query lng is on other side of 0
+		// For small crossing rectangles, shifted lng range is e.g., 179-181, so query at 0 stays 0 (outside) correctly.
+		// For query at e.g., -179.5 shifted to 180.5 inside.
+	}
+	px := useLng
 	py := lat
-	n := len(poly)
+	n := len(usePoly)
 	for i := 0; i < n; i++ {
 		j := (i + 1) % n
-		x1 := poly[i].Lng
-		y1 := poly[i].Lat
-		x2 := poly[j].Lng
-		y2 := poly[j].Lat
+		x1 := usePoly[i].Lng
+		y1 := usePoly[i].Lat
+		x2 := usePoly[j].Lng
+		y2 := usePoly[j].Lat
 		if pointOnSegment(px, py, x1, y1, x2, y2) {
 			return true
 		}
 	}
+	// Also check original polygon edges for points exactly on antimeridian edge that might be missed due to shift?
+	// For crossing case, the edge that crosses from 179 to -179 via 180 after shift becomes 179->181, so point at 180 is on edge and will be caught.
+	// No need for extra check.
+
 	inside := false
 	j := n - 1
 	for i := 0; i < n; i++ {
-		xi := poly[i].Lng
-		yi := poly[i].Lat
-		xj := poly[j].Lng
-		yj := poly[j].Lat
+		xi := usePoly[i].Lng
+		yi := usePoly[i].Lat
+		xj := usePoly[j].Lng
+		yj := usePoly[j].Lat
 		if (yi > py) != (yj > py) {
+			// Avoid div by zero (handled by yi!=yj due to condition)
 			xIntersect := (xj-xi)*(py-yi)/(yj-yi) + xi
 			if px < xIntersect {
 				inside = !inside
@@ -386,6 +436,29 @@ func pointInPolygon(lat, lng float64, poly []Point) bool {
 		j = i
 	}
 	return inside
+}
+
+func pointInBBox(lat, lng float64, bbox BBox) bool {
+	if lat < bbox.MinLat-eps || lat > bbox.MaxLat+eps {
+		return false
+	}
+	span := bbox.MaxLng - bbox.MinLng
+	if span >= 360-eps {
+		// world-spanning, all lngs valid
+		return true
+	}
+	if span > 180 {
+		// crossing antimeridian: valid lngs are >= max OR <= min (small wrapping interval)
+		// Reject if lng is strictly between min and max (large interior gap)
+		if lng > bbox.MinLng+eps && lng < bbox.MaxLng-eps {
+			return false
+		}
+		return true
+	}
+	if lng < bbox.MinLng-eps || lng > bbox.MaxLng+eps {
+		return false
+	}
+	return true
 }
 
 func computeBBox(poly []Point) BBox {
@@ -555,12 +628,41 @@ func NewServer(db DB, gridSize float64, cacheSize int, dbPath string) *Server {
 		s.bboxes[id] = bbox
 		latStart := int(math.Floor((bbox.MinLat + 90.0) / gridSize))
 		latEnd := int(math.Floor((bbox.MaxLat + 90.0) / gridSize))
-		lngStart := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
-		lngEnd := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
-		for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-			for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-				key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-				s.grid[key] = append(s.grid[key], id)
+		lngSpan := bbox.MaxLng - bbox.MinLng
+		if lngSpan >= 360-eps {
+			// world-spanning: covers all longitudes, add to all lng cells
+			lngStart := int(math.Floor((-180.0 + 180.0) / gridSize))
+			lngEnd := int(math.Floor((180.0 + 180.0) / gridSize))
+			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+				for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
+					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
+					s.grid[key] = append(s.grid[key], id)
+				}
+			}
+		} else if lngSpan > 180 {
+			// crossing antimeridian: small wrapping interval, split into [maxLng,180] and [-180,minLng]
+			lngStart1 := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
+			lngEnd1 := int(math.Floor((180.0 + 180.0) / gridSize))
+			lngStart2 := int(math.Floor((-180.0 + 180.0) / gridSize))
+			lngEnd2 := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
+			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+				for lngIdx := lngStart1; lngIdx <= lngEnd1; lngIdx++ {
+					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
+					s.grid[key] = append(s.grid[key], id)
+				}
+				for lngIdx := lngStart2; lngIdx <= lngEnd2; lngIdx++ {
+					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
+					s.grid[key] = append(s.grid[key], id)
+				}
+			}
+		} else {
+			lngStart := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
+			lngEnd := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
+			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+				for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
+					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
+					s.grid[key] = append(s.grid[key], id)
+				}
 			}
 		}
 	}
@@ -578,7 +680,6 @@ func (s *Server) getCellForPoint(lat, lng float64) CellKey {
 }
 
 func (s *Server) lookupPointInternalLocked(lat, lng float64) []string {
-	// caller holds RLock
 	cell := s.getCellForPoint(lat, lng)
 	candidates := s.grid[cell]
 	if len(candidates) == 0 {
@@ -587,7 +688,7 @@ func (s *Server) lookupPointInternalLocked(lat, lng float64) []string {
 	matching := make([]string, 0, 2)
 	for _, id := range candidates {
 		bbox := s.bboxes[id]
-		if lat < bbox.MinLat-eps || lat > bbox.MaxLat+eps || lng < bbox.MinLng-eps || lng > bbox.MaxLng+eps {
+		if !pointInBBox(lat, lng, bbox) {
 			continue
 		}
 		g := s.db[id]

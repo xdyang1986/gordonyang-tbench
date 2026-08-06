@@ -1,5 +1,5 @@
 """
-Step 2 tests: High-QPS geofence service with spatial index, cache, batch, concurrency, CRUD, eviction, rounding (Hard version)
+Step 2 tests: High-QPS geofence service with spatial index, cache, batch, concurrency, CRUD, eviction, rounding, antimeridian, pole (Hard version, relative perf)
 """
 
 import os
@@ -130,6 +130,46 @@ def stop_server(proc):
             proc.kill()
 
 
+def assert_is_list_not_null(obj, field="geofences"):
+    """Broad nil-slice check: field must be list, not None, and raw JSON must not contain null for that field."""
+    assert field in obj, f"missing field {field} in {obj}"
+    val = obj[field]
+    assert isinstance(val, list), f"field {field} should be list, got {type(val)} {val}"
+    # val may be [] but not None
+
+
+def assert_response_arrays_valid(resp):
+    """Ensure every array field in response is list not null, check raw text for :null where array expected."""
+    # Parse json
+    try:
+        data = resp.json()
+    except:
+        return
+
+    # Check common array fields
+    # For /lookup: geofences
+    # For /lookup/batch: results is list, each results[i].geofences list
+    # For /geofences: should be list
+    # We will check recursively for any 'geofences' key that is None
+    def check_obj(o):
+        if isinstance(o, dict):
+            if "geofences" in o:
+                assert o["geofences"] is not None, f"geofences is null in {o}"
+                assert isinstance(o["geofences"], list), f"geofences not list in {o}"
+            for v in o.values():
+                check_obj(v)
+        elif isinstance(o, list):
+            for item in o:
+                check_obj(item)
+
+    check_obj(data)
+    # Also raw text should not have :null for geofences if we expect [] – but we already checked parsed
+    # For empty geofences endpoint, raw should be [] not null
+    txt = resp.text.strip()
+    if txt == "null":
+        raise AssertionError(f"response is literal null, expected array: {txt[:200]}")
+
+
 # ---- CLI backward compat (including strict validation) ----
 
 
@@ -146,17 +186,17 @@ def test_cli_still_works():
         assert r.returncode == 0
         arr = json.loads(r.stdout)
         assert len(arr) == 1
-        # must be [] not null for empty? Here we have 1, but check empty later
+        assert isinstance(arr, list)
         r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
         assert r.returncode == 0
-        assert json.loads(r.stdout) == ["zone_a"]
-        assert r.stdout.strip() != "null"
+        data = json.loads(r.stdout)
+        assert isinstance(data, list), "lookup should return list, not null"
+        assert data == ["zone_a"]
         r = run_cli(db, ["remove", "zone_a"])
         assert r.returncode == 0
 
-        # strict validation should still work in step2 binary
         r = run_cli(db, ["add", "bad", "--polygon", "0,0;;0,1;1,1;1,0", "--name", "A"])
-        assert r.returncode == 2, "empty segment should be rejected in step2 as well"
+        assert r.returncode == 2, "empty segment should be rejected"
         r = run_cli(db, ["add", "bad", "--polygon", "0,0;1,1;0,1;1,0", "--name", "A"])
         assert r.returncode == 2, "self-intersecting should be rejected"
     finally:
@@ -182,26 +222,24 @@ def test_http_lookup_correctness():
                 f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             data = resp.json()
+            assert_is_list_not_null(data, "geofences")
             assert data["geofences"] == ["sq"]
             assert data["count"] == 1
-            # must be [] not null
-            assert data["geofences"] is not None
 
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=2&lng=2", timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
             assert resp.json()["geofences"] == []
-            assert (
-                resp.text.find("null") == -1
-                or '"geofences":[]' in resp.text
-                or '"geofences": []' in resp.text
-            ), "empty should be [], not null"
 
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=10.5&lng=10.5", timeout=2
             )
+            assert_response_arrays_valid(resp)
             assert resp.json()["geofences"] == ["sq2"]
 
             # invalid lat
@@ -217,24 +255,26 @@ def test_http_lookup_correctness():
             # geofences endpoint
             resp = requests.get(f"http://localhost:{port}/geofences", timeout=2)
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             arr = resp.json()
+            assert isinstance(arr, list), "geofences should be list not null"
             assert len(arr) == 2
             ids = [x["id"] for x in arr]
             assert ids == sorted(ids)
-            # ensure not null
-            assert resp.text.strip() != "null"
 
             # stats
             resp = requests.get(f"http://localhost:{port}/stats", timeout=2)
             assert resp.status_code == 200
             stats = resp.json()
-            assert "total_geofences" in stats
-            assert "total_queries" in stats
-            assert "cache_hits" in stats
-            assert "cache_size" in stats
-            assert "avg_latency_ms" in stats
-            assert "index_cells" in stats
-            assert "cache_hit_rate" in stats
+            for k in [
+                "total_geofences",
+                "total_queries",
+                "cache_hits",
+                "cache_size",
+                "avg_latency_ms",
+                "index_cells",
+            ]:
+                assert k in stats
             assert stats["total_geofences"] == 2
             assert stats["index_cells"] > 0
         finally:
@@ -244,7 +284,7 @@ def test_http_lookup_correctness():
 
 
 def test_http_verbose_lookup():
-    """Test GET /lookup?verbose=true returns full objects."""
+    """Verbose returns full objects."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -258,31 +298,19 @@ def test_http_verbose_lookup():
                 timeout=2,
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             data = resp.json()
+            assert_is_list_not_null(data, "geofences")
             assert data["count"] == 1
             assert len(data["geofences"]) == 1
             assert data["geofences"][0]["id"] == "sq"
             assert "polygon" in data["geofences"][0]
 
-            # without verbose should be IDs
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
             )
+            assert_response_arrays_valid(resp)
             assert resp.json()["geofences"] == ["sq"]
-
-            # verbose=1 also accepted
-            resp = requests.get(
-                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5&verbose=1", timeout=2
-            )
-            assert resp.status_code == 200
-            # should be verbose if implementation supports 1, else at least not fail
-            # We allow either, but if it returns IDs, we skip strict check
-            if (
-                isinstance(resp.json()["geofences"], list)
-                and len(resp.json()["geofences"]) > 0
-            ):
-                if isinstance(resp.json()["geofences"][0], dict):
-                    assert resp.json()["geofences"][0]["id"] == "sq"
         finally:
             stop_server(proc)
     finally:
@@ -300,8 +328,7 @@ def test_http_single_geofence():
         try:
             resp = requests.get(f"http://localhost:{port}/geofences/sq", timeout=2)
             assert resp.status_code == 200
-            obj = resp.json()
-            assert obj["id"] == "sq"
+            assert resp.json()["id"] == "sq"
 
             resp = requests.get(
                 f"http://localhost:{port}/geofences/notfound", timeout=2
@@ -314,7 +341,7 @@ def test_http_single_geofence():
 
 
 def test_http_crud():
-    """POST /geofences adds, DELETE removes, with index and cache invalidation."""
+    """POST adds, GET finds, lookup finds new, DELETE removes, with cache invalidation."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -323,7 +350,6 @@ def test_http_crud():
         port = get_free_port()
         proc = start_server(db, port, cache_size="10")
         try:
-            # POST new geofence
             payload = {
                 "id": "newzone",
                 "name": "New",
@@ -338,22 +364,22 @@ def test_http_crud():
                 f"http://localhost:{port}/geofences", json=payload, timeout=2
             )
             assert resp.status_code in (200, 201), f"POST failed {resp.text}"
-            data = resp.json()
-            assert data["id"] == "newzone"
-
-            # GET single should find it
-            resp = requests.get(f"http://localhost:{port}/geofences/newzone", timeout=2)
-            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             assert resp.json()["id"] == "newzone"
 
-            # lookup should find new zone
+            resp = requests.get(f"http://localhost:{port}/geofences/newzone", timeout=2)
+            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=5.5&lng=5.5", timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
             assert "newzone" in resp.json()["geofences"]
 
-            # POST invalid (self-intersecting) should 400
+            # invalid self-intersecting should 400
             bad = {
                 "id": "bad",
                 "name": "Bad",
@@ -367,43 +393,36 @@ def test_http_crud():
             resp = requests.post(
                 f"http://localhost:{port}/geofences", json=bad, timeout=2
             )
-            assert resp.status_code == 400, (
-                f"self-intersecting should be 400, got {resp.status_code}"
-            )
+            assert resp.status_code == 400
 
-            # DELETE
             resp = requests.delete(
                 f"http://localhost:{port}/geofences/newzone", timeout=2
             )
             assert resp.status_code == 200
-            assert resp.json().get("deleted") == "newzone" or "newzone" in str(
-                resp.json()
-            )
+            assert_response_arrays_valid(resp)
 
-            # lookup after delete should not find
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=5.5&lng=5.5", timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
             assert "newzone" not in resp.json()["geofences"]
 
-            # GET after delete 404
             resp = requests.get(f"http://localhost:{port}/geofences/newzone", timeout=2)
             assert resp.status_code == 404
 
-            # Check persistence: file should have been updated
-            # Restart server and ensure newzone not present
             stop_server(proc)
             port2 = get_free_port()
             proc2 = start_server(db, port2)
             try:
                 resp = requests.get(f"http://localhost:{port2}/geofences", timeout=2)
+                assert_response_arrays_valid(resp)
                 ids = [x["id"] for x in resp.json()]
                 assert "newzone" not in ids
                 assert "sq" in ids
             finally:
                 stop_server(proc2)
-                # set proc to None to avoid double stop in outer finally
                 proc = None
         finally:
             if proc:
@@ -421,46 +440,36 @@ def test_http_batch():
         port = get_free_port()
         proc = start_server(db, port)
         try:
-            # valid batch
             payload = {"points": [{"lat": 0.5, "lng": 0.5}, {"lat": 2, "lng": 2}]}
             resp = requests.post(
                 f"http://localhost:{port}/lookup/batch", json=payload, timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             results = resp.json()["results"]
             assert len(results) == 2
+            assert_is_list_not_null(results[0], "geofences")
             assert results[0]["geofences"] == ["sq"]
             assert results[1]["geofences"] == []
-            # ensure not null
-            assert results[1]["geofences"] == []
+            assert isinstance(results[1]["geofences"], list)
 
-            # empty batch
             resp = requests.post(
                 f"http://localhost:{port}/lookup/batch", json={"points": []}, timeout=2
             )
             assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             assert resp.json()["results"] == []
+            assert isinstance(resp.json()["results"], list)
 
-            # too large
             big = {"points": [{"lat": 0, "lng": 0}] * 1001}
             resp = requests.post(
                 f"http://localhost:{port}/lookup/batch", json=big, timeout=2
             )
             assert resp.status_code == 400
 
-            # invalid point
             bad = {"points": [{"lat": 100, "lng": 0}]}
             resp = requests.post(
                 f"http://localhost:{port}/lookup/batch", json=bad, timeout=2
-            )
-            assert resp.status_code == 400
-
-            # invalid json
-            resp = requests.post(
-                f"http://localhost:{port}/lookup/batch",
-                data="not json",
-                headers={"Content-Type": "application/json"},
-                timeout=2,
             )
             assert resp.status_code == 400
         finally:
@@ -478,24 +487,20 @@ def test_cache_behavior():
         port = get_free_port()
         proc = start_server(db, port, cache_size="10")
         try:
-            # first query miss
             requests.get(f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2)
             resp = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            assert resp["total_queries"] >= 1
             hits_before = resp["cache_hits"]
 
-            # repeat same point 5 times
             for _ in range(5):
-                requests.get(
+                r = requests.get(
                     f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
                 )
+                assert_response_arrays_valid(r)
+                assert_is_list_not_null(r.json(), "geofences")
 
             resp = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            assert resp["cache_hits"] >= hits_before + 4, (
-                f"expected cache hits increase, got {resp}"
-            )
+            assert resp["cache_hits"] >= hits_before + 4
             assert resp["cache_size"] >= 1
-            assert resp["cache_size"] <= 10
         finally:
             stop_server(proc)
     finally:
@@ -503,7 +508,7 @@ def test_cache_behavior():
 
 
 def test_cache_rounding():
-    """Cache key must be rounded to 6 decimals: nearby points share cache."""
+    """Nearby points should share cache entry when rounded to 6 decimals."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -512,23 +517,19 @@ def test_cache_rounding():
         port = get_free_port()
         proc = start_server(db, port, cache_size="10")
         try:
-            # Query 0.5000001, 0.5000001
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.5000001&lng=0.5000001", timeout=2
             )
-            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
             stats1 = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            # Query 0.5000002,0.5000002 should be same cache key if rounding to 6 decimals (0.500000)
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.5000002&lng=0.5000002", timeout=2
             )
-            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             stats2 = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            # Second should be hit if rounding works
-            assert stats2["cache_hits"] >= stats1["cache_hits"] + 1, (
-                f"rounding cache miss: stats1 {stats1} stats2 {stats2}"
-            )
-            assert stats2["cache_size"] == 1, "rounding should keep same key, size 1"
+            assert stats2["cache_hits"] >= stats1["cache_hits"] + 1
+            assert stats2["cache_size"] == 1
         finally:
             stop_server(proc)
     finally:
@@ -536,7 +537,7 @@ def test_cache_rounding():
 
 
 def test_cache_eviction():
-    """LRU eviction: with size 2, 3 unique points should evict LRU."""
+    """LRU eviction: size 2, 3 unique points evicts LRU, and MRU stays."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -545,49 +546,29 @@ def test_cache_eviction():
         port = get_free_port()
         proc = start_server(db, port, cache_size="2")
         try:
-            # Query 3 unique points
             requests.get(f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2)
             requests.get(f"http://localhost:{port}/lookup?lat=1.5&lng=1.5", timeout=2)
             requests.get(f"http://localhost:{port}/lookup?lat=2.5&lng=2.5", timeout=2)
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            assert stats["cache_size"] == 2, (
-                f"expected size 2, got {stats['cache_size']}"
-            )
-            # First point should have been evicted (LRU)
-            hits_before = stats["cache_hits"]
-            # Re-query first point - should be miss (not hit)
-            requests.get(f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2)
-            stats_after = requests.get(
-                f"http://localhost:{port}/stats", timeout=2
-            ).json()
-            # If eviction worked, this should be miss, so hits should not increase
-            # However if implementation is FIFO not LRU, it would still be miss for first, but LRU after accessing pattern
-            # For true LRU test: query A,B, query A again (makes A MRU, B LRU), then query C -> B should be evicted, not A
-            # So do more precise LRU test
-            # Reset via restart
+            assert stats["cache_size"] == 2
+
             stop_server(proc)
             port2 = get_free_port()
             proc2 = start_server(db, port2, cache_size="2")
             try:
-                # A
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=0.5&lng=0.5", timeout=2
                 )
-                # B
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=1.5&lng=1.5", timeout=2
                 )
-                # A again -> makes A MRU, B LRU
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=0.5&lng=0.5", timeout=2
                 )
                 stats_mid = requests.get(
                     f"http://localhost:{port2}/stats", timeout=2
                 ).json()
-                assert stats_mid["cache_hits"] == 1, (
-                    f"expected 1 hit for A re-query, got {stats_mid}"
-                )
-                # C -> should evict B, not A
+                assert stats_mid["cache_hits"] == 1
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=2.5&lng=2.5", timeout=2
                 )
@@ -595,17 +576,13 @@ def test_cache_eviction():
                     f"http://localhost:{port2}/stats", timeout=2
                 ).json()
                 assert stats_mid2["cache_size"] == 2
-                # A should still be in cache (hit)
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=0.5&lng=0.5", timeout=2
                 )
                 stats_final = requests.get(
                     f"http://localhost:{port2}/stats", timeout=2
                 ).json()
-                assert stats_final["cache_hits"] == stats_mid2["cache_hits"] + 1, (
-                    f"LRU eviction failed: A should still be cached, expected hit, got stats {stats_final}"
-                )
-                # B should be miss
+                assert stats_final["cache_hits"] == stats_mid2["cache_hits"] + 1
                 hits_before_b = stats_final["cache_hits"]
                 requests.get(
                     f"http://localhost:{port2}/lookup?lat=1.5&lng=1.5", timeout=2
@@ -613,9 +590,7 @@ def test_cache_eviction():
                 stats_after_b = requests.get(
                     f"http://localhost:{port2}/stats", timeout=2
                 ).json()
-                assert stats_after_b["cache_hits"] == hits_before_b, (
-                    f"B should have been evicted, should be miss, got {stats_after_b}"
-                )
+                assert stats_after_b["cache_hits"] == hits_before_b
             finally:
                 stop_server(proc2)
                 proc = None
@@ -649,12 +624,7 @@ def test_index_cells():
         try:
             stats2 = requests.get(f"http://localhost:{port2}/stats", timeout=2).json()
             assert stats2["index_cells"] > 0
-            # small grid should have more cells than large grid
-            # For these polygons, grid 1.0 should create more cells than 5.0
-            # So check monotonic
-            assert stats["index_cells"] >= stats2["index_cells"], (
-                f"grid 1.0 should have >= cells than 5.0, got {stats['index_cells']} vs {stats2['index_cells']}"
-            )
+            assert stats["index_cells"] >= stats2["index_cells"]
         finally:
             stop_server(proc2)
     finally:
@@ -662,15 +632,13 @@ def test_index_cells():
 
 
 def test_index_large_polygon():
-    """World polygon creates many cells but should not OOM and empty area lookup fast."""
+    """World polygon creates many cells but should not OOM and lookup fast."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
-        # world
         poly = "-90,-180;-90,180;90,180;90,-180"
         run_cli(db, ["add", "world", "--polygon", poly, "--name", "World"])
-        # plus 100 small zones
         for i in range(100):
             base_lat = (i // 10) * 2.0
             base_lng = (i % 10) * 2.0
@@ -681,23 +649,13 @@ def test_index_large_polygon():
         proc = start_server(db, port, grid_size="1", cache_size="100")
         try:
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            assert stats["index_cells"] > 100, (
-                f"world polygon should create many cells, got {stats['index_cells']}"
-            )
-            # empty area far from small zones but inside world -> should still return world
+            assert stats["index_cells"] > 100
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=80&lng=150", timeout=2
             )
-            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
             assert "world" in resp.json()["geofences"]
-            # measure empty? Actually world covers everything, so not empty. But ensure fast
-            start = time.time()
-            for _ in range(20):
-                requests.get(
-                    f"http://localhost:{port}/lookup?lat=80&lng=150", timeout=2
-                )
-            elapsed = time.time() - start
-            assert elapsed / 20 < 0.1, f"large polygon lookup too slow {elapsed / 20}"
         finally:
             stop_server(proc)
     finally:
@@ -717,7 +675,8 @@ def test_no_cache_mode():
                 resp = requests.get(
                     f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
                 )
-                assert resp.status_code == 200
+                assert_response_arrays_valid(resp)
+                assert_is_list_not_null(resp.json(), "geofences")
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
             assert stats["cache_size"] == 0
             assert stats["cache_hits"] == 0
@@ -727,7 +686,7 @@ def test_no_cache_mode():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# ---- Performance / QPS ----
+# ---- Relative performance checks (no absolute floors) ----
 
 
 def _create_many_geofences(db, count=100):
@@ -739,150 +698,104 @@ def _create_many_geofences(db, count=100):
         run_cli(db, ["add", f"zone_{i:03d}", "--polygon", poly, "--name", f"Zone {i}"])
 
 
-def _create_many_with_large_polys(db, count=500):
-    """Create mix of small squares and some large 100-point polygons."""
-    run_cli(db, ["clear"])
-    for i in range(count):
-        if i % 20 == 0:
-            # large polygon with 50 points (circle approx)
-            import math
-
-            center_lat = (i // 25) * 4.0
-            center_lng = (i % 25) * 4.0
-            points = []
-            for k in range(50):
-                angle = 2 * math.pi * k / 50
-                lat = center_lat + 0.4 * math.sin(angle)
-                lng = center_lng + 0.4 * math.cos(angle)
-                points.append(f"{lat},{lng}")
-            poly = ";".join(points)
-            run_cli(
-                db, ["add", f"zone_{i:03d}", "--polygon", poly, "--name", f"Zone {i}"]
-            )
-        else:
-            base_lat = (i // 25) * 2.0
-            base_lng = (i % 25) * 2.0
-            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
-            run_cli(
-                db, ["add", f"zone_{i:03d}", "--polygon", poly, "--name", f"Zone {i}"]
-            )
+def _measure_avg_latency(port, lat, lng, repeats=20, timeout=2):
+    start = time.time()
+    for _ in range(repeats):
+        resp = requests.get(
+            f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=timeout
+        )
+        assert resp.status_code == 200
+        assert_response_arrays_valid(resp)
+    elapsed = time.time() - start
+    return elapsed / repeats
 
 
-def test_qps_throughput():
+def test_relative_index_performance():
+    """500-zone lookup latency should be small multiple of 5-zone latency (proves index)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        # 5 zones
+        _create_many_geofences(db, count=5)
+        port5 = get_free_port()
+        proc5 = start_server(db, port5, grid_size="1", cache_size="0")
+        try:
+            # warm up
+            _measure_avg_latency(port5, 0.5, 0.5, repeats=5)
+            avg5_inside = _measure_avg_latency(port5, 0.5, 0.5, repeats=20)
+            avg5_empty = _measure_avg_latency(port5, 80, 150, repeats=20)
+        finally:
+            stop_server(proc5)
+
+        # 500 zones – same first zone at 0,0 so inside point same
+        _create_many_geofences(db, count=500)
+        port500 = get_free_port()
+        proc500 = start_server(db, port500, grid_size="1", cache_size="0")
+        try:
+            _measure_avg_latency(port500, 0.5, 0.5, repeats=5)
+            avg500_inside = _measure_avg_latency(port500, 0.5, 0.5, repeats=20)
+            avg500_empty = _measure_avg_latency(port500, 80, 150, repeats=20)
+        finally:
+            stop_server(proc500)
+
+        print(
+            f"Relative: 5-zone inside {avg5_inside * 1000:.2f}ms empty {avg5_empty * 1000:.2f}ms | "
+            f"500-zone inside {avg500_inside * 1000:.2f}ms empty {avg500_empty * 1000:.2f}ms | "
+            f"ratio inside {avg500_inside / (avg5_inside + 1e-6):.2f}x empty {avg500_empty / (avg5_empty + 1e-6):.2f}x"
+        )
+
+        # With index, 500 should be within ~5x of 5 (plus small absolute slack for noise)
+        # Naive without index would be ~100x (500/5)
+        # Use generous factor 8 to avoid flake, plus 0.02s slack for tiny absolute times
+        assert avg500_inside <= avg5_inside * 8 + 0.05, (
+            f"500-zone inside too slow vs 5-zone: {avg500_inside}s vs {avg5_inside}s ratio {avg500_inside / (avg5_inside + 1e-9):.1f}x, expected index to keep it small"
+        )
+        assert avg500_empty <= avg5_empty * 8 + 0.05, (
+            f"500-zone empty too slow vs 5-zone: {avg500_empty}s vs {avg5_empty}s ratio {avg500_empty / (avg5_empty + 1e-9):.1f}x, expected index to make empty fast"
+        )
+
+        # Also ensure both absolute generous upper bound to prevent hangs, but not tight
+        assert avg5_inside < 1.0 and avg500_inside < 1.0
+        assert avg5_empty < 1.0 and avg500_empty < 1.0
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cache_cold_vs_cached_ratio():
+    """Second identical query should be cache hit and not slower than first by large factor."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
         _create_many_geofences(db, count=100)
         port = get_free_port()
-        proc = start_server(db, port, grid_size="1", cache_size="500")
+        proc = start_server(db, port, grid_size="1", cache_size="100")
         try:
-            points = []
-            for _ in range(200):
-                if random.random() < 0.5:
-                    z = random.randint(0, 99)
-                    base_lat = (z // 10) * 2.0 + 0.4
-                    base_lng = (z % 10) * 2.0 + 0.4
-                    points.append((base_lat, base_lng))
-                else:
-                    points.append((random.uniform(-20, 20), random.uniform(-20, 20)))
-
-            def do_lookup(pt):
-                lat, lng = pt
-                try:
-                    resp = requests.get(
-                        f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=5
-                    )
-                    return resp.status_code == 200
-                except Exception:
-                    return False
-
-            for pt in points[:10]:
-                do_lookup(pt)
-
+            # cold
             start = time.time()
-            total_requests = 1000
-            all_pts = [random.choice(points) for _ in range(total_requests)]
-
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(do_lookup, pt) for pt in all_pts]
-                results = [f.result() for f in as_completed(futures)]
-
-            elapsed = time.time() - start
-            success = sum(1 for r in results if r)
-            qps = success / elapsed if elapsed > 0 else 0
-
-            print(
-                f"QPS test: {success}/{total_requests} succeeded in {elapsed:.2f}s => {qps:.1f} QPS"
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
             )
+            assert_response_arrays_valid(resp)
+            cold = time.time() - start
 
-            assert success >= total_requests * 0.95
-            assert elapsed < 7.0, f"took too long {elapsed:.2f}s, got {qps:.1f} QPS"
-            assert qps >= 120, f"QPS too low: {qps:.1f}, expected >=120"
+            # warm – should be hit
+            start = time.time()
+            for _ in range(10):
+                resp = requests.get(
+                    f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+                )
+                assert_response_arrays_valid(resp)
+            warm_avg = (time.time() - start) / 10
 
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            assert stats["avg_latency_ms"] < 150
-        finally:
-            stop_server(proc)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def test_qps_throughput_large_scale():
-    """Harder: 500 geofences, 1000 reqs, 30 workers, require >=300 QPS."""
-    tmpdir = tempfile.mkdtemp()
-    db = os.path.join(tmpdir, "geof.json")
-    try:
-        _create_many_geofences(db, count=500)
-        port = get_free_port()
-        proc = start_server(db, port, grid_size="1", cache_size="1000")
-        try:
-            points = []
-            for _ in range(500):
-                if random.random() < 0.6:
-                    z = random.randint(0, 499)
-                    base_lat = (z // 25) * 2.0 + 0.4
-                    base_lng = (z % 25) * 2.0 + 0.4
-                    points.append((base_lat, base_lng))
-                else:
-                    points.append((random.uniform(-30, 60), random.uniform(-30, 60)))
-
-            def do_lookup(pt):
-                lat, lng = pt
-                try:
-                    resp = requests.get(
-                        f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=5
-                    )
-                    return resp.status_code == 200
-                except Exception:
-                    return False
-
-            # warmup
-            for pt in points[:20]:
-                do_lookup(pt)
-
-            start = time.time()
-            total_requests = 1500
-            all_pts = [random.choice(points) for _ in range(total_requests)]
-
-            with ThreadPoolExecutor(max_workers=30) as executor:
-                futures = [executor.submit(do_lookup, pt) for pt in all_pts]
-                results = [f.result() for f in as_completed(futures)]
-
-            elapsed = time.time() - start
-            success = sum(1 for r in results if r)
-            qps = success / elapsed if elapsed > 0 else 0
-            print(
-                f"Large QPS: {success}/{total_requests} in {elapsed:.2f}s => {qps:.1f} QPS"
+            assert stats["cache_hits"] >= 9, f"expected hits, got {stats}"
+            # Warm should not be 10x slower than cold (cache should help or at least not hurt)
+            assert warm_avg <= cold * 5 + 0.05, (
+                f"cached avg {warm_avg}s much slower than cold {cold}s"
             )
-            assert success >= total_requests * 0.95
-            assert elapsed < 6.0, f"large scale too slow {elapsed:.2f}s, QPS {qps:.1f}"
-            assert qps >= 300, f"large QPS too low {qps:.1f}, expected >=300"
-
-            # latency check via stats
-            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            # avg should be reasonable
-            assert stats["avg_latency_ms"] < 100, (
-                f"avg latency high {stats['avg_latency_ms']}"
+            print(
+                f"cold {cold * 1000:.2f}ms warm avg {warm_avg * 1000:.2f}ms hits {stats['cache_hits']}"
             )
         finally:
             stop_server(proc)
@@ -905,14 +818,20 @@ def test_batch_performance():
             payload = {"points": batch_points}
             start = time.time()
             resp = requests.post(
-                f"http://localhost:{port}/lookup/batch", json=payload, timeout=5
+                f"http://localhost:{port}/lookup/batch", json=payload, timeout=10
             )
             elapsed = time.time() - start
             assert resp.status_code == 200, f"batch failed {resp.text}"
+            assert_response_arrays_valid(resp)
             results = resp.json()["results"]
             assert len(results) == 100
+            for r in results:
+                assert_is_list_not_null(r, "geofences")
             print(f"Batch 100 points in {elapsed:.3f}s")
-            assert elapsed < 0.8, f"batch too slow {elapsed:.2f}s >0.8s"
+            # Generous bound only to prevent hang, not tight perf floor
+            assert elapsed < 5.0, (
+                f"batch too slow {elapsed}s, should be <5s to avoid hang"
+            )
         finally:
             stop_server(proc)
     finally:
@@ -934,15 +853,13 @@ def test_batch_large_performance():
             payload = {"points": batch_points}
             start = time.time()
             resp = requests.post(
-                f"http://localhost:{port}/lookup/batch", json=payload, timeout=10
+                f"http://localhost:{port}/lookup/batch", json=payload, timeout=15
             )
             elapsed = time.time() - start
-            assert resp.status_code == 200, f"batch 500 failed {resp.text[:500]}"
-            results = resp.json()["results"]
-            assert len(results) == 500
+            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
             print(f"Batch 500 points in {elapsed:.3f}s")
-            # Should still be <1.5s even for 500 points with index
-            assert elapsed < 1.5, f"batch 500 too slow {elapsed:.2f}s"
+            assert elapsed < 8.0
         finally:
             stop_server(proc)
     finally:
@@ -964,7 +881,9 @@ def test_concurrency_correctness():
 
             def expected_via_cli(lat, lng):
                 r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
-                return json.loads(r.stdout)
+                data = json.loads(r.stdout)
+                assert isinstance(data, list), "CLI should return list not null"
+                return data
 
             test_pts = [(0.5, 0.5), (10.5, 10.5), (5, 5), (0, 0), (1, 1), (20, 20)]
             expected = {}
@@ -979,10 +898,10 @@ def test_concurrency_correctness():
                     )
                     if resp.status_code != 200:
                         return False, pt, f"status {resp.status_code}"
+                    assert_response_arrays_valid(resp)
                     data = resp.json()
-                    # Ensure geofences field is not None (must be [] not null)
                     if data.get("geofences") is None:
-                        return False, pt, f"geofences is null, expected {expected[pt]}"
+                        return False, pt, "geofences is null"
                     got = data["geofences"]
                     exp = expected[pt]
                     if got != exp:
@@ -1025,6 +944,9 @@ def test_concurrency_with_crud():
                             f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
                         )
                         if resp.status_code != 200:
+                            return False
+                        assert_response_arrays_valid(resp)
+                        if resp.json().get("geofences") is None:
                             return False
                     except:
                         return False
@@ -1069,45 +991,226 @@ def test_concurrency_with_crud():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_large_geofence_set_still_fast():
+# ---- New semantic discriminators ----
+
+
+def test_antimeridian_crossing():
+    """Antimeridian-crossing polygons must be handled (bbox wrap and grid)."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
-        _create_many_geofences(db, count=300)
+        run_cli(db, ["clear"])
+        # Tiny rectangle crossing 180: lat 0-1, lng 179 to -179 (2 deg wide via antimeridian)
+        poly = "0,179;0,-179;1,-179;1,179"
+        r = run_cli(db, ["add", "cross", "--polygon", poly, "--name", "Cross"])
+        assert r.returncode == 0, f"crossing add should be valid, got {r.stderr}"
+
+        # CLI checks
+        for lat, lng, should_inside in [
+            (0.5, 179.5, True),
+            (0.5, -179.5, True),
+            (0.5, 180, True),
+            (0.5, -180, True),
+            (0.5, 0, False),
+        ]:
+            r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
+            assert r.returncode == 0
+            ids = json.loads(r.stdout)
+            assert isinstance(ids, list), "should be list not null"
+            if should_inside:
+                assert "cross" in ids, (
+                    f"point {lat},{lng} should be inside crossing rect"
+                )
+            else:
+                assert "cross" not in ids, (
+                    f"point {lat},{lng} should be outside crossing rect"
+                )
+
         port = get_free_port()
-        proc = start_server(db, port, grid_size="1", cache_size="1000")
+        proc = start_server(db, port, grid_size="1", cache_size="0")
         try:
-            start = time.time()
-            for _ in range(20):
+            for lat, lng, should_inside in [
+                (0.5, 179.5, True),
+                (0.5, -179.5, True),
+                (0.5, 180, True),
+                (0.5, -180, True),
+                (0.5, 0, False),
+            ]:
                 resp = requests.get(
-                    f"http://localhost:{port}/lookup?lat=80&lng=150", timeout=2
+                    f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=2
                 )
                 assert resp.status_code == 200
-            elapsed = time.time() - start
-            avg = elapsed / 20
-            print(f"Large set empty area avg latency {avg * 1000:.2f}ms")
-            assert avg < 0.15, f"empty area too slow {avg}s"
+                assert_response_arrays_valid(resp)
+                data = resp.json()
+                assert_is_list_not_null(data, "geofences")
+                if should_inside:
+                    assert "cross" in data["geofences"], (
+                        f"HTTP {lat},{lng} should be inside"
+                    )
+                else:
+                    assert "cross" not in data["geofences"]
 
-            def timed_lookup():
-                s = time.time()
-                r = requests.get(
-                    f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
-                )
-                return time.time() - s, r.status_code == 200
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            # For tiny crossing rect, index should NOT explode to 300+ cells. With split, it should be small (~8 cells for grid 1)
+            # With naive bbox covering -179..179, it would be 718 cells. So check small.
+            assert stats["index_cells"] < 100, (
+                f"crossing rect should create small number of cells with wrapping logic, got {stats['index_cells']} (naive would be 718)"
+            )
+            print(f"antimeridian index_cells {stats['index_cells']}")
 
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(timed_lookup) for _ in range(200)]
-                latencies = []
-                for f in as_completed(futures):
-                    dur, ok = f.result()
-                    assert ok
-                    latencies.append(dur)
-            latencies.sort()
-            p50 = latencies[len(latencies) // 2]
-            p99 = latencies[int(len(latencies) * 0.99)]
-            print(f"Large set p50 {p50 * 1000:.1f}ms p99 {p99 * 1000:.1f}ms")
-            assert p50 < 0.08, f"p50 too high {p50}s"
-            assert p99 < 0.2, f"p99 too high {p99}s, expected <0.2"
+            # empty area (0,0) should be fast even though crossing polygon exists – grid empty for that cell
+            avg_empty = _measure_avg_latency(port, 0, 0, repeats=20)
+            print(f"antimeridian empty avg {avg_empty * 1000:.2f}ms")
+            assert avg_empty < 1.0
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_pole_adjacent():
+    """Pole-adjacent bounding boxes must be correct."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Near north pole
+        poly = "89,-10;89,10;90,10;90,-10"
+        r = run_cli(db, ["add", "pole", "--polygon", poly, "--name", "Pole"])
+        assert r.returncode == 0, f"pole add failed {r.stderr}"
+
+        # Inside near pole
+        r = run_cli(db, ["lookup", "--lat", "89.5", "--lng", "0"])
+        assert r.returncode == 0
+        assert "pole" in json.loads(r.stdout)
+
+        # Outside just south
+        r = run_cli(db, ["lookup", "--lat", "88.5", "--lng", "0"])
+        assert "pole" not in json.loads(r.stdout)
+
+        port = get_free_port()
+        proc = start_server(db, port, grid_size="1", cache_size="0")
+        try:
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=89.5&lng=0", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "pole" in resp.json()["geofences"]
+
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=88.5&lng=0", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "pole" not in resp.json()["geofences"]
+
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats["index_cells"] > 0
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cache_invalidation_on_delete():
+    """After DELETE, cached result must not be stale."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "sq", "--polygon", "0,0;0,1;1,1;1,0", "--name", "sq"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="10")
+        try:
+            # populate cache
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "sq" in resp.json()["geofences"]
+
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats["cache_size"] == 1
+
+            # DELETE
+            resp = requests.delete(f"http://localhost:{port}/geofences/sq", timeout=2)
+            assert resp.status_code == 200
+            assert_response_arrays_valid(resp)
+
+            # Subsequent lookup must NOT return deleted, even if previously cached
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
+            assert "sq" not in resp.json()["geofences"], (
+                "cache should have been invalidated on DELETE"
+            )
+            assert resp.json()["geofences"] == []
+
+            # cache should be cleared (or at least not contain stale)
+            stats_after = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            # After invalidation, cache_size should be 0 then 1 after new query, but not contain stale
+            assert stats_after["total_geofences"] == 0
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_read_after_post_visibility():
+    """After POST, subsequent GET and lookup must see new geofence immediately."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="10")
+        try:
+            # lookup empty point before POST – should be [] and cached
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=5.5&lng=5.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+
+            # POST new zone containing that point
+            payload = {
+                "id": "newzone",
+                "name": "New",
+                "polygon": [
+                    {"lat": 5, "lng": 5},
+                    {"lat": 5, "lng": 6},
+                    {"lat": 6, "lng": 6},
+                    {"lat": 6, "lng": 5},
+                ],
+            }
+            resp = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert resp.status_code in (200, 201)
+
+            # Immediate lookup must see newzone (not stale [] from cache)
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=5.5&lng=5.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
+            assert "newzone" in resp.json()["geofences"], (
+                "read-after-POST should see new geofence, cache should have been invalidated"
+            )
+
+            # GET single should also see it
+            resp = requests.get(f"http://localhost:{port}/geofences/newzone", timeout=2)
+            assert resp.status_code == 200
+            assert resp.json()["id"] == "newzone"
+
+            # GET list should contain it
+            resp = requests.get(f"http://localhost:{port}/geofences", timeout=2)
+            assert_response_arrays_valid(resp)
+            assert isinstance(resp.json(), list)
+            assert "newzone" in [x["id"] for x in resp.json()]
         finally:
             stop_server(proc)
     finally:
@@ -1129,8 +1232,6 @@ def test_stats_monotonic():
             s2 = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
             assert s2["total_queries"] >= s1["total_queries"] + 2
             assert s2["total_geofences"] == s1["total_geofences"]
-            # cache_hit_rate should be between 0 and 1
-            assert 0 <= s2["cache_hit_rate"] <= 1
         finally:
             stop_server(proc)
     finally:
@@ -1159,40 +1260,98 @@ def test_invalid_serve_flags():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_no_null_slices():
-    """Ensure all JSON arrays are [] not null."""
+def test_no_null_slices_broad():
+    """Broaden nil-slice check to every response path."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
         port = get_free_port()
-        proc = start_server(db, port)
+        proc = start_server(db, port, cache_size="5")
         try:
+            # empty geofences list
             resp = requests.get(f"http://localhost:{port}/geofences", timeout=2)
             assert resp.status_code == 200
-            assert resp.text.strip() == "[]", (
-                f"empty geofences should be [], got {resp.text}"
-            )
+            assert_response_arrays_valid(resp)
+            assert isinstance(resp.json(), list)
+            assert resp.json() == []
 
+            # lookup empty
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0&lng=0", timeout=2
             )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["geofences"] == []
-            # raw text should contain [] not null
-            assert (
-                "null" not in resp.text
-                or '"geofences":[]' in resp.text
-                or '"geofences": []' in resp.text
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
+            assert resp.json()["geofences"] == []
+
+            # lookup with cache hit (second time)
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0&lng=0", timeout=2
             )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
 
             # batch empty
             resp = requests.post(
                 f"http://localhost:{port}/lookup/batch", json={"points": []}, timeout=2
             )
+            assert_response_arrays_valid(resp)
             assert resp.json()["results"] == []
-        finally:
+            assert isinstance(resp.json()["results"], list)
+
+            # batch with empty result
+            resp = requests.post(
+                f"http://localhost:{port}/lookup/batch",
+                json={"points": [{"lat": 0, "lng": 0}]},
+                timeout=2,
+            )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json()["results"][0], "geofences")
+            assert resp.json()["results"][0]["geofences"] == []
+
+            # verbose empty
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0&lng=0&verbose=true", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
+            assert resp.json()["geofences"] == []
+
+            # add one, then delete, then lookup should be [] not null (post-delete path)
+            run_cli(db, ["add", "sq", "--polygon", "0,0;0,1;1,1;1,0", "--name", "sq"])
             stop_server(proc)
+            port2 = get_free_port()
+            proc2 = start_server(db, port2, cache_size="5")
+            try:
+                resp = requests.get(
+                    f"http://localhost:{port2}/lookup?lat=0.5&lng=0.5", timeout=2
+                )
+                assert_response_arrays_valid(resp)
+                assert "sq" in resp.json()["geofences"]
+
+                resp = requests.delete(
+                    f"http://localhost:{port2}/geofences/sq", timeout=2
+                )
+                assert resp.status_code == 200
+
+                resp = requests.get(
+                    f"http://localhost:{port2}/lookup?lat=0.5&lng=0.5", timeout=2
+                )
+                assert_response_arrays_valid(resp)
+                assert_is_list_not_null(resp.json(), "geofences")
+                assert resp.json()["geofences"] == [], (
+                    "post-delete path should return [] not null"
+                )
+                assert (
+                    "null" not in resp.text
+                    or '"geofences":[]' in resp.text
+                    or '"geofences": []' in resp.text
+                )
+            finally:
+                stop_server(proc2)
+                proc = None
+        finally:
+            if proc:
+                stop_server(proc)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

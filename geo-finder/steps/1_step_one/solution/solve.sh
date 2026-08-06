@@ -290,16 +290,57 @@ func pointOnSegment(px, py, x1, y1, x2, y2 float64) bool {
 	}
 	return true
 }
+func crossesAntimeridianPoly(poly []Point) bool {
+	if len(poly) == 0 {
+		return false
+	}
+	minLng := poly[0].Lng
+	maxLng := poly[0].Lng
+	for _, p := range poly[1:] {
+		if p.Lng < minLng {
+			minLng = p.Lng
+		}
+		if p.Lng > maxLng {
+			maxLng = p.Lng
+		}
+	}
+	diff := maxLng - minLng
+	if diff < 0 {
+		diff = -diff
+	}
+	// World-spanning (360) should not be treated as small crossing
+	if diff >= 360-eps {
+		return false
+	}
+	return diff > 180
+}
+
 func pointInPolygon(lat, lng float64, poly []Point) bool {
-	px := lng
+	usePoly := poly
+	useLng := lng
+	if crossesAntimeridianPoly(poly) {
+		shifted := make([]Point, len(poly))
+		for i, p := range poly {
+			if p.Lng < 0 {
+				shifted[i] = Point{Lat: p.Lat, Lng: p.Lng + 360}
+			} else {
+				shifted[i] = p
+			}
+		}
+		usePoly = shifted
+		if lng < 0 {
+			useLng = lng + 360
+		}
+	}
+	px := useLng
 	py := lat
-	n := len(poly)
+	n := len(usePoly)
 	for i := 0; i < n; i++ {
 		j := (i + 1) % n
-		x1 := poly[i].Lng
-		y1 := poly[i].Lat
-		x2 := poly[j].Lng
-		y2 := poly[j].Lat
+		x1 := usePoly[i].Lng
+		y1 := usePoly[i].Lat
+		x2 := usePoly[j].Lng
+		y2 := usePoly[j].Lat
 		if pointOnSegment(px, py, x1, y1, x2, y2) {
 			return true
 		}
@@ -307,10 +348,10 @@ func pointInPolygon(lat, lng float64, poly []Point) bool {
 	inside := false
 	j := n - 1
 	for i := 0; i < n; i++ {
-		xi := poly[i].Lng
-		yi := poly[i].Lat
-		xj := poly[j].Lng
-		yj := poly[j].Lat
+		xi := usePoly[i].Lng
+		yi := usePoly[i].Lat
+		xj := usePoly[j].Lng
+		yj := usePoly[j].Lat
 		if (yi > py) != (yj > py) {
 			xIntersect := (xj-xi)*(py-yi)/(yj-yi) + xi
 			if px < xIntersect {

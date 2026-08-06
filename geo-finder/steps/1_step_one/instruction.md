@@ -66,14 +66,14 @@ DB file is JSON object mapping ID -> Geofence:
 - Delete by ID. Invalid format -> exit 2. Not found -> stderr + exit 3. Else print `removed`, exit 0. Ensure atomic write and no temp leftover.
 
 #### 3. `list`
-- Print JSON array of all geofence objects sorted by ID ascending lexicographic. Empty -> `[]` (must be `[]`, not `null`). Exit 0.
+- Print JSON array of all geofence objects sorted by ID ascending lexicographic. Empty store should return an empty JSON array.
 
 #### 4. `lookup --lat <float> --lng <float> [--verbose]`
 - Find geofences containing point.
 - lat in [-90,90], lng in [-180,180], else exit 2.
 - Points on edge or vertex are considered **inside** (epsilon 1e-9). Must handle horizontal edges, vertices, concave polygons correctly. Do NOT rely on external library; implement robust ray casting.
 - Output: default JSON array of matching IDs sorted asc. `--verbose` → JSON array of matching Geofence objects sorted by ID asc.
-- Exit 0 even if empty (print `[]`, not `null`).
+- Exit 0 even if empty (print empty JSON array).
 - Performance: With 500 geofences each up to 100 points, lookup should complete in <200ms via CLI (tests will measure). Implement bounding-box prefilter even for CLI to meet this.
 
 #### 5. `clear`
@@ -87,10 +87,10 @@ DB file is JSON object mapping ID -> Geofence:
 - Must build with `go build -o geofencectl .` from `/app/src`.
 - Parent dir creation required.
 - Atomic write via temp file + rename required.
-- Empty slice must marshal to `[]`, not `null` (use non-nil empty slice).
 - Sorting deterministic required.
 - No leftover temp files.
 - Self-intersection and duplicate detection required.
+- All JSON array outputs must be valid JSON arrays.
 
 ### Deliverable
 Place full implementation under `/app/src/`.
