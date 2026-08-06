@@ -11,7 +11,6 @@ cat > /app/src/main.go <<'GOEOF'
 package main
 
 import (
-	"container/list"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -19,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,10 +48,6 @@ type BBox struct {
 type CellKey struct {
 	LatIdx int
 	LngIdx int
-}
-
-func (c CellKey) String() string {
-	return fmt.Sprintf("%d_%d", c.LatIdx, c.LngIdx)
 }
 
 var idRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -178,11 +174,17 @@ func pointOnSegment(px, py, x1, y1, x2, y2 float64) bool {
 	if math.Abs(cross) > eps {
 		return false
 	}
-	minX := math.Min(x1, x2) - eps
-	maxX := math.Max(x1, x2) + eps
-	minY := math.Min(y1, y2) - eps
-	maxY := math.Max(y1, y2) + eps
-	if px < minX || px > maxX || py < minY || py > maxY {
+	minX := x1
+	maxX := x2
+	if minX > maxX {
+		minX, maxX = maxX, minX
+	}
+	minY := y1
+	maxY := y2
+	if minY > maxY {
+		minY, maxY = maxY, minY
+	}
+	if px < minX-eps || px > maxX+eps || py < minY-eps || py > maxY+eps {
 		return false
 	}
 	return true
@@ -245,35 +247,58 @@ func computeBBox(poly []Point) BBox {
 	return BBox{MinLat: minLat, MaxLat: maxLat, MinLng: minLng, MaxLng: maxLng}
 }
 
-type cacheEntry struct {
+type lruNode struct {
 	key   string
 	value []string
+	prev  *lruNode
+	next  *lruNode
 }
 
 type LRUCache struct {
 	capacity int
 	mu       sync.Mutex
-	ll       *list.List
-	cache    map[string]*list.Element
+	cache    map[string]*lruNode
+	head     *lruNode
+	tail     *lruNode
 }
 
 func NewLRUCache(capacity int) *LRUCache {
 	return &LRUCache{
 		capacity: capacity,
-		ll:       list.New(),
-		cache:    make(map[string]*list.Element),
+		cache:    make(map[string]*lruNode),
+	}
+}
+
+func (c *LRUCache) moveToFront(n *lruNode) {
+	if c.head == n {
+		return
+	}
+	if n.prev != nil {
+		n.prev.next = n.next
+	}
+	if n.next != nil {
+		n.next.prev = n.prev
+	}
+	if c.tail == n {
+		c.tail = n.prev
+	}
+	n.prev = nil
+	n.next = c.head
+	if c.head != nil {
+		c.head.prev = n
+	}
+	c.head = n
+	if c.tail == nil {
+		c.tail = n
 	}
 }
 
 func (c *LRUCache) Get(key string) ([]string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if elem, ok := c.cache[key]; ok {
-		c.ll.MoveToFront(elem)
-		val := elem.Value.(*cacheEntry).value
-		cp := make([]string, len(val))
-		copy(cp, val)
-		return cp, true
+	if n, ok := c.cache[key]; ok {
+		c.moveToFront(n)
+		return n.value, true
 	}
 	return nil, false
 }
@@ -284,20 +309,36 @@ func (c *LRUCache) Put(key string, value []string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if elem, ok := c.cache[key]; ok {
-		c.ll.MoveToFront(elem)
-		elem.Value.(*cacheEntry).value = value
+	if n, ok := c.cache[key]; ok {
+		cp := make([]string, len(value))
+		copy(cp, value)
+		n.value = cp
+		c.moveToFront(n)
 		return
 	}
-	ent := &cacheEntry{key: key, value: value}
-	elem := c.ll.PushFront(ent)
-	c.cache[key] = elem
-	if c.ll.Len() > c.capacity {
-		back := c.ll.Back()
-		if back != nil {
-			c.ll.Remove(back)
-			be := back.Value.(*cacheEntry)
-			delete(c.cache, be.key)
+	cp := make([]string, len(value))
+	copy(cp, value)
+	n := &lruNode{key: key, value: cp}
+	c.cache[key] = n
+	n.next = c.head
+	if c.head != nil {
+		c.head.prev = n
+	}
+	c.head = n
+	if c.tail == nil {
+		c.tail = n
+	}
+	if len(c.cache) > c.capacity {
+		if c.tail != nil {
+			del := c.tail
+			if del.prev != nil {
+				del.prev.next = nil
+				c.tail = del.prev
+			} else {
+				c.head = nil
+				c.tail = nil
+			}
+			delete(c.cache, del.key)
 		}
 	}
 }
@@ -305,16 +346,19 @@ func (c *LRUCache) Put(key string, value []string) {
 func (c *LRUCache) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ll.Len()
+	return len(c.cache)
+}
+
+func cacheKey(lat, lng float64) string {
+	return strconv.FormatFloat(lat, 'f', 6, 64) + "," + strconv.FormatFloat(lng, 'f', 6, 64)
 }
 
 type Server struct {
-	db             DB
+	db             map[string]Geofence
 	bboxes         map[string]BBox
 	grid           map[CellKey][]string
 	gridSize       float64
 	cache          *LRUCache
-	mu             sync.RWMutex
 	totalQueries   int64
 	cacheHits      int64
 	totalLatencyNs int64
@@ -323,7 +367,7 @@ type Server struct {
 func NewServer(db DB, gridSize float64, cacheSize int) *Server {
 	s := &Server{
 		db:       db,
-		bboxes:   make(map[string]BBox),
+		bboxes:   make(map[string]BBox, len(db)),
 		grid:     make(map[CellKey][]string),
 		gridSize: gridSize,
 		cache:    NewLRUCache(cacheSize),
@@ -342,6 +386,10 @@ func NewServer(db DB, gridSize float64, cacheSize int) *Server {
 			}
 		}
 	}
+	for k, ids := range s.grid {
+		sort.Strings(ids)
+		s.grid[k] = ids
+	}
 	return s
 }
 
@@ -353,36 +401,26 @@ func (s *Server) getCellForPoint(lat, lng float64) CellKey {
 
 func (s *Server) lookupPointInternal(lat, lng float64) []string {
 	cell := s.getCellForPoint(lat, lng)
-	s.mu.RLock()
 	candidates := s.grid[cell]
-	candCopy := make([]string, len(candidates))
-	copy(candCopy, candidates)
-	s.mu.RUnlock()
-
-	matching := []string{}
-	for _, id := range candCopy {
-		s.mu.RLock()
-		g, ok := s.db[id]
-		bbox, bboxOk := s.bboxes[id]
-		s.mu.RUnlock()
-		if !ok {
+	if len(candidates) == 0 {
+		return []string{}
+	}
+	matching := make([]string, 0, 2)
+	for _, id := range candidates {
+		bbox := s.bboxes[id]
+		if lat < bbox.MinLat-eps || lat > bbox.MaxLat+eps || lng < bbox.MinLng-eps || lng > bbox.MaxLng+eps {
 			continue
 		}
-		if bboxOk {
-			if lat < bbox.MinLat-eps || lat > bbox.MaxLat+eps || lng < bbox.MinLng-eps || lng > bbox.MaxLng+eps {
-				continue
-			}
-		}
+		g := s.db[id]
 		if pointInPolygon(lat, lng, g.Polygon) {
 			matching = append(matching, id)
 		}
 	}
-	sort.Strings(matching)
 	return matching
 }
 
 func (s *Server) lookupWithCache(lat, lng float64) (result []string, isHit bool, durationNs int64) {
-	key := fmt.Sprintf("%.6f,%.6f", lat, lng)
+	key := cacheKey(lat, lng)
 	start := time.Now()
 	if s.cache.capacity > 0 {
 		if val, ok := s.cache.Get(key); ok {
@@ -396,11 +434,6 @@ func (s *Server) lookupWithCache(lat, lng float64) (result []string, isHit bool,
 		s.cache.Put(key, res)
 	}
 	return res, false, durationNs
-}
-
-func (s *Server) lookupPoint(lat, lng float64) []string {
-	res, _, _ := s.lookupWithCache(lat, lng)
-	return res
 }
 
 func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
@@ -468,37 +501,18 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	results := make([]map[string]interface{}, len(req.Points))
-	var wg sync.WaitGroup
-	type batchRes struct {
-		idx   int
-		lat   float64
-		lng   float64
-		geofs []string
-		isHit bool
-		durNs int64
-	}
-	ch := make(chan batchRes, len(req.Points))
-	for i, pt := range req.Points {
-		wg.Add(1)
-		go func(idx int, lat, lng float64) {
-			defer wg.Done()
-			geofs, isHit, dur := s.lookupWithCache(lat, lng)
-			ch <- batchRes{idx: idx, lat: lat, lng: lng, geofs: geofs, isHit: isHit, durNs: dur}
-		}(i, pt.Lat, pt.Lng)
-	}
-	wg.Wait()
-	close(ch)
 	var totalDur int64
 	var hitCount int64
 	var qCount int64
-	for br := range ch {
-		results[br.idx] = map[string]interface{}{
-			"lat":       br.lat,
-			"lng":       br.lng,
-			"geofences": br.geofs,
+	for i, pt := range req.Points {
+		geofs, isHit, dur := s.lookupWithCache(pt.Lat, pt.Lng)
+		results[i] = map[string]interface{}{
+			"lat":       pt.Lat,
+			"lng":       pt.Lng,
+			"geofences": geofs,
 		}
-		totalDur += br.durNs
-		if br.isHit {
+		totalDur += dur
+		if isHit {
 			hitCount++
 		}
 		qCount++
@@ -515,19 +529,15 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGeofences(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
 	ids := make([]string, 0, len(s.db))
 	for id := range s.db {
 		ids = append(ids, id)
 	}
-	s.mu.RUnlock()
 	sort.Strings(ids)
-	s.mu.RLock()
 	list := make([]Geofence, 0, len(ids))
 	for _, id := range ids {
 		list = append(list, s.db[id])
 	}
-	s.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
 }
@@ -540,10 +550,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if totalQ > 0 {
 		avgMs = float64(totalNs) / float64(totalQ) / 1e6
 	}
-	s.mu.RLock()
 	totalGeof := len(s.db)
 	indexCells := len(s.grid)
-	s.mu.RUnlock()
 	cacheSize := s.cache.Size()
 
 	resp := map[string]interface{}{
@@ -600,9 +608,6 @@ func cmdAdd(dbPath string, args []string) {
 	trimmedName := strings.TrimSpace(name)
 	if trimmedName == "" || len(trimmedName) > 128 {
 		printErrExit(2, "invalid name length")
-	}
-	if strings.Contains(name, "\n") {
-		printErrExit(2, "name contains newline")
 	}
 	points, err := parsePolygonString(polygonStr)
 	if err != nil {
@@ -788,6 +793,11 @@ func cmdServe(dbPath string, args []string) {
 		cacheSize = cs
 	}
 	db := loadDB(dbPath)
+	if n := runtime.NumCPU(); n > 1 {
+		runtime.GOMAXPROCS(n)
+	} else {
+		runtime.GOMAXPROCS(4)
+	}
 	server := NewServer(db, gridSize, cacheSize)
 
 	mux := http.NewServeMux()
@@ -803,7 +813,12 @@ func cmdServe(dbPath string, args []string) {
 
 	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	fmt.Printf("serving on :%d\n", port)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		printErrExit(2, "server error: %v", err)
 	}
 }
