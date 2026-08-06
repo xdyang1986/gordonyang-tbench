@@ -1473,15 +1473,11 @@ def test_ops_log_replay_sorted_by_ts():
         for s in cfg["shards"]:
             _write_shard_versioned(s["path"], {}, s["id"], 0)
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
-        assert r.returncode == 0
+        assert r.returncode == 0, f"Migration with out-of-order ts failed: {r.stderr}"
         got = json.loads(_proxy_cli("get", key).stdout.strip())
-        # File-order would give early (second line) as final, ts-sorted must give late (ts 100) as final if we sort ascending? Actually ascending: 50 then 100, final late
-        # For file-order easier version, final would be early (since file order second line is early), but for ts-sorted harder, final late
-        # Our current easy solution uses file-order, so it would give early, but we are adding ts-sorted test to a file-order solution – this test would fail for file-order solution
-        # To keep easier, we should NOT require ts-sorted, so we change this test to expect file-order for easier version: final early
-        # For balanced hard, we want file-order? Let's keep file-order expectation to make it easier: final early
-        assert got == "early-ts-50", (
-            f"File-order replay should make second file entry win, got {got}"
+        # TS-sorted harder: file has ts=100 then ts=50, sorted ascending 50->100, final late-ts-100 must win, not file-order early
+        assert got == "late-ts-100", (
+            f"TS-sorted replay should make later ts win, got {got}, file order was late then early"
         )
     finally:
         shutil.rmtree(tmpdir)
