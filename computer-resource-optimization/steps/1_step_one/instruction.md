@@ -1,6 +1,6 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (58 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (30 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 58 tests, 20 concurrent allocs all 20, 1000 nodes history, 200 nodes/200 jobs sorted, checksum strict, special chars <>& no HTML escape, spaces handling via Join, global IDs, edge validation, Unicode.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 30 tests, 20 concurrent allocs all 20, 1000 nodes history, 200 nodes/200 jobs sorted, checksum strict, special chars <>& no HTML escape, edge validation, Unicode.
 
 Data directory `/app/data/` writable, default persistence `/app/data/cluster.json`.
 
@@ -16,7 +16,7 @@ Help: bare binary no args must print help containing keywords `add-node`, `remov
 
 Commands:
 ```
-add-node <nodeID> <cpu> <memory> <gpu>          -> idempotent exit0, fail exit2 if empty ID or cpu<=0 or memory<=0 or gpu<0 or not int, handles 200 nodes sorted, special chars <>&
+add-node <nodeID> <cpu> <memory> <gpu>          -> idempotent exit0, fail exit2 if empty ID or cpu<=0 or memory<=0 or gpu<0 or not int, handles 200 nodes sorted, special chars <>&. Re-adding an existing nodeID is a no-op — exit 0, existing resources unchanged (not an upsert).
 remove-node <nodeID>                            -> prints true/false, removes node only if no allocated jobs else fail exit2, exit0 even if not exist
 list-nodes <limit> <offset>                     -> sorted by id asc; limit=0 returns all; offset beyond the end returns []. JSON array sorted by id asc, each element full node object. Same for list-jobs. Limit and offset optional, invalid → exit2. Performance 100 and 200 <2s
 get-node <nodeID>                               -> JSON node, exit2 if not exist or empty ID
@@ -35,9 +35,9 @@ status                                          -> JSON cluster status: {"total_
 - Both support optional args: `list-nodes`, `list-nodes <limit>`, `list-nodes <limit> <offset>` – same for list-jobs.
 - Invalid limit/offset (negative, non-int) → exit2.
 
-Node JSON: `{"id":"node1","total":{"cpu":4,"memory":1024,"gpu":1},"used":{"cpu":1,"memory":256,"gpu":0},"free":{"cpu":3,"memory":768,"gpu":1},"jobs":["job1"]}` jobs sorted.
+Node JSON: `{"id":"node1","total":{"cpu":4,"memory":1024,"gpu":1},"used":{"cpu":1,"memory":256,"gpu":0},"free":{"cpu":3,"memory":768,"gpu":1},"jobs":["job1"]}` jobs sorted. Jobs is always a JSON array; when empty it MUST serialize as [] not null. Same for any empty array field (list-nodes/list-jobs return [] when empty).
 
-Job JSON: `{"id":"job1","required":{"cpu":1,"memory":256,"gpu":0},"node_id":"node1","status":"running"}` or pending when node_id empty.
+Job JSON: `{"id":"job1","required":{"cpu":1,"memory":256,"gpu":0},"node_id":"node1","status":"running"}` or pending when node_id empty. Re-adding an existing job ID is a no-op: exit 0, existing resources and allocation unchanged.
 
 Allocation JSON: `{"job_id":"job1","node_id":"node1","allocated":true}`
 
@@ -65,18 +65,18 @@ Behavioral extra hard (reference gets 20/20):
 On read: missing file → empty store {nodes:{}, jobs:{}}, empty file → empty store, wrapper missing/empty checksum or mismatch or invalid JSON → corruption: backup `<original>.corrupt.<nanosec>` integer nanosec, stderr warning "corrupt" or "checksum", recreate empty valid wrapper.
 
 ### Business Rules
-- add-node idempotent, empty ID exit2, cpu>0 memory>0 gpu>=0 else exit2, handles 200 nodes sorted, special chars <>& no escape, Unicode
-- remove-node true/false, fails exit2 if node has allocated jobs, does not clear jobs (must deallocate first), join after delete? Actually get-node after delete fails exit2
+- add-node idempotent: re-adding an existing nodeID is a no-op — exit 0, existing resources unchanged (not an upsert). Empty ID exit2, cpu>0 memory>0 gpu>=0 else exit2, handles 200 nodes sorted, special chars <>& no escape, Unicode
+- remove-node true/false, fails exit2 if node has allocated jobs, does not clear jobs (must deallocate first), get-node after delete fails exit2
 - list-nodes JSON array sorted, get-node exit2 if not exist
-- add-job idempotent, empty ID exit2, invalid resources exit2, special chars no escape, Unicode emoji 🌍🚀😀 preserved, large 10KB ID? Actually job ID may be large? We test large message 10KB? For cluster, we test large node IDs? Keep 10KB handling for ID? We will test large ID 10KB maybe.
-- remove-job true/false, if allocated deallocates and updates node used, then removes, exit0 even if not exist
+- add-job idempotent: re-adding existing job ID is a no-op: exit 0, existing required resources and allocation unchanged. Empty ID exit2, invalid resources exit2, special chars no escape, Unicode emoji 🌍🚀😀 preserved, supports large IDs (10KB)
+- remove-job true/false, if allocated deallocates first (node jobs field becomes [] not null, used resources decremented) then removes, exit0 even if not exist
 - list-jobs sorted, get-job exit2 if not exist
-- allocate: member resources check else exit2 insufficient, job must exist node must exist else exit2, already allocated to different node exit2, same node idempotent exit0, special chars, large
-- deallocate true/false, exit2 if job not exist, false if not allocated
+- allocate: resources check else exit2 stderr "insufficient", job must exist node must exist else exit2, already allocated to different node exit2, same node idempotent exit0, special chars, large IDs
+- deallocate true/false, exit2 if job not exist, false if not allocated, when deallocated node's jobs must become [] not null
 - schedule: first-fit sorted node IDs asc, first node that fits, if job already allocated exit2, if no fit exit1 stderr "no fit", prints JSON scheduled
 - status: returns counts and total/used resources
 
-### Integrity Coverage (58 tests extra hard)
+### Integrity Coverage (30 tests Turn 1, 20 tests Turn 2 – extra hard)
 - checksum strict, mismatch/missing/invalid JSON backup integer nanosec, stderr warnings
 - atomic all 20 same node, diff nodes all 20, concurrent add-node 20, file lock cleanup
 - stdlib only, advisory CreateTemp/Rename

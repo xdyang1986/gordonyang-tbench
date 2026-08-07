@@ -762,12 +762,11 @@ func (b *batchSpanProcessor) run() {
 	for {
 		select {
 		case <-b.stopCh:
-			// flush remaining queue and batch
+			// flush remaining queue and batch, respecting BatchSize chunking
 			b.mu.Lock()
 			// drain queue
 			closeDrain := func() []ReadableSpan {
 				var remaining []ReadableSpan
-				// drain channel without blocking
 				for {
 					select {
 					case span, ok := <-b.queue:
@@ -785,19 +784,38 @@ func (b *batchSpanProcessor) run() {
 			batchToExport := b.batch
 			b.batch = nil
 			b.mu.Unlock()
-			if len(batchToExport) > 0 {
-				b.exportWithTimeout(batchToExport)
+			// chunked export to respect BatchSize on shutdown drain
+			for len(batchToExport) > 0 {
+				n := b.batchSize
+				if n <= 0 {
+					n = len(batchToExport)
+				}
+				if n > len(batchToExport) {
+					n = len(batchToExport)
+				}
+				chunk := batchToExport[:n]
+				batchToExport = batchToExport[n:]
+				b.exportWithTimeout(chunk)
 			}
 			return
 		case span, ok := <-b.queue:
 			if !ok {
-				// channel closed, flush
+				// channel closed, flush respecting BatchSize
 				b.mu.Lock()
 				batchToExport := b.batch
 				b.batch = nil
 				b.mu.Unlock()
-				if len(batchToExport) > 0 {
-					b.exportWithTimeout(batchToExport)
+				for len(batchToExport) > 0 {
+					n := b.batchSize
+					if n <= 0 {
+						n = len(batchToExport)
+					}
+					if n > len(batchToExport) {
+						n = len(batchToExport)
+					}
+					chunk := batchToExport[:n]
+					batchToExport = batchToExport[n:]
+					b.exportWithTimeout(chunk)
 				}
 				return
 			}

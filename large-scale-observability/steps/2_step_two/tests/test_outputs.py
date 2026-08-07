@@ -590,22 +590,21 @@ def test_batch_droppedcount_and_queuelen():
     func main(){
         exp := observability.NewInMemoryExporter()
         proc := observability.NewBatchSpanProcessor(exp, observability.WithQueueSize(5), observability.WithBatchSize(100))
-        // Access DroppedCount and QueueLen via type assertion if method exists
-        // Use interface that includes those methods
         tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
         for i:=0;i<20;i++{
             _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
             s.End()
         }
-        // Try to get dropped count via type that has method
-        if b, ok := proc.(interface{ DroppedCount() int }); ok {
+        // Access via SpanProcessor interface to work with both *BatchSpanProcessor and SpanProcessor return types
+        var sp observability.SpanProcessor = proc
+        if b, ok := sp.(interface{ DroppedCount() int }); ok {
             dc := b.DroppedCount()
             fmt.Printf("dropped %d\\n", dc)
             if dc < 0 { panic("negative dropped") }
         } else {
             panic("BatchSpanProcessor should have DroppedCount method")
         }
-        if b, ok := proc.(interface{ QueueLen() int }); ok {
+        if b, ok := sp.(interface{ QueueLen() int }); ok {
             ql := b.QueueLen()
             fmt.Printf("queueLen %d\\n", ql)
             if ql <0 || ql>5 { panic(fmt.Sprintf("queueLen out of expected 0-5 got %d", ql)) }
@@ -1502,7 +1501,7 @@ def test_tracing_race_with_sampler():
 
 
 def test_sampler_ratio_small_large():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "crypto/rand"
@@ -1532,10 +1531,13 @@ def test_sampler_ratio_small_large():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"small large ratio failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"small large ratio failed: {proc.stdout} {proc.stderr}"
+    )
+
 
 def test_batch_processor_queue_size_edge():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1559,10 +1561,11 @@ def test_batch_processor_queue_size_edge():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"queue size edge failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"queue size edge failed: {proc.stdout} {proc.stderr}"
+
 
 def test_batch_processor_default_options():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1582,10 +1585,11 @@ def test_batch_processor_default_options():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"default options failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"default options failed: {proc.stdout} {proc.stderr}"
+
 
 def test_batch_processor_error_handling():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1615,10 +1619,11 @@ def test_batch_processor_error_handling():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"error handling failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"error handling failed: {proc.stdout} {proc.stderr}"
+
 
 def test_metrics_histogram_buckets_dedup_sorted():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1647,10 +1652,11 @@ def test_metrics_histogram_buckets_dedup_sorted():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"dup buckets failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"dup buckets failed: {proc.stdout} {proc.stderr}"
+
 
 def test_metrics_counter_add_nan_inf():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "math"
@@ -1676,10 +1682,11 @@ def test_metrics_counter_add_nan_inf():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"nan inf counter failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"nan inf counter failed: {proc.stdout} {proc.stderr}"
+
 
 def test_logger_with_nil_context():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "bytes"
@@ -1694,10 +1701,11 @@ def test_logger_with_nil_context():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"logger nil ctx failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"logger nil ctx failed: {proc.stdout} {proc.stderr}"
+
 
 def test_tracing_span_context_traceflags_false():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1718,10 +1726,11 @@ def test_tracing_span_context_traceflags_false():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"traceflags false failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"traceflags false failed: {proc.stdout} {proc.stderr}"
+
 
 def test_metrics_gauge_add_large():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1744,10 +1753,11 @@ def test_metrics_gauge_add_large():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"gauge large failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"gauge large failed: {proc.stdout} {proc.stderr}"
+
 
 def test_batch_processor_forceflush_concurrent():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1782,11 +1792,13 @@ def test_batch_processor_forceflush_concurrent():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"forceflush concurrent failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"forceflush concurrent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_queue_size_zero_defaults():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1800,10 +1812,11 @@ def test_batch_processor_queue_size_zero_defaults():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
 
 def test_sampler_ratio_extreme_small():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "crypto/rand"
@@ -1825,10 +1838,11 @@ def test_sampler_ratio_extreme_small():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
 
 def test_metrics_cardinality_histogram():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1852,10 +1866,11 @@ def test_metrics_cardinality_histogram():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
 
 def test_tracing_large_attribute_100kb():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1878,10 +1893,11 @@ def test_tracing_large_attribute_100kb():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
 
 def test_batch_processor_high_contention():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1913,10 +1929,11 @@ def test_batch_processor_high_contention():
     }
     """)
     proc = go_run_program(code, timeout=60)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
 
 def test_sampler_ratio_tight_tolerance():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "crypto/rand"
@@ -1938,4 +1955,139 @@ def test_sampler_ratio_tight_tolerance():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0
+    assert proc.returncode == 0
+
+
+def test_batch_shutdown_respects_batch_size():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    type countingExporter struct {
+        mu sync.Mutex
+        batches [][]observability.ReadableSpan
+        maxBatch int
+    }
+    func (c *countingExporter) ExportSpans(ctx context.Context, spans []observability.ReadableSpan) error {
+        c.mu.Lock()
+        defer c.mu.Unlock()
+        c.batches = append(c.batches, spans)
+        if len(spans) > c.maxBatch { c.maxBatch = len(spans) }
+        return nil
+    }
+    func main(){
+        exporter := &countingExporter{}
+        proc := observability.NewBatchSpanProcessor(exporter, observability.WithBatchSize(5), observability.WithQueueSize(1000), observability.WithBatchTimeout(5*1000000000))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<20;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        // Shutdown without explicit ForceFlush must drain and still respect BatchSize chunking
+        proc.Shutdown(context.Background())
+        fmt.Printf("maxBatch %d batches %d\\n", exporter.maxBatch, len(exporter.batches))
+        if exporter.maxBatch > 5 {
+            panic(fmt.Sprintf("Shutdown drain batch size limit violated: max %d > 5", exporter.maxBatch))
+        }
+        total := 0
+        for _, b := range exporter.batches { total+=len(b) }
+        if total!=20 {
+            panic(fmt.Sprintf("Shutdown should export all 20 spans, got %d", total))
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"shutdown respects batch size failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_timeout_partial_no_forceflush():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewInMemoryExporter()
+        // BatchSize much larger than number of spans, so export can only happen via BatchTimeout
+        proc := observability.NewBatchSpanProcessor(exp, observability.WithBatchSize(100), observability.WithQueueSize(1000), observability.WithBatchTimeout(100*time.Millisecond))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<7;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        // No ForceFlush — rely on BatchTimeout to fire partial batch
+        time.Sleep(500*time.Millisecond)
+        count := len(exp.GetSpans())
+        fmt.Printf("exported after timeout %d\\n", count)
+        if count != 7 {
+            panic(fmt.Sprintf("BatchTimeout should fire partial batch of 7 without ForceFlush, got %d", count))
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"timeout partial no forceflush failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_timeout_respects_batch_size():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "time"
+        "ride-observability/observability"
+    )
+    type countingExporter struct {
+        mu sync.Mutex
+        batches [][]observability.ReadableSpan
+        maxBatch int
+    }
+    func (c *countingExporter) ExportSpans(ctx context.Context, spans []observability.ReadableSpan) error {
+        c.mu.Lock()
+        defer c.mu.Unlock()
+        c.batches = append(c.batches, spans)
+        if len(spans) > c.maxBatch { c.maxBatch = len(spans) }
+        return nil
+    }
+    func main(){
+        exporter := &countingExporter{}
+        proc := observability.NewBatchSpanProcessor(exporter, observability.WithBatchSize(5), observability.WithQueueSize(1000), observability.WithBatchTimeout(100*time.Millisecond))
+        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        for i:=0;i<12;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        time.Sleep(600*time.Millisecond)
+        // After timeout, all 12 should be exported chunked to at most 5 per batch
+        fmt.Printf("maxBatch %d totalBatches %d\\n", exporter.maxBatch, len(exporter.batches))
+        if exporter.maxBatch > 5 {
+            panic(fmt.Sprintf("timeout export violated BatchSize: max %d > 5", exporter.maxBatch))
+        }
+        total := 0
+        for _, b := range exporter.batches { total+=len(b) }
+        if total != 12 {
+            panic(fmt.Sprintf("expected 12 exported via timeout, got %d", total))
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"timeout respects batch size failed: {proc.stdout} {proc.stderr}"
+    )

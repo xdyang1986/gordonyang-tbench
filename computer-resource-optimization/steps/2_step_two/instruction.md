@@ -1,4 +1,4 @@
-# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (62 tests)
+# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (20 tests)
 
 Turn1 implemented core cluster management with single-file persistence, first-fit scheduling, integrity, atomic writes, corruption handling, concurrent safety.
 
@@ -49,11 +49,12 @@ Validation: bad config (invalid JSON, shard_count≤0, duplicate id, empty path,
 ### Sharded Mode Semantics
 - Nodes sharded via weighted hash of nodeID (same as database-sharding task)
 - Jobs stored in `jobs_path` wrapper checksum file (map jobID -> job)
-- `add-node <nodeID> <cpu> <mem> <gpu>`: idempotent, creates in designated shard via weighted hash, handles empty ID exit2, invalid resources exit2. If `global:` prefix, treat as broadcast? For cluster, global: returns -1 for get-shard-id but still stored in all shards? Simpler: global: nodes treated as broadcast to all shards for high availability (replicate). But for allocation, any copy can be used. To keep tests simple, implement global: broadcast: create in ALL shards, get-shard-id returns -1, get-shard-path returns comma-separated sorted list. If not global, single shard.
+- `add-node <nodeID> <cpu> <mem> <gpu>`: idempotent – re-adding an existing nodeID is a no-op — exit 0, existing resources unchanged (not an upsert) – creates in designated shard via weighted hash, handles empty ID exit2, invalid resources exit2. If `global:` prefix, treat as broadcast: global: returns -1 for get-shard-id but still stored in all shards (replicate). For allocation, any copy can be used. To keep tests simple, implement global: broadcast: create in ALL shards, get-shard-id returns -1, get-shard-path returns comma-separated sorted list. If not global, single shard. Re-adding existing global node also no-op unchanged.
+- Node JSON `jobs` field MUST always be JSON array: empty MUST serialize as [] not null (Go nil-slice pitfall – initialize empty slice as []string{}), same for any empty array field.
 - `remove-node <nodeID>`: prints true/false, checks allocated jobs via jobs file, fails exit2 if node has jobs, else removes from all shards where it exists (for global). Exit0 even if not exist.
 - `list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`. Now supports pagination for large scale. limit optional integer ≥0, 0/omit=all, offset optional integer ≥0 default 0. Returns sorted nodes array sliced by `sorted[offset:offset+limit]` if limit>0 else `[offset:]`. Invalid limit/offset (negative, non-int) → exit2. Performance: 1000 and 2000 nodes <2s O(n log n) not O(n²).
 - `get-node <nodeID>`: works across shards, finds node in its shard (or any for global).
-- `add-job`, `remove-job`, `list-jobs <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-nodes., `get-job` similar, jobs stored in jobs file with pagination. `list-jobs` pagination same semantics, performance 1000 and 500 <2s.
+- `add-job`, `remove-job`, `list-jobs <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for list-nodes. `add-job` idempotent: re-adding existing job ID is a no-op: exit 0, existing resources and allocation unchanged. `get-job` similar, jobs stored in jobs file with pagination. `list-jobs` pagination same semantics, performance 1000 and 500 <2s. When node jobs emptied via remove-job/deallocate, node's jobs field MUST be [] not null.
 
 **Pagination contract (MUST):**
 - `list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`.

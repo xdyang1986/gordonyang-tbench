@@ -955,21 +955,49 @@ def test_metrics_collect_copy():
     )
     func main(){
         prov := observability.NewMetricsProvider()
-        c := prov.Counter("copy_test")
+        c := prov.Counter("copy_test", observability.WithLabels(map[string]string{"env":"prod"}))
         c.Inc()
         fams1 := prov.Collect()
-        // mutate returned
+        if len(fams1)==0 || len(fams1[0].Metrics)==0 {
+            panic("Collect returned empty families/metrics for copy_test")
+        }
+        if fams1[0].Metrics[0].Labels == nil {
+            panic("Collect returned nil Labels map; expected non-nil map (implementation should return empty or populated non-nil map) — got nil")
+        }
+        // mutate returned copy
         fams1[0].Metrics[0].Value = 9999
-        fams1[0].Metrics[0].Labels["hacked"]="yes"
+        // mutate existing label
+        origEnv := fams1[0].Metrics[0].Labels["env"]
+        _ = origEnv
+        fams1[0].Metrics[0].Labels["env"]="hacked"
+        fams1[0].Metrics[0].Labels["injected"]="yes"
         fams2 := prov.Collect()
         var val float64
+        var env string
+        var hasInjected bool
         for _, fam := range fams2 {
             if fam.Name=="copy_test" {
+                if len(fam.Metrics)==0 { panic("copy_test metrics empty on second collect") }
                 val = fam.Metrics[0].Value
-                if _, ok := fam.Metrics[0].Labels["hacked"]; ok { panic("Collect should return copy, not expose internal map") }
+                if fam.Metrics[0].Labels == nil {
+                    panic("second Collect returned nil Labels map")
+                }
+                env = fam.Metrics[0].Labels["env"]
+                _, hasInjected = fam.Metrics[0].Labels["injected"]
+                if _, ok := fam.Metrics[0].Labels["hacked"]; ok {
+                    // also check if original overwritten
+                }
             }
         }
-        if val != 1 { panic(fmt.Sprintf("expected value still 1 after mutation, got %f", val)) }
+        if hasInjected {
+            panic("Collect should return deep copy of Labels, not expose internal map (injected label leaked)")
+        }
+        if env != "prod" {
+            panic(fmt.Sprintf("Collect should return copy of Labels; expected env=prod still, got %s (mutation leaked)", env))
+        }
+        if val != 1 {
+            panic(fmt.Sprintf("expected value still 1 after mutation of copy, got %f (value mutation leaked)", val))
+        }
         fmt.Println("OK")
     }
     """)
@@ -1486,7 +1514,7 @@ def test_tracing_with_race():
 
 
 def test_tracing_custom_id_generator():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1510,10 +1538,11 @@ def test_tracing_custom_id_generator():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"custom id gen failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"custom id gen failed: {proc.stdout} {proc.stderr}"
+
 
 def test_tracing_service_name_override():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1532,10 +1561,13 @@ def test_tracing_service_name_override():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"service name override failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"service name override failed: {proc.stdout} {proc.stderr}"
+    )
+
 
 def test_metrics_description():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1557,10 +1589,11 @@ def test_metrics_description():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"description failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"description failed: {proc.stdout} {proc.stderr}"
+
 
 def test_metrics_histogram_unsorted_buckets():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "fmt"
@@ -1588,10 +1621,11 @@ def test_metrics_histogram_unsorted_buckets():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"unsorted buckets failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"unsorted buckets failed: {proc.stdout} {proc.stderr}"
+
 
 def test_logger_level_case_insensitive():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "bytes"
@@ -1612,10 +1646,13 @@ def test_logger_level_case_insensitive():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"level case insensitive failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"level case insensitive failed: {proc.stdout} {proc.stderr}"
+    )
+
 
 def test_tracing_traceflags():
-    code=textwrap.dedent("""
+    code = textwrap.dedent("""
     package main
     import (
         "context"
@@ -1634,4 +1671,4 @@ def test_tracing_traceflags():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode==0, f"traceflags failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, f"traceflags failed: {proc.stdout} {proc.stderr}"
