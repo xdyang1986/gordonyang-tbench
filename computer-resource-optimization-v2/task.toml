@@ -1,7 +1,7 @@
 schema_version = "1.1"
 
 [task]
-name = "codimango/computer-resource-optimization"
+name = "codimango/computer-resource-optimization-v2"
 description = "Hard multi-turn Go cluster management system. Turn1 implements core cluster management with nodes, jobs, allocation, persistence integrity, atomic writes, corruption handling, concurrent safety, large scale. Turn2 adds large-scale efficiency: weighted sharding, best-fit scheduling optimization, pagination, node health heartbeat TTL, rate limiting per-node token bucket, snapshot/restore dir+file, ops-log with invalid skipping, distribution, presence, performance 10k nodes <2s."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "cluster", "resource-management", "scheduling", "sharding", "optimization", "concurrency", "distributed-systems"]
