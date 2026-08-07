@@ -6,7 +6,7 @@ Turn1 proxy now handles weighted sharding (weights 1,2,1,1 total 5), `global:` b
 
 Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 global configs that are not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without `shard_id`/`version`. Turn2 must upgrade to new versioned format and fix migration – harder than Turn1, loosened vs staging+updated_at extra-hard which gave 0/10 all.
 
-## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=false to fix oracle resume bug)
+## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=true so agent sees prior terminal state)
 
 ### 1. Proxy fallback + robustness (UPGRADED to versioned format with shard_id+version for HARD)
 
@@ -77,7 +77,7 @@ Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-h
 
 - **Read shards**: support ALL formats: old flat `{"k":v}`, Turn1 format `{"data":...,"checksum":...}`, Turn2 versioned `{"shard_id":..., "version":..., "data":..., "checksum":...}` with corruption handling: invalid JSON, checksum mismatch, missing checksum, shard_id mismatch, missing version when shard_id present, version <0 → backup `.corrupt.<timestamp>` + warning containing corrupt/checksum/shard_id/version, treat as empty version 0.
 
-- **Read ops.log**: line by line via `bufio.Scanner`, skip invalid JSON lines with stderr warning containing "corrupt"/"invalid"/"warning", collect valid entries, then **sort by `ts` ascending** (if ts missing, treat as 0), stable sort preserving file order for equal ts, then replay in sorted ts order. Must handle ops.log with corrupted lines and out-of-order timestamps (file order != ts order). Example: ops.log has set k=v1 ts=100 then set k=v2 ts=50 – ts-sorted replay must apply ts=50 first, then ts=100, final v1 wins (later ts). This is harder than file-order.
+- **Read ops.log**: line by line via `bufio.Scanner`, skip invalid JSON lines with stderr warning containing "corrupt"/"invalid"/"warning", collect valid entries, then replay entries in ascending ts order, stable for ties (if ts missing, treat as 0). Must handle ops.log with corrupted lines and out-of-order timestamps.
 
 - **Detect inconsistent state**: scan all shards, build key→[shard ids] for non-global keys. If same non-global key in multiple shards, log stderr `Warning: key "dup" found in multiple shards [0 1]` and also `Detected duplicate keys...` (global duplicates expected, not warned as inconsistent). Must log warning for each duplicate.
 
@@ -89,7 +89,7 @@ Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-h
 
 - **Batched atomic writes + staging (harder)**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via `os.CreateTemp` in same dir + `os.Rename`, version = old version +1 if changed. Must create staging dir `/app/data/staging` and write grouped files there first via atomic write (`staging/shard_<id>.json` with versioned format), then also write to final shard path atomically (two-phase). Source inspection checks `CreateTemp`+`Rename` and grouping map (`grouped` or `map[int]`) and `SetEscapeHTML` and `staging`. Direct per-key writes considered reward hacking. Must also increment version on ops.log replay.
 
-- **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), **replay ops.log sorted by ts ascending**, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. This ensures deletes prevent legacy resurrection and later ts wins. Example: legacy has `k=v`, ops.log has `delete k` ts=200 → after migration, `k` deleted. Must also handle global keys in replay (replicate/delete all). If ops.log has set k=v1 ts=100 then set k=v2 ts=50, ts-sorted must apply 50 then 100 → final v1 (later ts) wins, not file order.
+- **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), replay entries in ascending ts order, stable for ties, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. This ensures deletes prevent legacy resurrection and later ts wins. Must handle global keys in replay (replicate/delete all).
 
 - **Version handling**: new format has `version` incremented. Migration must write new format with `shard_id` correct, version = old version +1 (or +1 per changed shard). After migration, version >= previous, shard_id matches expected, checksum valid (no HTML escaping, sorted keys, separators `,`, `:`), data contains migrated keys. Post-migration new writes must continue incrementing version.
 
@@ -144,4 +144,4 @@ go build -o ./proxy .
 ./proxy --config /app/config.json --legacy /app/data/legacy.json migrate --backup /tmp/codimango/backup.json --force
 ```
 
-Implement at `/app/` – Turn1 solution replayed via prior `solve.sh` before grading (inherit_prior_session=false to fix oracle resume bug).
+Implement at `/app/` – Turn1 solution replayed via prior `solve.sh` before grading (inherit_prior_session=true).

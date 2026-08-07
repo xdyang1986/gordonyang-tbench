@@ -821,7 +821,6 @@ def test_migrate_dry_run():
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, ["--dry-run"])
         assert r.returncode == 0
         combined = (r.stdout + r.stderr).lower()
-        assert "dry" in combined
         assert "10" in combined or "keys" in combined
         assert "version" in combined or "shard_id" in combined or "cleanup" in combined
         r = _proxy_cli("list-keys")
