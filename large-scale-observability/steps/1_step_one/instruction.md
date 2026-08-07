@@ -243,11 +243,11 @@ Rules:
 
 - Name must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Return no-op or handle invalid? For this task: if invalid name, return no-op instrument that does nothing but Collect does NOT include invalid metric.
 - Labels must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Invalid label keys cause metric to be no-op.
-- **Label value handling (checked by `test_metrics_label_truncate`):** label values may be long (e.g., 500 chars). To prevent high cardinality via long values, **truncate label values longer than 256 chars to 256 chars** (keep first 256). Do **not** drop the metric entirely for long values — truncate. This is required.
+- **Label value handling:** label values may be long (e.g., 500 chars). To prevent high cardinality via long values, **truncate label values longer than 256 chars to 256 chars** (keep first 256). Do **not** drop the metric entirely for long values — truncate. This is required.
 - Counter only inc positive? Add delta can be >=0 only. If negative, ignore. **Also ignore NaN and Inf for Counter Add and Histogram Observe** (do nothing).
 - Same metric name + same label set should return same instrument instance (reuse). Same name but different label values -> different time series (distinct MetricSample entries).
 - Thread safety: Inc/Add/Observe/Set may be called concurrently; must use atomic or mutex and not race. Test 100 goroutines x 1000 inc.
-- `Collect()` returns snapshot of all metrics at call time. **Must return deep copy — must not expose internal mutable maps (checked by `test_metrics_collect_copy`):** mutating the returned `MetricFamily.Metrics[0].Value` or `Labels` map must not affect the provider's internal state; next `Collect()` must return original values. So you must copy both slice and maps.
+- `Collect()` returns snapshot of all metrics at call time. **Must return deep copy — must not expose internal mutable maps:** mutating the returned `MetricFamily` slice, any `Metrics` slice, or any `Labels` map (including mutating a label value or injecting a new key) must not affect the provider's internal state; a subsequent `Collect()` must return original values. You must copy both slices and maps. When labels are present, the returned `Labels` map must be non-nil and mutable safely without panicking.
 - Histogram: default buckets if not provided: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. On Observe, increment count, sum, bucket counts (cumulative? Use inclusive). Return in Collect: Buckets with cumulative counts, plus Count and Sum. Buckets should be sorted ascending even if input unsorted.
 - Counter/Gauge value stored as float64.
 

@@ -162,7 +162,7 @@ func (g *defaultIDGenerator) NewSpanID() string {
 	return hex.EncodeToString(b)
 }
 
-// Sampling - implemented for you to use, but you must wire into Tracer for step2
+// Sampling - AlwaysOn implemented for step1, others are TODO for step2
 type SamplingDecision int
 const (
 	DecisionDrop SamplingDecision = iota
@@ -184,10 +184,14 @@ type Sampler interface {
 	Description() string
 }
 
-func NewAlwaysOnSampler() Sampler { panic("not implemented: sampling required for step2") }
-func NewAlwaysOffSampler() Sampler { panic("not implemented") }
-func NewTraceIDRatioSampler(fraction float64) Sampler { panic("not implemented") }
-func NewParentBasedSampler(root Sampler) Sampler { panic("not implemented") }
+type alwaysOnSampler struct{}
+func NewAlwaysOnSampler() Sampler { return &alwaysOnSampler{} }
+func (s *alwaysOnSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample }
+func (s *alwaysOnSampler) Description() string { return "AlwaysOnSampler" }
+
+func NewAlwaysOffSampler() Sampler { panic("not implemented: AlwaysOffSampler required for step2") }
+func NewTraceIDRatioSampler(fraction float64) Sampler { panic("not implemented: TraceIDRatioSampler required for step2") }
+func NewParentBasedSampler(root Sampler) Sampler { panic("not implemented: ParentBasedSampler required for step2") }
 
 // Tracer options - helpers implemented
 type tracerConfig struct {

@@ -168,21 +168,22 @@ func (s *traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingDecisio
 	if s.fraction >= 1 {
 		return DecisionRecordAndSample
 	}
-	// parse first 16 hex chars -> 8 bytes -> uint64
-	if len(p.TraceID) < 16 {
+	// Strict validation: TraceID must be 32 hex chars (per spec invalid => Drop)
+	if len(p.TraceID) != 32 {
 		return DecisionDrop
 	}
-	// take first 16 chars
+	// quick hex validation of full 32 chars
+	for _, ch := range p.TraceID {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return DecisionDrop
+		}
+	}
+	// parse first 16 hex chars -> 8 bytes -> uint64 for uniform sampling
 	sub := p.TraceID[:16]
 	val, err := strconv.ParseUint(sub, 16, 64)
 	if err != nil {
-		// fallback: hash-like using hex decode?
 		return DecisionDrop
 	}
-	// compare val / maxUint64 < fraction
-	// Equivalent to val < fraction * maxUint64
-	// max uint64 = 2^64-1 ~ 1.84e19, but using float may lose precision, use float64 ratio
-	// compute threshold
 	threshold := s.fraction * float64(^uint64(0))
 	if float64(val) < threshold {
 		return DecisionRecordAndSample

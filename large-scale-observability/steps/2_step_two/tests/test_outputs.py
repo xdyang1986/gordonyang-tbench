@@ -229,22 +229,16 @@ def test_sampler_invalid_traceid():
     )
     func main(){
         sampler := observability.NewTraceIDRatioSampler(0.5)
-        invalids := []string{"", "short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "0102030405060708090a0b0c0d0e0f0g"}
+        invalids := []string{"", "short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "0102030405060708090a0b0c0d0e0f0g", "010203040506070", "g102030405060708090a0b0c0d0e0f10"}
         for _, tid := range invalids {
             p := observability.SamplingParameters{TraceID:tid, SpanName:"test"}
-            // should not panic, and should return Drop for invalid (or at least not panic)
             func(){
                 defer func(){
-                    if r:=recover(); r!=nil { panic(fmt.Sprintf("panic on invalid traceID %s: %v", tid, r)) }
+                    if r:=recover(); r!=nil { panic(fmt.Sprintf("panic on invalid traceID %q: %v", tid, r)) }
                 }()
                 d := sampler.ShouldSample(p)
-                // for invalid, we expect Drop
-                if d!=observability.DecisionDrop && d!=observability.DecisionRecordAndSample {
-                    panic("unexpected decision")
-                }
-                // For our stricter test, invalid should be Drop
-                if tid=="" || len(tid)<16 {
-                    if d!=observability.DecisionDrop { panic(fmt.Sprintf("invalid tid %s should Drop, got %d", tid, d)) }
+                if d!=observability.DecisionDrop {
+                    panic(fmt.Sprintf("invalid traceID %q must return Drop per spec, got %d", tid, d))
                 }
             }()
         }

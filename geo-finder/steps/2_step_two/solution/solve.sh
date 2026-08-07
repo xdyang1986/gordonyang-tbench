@@ -486,6 +486,44 @@ func computeBBox(poly []Point) BBox {
 	return BBox{MinLat: minLat, MaxLat: maxLat, MinLng: minLng, MaxLng: maxLng}
 }
 
+func gridCellsForBBox(bbox BBox, gridSize float64) []CellKey {
+	latStart := int(math.Floor((bbox.MinLat + 90.0) / gridSize))
+	latEnd := int(math.Floor((bbox.MaxLat + 90.0) / gridSize))
+	lngSpan := bbox.MaxLng - bbox.MinLng
+	keys := []CellKey{}
+	if lngSpan >= 360-eps {
+		lngStart := int(math.Floor((-180.0 + 180.0) / gridSize))
+		lngEnd := int(math.Floor((180.0 + 180.0) / gridSize))
+		for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+			for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
+				keys = append(keys, CellKey{LatIdx: latIdx, LngIdx: lngIdx})
+			}
+		}
+	} else if lngSpan > 180 {
+		lngStart1 := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
+		lngEnd1 := int(math.Floor((180.0 + 180.0) / gridSize))
+		lngStart2 := int(math.Floor((-180.0 + 180.0) / gridSize))
+		lngEnd2 := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
+		for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+			for lngIdx := lngStart1; lngIdx <= lngEnd1; lngIdx++ {
+				keys = append(keys, CellKey{LatIdx: latIdx, LngIdx: lngIdx})
+			}
+			for lngIdx := lngStart2; lngIdx <= lngEnd2; lngIdx++ {
+				keys = append(keys, CellKey{LatIdx: latIdx, LngIdx: lngIdx})
+			}
+		}
+	} else {
+		lngStart := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
+		lngEnd := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
+		for latIdx := latStart; latIdx <= latEnd; latIdx++ {
+			for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
+				keys = append(keys, CellKey{LatIdx: latIdx, LngIdx: lngIdx})
+			}
+		}
+	}
+	return keys
+}
+
 // LRU
 type lruNode struct {
 	key   string
@@ -626,44 +664,8 @@ func NewServer(db DB, gridSize float64, cacheSize int, dbPath string) *Server {
 	for id, g := range db {
 		bbox := computeBBox(g.Polygon)
 		s.bboxes[id] = bbox
-		latStart := int(math.Floor((bbox.MinLat + 90.0) / gridSize))
-		latEnd := int(math.Floor((bbox.MaxLat + 90.0) / gridSize))
-		lngSpan := bbox.MaxLng - bbox.MinLng
-		if lngSpan >= 360-eps {
-			// world-spanning: covers all longitudes, add to all lng cells
-			lngStart := int(math.Floor((-180.0 + 180.0) / gridSize))
-			lngEnd := int(math.Floor((180.0 + 180.0) / gridSize))
-			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-				for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-					s.grid[key] = append(s.grid[key], id)
-				}
-			}
-		} else if lngSpan > 180 {
-			// crossing antimeridian: small wrapping interval, split into [maxLng,180] and [-180,minLng]
-			lngStart1 := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
-			lngEnd1 := int(math.Floor((180.0 + 180.0) / gridSize))
-			lngStart2 := int(math.Floor((-180.0 + 180.0) / gridSize))
-			lngEnd2 := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
-			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-				for lngIdx := lngStart1; lngIdx <= lngEnd1; lngIdx++ {
-					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-					s.grid[key] = append(s.grid[key], id)
-				}
-				for lngIdx := lngStart2; lngIdx <= lngEnd2; lngIdx++ {
-					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-					s.grid[key] = append(s.grid[key], id)
-				}
-			}
-		} else {
-			lngStart := int(math.Floor((bbox.MinLng + 180.0) / gridSize))
-			lngEnd := int(math.Floor((bbox.MaxLng + 180.0) / gridSize))
-			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-				for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-					s.grid[key] = append(s.grid[key], id)
-				}
-			}
+		for _, key := range gridCellsForBBox(bbox, gridSize) {
+			s.grid[key] = append(s.grid[key], id)
 		}
 	}
 	for k, ids := range s.grid {
@@ -895,28 +897,21 @@ func (s *Server) handleGeofencesSingle(w http.ResponseWriter, r *http.Request, i
 			json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
 			return
 		}
-		// remove from grid
+		// remove from grid (handle world-spanning and antimeridian crossing)
 		oldBBox, hasBBox := s.bboxes[id]
 		if hasBBox {
-			latStart := int(math.Floor((oldBBox.MinLat + 90.0) / s.gridSize))
-			latEnd := int(math.Floor((oldBBox.MaxLat + 90.0) / s.gridSize))
-			lngStart := int(math.Floor((oldBBox.MinLng + 180.0) / s.gridSize))
-			lngEnd := int(math.Floor((oldBBox.MaxLng + 180.0) / s.gridSize))
-			for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-				for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-					key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-					ids := s.grid[key]
-					newIds := make([]string, 0, len(ids))
-					for _, gid := range ids {
-						if gid != id {
-							newIds = append(newIds, gid)
-						}
+			for _, key := range gridCellsForBBox(oldBBox, s.gridSize) {
+				ids := s.grid[key]
+				newIds := make([]string, 0, len(ids))
+				for _, gid := range ids {
+					if gid != id {
+						newIds = append(newIds, gid)
 					}
-					if len(newIds) == 0 {
-						delete(s.grid, key)
-					} else {
-						s.grid[key] = newIds
-					}
+				}
+				if len(newIds) == 0 {
+					delete(s.grid, key)
+				} else {
+					s.grid[key] = newIds
 				}
 			}
 		}
@@ -980,43 +975,29 @@ func (s *Server) handleGeofencesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	// remove old if exists
+	// remove old if exists (handle world-spanning and antimeridian)
 	if oldBBox, ok := s.bboxes[g.ID]; ok {
-		latStart := int(math.Floor((oldBBox.MinLat + 90.0) / s.gridSize))
-		latEnd := int(math.Floor((oldBBox.MaxLat + 90.0) / s.gridSize))
-		lngStart := int(math.Floor((oldBBox.MinLng + 180.0) / s.gridSize))
-		lngEnd := int(math.Floor((oldBBox.MaxLng + 180.0) / s.gridSize))
-		for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-			for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-				key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-				ids := s.grid[key]
-				newIds := make([]string, 0, len(ids))
-				for _, gid := range ids {
-					if gid != g.ID {
-						newIds = append(newIds, gid)
-					}
+		for _, key := range gridCellsForBBox(oldBBox, s.gridSize) {
+			ids := s.grid[key]
+			newIds := make([]string, 0, len(ids))
+			for _, gid := range ids {
+				if gid != g.ID {
+					newIds = append(newIds, gid)
 				}
-				if len(newIds) == 0 {
-					delete(s.grid, key)
-				} else {
-					s.grid[key] = newIds
-				}
+			}
+			if len(newIds) == 0 {
+				delete(s.grid, key)
+			} else {
+				s.grid[key] = newIds
 			}
 		}
 	}
 	s.db[g.ID] = g
 	bbox := computeBBox(g.Polygon)
 	s.bboxes[g.ID] = bbox
-	latStart := int(math.Floor((bbox.MinLat + 90.0) / s.gridSize))
-	latEnd := int(math.Floor((bbox.MaxLat + 90.0) / s.gridSize))
-	lngStart := int(math.Floor((bbox.MinLng + 180.0) / s.gridSize))
-	lngEnd := int(math.Floor((bbox.MaxLng + 180.0) / s.gridSize))
-	for latIdx := latStart; latIdx <= latEnd; latIdx++ {
-		for lngIdx := lngStart; lngIdx <= lngEnd; lngIdx++ {
-			key := CellKey{LatIdx: latIdx, LngIdx: lngIdx}
-			s.grid[key] = append(s.grid[key], g.ID)
-			sort.Strings(s.grid[key])
-		}
+	for _, key := range gridCellsForBBox(bbox, s.gridSize) {
+		s.grid[key] = append(s.grid[key], g.ID)
+		sort.Strings(s.grid[key])
 	}
 	s.cache.Clear()
 	dbCopy := make(DB, len(s.db))

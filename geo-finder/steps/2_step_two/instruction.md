@@ -25,6 +25,8 @@ geofencectl --db <PATH> serve --port <int> [--grid-size <float>] [--cache-size <
 Precompute bounding box per geofence for quick reject. Must correctly handle:
 - Polygons near poles (lat close to ±90)
 - Polygons that cross the antimeridian (lng near ±180, e.g., a rectangle from 179 to -179). When `maxLng-minLng > 180`, the polygon crosses the antimeridian and the bbox check must account for wrapping (point is outside only if it lies in the large gap, not the small wrapping interval).
+- A polygon whose longitude span is ≥ 360 (e.g. the world rectangle -180…180) does not cross the antimeridian — it covers every longitude. Classify world-spanning before applying the >180 crossing rule: its bbox keeps the full longitude range, and it must match points at every longitude in its latitude band.
+- The wrapping rule applies to the point-in-polygon test itself, not only to the bbox and grid. The same answers must come from the CLI lookup command and from GET /lookup.
 
 #### 2. Grid Spatial Index
 Uniform grid over world lat [-90,90], lng [-180,180]. You must implement spatial indexing to reduce candidates. On query, compute cell for point and get candidates from index (empty cell -> empty result). Then bbox check, then point-in-polygon. Must track `index_cells` = number of cells with >=1 geofence.
@@ -33,11 +35,12 @@ Uniform grid over world lat [-90,90], lng [-180,180]. You must implement spatial
 - Index must be updatable on HTTP POST/DELETE (see CRUD). On mutation, update bboxes, grid, and invalidate cache correctly under concurrency.
 
 - For antimeridian-crossing polygons, grid assignment must handle wrapping: a polygon crossing should be added to cells on both sides of ±180 (e.g., [maxLng,180] and [-180,minLng]), not to the huge interior gap covering most of the world. Otherwise you will create tens of thousands of cells for a tiny crossing rectangle and risk OOM.
+- For world-spanning polygons (span ≥ 360, e.g. -180…180), do NOT treat as antimeridian-crossing — it covers every longitude, so its bbox keeps the full longitude range and it must match points at every longitude in its latitude band. You may either materialize all longitude cells or flag it as global; both are acceptable as long as correctness holds.
 
 #### 3. Cache
 Implement a cache for point lookups:
 
-- Should improve hit rate for repeated or nearby queries. Nearby points that are very close should ideally share cache entries.
+- Cache keys are derived from the query point rounded to exactly 6 decimal places. Two points that agree to 6 decimals (e.g. 0.5000001 and 0.5000002) map to one entry: the second is a cache hit and cache_size stays at 1.
 - Must have bounded size = cache-size flag, evict least recently used when exceeding.
 - Thread-safe.
 - Must be consulted before index search.
