@@ -55,11 +55,11 @@ Behavior:
 - **TraceIDRatioBased**:
   - If `fraction <= 0`: always `DecisionDrop`.
   - If `fraction >= 1`: always `DecisionRecordAndSample`.
-  - For `0 < fraction < 1`: deterministically decide based on TraceID.
-  - **Algorithm (required for test determinism):** Parse the **first 16 hex characters** of TraceID (representing the first 8 bytes) as a uint64 in base 16. If parsing fails or TraceID is shorter than 16 chars, return `DecisionDrop`. Compute threshold = `fraction * 2^64` (i.e. `fraction * float64(^uint64(0))`). If `float64(parsedValue) < threshold`, sample; otherwise drop. This makes the decision deterministic for the same TraceID and uniform over random IDs.
-  - **Invalid TraceID handling: Any TraceID that is empty, shorter than 16 chars, longer but with non-hex characters in the first 16 chars, or not 32 hex chars overall, MUST return `DecisionDrop` and MUST NOT panic.** Tests explicitly check that invalid IDs (e.g. `""`, `"short"`, `"zzzz...`, `"0102...g"`) do not panic and result in `Drop`.
-  - Sampling 10k random valid traceIDs with ratio 0.1 should yield sampled ratio within 0.05-0.15; ratio 0.5 within 0.4-0.6. Implementation must be deterministic: same TraceID always yields same decision.
-  - Determinism note: same 16-char prefix with different suffix must yield same decision because only first 16 chars are used.
+  - For `0 < fraction < 1`: deterministically decide based on TraceID. Properties required:
+    - Same TraceID always yields same decision.
+    - Decision is uniformly distributed over random TraceIDs (e.g., ratio 0.1 yields sampled ratio within 0.05-0.15 over 10k random IDs; ratio 0.5 within 0.4-0.6).
+    - Decision must be based solely on TraceID and fraction, not span name/kind.
+  - **Invalid TraceID handling: Any TraceID that is not a valid 32 hex char string (empty, wrong length, or contains non-hex) MUST return `DecisionDrop` and MUST NOT panic** – e.g., `""`, `"short"`, `"zzzz..."`, `"0102...g"` must not panic and result in Drop.
 - **ParentBased**:
   - If `HasParent == false`: delegate to root sampler.
   - If `HasParent == true` and `ParentContext.Sampled == true`: always `DecisionRecordAndSample` regardless of root.
@@ -104,19 +104,22 @@ func NewBatchSpanProcessor(exporter SpanExporter, opts ...BatchSpanProcessorOpti
 Spec:
 
 - `WithMaxExportBatchSize` is an **alias for `WithBatchSize`**: it sets the same underlying max batch size. If both are supplied, the last option wins. Default 512 for both.
-- **Hard cap enforcement:** `BatchSize` is the maximum spans per batch. Exporter must never receive a batch larger than `BatchSize`. The provided `test_batch_batch_size_limit` asserts `max batch <= BatchSize`. Your background goroutine must export at most `BatchSize` spans per call, splitting larger pending sets into multiple exports in order.
+- **Non-positive option values fall back to the default**: If any option is supplied with a non-positive value (e.g., `WithBatchSize(0)`, `WithQueueSize(0)`, `WithBatchTimeout(0)`, `WithExportTimeout(0)`), it must be treated as if not supplied and the default (512/2048/5s/30s) used. This ensures a processor constructed with all-zero options still exports.
+- **Hard cap enforcement:** `BatchSize` is the maximum spans per batch. Exporter must never receive a batch larger than `BatchSize`. Your background goroutine must export at most `BatchSize` spans per call, splitting larger pending sets into multiple exports in order.
 - Async: maintains internal queue (channel or slice protected). `OnEnd` enqueues `ReadableSpan`. If queue full, **drop** the span (do not block caller) and increment dropped counter.
 - Background goroutine: collects spans up to `BatchSize` or `BatchTimeout` elapsed, then calls `exporter.ExportSpans`.
 - Must be concurrency-safe: many goroutines calling `OnEnd`.
 - Must handle backpressure: non-blocking enqueue. Under heavy load with small queue, calling goroutines must not be blocked for more than a few milliseconds. Tests measure fast enqueue timing.
 - `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting `BatchSize`), wait for in-flight exports, respect `ctx` timeout, return nil if success or `ctx` error. After `Shutdown`, `OnEnd` should drop (no-op) and not panic.
 - `ForceFlush(ctx)` blocks until all currently queued spans are exported or `ctx` timeout. It must export incomplete batches as well, not wait for `BatchSize` to fill.
-- **Required methods** (not optional) for testing and observability:
+- **Required methods** (not optional) for observability:
   ```go
   func (b *BatchSpanProcessor) DroppedCount() int
   func (b *BatchSpanProcessor) QueueLen() int
   ```
-  These must be implemented on the concrete `*BatchSpanProcessor` type. Tests access them by first assigning the processor to a `SpanProcessor` interface variable and then type-asserting to `interface{ DroppedCount() int }` and `interface{ QueueLen() int }`, so the implementation works regardless of whether `NewBatchSpanProcessor` returns a concrete type or interface. The simplest is to return `*BatchSpanProcessor` with those methods.
+  These must be implemented on the concrete `*BatchSpanProcessor` type and be accessible via interface assertion (e.g., processor assigned to `SpanProcessor` then asserted to `interface{ DroppedCount() int }`).
+  - `QueueLen()` counts spans waiting in the queue, excluding any already moved into the in-progress batch, and must never exceed `QueueSize`.
+  - `DroppedCount()` counts spans dropped due to full queue.
 - Export failure: if `exporter.ExportSpans` returns error, processor must not crash/panic, and must continue processing.
 - Ordering: batches export in order enqueued, but no strict global ordering guarantee beyond per-processor.
 - Resource: goroutine must exit on `Shutdown`, no leaks.

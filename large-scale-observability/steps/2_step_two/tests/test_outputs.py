@@ -189,6 +189,7 @@ def test_sampler_ratio_half():
 
 
 def test_sampler_determinism_prefix():
+    # Property: same TraceID must yield same decision (deterministic), not spoon-fed prefix impl
     code = textwrap.dedent("""
     package main
     import (
@@ -197,27 +198,27 @@ def test_sampler_determinism_prefix():
     )
     func main(){
         sampler := observability.NewTraceIDRatioSampler(0.5)
-        // same prefix, different suffix should give same decision if impl uses first 16 chars
-        base := "0102030405060708"
-        tid1 := base + "0102030405060708"
-        tid2 := base + "aabbccddeeff0011"
-        tid3 := base + "ffffffffffffffff"
-        p1 := observability.SamplingParameters{TraceID:tid1, SpanName:"test"}
-        p2 := observability.SamplingParameters{TraceID:tid2, SpanName:"test"}
-        p3 := observability.SamplingParameters{TraceID:tid3, SpanName:"test"}
-        d1 := sampler.ShouldSample(p1)
-        d2 := sampler.ShouldSample(p2)
-        d3 := sampler.ShouldSample(p3)
+        tid := "01020304050607080102030405060708"
+        p := observability.SamplingParameters{TraceID:tid, SpanName:"test"}
+        d1 := sampler.ShouldSample(p)
+        d2 := sampler.ShouldSample(p)
+        d3 := sampler.ShouldSample(p)
         if d1!=d2 || d1!=d3 {
-            panic(fmt.Sprintf("sampler should be deterministic on prefix, got %d %d %d", d1, d2, d3))
+            panic(fmt.Sprintf("sampler should be deterministic on same TraceID, got %d %d %d", d1, d2, d3))
+        }
+        // also check different TraceIDs are stable across repeated calls
+        tid2 := "aabbccddeeff0011aabbccddeeff0011"
+        p2 := observability.SamplingParameters{TraceID:tid2, SpanName:"test"}
+        d4 := sampler.ShouldSample(p2)
+        d5 := sampler.ShouldSample(p2)
+        if d4!=d5 {
+            panic("determinism failed for second id")
         }
         fmt.Println("OK")
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"determinism prefix failed: {proc.stdout} {proc.stderr}"
-    )
+    assert proc.returncode == 0, f"determinism failed: {proc.stdout} {proc.stderr}"
 
 
 def test_sampler_invalid_traceid():
