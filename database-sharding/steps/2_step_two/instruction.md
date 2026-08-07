@@ -6,7 +6,7 @@ Turn1 proxy now handles weighted sharding (weights 1,2,1,1 total 5), `global:` b
 
 Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 global configs that are not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without `shard_id`/`version`. Turn2 must upgrade to new versioned format and fix migration – harder than Turn1.
 
-## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .`, inherits Turn1
+## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=false to fix oracle resume bug)
 
 ### 1. Proxy fallback + robustness (UPGRADED to versioned format with shard_id+version for HARD, but easier than 83-test)
 
@@ -76,7 +76,7 @@ Requirements:
 
 - **Read shards**: support ALL formats: old flat `{"k":v}`, Turn1 format `{"data":...,"checksum":...}`, Turn2 versioned `{"shard_id":..., "version":..., "data":..., "checksum":...}` with corruption handling: invalid JSON, checksum mismatch, missing checksum, shard_id mismatch, missing version when shard_id present, version <0 → backup `.corrupt.<timestamp>` + warning containing corrupt/checksum/shard_id/version, treat as empty version 0.
 
-- **Read ops.log**: read line by line, skip invalid JSON lines with stderr warning containing "corrupt"/"invalid"/"warning", collect valid entries in file order (no timestamp sort for easier version). Must handle corrupted lines and large lines, avoiding infinite loop on invalid.
+- **Read ops.log**: read line by line via `bufio.Scanner`, skip invalid JSON lines with stderr warning containing "corrupt"/"invalid"/"warning", collect valid entries, then sort by ts ascending (if ts missing, treat as 0), stable sort preserving file order for equal ts, then replay in sorted ts order. Must handle ops.log with corrupted lines and out-of-order timestamps (file order != ts order) and large lines, avoiding infinite loop on invalid.
 
 - **Detect inconsistent state**: scan all shards, build key→[shard ids] for non-global keys. If same non-global key in multiple shards, log stderr `Warning: key "dup" found in multiple shards [0 1]` and also `Detected duplicate keys...` (global duplicates expected). Must log warning for each duplicate.
 
@@ -88,7 +88,7 @@ Requirements:
 
 - **Batched atomic writes**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via temporary file in same directory then rename to final path, version = old version +1 if changed. Must be one write per shard (grouped/batched), not per-key, to ensure durability and avoid partial states. Must also increment version on ops.log replay.
 
-- **Tombstone via ops.log replay**: After legacy + cleanup merge (writes new versioned format), **replay ops.log in file order**, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. Ensures deletes prevent legacy resurrection. Example: legacy has `k=v`, ops.log has `delete k` → after migration, `k` deleted. Must also handle global keys in replay.
+- **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), **replay ops.log sorted by ts ascending**, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. Ensures deletes prevent legacy resurrection and later ts wins. Example: legacy has `k=v`, ops.log has `delete k` → after migration, `k` deleted. Must also handle global keys in replay. If ops.log has set k=v1 ts=100 then set k=v2 ts=50, ts-sorted must apply 50 then 100 → final v1 wins, not file order.
 
 - **Version handling**: new format has `version` incremented. Migration must write new format with `shard_id` correct, version = old version +1. After migration, version >= previous, shard_id matches expected, checksum valid (no HTML escaping, sorted keys, separators), data contains migrated keys.
 
@@ -143,4 +143,4 @@ go build -o ./proxy .
 ./proxy --config /app/config.json --legacy /app/data/legacy.json migrate --backup /tmp/codimango/backup.json --force
 ```
 
-Implement at `/app/` – Turn1 present via inherit.
+Implement at `/app/` – Turn1 solution replayed via prior `solve.sh` before grading (inherit_prior_session=false to fix oracle resume bug).
