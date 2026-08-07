@@ -97,6 +97,7 @@ For list --roads: same.
 
 #### 4. near --lat <f> --lng <f> --radius <f> [--accuracy-max <f> --speed-min <f> --limit <n> --offset <m> --now <ts> --include-stale --zones <path> --roads <path>]
 - lat [-90,90] lng [-180,180] radius [0,50000] else exit2, accuracy-max >=0, speed-min 0-50, now age = now - ts age<0=>0 age>30000 stale excluded only when now provided unless include-stale, zones active filtered by now if provided, roads snap, distance filter Haversine <=radius, sort distance asc then vehicle_id asc, pagination.
+- Each result object is the base location object plus "distance_m": Haversine distance in metres from the query point.
 
 #### 5. track <vehicle_id> --from <ts> --to <ts> [--limit <n> --offset <m>]
 - History within [from,to] inclusive sorted asc paginated, requires both flags from<=to else exit2, not found exit3.

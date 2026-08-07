@@ -1146,6 +1146,9 @@ def test_near_haversine_accuracy(binary):
     )
     arr = json.loads(p.stdout.strip())
     assert len(arr) == 1
+    assert (
+        arr[0]["distance_m"] < 20
+    )  # spec now defines distance_m as Haversine distance in metres
 
 
 def test_roads_mixed_format(binary):

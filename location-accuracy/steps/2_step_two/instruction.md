@@ -79,7 +79,11 @@ Finding nearest:
 #### geofence-check <lat> <lng> [--zones <path>] [--now <ts>]
 - Same as Step1 extreme.
 
-#### Enhanced near/list/track etc same as Step1 extreme with zones circles holes time antimeridian, roads mixed, batch variable, etc.
+#### Enhanced near
+- Same as Step1 extreme: lat/lng/radius validation, accuracy-max, speed-min, now/include-stale, zones, roads, distance filter, sorting, pagination.
+- Each result object is the base location object plus "distance_m": Haversine distance in metres from the query point.
+
+#### Enhanced list/track etc same as Step1 extreme with zones circles holes time antimeridian, roads mixed, batch variable, etc.
 
 ### Road Data
 Environment creates /app/data/roads.json sample, /app/data/zones.json empty by default (to avoid breaking tests), but loader must support circles holes time antimeridian etc when provided.
