@@ -1,22 +1,24 @@
 #!/bin/bash
-# No set -e — must capture pytest exit even on failure
-
-apt-get update -qq
-apt-get install -y -qq curl ca-certificates golang-go > /dev/null
-
-curl -LsSf https://astral.sh/uv/0.9.7/install.sh | sh > /dev/null 2>&1
-source $HOME/.local/bin/env
-
+# No set -e for baseline – must capture pytest exit even on failure, but avoid apt-get behind fwdproxy
 set +e
-uvx \
-  --with pytest==8.4.1 \
-  --with pytest-json-ctrf==0.3.5 \
-  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
-EXIT=$?
-set -e
+mkdir -p /logs/verifier
+if [ -f /etc/fwdproxy.env ]; then set -a; . /etc/fwdproxy.env; set +a; fi
 
-if [ $EXIT -eq 0 ]; then
-  echo 1 > /logs/verifier/reward.txt
+# Base image ubuntu:24.04 + golang-go installed in Dockerfile, avoid apt-get which fails behind proxy
+pip3 install -q pytest==8.4.1 requests==2.32.3 2>&1 | tail -20 || true
+
+if command -v pytest >/dev/null 2>&1; then
+  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+  EXIT=$?
+elif python3 -m pytest --version >/dev/null 2>&1; then
+  python3 -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+  EXIT=$?
+elif command -v uvx >/dev/null 2>&1; then
+  uvx --with pytest==8.4.1 --with pytest-json-ctrf==0.3.5 --with requests==2.32.3 pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+  EXIT=$?
 else
-  echo 0 > /logs/verifier/reward.txt
+  python -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+  EXIT=$?
 fi
+
+if [ $EXIT -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi

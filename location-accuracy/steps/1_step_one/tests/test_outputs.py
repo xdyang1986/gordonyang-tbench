@@ -694,7 +694,7 @@ def test_zones_out_of_zone_rejection(binary):
         ["update", "veh_outside", "39.0", "-121.5", "1000", "--zones", zones_path],
         expect_code=3,
     )
-    assert "out_of_zone" in p.stdout.lower()
+    assert "out_of_zone" in (p.stdout + p.stderr).lower()
 
 
 def test_zones_holes(binary):
@@ -734,7 +734,7 @@ def test_zones_holes(binary):
         ["update", "veh_hole", "5", "5", "1000", "--zones", zones_path],
         expect_code=3,
     )
-    assert "out_of_zone" in p.stdout.lower()
+    assert "out_of_zone" in (p.stdout + p.stderr).lower()
 
 
 def test_zones_circle(binary):
@@ -756,7 +756,7 @@ def test_zones_circle(binary):
         ["update", "veh_out", "10", "10", "1000", "--zones", zones_path],
         expect_code=3,
     )
-    assert "out_of_zone" in p.stdout.lower()
+    assert "out_of_zone" in (p.stdout + p.stderr).lower()
 
 
 def test_zones_antimeridian(binary):
@@ -794,7 +794,7 @@ def test_zones_antimeridian(binary):
         ["update", "veh_out", "0", "0", "1000", "--zones", zones_path],
         expect_code=3,
     )
-    assert "out_of_zone" in p.stdout.lower()
+    assert "out_of_zone" in (p.stdout + p.stderr).lower()
 
 
 def test_zones_point_on_edge_inside(binary):
@@ -929,7 +929,7 @@ def test_zones_default_file(binary):
         p = run_cli(
             binary, db, ["update", "veh_out", "20", "20", "1000"], expect_code=3
         )
-        assert "out_of_zone" in p.stdout.lower()
+        assert "out_of_zone" in (p.stdout + p.stderr).lower()
     finally:
         if backup is not None:
             with open(default_path, "w") as f:

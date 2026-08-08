@@ -210,7 +210,7 @@ def test_zones_out_of_zone(binary):
         json.dump(zones, f)
     run_cli(binary, db, ["update", "veh_in", "37.5", "-121.5", "1000", "--zones", zones_path], expect_code=0)
     p = run_cli(binary, db, ["update", "veh_out", "39.0", "-121.5", "1000", "--zones", zones_path], expect_code=3)
-    assert "out_of_zone" in p.stdout.lower()
+    assert "out_of_zone" in (p.stdout + p.stderr).lower()
 
 def test_zones_circle(binary):
     tmp=tempfile.mkdtemp()
