@@ -1,4 +1,4 @@
-# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (20 tests)
+# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (46 tests)
 
 Turn1 implemented core cluster management with single-file persistence, first-fit scheduling, integrity, atomic writes, corruption handling, concurrent safety.
 
@@ -14,11 +14,14 @@ Stdlib only, `go.mod` no external requires, `go list -f '{{join .Imports " "}}' 
 
 ### Flags
 - `--data` default `/app/data/cluster.json` – single-file mode (Turn1 compat)
-- `--config` default `/app/config.json` – sharded mode config path. If config file exists and valid, sharded mode active, else fallback to single-file.
+- `--config` default `/app/config.json` – sharded mode config path.
+  - If config file **does NOT exist** → fallback to single-file mode (backwards compat).
+  - If config file exists **and is valid** → sharded mode active.
+  - If config file exists **but invalid** (bad JSON, shard_count≤0, missing shard_count, shards missing/empty, duplicate id, empty path, weight≤0, negative id) → **exit2 no stdout**, only stderr. This is the validation rule; fallback does NOT apply to invalid configs.
 
 ### Config File Format (for sharding, MUST - Extra Hard)
 
-`/app/config.json`:
+/app/config.json:
 ```json
 {
   "shard_count": 4,
@@ -38,13 +41,14 @@ Stdlib only, `go.mod` no external requires, `go list -f '{{join .Imports " "}}' 
   "nodes_index_path": "/app/data/nodes_index.json"
 }
 ```
-- `shard_count` >0 else exit2 no stdout, shards unique id, path non-empty, weight>0 else exit2, negative id exit2, duplicate id exit2, empty path exit2.
+- `shard_count` required, >0 else exit2 no stdout (missing counts as invalid), `shards` required non-empty array else exit2.
+- shards: id unique non-negative, path non-empty, weight>0 else exit2 no stdout, unknown fields ignored.
 - `rate_limit` optional default `{"allocations_per_second":5,"burst":10}`
 - `node_heartbeat_ttl_seconds` optional default 60
 - `ops_log`, `jobs_path`, `presence_path`, `rate_limit_path`, `counter_path`, `nodes_index_path` optional defaults as above.
 - **Unknown fields must be ignored** – tolerant: extra fields top-level and inside shards must be ignored, still allow operations succeed. Tests verify `future_field`, `unknown_top_level`, `future_shard_field` ignored.
 
-Validation: bad config (invalid JSON, shard_count≤0, duplicate id, empty path, weight≤0, negative id) → exit2 no stdout only stderr.
+Validation: bad config (invalid JSON, missing shard_count, shard_count≤0, missing/empty shards, duplicate id, empty path, weight≤0, negative id) → exit2 no stdout only stderr.
 
 ### Sharded Mode Semantics
 - Nodes sharded via weighted hash of nodeID (same as database-sharding task)
@@ -63,7 +67,7 @@ Validation: bad config (invalid JSON, shard_count≤0, duplicate id, empty path,
 - `allocate`, `deallocate`, `schedule`, `status` work across shards: allocation needs to read nodes union and jobs, update appropriate shard file and jobs file atomically under global lock, append ops log.
 - `schedule <jobID>`: **NOW BEST-FIT instead of first-fit for efficiency**. Among all nodes that fit, choose node with smallest sufficient free resources to reduce fragmentation. Scoring: minimal (free_cpu - req_cpu), tie-breaker minimal (free_mem - req_mem), then minimal (free_gpu - req_gpu), then smallest node ID lexicographically for determinism. Must be deterministic. If job already allocated exit2, if no fit exit1 stderr "no fit" no stdout. Prints JSON scheduled.
 
-Best-fit vs first-fit difference tested: first-fit would pick nodeA (sorted ID) even if wasteful, best-fit must pick nodeB with smaller waste. This proves efficiency improvement.
+Best-fit vs first-fit difference tested: first-fit would pick nodeA (sorted ID) even if wasteful, best-fit must pick nodeB with smaller waste. This proves efficiency improvement. **Tie-breaking cascade is critical**: if CPU waste equal, compare MEM waste, then GPU waste, then ID lex order. Many naive impls miss mem/gpu/id tie-break.
 
 ### Rate Limiting (extra hard) – Per-Node Token Bucket
 
@@ -74,6 +78,7 @@ Best-fit vs first-fit difference tested: first-fit would pick nodeA (sorted ID) 
 - Consume: if tokens≥1, tokens-=1 allow persist, proceed allocate/schedule; else fail rate limited, persist refilled tokens, exit1 stderr contains "rate limit" case-insensitive no stdout, must NOT allocate and must NOT append to ops log.
 - Per-node independent: allocating to nodeA rate limited, nodeB still succeeds.
 - Persistence path `rate_limit_path` wrapper checksum, atomic via CreateTemp+Rename, corruption handling.
+- **No-consume on insufficient**: if allocation fails due to insufficient resources (exit2), token must NOT be consumed.
 - Tests extra hard: burst2 rate1, 2 succeed, 3rd fails exit1 no side effects, per-node independent (nodeB succeeds when nodeA limited), **refill after 1.6s** succeeds, **multiple cycles** 2 succeed fail sleep 1.2s succeed fail sleep 1.2s succeed, persistence across invocations (file contains bucket), corruption handling for rate_limit.json (invalid JSON → bucket reset → allocate succeeds)
 
 ### Presence / Node Health (extra hard)
@@ -99,7 +104,7 @@ list-online                      -> sorted online within TTL
 snapshot <backup_path>           -> dir mode: mkdir -p and copy shard files+jobs+presence+rate_limit+counter+ops_log+config; file mode: combined JSON file with shards map, jobs, presence, rate_limit, counter, ops_log
 restore <backup_path>            -> dir and file modes restore all files via atomic writes, must restore exactly, post-snapshot mutations gone, list-nodes no newnode, list-jobs no newjob, and next allocate still works
 ops-log                          -> prints ops.log as JSON array, skips invalid JSON lines with warning stderr "corrupt"/"skip"/"warning", preserves order, content checks op types order, large 100 ops
-optimize                         -> efficient defragmentation: tries to consolidate jobs onto fewer nodes using best-fit, prints JSON {"fragmentation_before":float,"fragmentation_after":float,"moves":int,"total_nodes":int,"used_nodes":int}, must not overcommit, must preserve all jobs, reduces fragmentation or keeps same, moves >=0
+optimize                         -> efficient defragmentation: tries to consolidate jobs onto fewer nodes using best-fit, prints JSON {"fragmentation_before":float,"fragmentation_after":float,"moves":int,"total_nodes":int,"used_nodes":int}, must not overcommit, must preserve all jobs, reduces fragmentation or keeps same, moves >=0. After optimize: fragmentation_after <= fragmentation_before OR used_nodes <= before, all jobs preserved, no node overcommitted (used <= total).
 ```
 
 Help must contain: `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-presence`, `get-node-health`, `list-healthy`, `list-online`, `snapshot`, `restore`, `ops-log`, `optimize`, plus `data`, `checksum`, `shard`, `weight`, `global`
@@ -116,11 +121,67 @@ Bare no args → help exit0.
 - Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
 - `global:` prefix → -1 broadcast, `get-shard-path` returns comma-separated sorted list of all shard paths
 
-### Pagination – Extra Hard
+### Failing Observations (current naive extension shows these bugs – you must fix)
 
-- `list-nodes <limit> <offset>`: limit0/all, offset0 default, `sorted[offset:offset+limit]` if limit>0 else `[offset:]`
-- Similarly `list-jobs`
-- Must handle 100, 500, 1000, 2000 quickly <2s
+The existing program at `/app/main.go` builds but has bugs. Correcting only the enumerated rules without fixing these observed failures still leaves tests failing.
+
+**1. Best-fit tie-breaking:**
+```
+./cluster-manager --config /app/config.json add-node nodeA 4 2048 0
+./cluster-manager --config /app/config.json add-node nodeB 4 1024 0
+./cluster-manager --config /app/config.json add-job job1 2 512 0
+./cluster-manager --config /app/config.json schedule job1
+# naive first-fit returns nodeA (lexicographically smallest). Correct best-fit:
+# free CPU equal (4-0=4), waste CPU equal 2, but mem waste: nodeA 1536 vs nodeB 512 → nodeB should win.
+# Expected: {"job_id":"job1","node_id":"nodeB","scheduled":true}
+```
+
+Second tie case – GPU then ID:
+```
+nodeX free (cpu2 mem512 gpu1), nodeY free (cpu2 mem512 gpu0), req (cpu1 mem256 gpu0)
+→ both cpu waste 1, mem waste 256 equal, gpu waste nodeX 1 vs nodeY 0 → nodeY wins
+If waste identical for cpu/mem/gpu, smaller ID wins: nodeA vs nodeB identical → nodeA
+```
+
+**2. Token bucket refill cycles:**
+```
+config rate_limit 1/sec burst 2
+alloc job0→node1 ok tokens 1 left
+alloc job1→node1 ok tokens 0 left
+alloc job2→node1 FAIL exit1 "rate limit", tokens stays 0, no ops-log entry, no allocation
+sleep 1.6s → refill 1.6 tokens → now 1.6
+alloc job2→node1 ok tokens 0.6 left
+alloc job3→node1 FAIL rate limit
+sleep 1.2s → refill → 1.8 tokens → alloc ok, etc.
+Per-node independent: nodeA limited, nodeB with separate bucket still succeeds.
+Insufficient resource must NOT consume token:
+  add-node small 1 256 0, add-job big 10 10000 0, allocate big→small fails exit2 "insufficient"
+  Next allocate small→small must still succeed (token not consumed).
+Corruption: echo "invalid" > rate_limit.json, next allocate must succeed (reset bucket).
+```
+
+**3. Optimize fragmentation invariant:**
+```
+3 nodes 4CPU each, 3 jobs 1CPU placed fragmented one per node: used_nodes=3
+./cluster-manager --config /app/config.json optimize
+→ must consolidate to 1 node if possible, reporting:
+  fragmentation_before >0, fragmentation_after <= fragmentation_before
+  used_nodes after <= before, moves >=0, total_nodes unchanged,
+  all jobs preserved, no node used>total
+```
+
+**4. Presence TTL expiry:**
+```
+heartbeat nodeA, get-node-health → online true
+sleep 3s with TTL=2 → online false, list-healthy [] (not containing nodeA)
+heartbeat nodeB → list-healthy [nodeB] only
+Unknown node: get-presence never-seen → {"node_id":"x","online":false,"last_seen":0,"last_seen_seconds_ago":0}
+Corrupt presence.json → treated as empty, online false
+```
+
+Fix the program at `/app` to pass these cases and in general.
+
+Build: `cd /app && go build -o /app/cluster-manager .`
 
 ### Snapshot/Restore – Extra Hard
 
@@ -128,7 +189,7 @@ Bare no args → help exit0.
 - `restore <backup_path>`: dir mode copy files back overwrite, file mode reads combined JSON and restores each component via atomic writes; after restore jobs, nodes, presence, rate_limit, counter must be exactly as snapshot time (tested via that post-snapshot mutated data gone, list-nodes no newnode, and jobs preserved)
 - Exit0, must handle global lock
 
-### Integrity & Concurrency – Extra Hard (62 tests)
+### Integrity & Concurrency – Extra Hard
 
 - Persistence files must use wrapper `{"data":..., "checksum":...}` checksum MD5 canonical `json.dumps(data, sort_keys=True, separators=(',',':'))` `SetEscapeHTML(false)`, atomic via CreateTemp+Rename, tests verify checksum for all sharded files strict
 - Corruption handling for all files: invalid JSON → backup `<path>.corrupt.<nanosec>` integer, stderr warning "corrupt" or "checksum", recreate empty valid file. Tests for shard files, jobs.json, presence.json, rate_limit.json, etc.
@@ -136,7 +197,7 @@ Bare no args → help exit0.
 - Atomic behavior extra hard:
   - Same node: 20 concurrent allocate, file must remain valid JSON, no overcommit, preserve **all 20 jobs** (extra hard), global.lock cleaned
   - Different nodes: 20 concurrent allocate to 20 different nodes must preserve **all 20** with correct used counts (multi-shard atomic via global lock)
-- Stdlib-only imports, advisory CreateTemp+Rename
+- Stdlib-only imports, advisory CreateTemp/Rename
 - Ops-log invalid line skipping with warning, order preserved, content order and large 100 ops, must use bufio.Scanner with big buffer 10*1024*1024 to handle 100KB+ lines
 - Config validation and unknown-field tolerance: malformed configs exit2 no stdout, unknown fields ignored, defaults for missing optional, shard_count mismatch lenient not crash
 - Weighted distribution 20 exact, 50 tolerance, 100 tolerance (40% weight)
@@ -147,10 +208,10 @@ Bare no args → help exit0.
 ### Efficiency Requirements
 
 - Scheduling must be best-fit now (more efficient than Turn1 first-fit) to reduce fragmentation
-- Best-fit must pick minimal waste, verified by tests
+- Best-fit must pick minimal waste, verified by tests including tie-break cascade cpu→mem→gpu→id
 - Pagination must be O(n) slicing not O(n²), large history tests 1000 bulk500 and 2000 bulk1000 <2s
 - Concurrent allocations 20 must preserve all and be atomic via global lock
-- Optimize command must not overcommit and should improve or keep fragmentation
+- Optimize command must not overcommit and should improve or keep fragmentation: fragmentation_after <= fragmentation_before OR used_nodes_after <= used_nodes_before, preserve all jobs, total_nodes unchanged.
 
 ### Exit Codes
 0 success, 1 I/O or rate-limited or no fit (rate limit → exit1 stderr "rate limit", no fit → exit1 stderr "no fit"), 2 invalid input (bad config, node/job not exist, empty IDs, invalid limit, missing args, unknown command). Remove non-exist exit0 prints false.
