@@ -943,6 +943,7 @@ def test_zones_default_file(binary):
 
 def test_geofence_check_basic(binary):
     tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
     zones_path = os.path.join(tmp, "zones.json")
     zones = [
         {
@@ -958,7 +959,7 @@ def test_geofence_check_basic(binary):
     with open(zones_path, "w") as f:
         json.dump(zones, f)
     p = run_cli(
-        binary, None, ["geofence-check", "5", "5", "--zones", zones_path], expect_code=0
+        binary, db, ["geofence-check", "5", "5", "--zones", zones_path], expect_code=0
     )
     data = json.loads(p.stdout.strip())
     assert data["inside"] is True
@@ -966,6 +967,7 @@ def test_geofence_check_basic(binary):
 
 def test_geofence_check_holes(binary):
     tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
     zones_path = os.path.join(tmp, "zones.json")
     zones = [
         {
@@ -989,31 +991,32 @@ def test_geofence_check_holes(binary):
     with open(zones_path, "w") as f:
         json.dump(zones, f)
     p = run_cli(
-        binary, None, ["geofence-check", "1", "1", "--zones", zones_path], expect_code=0
+        binary, db, ["geofence-check", "1", "1", "--zones", zones_path], expect_code=0
     )
     assert json.loads(p.stdout.strip())["inside"] is True
     p2 = run_cli(
-        binary, None, ["geofence-check", "5", "5", "--zones", zones_path], expect_code=0
+        binary, db, ["geofence-check", "5", "5", "--zones", zones_path], expect_code=0
     )
     assert json.loads(p2.stdout.strip())["inside"] is False
 
 
 def test_geofence_check_circle(binary):
     tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
     zones_path = os.path.join(tmp, "zones.json")
     zones = [{"id": "circle", "center": {"lat": 0, "lng": 0}, "radius_m": 100000}]
     with open(zones_path, "w") as f:
         json.dump(zones, f)
     p = run_cli(
         binary,
-        None,
+        db,
         ["geofence-check", "0.5", "0.5", "--zones", zones_path],
         expect_code=0,
     )
     assert json.loads(p.stdout.strip())["inside"] is True
     p2 = run_cli(
         binary,
-        None,
+        db,
         ["geofence-check", "10", "10", "--zones", zones_path],
         expect_code=0,
     )
@@ -1022,6 +1025,7 @@ def test_geofence_check_circle(binary):
 
 def test_geofence_check_time_based(binary):
     tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
     zones_path = os.path.join(tmp, "zones.json")
     zones = [
         {
@@ -1040,14 +1044,14 @@ def test_geofence_check_time_based(binary):
         json.dump(zones, f)
     p = run_cli(
         binary,
-        None,
+        db,
         ["geofence-check", "5", "5", "--zones", zones_path, "--now", "1500"],
         expect_code=0,
     )
     assert json.loads(p.stdout.strip())["inside"] is True
     p2 = run_cli(
         binary,
-        None,
+        db,
         ["geofence-check", "5", "5", "--zones", zones_path, "--now", "500"],
         expect_code=0,
     )
@@ -1056,6 +1060,7 @@ def test_geofence_check_time_based(binary):
 
 def test_geofence_check_antimeridian(binary):
     tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
     zones_path = os.path.join(tmp, "zones.json")
     zones = [
         {
@@ -1072,13 +1077,13 @@ def test_geofence_check_antimeridian(binary):
         json.dump(zones, f)
     p = run_cli(
         binary,
-        None,
+        db,
         ["geofence-check", "0", "180", "--zones", zones_path],
         expect_code=0,
     )
     assert json.loads(p.stdout.strip())["inside"] is True
     p2 = run_cli(
-        binary, None, ["geofence-check", "0", "0", "--zones", zones_path], expect_code=0
+        binary, db, ["geofence-check", "0", "0", "--zones", zones_path], expect_code=0
     )
     assert json.loads(p2.stdout.strip())["inside"] is False
 
