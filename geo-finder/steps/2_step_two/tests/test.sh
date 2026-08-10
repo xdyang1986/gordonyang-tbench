@@ -1,38 +1,21 @@
 #!/bin/bash
-set -e
+# Fail-closed: reward 0 unless pytest exits 0 and ctrf.json exists.
+set +e
 mkdir -p /logs/verifier
+echo 0 > /logs/verifier/reward.txt
+rm -f /logs/verifier/ctrf.json
 
-if [ -f /etc/fwdproxy.env ]; then
-  set -a; . /etc/fwdproxy.env; set +a
-fi
+# Python toolchain installed at build time, no network needed in test.sh
+pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+EXIT=$?
 
-pip3 install -q pytest==8.4.1 requests==2.32.3 2>&1 | tail -20 || true
-
-if command -v pytest >/dev/null 2>&1; then
-  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v || {
-    echo 0 > /logs/verifier/reward.txt
-    exit 0
-  }
-elif python3 -m pytest --version >/dev/null 2>&1; then
-  python3 -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v || {
-    echo 0 > /logs/verifier/reward.txt
-    exit 0
-  }
-elif command -v uvx >/dev/null 2>&1; then
-  uvx \
-    --with pytest==8.4.1 \
-    --with pytest-json-ctrf==0.3.5 \
-    --with requests==2.32.3 \
-    pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v || {
-    echo 0 > /logs/verifier/reward.txt
-    exit 0
-  }
-else
-  python -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v || true
-fi
-
-if [ $? -eq 0 ]; then
+if [ $EXIT -eq 0 ] && [ -f /logs/verifier/ctrf.json ]; then
   echo 1 > /logs/verifier/reward.txt
 else
   echo 0 > /logs/verifier/reward.txt
+  if [ ! -f /logs/verifier/ctrf.json ]; then
+    echo "ctrf.json missing after pytest exit $EXIT – keeping reward 0" >&2
+  fi
 fi
+
+exit 0
