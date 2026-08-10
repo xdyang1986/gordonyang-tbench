@@ -6,6 +6,11 @@ echo 0 > /logs/verifier/reward.txt
 rm -f /logs/verifier/ctrf.json
 
 # Python toolchain installed at build time, no network needed in test.sh
+# Also bypass fwdproxy (infra moves 8080->51484); localhost must not go via proxy.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1"
+export no_proxy="localhost,127.0.0.1,0.0.0.0,::1"
+
 pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
 EXIT=$?
 

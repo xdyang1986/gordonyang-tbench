@@ -15,6 +15,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pytest
 import requests
 
+# Bypass fwdproxy for localhost requests (eval infra moves 8080->51484 and sets http_proxy).
+# Without this, requests to localhost go via proxy and timeout with "serving on :port".
+os.environ["NO_PROXY"] = (
+    os.environ.get("NO_PROXY", "") + ",localhost,127.0.0.1,0.0.0.0,::1"
+)
+os.environ["no_proxy"] = (
+    os.environ.get("no_proxy", "") + ",localhost,127.0.0.1,0.0.0.0,::1"
+)
+for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+    os.environ.pop(_k, None)
+
+# Force requests to ignore env proxies (requests respects proxies kwarg; setting to None bypasses)
+_orig_get = requests.get
+_orig_post = requests.post
+_orig_delete = requests.delete
+
+
+def _wrap_req(orig):
+    def _inner(*args, **kwargs):
+        kwargs.setdefault("proxies", {"http": None, "https": None})
+        return orig(*args, **kwargs)
+
+    return _inner
+
+
+requests.get = _wrap_req(requests.get)
+requests.post = _wrap_req(requests.post)
+requests.delete = _wrap_req(requests.delete)
+
 APP = "/app/src"
 BIN = "/tmp/geofencectl_step2"
 
