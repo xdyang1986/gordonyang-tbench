@@ -1,8 +1,8 @@
 """
-Step2 verifier — Redesigned for novelty with prior-violating semantics
-- RatioSampler uses last-8-hex + error/critical override (OTel uses first-16 ignoring status)
-- ParentAware requires parent AND root both Keep (OTel keeps if parent alone)
-- Batch evicts oldest on full (OTel drops newest) + ForceFlush block-and-drain
+Step2 verifier — RatioSampler last-8-hex + error override, ParentAware AND, Batch evict-oldest + block-and-drain
+- RatioSampler uses last-8-hex + error/critical override
+- ParentAware requires parent AND root both Keep
+- Batch evicts oldest on full + ForceFlush block-and-drain
 - Propagation single-header x-ride-trace
 """
 
@@ -256,8 +256,8 @@ def test_sampler_invalid_traceid():
 
 
 def test_sampler_ratio_last8hex_vs_first16():
-    # This is the key prior-violating test: OTel uses first 16 hex as uint64, we use last 8 hex as uint32.
-    # TraceID where first 16 is tiny (would Keep under OTel 0.5) but last 8 is max (should Drop under our spec)
+    # Determinism and algorithm test: uses last 8 hex as uint32
+    # TraceID where last 8 is max (should Drop for 0.5)
     code = textwrap.dedent("""
     package main
     import (
@@ -266,7 +266,7 @@ def test_sampler_ratio_last8hex_vs_first16():
     )
     func main(){
         sampler := observability.NewRatioSampler(0.5)
-        // TraceID: first 16 chars "0000000000000001" = 1 (tiny, OTel would Keep for 0.5)
+        // TraceID: first 16 chars 0000000000000001 tiny, last 8 ffffffff max
         // last 8 chars "ffffffff" = 4294967295 (max, ratio ~0.999, our spec should Drop for 0.5)
         tid := "0000000000000001ffffffffffffffff"
         // full length 32, last 8 = ffffffff
@@ -275,16 +275,16 @@ def test_sampler_ratio_last8hex_vs_first16():
         fmt.Printf("TraceID %s decision %d\\n", tid, d)
         // Our spec: last 8 hex ffffffff => 4294967295 / 2^32 ~0.999 >0.5 => Drop
         if d != observability.DecisionDrop {
-            panic(fmt.Sprintf("Expected Drop for tid %s with last8 ffffffff at 0.5 (OTel recall would incorrectly Keep), got %d", tid, d))
+            panic(fmt.Sprintf("Expected Drop for tid %s with last8 ffffffff at 0.5, got %d", tid, d))
         }
-        // opposite: first 16 huge, last 8 tiny => OTel Drop, we Keep
+        // opposite: last 8 tiny => Keep for 0.5
         tid2 := "ffffffffffffffff0000000000000000"
         p2 := observability.SamplingRequest{TraceID:tid2, SpanName:"test"}
         d2 := sampler.ShouldSample(p2)
         fmt.Printf("TraceID %s decision %d\\n", tid2, d2)
         // last 8 = 00000000 => 0/2^32 =0 <0.5 => Keep
         if d2 != observability.DecisionKeep {
-            panic(fmt.Sprintf("Expected Keep for tid %s with last8 00000000 at 0.5 (OTel would Drop), got %d", tid2, d2))
+            panic(fmt.Sprintf("Expected Keep for tid %s with last8 00000000 at 0.5, got %d", tid2, d2))
         }
         fmt.Println("OK")
     }
@@ -304,11 +304,11 @@ def test_sampler_ratio_error_override():
     )
     func main(){
         sampler := observability.NewRatioSampler(0.0) // 0.0 would normally Drop all
-        // But error status must Keep per new spec (OTel would Drop)
+        // Error status must override ratio 0.0 to Keep
         pErr := observability.SamplingRequest{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanName:"test", Status:observability.StatusError}
         d := sampler.ShouldSample(pErr)
         if d != observability.DecisionKeep {
-            panic(fmt.Sprintf("Error status should override ratio 0.0 to Keep (domain-specific), got %d", d))
+            panic(fmt.Sprintf("Error status should override ratio 0.0 to Keep, got %d", d))
         }
         pCrit := observability.SamplingRequest{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanName:"test", Priority:"critical"}
         d2 := sampler.ShouldSample(pCrit)
@@ -353,12 +353,12 @@ def test_sampler_parent_aware_and_logic():
         pNotSampled := observability.SamplingRequest{TraceID:parentNotSampled.TraceID, HasParent:true, Parent:parentNotSampled}
         if paAlways.ShouldSample(pNotSampled)!=observability.DecisionDrop { panic("not sampled parent should drop even if root Always") }
 
-        // Parent sampled true BUT root Never => should Drop per new AND logic (OTel would Keep)
+        // Parent sampled true + root Never => should Drop per AND logic
         parentSampled := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
         pSampledParentNeverRoot := observability.SamplingRequest{TraceID:parentSampled.TraceID, HasParent:true, Parent:parentSampled}
         // rootNever is 0.0 always drop
         if paNever.ShouldSample(pSampledParentNeverRoot)!=observability.DecisionDrop {
-            panic("parent sampled true + root Never should Drop per new AND logic (OTel recall would incorrectly Keep)")
+            panic("parent sampled true + root Never should Drop per AND logic")
         }
 
         // Parent sampled true + root Always => Keep
@@ -656,7 +656,7 @@ def test_batch_evict_oldest():
         spans := exp.GetSpans()
         fmt.Printf("exported %d spans\\n", len(spans))
         if len(spans)!=2 {
-            panic(fmt.Sprintf("evict-oldest: expected 2 exported (queue size 2 keeps newest 2), got %d. OTel drop-newest would give first 2.", len(spans)))
+            panic(fmt.Sprintf("evict-oldest: expected 2 exported (queue size 2 keeps newest 2), got %d.", len(spans)))
         }
         // check that exported are span-3 and span-4 (newest)
         has3, has4 := false, false
@@ -667,7 +667,7 @@ def test_batch_evict_oldest():
             if s.Name=="span-0" { has0=true }
         }
         if has0 {
-            panic("evict-oldest: should have evicted span-0, but found it (OTel drop-newest behavior)")
+            panic("evict-oldest: should have evicted span-0, but found it")
         }
         if !has3 || !has4 {
             panic(fmt.Sprintf("evict-oldest: expected span-3 and span-4 (newest), got has3=%v has4=%v", has3, has4))
@@ -926,7 +926,7 @@ def test_batch_forceflush_block_and_drain():
             dc := bc.DroppedCount()
             fmt.Printf("DroppedCount after block-and-drain %d\\n", dc)
             if dc != 0 {
-                panic(fmt.Sprintf("ForceFlush block-and-drain: DroppedCount should be 0 during flush, got %d (OTel non-blocking drop would increment)", dc))
+                panic(fmt.Sprintf("ForceFlush block-and-drain: DroppedCount should be 0 during flush, got %d", dc))
             }
         }
         proc.Shutdown(context.Background())

@@ -1,5 +1,5 @@
 """
-Step1 verifier — Redesigned for novelty: single-header x-ride-trace, domain names, but same concurrency & copy discriminators
+Step1 verifier — single-header x-ride-trace, concurrency, Collect deep copys
 """
 
 import os, subprocess, tempfile, re, textwrap, shutil
@@ -409,9 +409,9 @@ def test_tracing_marshal_unmarshal_single_header():
         observability.MarshalTrace(ctx, carrier)
         v, ok := carrier["x-ride-trace"]
         if !ok || v=="" { panic("x-ride-trace missing, MarshalTrace must write single header") }
-        // ensure OTel 4-key not used
+        // ensure single-header only
         if _, has := carrier["trace-id"]; has {
-            panic("MarshalTrace should NOT write OTel key trace-id, must use single x-ride-trace")
+            panic("MarshalTrace must write only x-ride-trace, not trace-id")
         }
         if _, has := carrier["span-id"]; has {
             panic("MarshalTrace should NOT write span-id, use x-ride-trace")
@@ -457,7 +457,7 @@ def test_tracing_inject_extract_alias_single_header():
             panic("Inject alias must write x-ride-trace")
         }
         if _, has := carrier["trace-id"]; has {
-            panic("Inject should NOT write trace-id legacy, must be single header")
+            panic("Inject must write only x-ride-trace")
         }
         ctx2 := observability.Extract(carrier)
         sc, ok := observability.SpanContextFromContext(ctx2)
