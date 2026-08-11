@@ -2,73 +2,89 @@
 
 ## Latest online validation status
 
-**Commit `2244c7af` · run 2026-08-07 14:35–16:12 UTC · jobs 4327628 / 4327629 / 4327630 / 4327631**
+**Commit `2898b43b` (v1.13) · run 2026-08-11 · jobs 4525004 / 4525005 / 4525006 / 4525007**
 
-Platform verdict: **`validation = passing`** (status `needs_reviewers_assigned`, review `Draft`).
+Platform verdict: `validation = passing`, `tbdReviewStatus = pass`, status `draft`.
+Contamination LOW · novelty risk MEDIUM · embedding dedup 0.5235 · quality dimensions
+depth 3 / realism 3 / originality 2.
 
-| Gate | Result |
-| --- | --- |
-| Structural checks | passed — 10/10 |
-| Oracle validation | passed — 3/3 @ reward 1.00 |
-| Metacode/Opus pass-fail balance | passed — avocado not trivial and ≥1 agent solved |
-| Agentic trial-output review | passed — not applicable |
-| Contamination check | passed — risk MEDIUM |
-| Provenance check | passed — no third-party authorship detected |
+All four jobs complete. The "Metacode or Opus pass/fail balance" row has still not
+appeared in `validationDetails` — aggregation lag, not a failure.
 
-### Per-model results (full-task pass = both steps at reward 1.0)
+| Stage | Job | Result | Reward split |
+| --- | --- | --- | --- |
+| oracle | 4525005 | **3/3** | 3 × 1.00 |
+| codex (`gpt-5.5`) | 4525006 | **8/10** | 8 × 1.00, 2 × 0.00 |
+| metacode (avocado) | 4525004 | **1/10** | 1 × 1.00, 3 × 0.50, 6 × 0.00 |
+| agent (`claude-opus-4-8`) | 4525007 | **1/10** | 1 × 1.00, 9 × 0.00 |
 
-| Model | Job | Full pass | Mean reward | Notes |
-| --- | --- | --- | --- | --- |
-| oracle | 4327630 | 3/3 | 1.00 | no flake |
-| avocado (`meta/avocado-5.14-code`) | 4327629 | 1/10 | 0.50 | 8 × step-2 fail, 1 × 0.00 (step-1 `go build` failure at 160 s) |
-| opus (`claude-opus-4-8`) | 4327631 | 0/10 | 0.50 | all 10 reach step 2 and fail there |
-| gpt (`gpt-5.5`, codex) | 4327628 | 0/10 | 0.50 | all 10 reach step 2 and fail there |
+### The task has swung to too-hard, and step 1 is what kills trials
 
-Step 1 passes in 29/30 agent trials; **every** non-oracle failure is in step 2, so the
-DQE cascade split is working as intended.
+A reward of `0.00` means step 1 failed, so step 2 never runs (`min_reward = 1`).
+Opus scored 0.00 on 9 of 10 trials; avocado on 6 of 10.
 
-### Failing tests in the latest run (30 agent trials)
+All 20 failing trials were analysed. **Every one is a single-test miss** — 29/30 on step 1
+or 37/38 on step 2 — and 17 of the 20 die in step 1:
 
-| Test | Trials failing | opus | gpt | avocado |
-| --- | --- | --- | --- | --- |
-| `test_index_large_polygon` | 19 | 4 | 9 | 6 |
-| `test_antimeridian_crossing` | 12 | 10 | 0 | 2 |
-| `test_cache_rounding` | 10 | 1 | 9 | 0 |
-| `test_concurrency_correctness` | 3 | 0 | 3 | 0 |
-| `test_no_null_slices_broad` | 3 | 0 | 3 | 0 |
-| `test_concurrency_with_crud` | 1 | 0 | 0 | 1 |
+| Test | Step | Trials failing | opus | avocado | codex |
+| --- | --- | --- | --- | --- | --- |
+| `test_world_bounds` | 1 | **11** | 4 | 6 | 1 |
+| `test_lookup_antimeridian_cli` | 1 | **6** | 5 | 0 | 1 |
+| `test_concurrent_post_stress` | 2 | 3 | 0 | 3 | 0 |
 
-### Reading of the result
+Both step-1 discriminators are the same thing: **world-spanning vs antimeridian
+classification**. `test_concurrent_post_stress` is the only step-2 test that ever fires,
+and only for avocado.
 
-The gate passes, but the pass profile is inverted and driven by three tests, two of
-which are not fairly derivable from `instruction.md`:
+### Reading of the result — the difficulty is an unstated rule, not reasoning depth
 
-1. **`test_index_large_polygon` (19/30, all three models) — spec⇄test contradiction.**
-   The test asserts `stats["index_cells"] > 100` for the world polygon
-   `-90,-180;-90,180;90,180;90,-180` plus 100 small zones; every failure reports exactly
-   `assert 100 > 100`, i.e. the world polygon contributed zero cells. That is the direct
-   consequence of following the instruction's own rule ("when `maxLng-minLng > 180`, the
-   polygon crosses the antimeridian … add to cells on both sides of ±180, not the huge
-   interior gap") — the world polygon has span 360, so a literal reading classifies it as
-   antimeridian-crossing and indexes it into ~0 cells. The reference solution carves out
-   `span >= 360` as "covers all longitudes", but that carve-out is oracle-only knowledge.
-   `test_antimeridian_crossing` additionally asserts `index_cells < 100` for a tiny
-   crossing rect, so the two tests pull in opposite directions.
+`test_world_bounds` fails at *add* time, before any lookup:
 
-2. **`test_antimeridian_crossing` (10/10 for opus, 0/10 for gpt) — model-specific split.**
-   Failures are on the CLI path (`point 0.5,179.5 should be inside crossing rect`,
-   returns `[]`): the polygon-crossing rule must also change point-in-polygon, not just
-   the bbox/grid, and the instruction states it only under the bbox and index headings.
+```
+add world --polygon "-90,-180;-90,180;90,180;90,-180"
+→ exit 2  "error: polygon has zero area (degenerate or colinear)"
+```
 
-3. **`test_cache_rounding` (9/10 for gpt) — under-specified to the point of unfair.**
-   The test requires cache keys rounded to exactly 6 decimals (`0.5000001` and
-   `0.5000002` must share an entry, `cache_size == 1`), but the instruction only says
-   nearby points "should **ideally** share cache entries" — no rounding precision is given.
+Two separately-required rules collide. Longitude wrapping normalises `-180 ≡ 180`, which
+collapses the world rectangle to a degenerate shape; the also-required "non-zero area"
+validation then rejects it. The instruction never says which rule wins, nor that the world
+rectangle must be accepted as a valid polygon.
 
-Net: difficulty here comes largely from unstated requirements rather than from reasoning
-depth. Before landing, either state the `span >= 360` world-polygon rule and the 6-decimal
-cache key in `instruction.md`, or drop those two assertions and keep the antimeridian
-semantics (spelled out for the lookup path, not only the index) as the discriminator.
+`test_lookup_antimeridian_cli` is the `>180` vs `≥360` misclassification on the lookup
+path — a point that should be inside the crossing rectangle comes back `[]`.
+
+The step-1 instruction states only (L74):
+
+> "Must also handle polygons that cross the antimeridian and world-spanning polygons
+> correctly, with same answers as HTTP service will require in step 2."
+
+No threshold, no classification order, no statement that the world rectangle is
+non-degenerate. The disambiguation that used to live in the step-2 spec was removed by
+`0619c25` (de-over-specification) and was never present in step 1. `f57dd07` then added
+these two tests to step 1, where a failure is fatal to the whole trial.
+
+The model ordering is inverted as a result — **codex 8/10 while opus and avocado are both
+1/10**. That is a coin flip on an unstated rule, not a capability difference: codex happens
+to pick the intended reading, the other two do not, and the split is near-total in each
+direction.
+
+### Action before landing
+
+State explicitly, in both steps' `instruction.md`:
+
+1. A polygon whose longitude span is ≥ 360 covers every longitude and is **not**
+   antimeridian-crossing; classify world-spanning *before* applying the crossing rule.
+2. The world rectangle is a valid, non-degenerate polygon — the zero-area/colinearity
+   check must run on unwrapped coordinates, before any longitude normalisation.
+
+Without (2), `test_world_bounds` is unwinnable for any implementation that follows the
+wrapping rule — it accounts for 11 of the 20 failures on its own.
+
+Expect pass rates to rise sharply once both are stated: removing the two step-1 tests from
+the tally would put opus at 10/10, avocado at 4/10 and codex at 10/10. The only fair
+discriminator still firing is `test_concurrent_post_stress` (3 × avocado), so the task will
+need real difficulty rebuilt on top of the selective-invalidation / concurrency family
+rather than on classification ambiguity.
 
 ## Authoring policy
 
