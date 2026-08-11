@@ -1,15 +1,6 @@
-# Large-Scale Observability for Ride-Hailing — Multi-Turn Task (Redesigned for Novelty)
+# Large-Scale Observability for Ride-Hailing — Multi-Turn Task
 
-This is a multi-turn terminal-bench task with 2 steps. You are building a ride-hailing observability library in Go (ride-observability) that handles 10k+ req/sec. Domain-specific design breaks generic OTel SDK recall.
-
-> **Not an OTel clone**: Although tracing/batch/sampling are inspired by observability, this task defines its own contract that *punishes* verbatim OTel recall:
-> - Propagation uses single header `x-ride-trace` (`{traceID}:{spanID}:{parentID}:{1/0}`), not four `trace-id`/`span-id`/`parent-id`/`sampled` keys.
-> - Ratio sampler uses **last 8 hex chars** as uint32 / 2^32, not first 16 hex as uint64 / 2^64. Fixed TraceIDs are tested where the two methods disagree.
-> - Ratio sampler always samples if `Status == StatusError` or `Priority == "critical"` regardless of fraction — OTel ratio ignores status/priority and would drop.
-> - Parent-aware sampler requires **both parent sampled AND root sampled** to keep. OTel ParentBased samples whenever parent sampled, ignoring root. Tests include `root=0.0 + parent sampled=true => Drop` which OTel recall gets wrong.
-> - Batch processor evicts **oldest** on full queue (keep newest ride), not newest. OTel drops newest. A queue-size-2 + 5-enqueue test checks exported set is last 2, not first 2.
-> - ForceFlush is **block-and-drain**: during ForceFlush, OnEnd must block, not drop. OTel non-blocking drop would increment DroppedCount during flush.
-> These differences are intentional; copying OTel verbatim fails.
+This is a multi-turn terminal-bench task with 2 steps. You are building an observability library in Go for a ride-hailing platform.
 
 ## Overall Goal
 Implement package `observability` in module `ride-observability` that provides:
@@ -17,31 +8,17 @@ Implement package `observability` in module `ride-observability` that provides:
 - Metrics (Counter, Gauge, Histogram) with thread-safety and cardinality limiting
 - Structured JSON logging correlated with tracing
 
-## API Summary (New naming — breaks OTel exact identifiers)
-
-### Core tracing (Step1) — see steps/1_step_one/instruction.md
-- Types: `TraceContext` (was SpanContext), `FinishedSpan` (was ReadableSpan), `Span`, `Exporter`, `Processor`, `Tracer`, `MemoryExporter` (was InMemoryExporter), `SimpleProcessor` (was SimpleSpanProcessor)
-- Aliases: `NewInMemoryExporter` -> `NewMemoryExporter`, `SpanContext` alias, `ReadableSpan` alias kept for compatibility but tests use new names
-- Context: `ContextWithTrace`, `TraceFromContext`, `MarshalTrace`, `UnmarshalTrace` — single header `x-ride-trace` format `traceID:spanID:parentID:1`  (parentID may be empty). Old names `ContextWithSpanContext`, `SpanContextFromContext`, `Inject`, `Extract` are aliases wrapping new logic (single header).
-- Status: `StatusUnset`, `StatusOK`, `StatusError` ; Kind: `KindInternal`, `KindServer`, `KindClient`
-- Tracing: `NewTracer(serviceName, opts...)`, `NewMemoryExporter()`, `NewSimpleProcessor()`
-- Metrics: `NewMetricsProvider()`, `Counter`, `Gauge`, `Histogram`, `Collect()` deep copy non-nil Labels, label value truncate 256
-- Logger: JSON, `trace_id`/`span_id`, `With` immutable, level filter
-
-### Scale hardening (Step2) — see steps/2_step_two/instruction.md
-- Sampling: `SamplingDecision` (`DecisionDrop`, `DecisionKeep`, `DecisionRecordOnly`), `SamplingRequest` (includes `StatusCode`, `Priority`), `Sampler` interface
-- Samplers: `NewAlwaysSampler` (alias `NewAlwaysOnSampler`), `NewNeverSampler` (alias `NewAlwaysOffSampler`), `NewRatioSampler` (alias `NewTraceIDRatioSampler`) with **last-8-hex** + error/critical override, `NewParentAwareSampler` (alias `NewParentBasedSampler`) with **parent AND root must both keep**
-- Batch: `NewBatchProcessor` (alias `NewBatchSpanProcessor`) with `WithBatchSize`, `WithQueueSize`, `WithBatchTimeout`, `WithExportTimeout`, `WithMaxBatchSize` alias, **evict-oldest on full**, **ForceFlush block-and-drain**, DroppedCount/QueueLen required, QueueLen excludes in-progress batch, never exceeds QueueSize, non-positive options fallback defaults, BatchSize hard cap per export
-- Metrics cardinality: per-name limiting with drop/aggregate overflow `__overflow__`, `DroppedSeriesCount`
-- Resource limits: 128 attrs/events, attribute value truncate exactly 1024, label value truncate 256
+## Steps
+- **Step 1 (1_step_one)**: Core observability — see `steps/1_step_one/instruction.md` for exact API. Must implement tracing (Tracer, Span, MemoryExporter, SimpleProcessor, Marshal/UnmarshalTrace single header), metrics (Counter reuse, distinct labels, concurrency, Collect deep copy with non-nil Labels, label truncation 256), logger (JSON, trace_id/span_id, With immutable, level filter). No external deps, thread-safe, go vet clean.
+- **Step 2 (2_step_two)**: Large-scale hardening — see `steps/2_step_two/instruction.md`. Adds sampling (Always, Never, Ratio with last-8-hex deterministic and error/critical override, invalid TraceID => Drop no panic, ParentAware requiring parent sampled AND root sampled, Description containing root), BatchProcessor (async queue, evict-oldest on full, BatchSize hard cap max per export, QueueSize, BatchTimeout triggers export without ForceFlush, ExportTimeout via goroutine select, ForceFlush drains queue and blocks new spans during flush, Shutdown flushes respecting BatchSize and drops new spans, required DroppedCount/QueueLen where QueueLen counts waiting in queue excluding in-progress batch and never exceeds QueueSize, non-positive option values fall back to defaults), metrics cardinality limiting per-name with drop/aggregate overflow (__overflow__ label) and DroppedSeriesCount, resource limits (128 attrs/events, attribute value truncate exactly 1024, label value truncate 256).
 
 ## Execution
-Code lives in `/app` (module `ride-observability`). Implement in `/app/observability/`. Tests are black-box Go harnesses importing your package at `/tests/`.
+Your code lives in `/app` (module `ride-observability`). Implement in `/app/observability/`. Tests are black-box Go harnesses importing your package and are injected at `/tests/` at verification time.
 
 ## Constraints
 - Go 1.22, stdlib only
 - Files must exist: `/app/observability/tracing.go`, `metrics.go`, `logger.go`
-- Thread safety mandatory, no races
+- Thread safety mandatory, no races (`go run -race`)
 - `go vet ./...` and `go build ./...` must pass
 
-Proceed Step1 then Step2 inherits.
+Proceed to Step 1 — follow `steps/1_step_one/instruction.md` first, then Step 2 inherits your Step1 files.

@@ -1,6 +1,6 @@
-# Large-Scale Observability for Ride-Hailing — Step 1: Core Observability & Design Quality (Redesigned)
+# Large-Scale Observability for Ride-Hailing — Step 1: Core Observability & Design Quality
 
-You are building an observability library for a ride-hailing system (rider, driver, matching, trip, payment). This version intentionally **breaks verbatim OTel Go SDK cloning** — memorized OTel symbols and propagation format will fail.
+You are building an observability library for a ride-hailing system (rider, driver, matching, trip, payment).
 
 ## Package layout expected
 
@@ -15,9 +15,9 @@ You are building an observability library for a ride-hailing system (rider, driv
 
 Public API must match below. Tests import `ride-observability/observability`.
 
-## 1. Tracing — domain-specific naming
+## 1. Tracing
 
-### Types (new names)
+### Types
 
 ```go
 type TraceContext struct {
@@ -40,7 +40,6 @@ const (
     KindInternal SpanKind = 0
     KindServer   SpanKind = 1
     KindClient   SpanKind = 2
-    // aliases for compat
     SpanKindInternal = KindInternal
     SpanKindServer   = KindServer
     SpanKindClient   = KindClient
@@ -70,12 +69,11 @@ type FinishedSpan struct {
     StatusMessage string
     ServiceName   string
 }
-// aliases
 type ReadableSpan = FinishedSpan
 type SpanContext = TraceContext
 ```
 
-### Interfaces (new names but OTel aliases kept for build)
+### Interfaces
 
 ```go
 type Span interface {
@@ -84,7 +82,7 @@ type Span interface {
     AddEvent(name string, attrs ...Attribute)
     SetStatus(code SpanStatus, message string)
     Context() TraceContext
-    SpanContext() TraceContext // alias
+    SpanContext() TraceContext
     IsRecording() bool
 }
 
@@ -114,7 +112,7 @@ type SpanStartOption func(*spanStartConfig)
 
 func WithServiceName(name string) TracerOption
 func WithProcessor(p Processor) TracerOption
-func WithSpanProcessor(p Processor) TracerOption // alias
+func WithSpanProcessor(p Processor) TracerOption
 func WithIDGenerator(gen IDGenerator) TracerOption
 
 func WithAttributes(attrs ...Attribute) SpanStartOption
@@ -134,9 +132,9 @@ Provide default IDGenerator producing 32 hex and 16 hex random IDs via crypto/ra
 ```go
 func NewTracer(serviceName string, opts ...TracerOption) Tracer
 func NewMemoryExporter() *MemoryExporter
-func NewInMemoryExporter() *MemoryExporter // alias
+func NewInMemoryExporter() *MemoryExporter
 func NewSimpleProcessor(exporter Exporter) Processor
-func NewSimpleSpanProcessor(exporter Exporter) Processor // alias
+func NewSimpleSpanProcessor(exporter Exporter) Processor
 ```
 
 `MemoryExporter`:
@@ -149,12 +147,12 @@ func (e *MemoryExporter) Clear()
 func (e *MemoryExporter) GetCount() int
 ```
 
-Tracer behavior (design quality):
+Tracer behavior:
 
-- `Start` creates new span. If ctx already contains a sampled TraceContext, child inherits TraceID and sets ParentID = parent SpanID. Step1 always sampled true (sampling added step2). Preserve parent chain.
+- `Start` creates new span. If ctx already contains a sampled TraceContext, child inherits TraceID and sets ParentID = parent SpanID. Step1 always sampled true. Preserve parent chain.
 - TraceID generation: if parent exists, reuse parent TraceID. Else generate new.
 - SpanID always new.
-- Store Span in context internally (private key). New context carries this span's TraceContext.
+- Store span in context internally (private key). New context carries this span's TraceContext.
 - `Span.End()` computes EndTime, calls processor OnEnd. Idempotent, concurrency-safe.
 - `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe.
 - **Resource limits:**
@@ -163,7 +161,7 @@ Tracer behavior (design quality):
   - Attribute value size: string >1024 truncated to 1024.
 - `IsRecording()` true if Sampled true and not ended.
 
-#### Context propagation — NEW single-header format (breaks OTel 4-key recall)
+#### Context propagation
 
 ```go
 func ContextWithTrace(ctx context.Context, tc TraceContext) context.Context
@@ -172,20 +170,19 @@ func TraceFromContext(ctx context.Context) (TraceContext, bool)
 func MarshalTrace(ctx context.Context, carrier map[string]string)
 func UnmarshalTrace(carrier map[string]string) context.Context
 
-// aliases that must wrap new logic (single header, not 4 keys)
 func ContextWithSpanContext(ctx context.Context, tc TraceContext) context.Context
 func SpanContextFromContext(ctx context.Context) (TraceContext, bool)
 func Inject(ctx context.Context, carrier map[string]string)
 func Extract(carrier map[string]string) context.Context
 ```
 
-- **Single header**: `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Example: `01020304...0f10:0102030405060708::1` for root, or `0102...:0203...:abcd...:0`.
+- `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Example: `0102030405060708090a0b0c0d0e0f10:0102030405060708::1` for root, or `0102030405060708090a0b0c0d0e0f10:0102030405060708:0a0b0c0d0e0f0a0b:0`.
 - `UnmarshalTrace` reads `x-ride-trace`, validates hex, returns context with TraceContext. If missing or invalid, return background context (no span).
-- Alias `Inject` must write **only** `x-ride-trace`, not `trace-id`/`span-id`/`parent-id`/`sampled` four keys. Alias `Extract` must read `x-ride-trace` only (parsing legacy four keys is NOT required and would be considered incorrect for this task; single-header is canonical). OTel recall that expects four keys will fail.
+- Alias `Inject` writes only `x-ride-trace`. Alias `Extract` reads only `x-ride-trace`. Single header is canonical.
 - Validation: TraceID 32 hex, SpanID 16 hex, ParentID empty or 16 hex. If invalid, ignore extraction.
 - Thread-safe.
 
-## 2. Metrics (unchanged conceptually, but keep Collect copy discriminator)
+## 2. Metrics
 
 ```go
 type Counter interface { Inc(); Add(delta float64) }
@@ -232,7 +229,7 @@ Rules:
 - Counter Add >=0 only, ignore negative, NaN, Inf. Histogram Observe ignore NaN/Inf.
 - Same name + same label set reuse same instrument (inc on one affects other).
 - Thread safety required.
-- `Collect()` deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, Labels map must not affect provider internal. Returned Labels map must be non-nil when labels present.
+- `Collect()` must return deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, or Labels map must not affect provider internal state; subsequent Collect must return original values. Returned Labels map must be non-nil when labels present.
 - Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive. Sorted ascending even if input unsorted.
 
 ## 3. Logging
@@ -248,7 +245,7 @@ type Logger interface {
 }
 type LoggerOption func(*loggerConfig)
 func WithOutput(w io.Writer) LoggerOption
-func WithLevel(level string) LoggerOption // debug, info, warn, error
+func WithLevel(level string) LoggerOption
 func NewLogger(serviceName string, opts ...LoggerOption) Logger
 ```
 
@@ -262,6 +259,6 @@ func NewLogger(serviceName string, opts ...LoggerOption) Logger
 - Implement all public symbols above.
 
 ## Grading
-Binary pass/fail based on all sub-tests. This step still discriminates via `Collect()` deep copy (mild) but propagation now uses single header, so OTel 4-key recall fails.
+Binary pass/fail based on all sub-tests.
 
 Implement step1 fully; do not yet implement samplers/batch/cardinality — those step2.
