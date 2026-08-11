@@ -1518,7 +1518,7 @@ def test_post_overwrite_and_grid_update():
 
 
 def test_concurrent_delete_and_lookup_stress():
-    """Heavy concurrent DELETE + lookup must not return stale cached [] or stale ID."""
+    """Heavy concurrent DELETE + lookup must not return null and final state must be empty (tests cache invalidation, not in-flight overlap)."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -1535,9 +1535,6 @@ def test_concurrent_delete_and_lookup_stress():
                 assert_response_arrays_valid(resp)
                 assert "sq" in resp.json()["geofences"]
 
-            # start many lookup workers that will run during delete
-            stop_flag = {"deleted": False}
-
             def lookup_worker():
                 for _ in range(50):
                     try:
@@ -1546,21 +1543,13 @@ def test_concurrent_delete_and_lookup_stress():
                             timeout=2,
                         )
                         if resp.status_code != 200:
-                            return False, "status"
+                            return False, f"status {resp.status_code}"
                         assert_response_arrays_valid(resp)
                         data = resp.json()
                         if data.get("geofences") is None:
                             return False, "null during concurrent"
-                        # Before delete should be sq, after delete should be []
-                        # Since delete time is racy, both are allowed until flag says deleted
-                        if stop_flag["deleted"]:
-                            if "sq" in data["geofences"]:
-                                return (
-                                    False,
-                                    f"stale after delete got {data['geofences']}",
-                                )
-                        # else before delete, both [] would be unexpected, but we don't fail on []
-                        # just ensure no null and valid list
+                        # don't enforce stale after delete here – in-flight requests that started
+                        # before delete may legitimately return sq after delete flag; final check is stricter
                     except Exception as e:
                         return False, str(e)
                 return True, ""
@@ -1573,20 +1562,23 @@ def test_concurrent_delete_and_lookup_stress():
                     f"http://localhost:{port}/geofences/sq", timeout=2
                 )
                 assert resp.status_code == 200
-                stop_flag["deleted"] = True
                 results = [f.result() for f in futures]
 
-            assert all(r[0] for r in results), (
-                f"concurrent delete stress failed: {results[:3]}"
+            # show all failures for debugging
+            failed = [r for r in results if not r[0]]
+            assert not failed, (
+                f"concurrent delete stress failed: {failed[:5]} results={results[:5]}"
             )
 
-            # final lookup must be empty
+            # final lookup after all workers done must be empty – tests cache invalidation
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
             )
             assert_response_arrays_valid(resp)
-            assert resp.json()["geofences"] == []
-            assert "sq" not in resp.json()["geofences"]
+            assert_is_list_not_null(resp.json(), "geofences")
+            assert resp.json()["geofences"] == [], (
+                f"after DELETE final lookup should be [] not {resp.json()['geofences']}"
+            )
 
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
             assert stats["total_geofences"] == 0

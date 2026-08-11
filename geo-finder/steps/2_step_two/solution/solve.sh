@@ -710,19 +710,20 @@ func (s *Server) lookupPointInternal(lat, lng float64) []string {
 func (s *Server) lookupWithCache(lat, lng float64) (result []string, isHit bool, durationNs int64) {
 	key := cacheKey(lat, lng)
 	start := time.Now()
+	s.mu.RLock()
 	if s.cache.capacity > 0 {
 		if val, ok := s.cache.Get(key); ok {
 			durationNs = time.Since(start).Nanoseconds()
+			s.mu.RUnlock()
 			return val, true, durationNs
 		}
 	}
-	s.mu.RLock()
 	res := s.lookupPointInternalLocked(lat, lng)
-	s.mu.RUnlock()
 	durationNs = time.Since(start).Nanoseconds()
 	if s.cache.capacity > 0 {
 		s.cache.Put(key, res)
 	}
+	s.mu.RUnlock()
 	return res, false, durationNs
 }
 
