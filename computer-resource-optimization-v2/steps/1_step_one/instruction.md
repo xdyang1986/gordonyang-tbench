@@ -1,18 +1,22 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (49 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (66 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 49 tests (was 30 too easy), 20 concurrent allocs all 20 preserved, concurrent add-node 20, 1000 nodes perf <2s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false, special chars <>& raw no escape, Unicode emoji, idempotent no-op preserved, jobs field [] not null not null, empty file and whitespace file empty store vs corrupt, missing/bad checksum corruption backup .corrupt.<nanosec>, atomic CreateTemp+Rename + file lock O_EXCL retry 5ms 2000 tries cleanup, pagination offset then limit order first-fit not best-fit.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 66 tests (was 30 too easy, then 49 still too easy), now 66 with real discriminators. Features: 20 concurrent allocs all 20 preserved, concurrent add-node 20, concurrent diff nodes 20, 1000 nodes perf <2s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs field [] not null (nil-slice pitfall), empty file and whitespace file empty store vs corrupt (null, [], invalid JSON -> corrupt backup .corrupt.<nanosec> integer suffix), missing/bad checksum corruption backup warning, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp and no global.lock leftover, pagination offset then limit order first-fit not best-fit.
 
-Failing observations (naive impl misses):
-- Empty file "" and whitespace "   \n\t" must be empty store [] not corrupt exit4; missing checksum or bad checksum => backup .corrupt.<nanosec> warning and recreate empty
-- Jobs field empty MUST be [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null
-- Idempotent no-op: re-adding existing node/job with different resources must preserve old resources and allocation, not upsert
-- Concurrent same node 20 allocates must preserve all 20 jobs and used counts, file valid JSON during, global.lock cleaned
-- Concurrent diff nodes 20 parallel allocates to 20 different nodes must preserve all 20
-- Concurrent add-node 20 different IDs must preserve all 20 sorted
-- Pagination offset then limit order: offset 1 limit 2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int -> exit2
-- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit job 2 CPU -> nodeA wins for Step1, Step2 will change to best-fit)
-- Special chars <>& raw "<" in file requires SetEscapeHTML(false), Unicode emoji preserved
-- Large ID 10KB supported, status total/used resources sum correct, atomic no tmp leftover
+Failing observations (naive impl misses, now enforced):
+- Empty "" and whitespace "   \n\t" must be empty store [] not corrupt 4; file "null" and "[]" must be treated as corrupt backup integer suffix .corrupt.<nanosec> (\.corrupt\.\d+$) warning
+- Missing checksum or bad checksum -> backup and recreate empty, list returns [] not crash
+- Jobs [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null; check raw contains '"jobs":[]' and no null
+- Idempotent no-op: re-add node/job with different resources preserves old resources and allocation, not upsert; add-job idempotent preserves status running
+- Concurrent add-node 20 different IDs preserve all 20 sorted, lock cleaned
+- Concurrent same node 20 allocates preserve all 20 jobs used correct no overcommit file valid JSON during concurrent, lock cleaned
+- Concurrent diff nodes 20 parallel allocates to 20 different nodes preserve all 20 status allocated 20
+- Concurrent list while allocating: list-nodes valid JSON during allocs
+- Pagination offset then limit: offset1 limit2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int (abc) -> exit2
+- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins Step1, Step2 flips to best-fit)
+- Special chars <>& raw "<" requires SetEscapeHTML(false) no \u003c, Unicode emoji 🌍🚀😀 preserved for node and job
+- Large ID 10KB supported, IDs dash underscore dot colon valid, empty ID with spaces "   " -> exit2, float resource "4.0" invalid -> exit2
+- Status sum total/used resources, used/free correct after allocate/deallocate, remove-job deallocates first preserves node, file lock cleaned after failure (insufficient)
+- Allocate already allocated different node -> exit2, same node idempotent exit0 no duplicate, node jobs sorted asc
 
 Data directory `/app/data/` writable, default persistence `/app/data/cluster.json`.
 
