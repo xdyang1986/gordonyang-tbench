@@ -117,31 +117,29 @@ Spec:
 - Background goroutine collects spans up to BatchSize or BatchTimeout elapsed, then calls ExportSpans.
 - Concurrency-safe: many goroutines calling OnEnd.
 - Backpressure: normally non-blocking enqueue (with evict-oldest). Calling goroutines must not be blocked for more than a few milliseconds in normal mode.
-- `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting BatchSize), wait for in-flight exports, respect ctx timeout, return nil or ctx error. After Shutdown, OnEnd should drop (no-op) and not panic.
-- `ForceFlush(ctx)` blocks until all currently queued spans are exported or ctx timeout. Must export incomplete batches as well, not wait for BatchSize to fill. During ForceFlush, OnEnd must block (not evict/drop) until queue has space or ctx timeout. DroppedCount must not increase during ForceFlush even if queue was full before flush.
-- Required methods (not optional):
+- `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting BatchSize), wait for in-flight exports, respect ctx timeout, return nil or ctx error. After Shutdown, OnEnd should drop (no-op) and not panic. Shutdown must respect context timeout and not block beyond timeout.
+- `ForceFlush(ctx)` blocks until all currently queued spans are exported or ctx timeout. Must export incomplete batches as well, not wait for BatchSize to fill. During ForceFlush, OnEnd must block (not evict/drop) until queue has space or ctx timeout. DroppedCount must not increase during ForceFlush even if queue was full before flush. ForceFlush with empty queue must not panic and return nil.
+- Required methods:
   ```go
   func (b *BatchProcessor) DroppedCount() int
   func (b *BatchProcessor) QueueLen() int
   ```
   Accessible via interface assertion from Processor.
-  - QueueLen counts spans waiting in queue, excluding any already moved into in-progress batch, never exceeds QueueSize.
-  - DroppedCount counts spans dropped/evicted due to full queue.
+  - QueueLen counts spans waiting in queue, excluding any already moved into in-progress batch, never exceeds QueueSize, even under concurrent producers.
+  - DroppedCount counts spans dropped/evicted due to full queue. Non-recording spans (IsRecording false) must not be queued and must not increment DroppedCount.
 - Export failure: if ExportSpans returns error, must not crash/panic, continue processing.
-- Ordering: batches export in order enqueued.
+- Ordering: spans must be exported in order enqueued. Batches preserve order.
 - Goroutine must exit on Shutdown, no leaks.
 - ExportTimeout: each export should respect timeout via context with timeout. Implement export with goroutine + select on context.
+- Backpressure: normal enqueues (when not flushing) must not block calling goroutine for more than a few milliseconds; only during ForceFlush may OnEnd block when queue full.
 
-Tests will:
-- Produce 5000 spans quickly with queue 5000, ensure all exported after ForceFlush.
-- Produce with small queue 2, produce 5 spans, ensure exported set is last 2 (newest) after evict-oldest, DroppedCount >=3, no deadlock.
-- Concurrent producers 100 goroutines x 100 spans, queue large enough, after shutdown all exported.
-- Shutdown flushes all pending respecting BatchSize.
-- Backpressure: normal enqueues not blocking >10ms.
-- ForceFlush blocking: fill queue, start slow ForceFlush, concurrent enqueue during flush must block not drop, DroppedCount unchanged.
-- IsRecording false spans must not be queued nor counted as dropped.
-- Batch size limit enforced.
-- Export timeout via goroutine select.
+Behavioral requirements:
+- Enqueue 5000 spans quickly with queue 5000: all exported after ForceFlush (no eviction since queue large enough).
+- Enqueue 5 spans with queue size 2: exported set is last 2 (newest) after evict-oldest semantics, DroppedCount >=3, no deadlock.
+- Concurrent producers 100 goroutines x 100 spans with queue large enough: after shutdown all exported.
+- Shutdown flushes all pending respecting BatchSize hard cap.
+- IsRecording false spans must not be queued nor counted.
+- Batch size limit enforced per export.
 
 ## 3. Metrics Cardinality Limiting
 
@@ -167,9 +165,10 @@ type MetricsProvider interface {
 - If unlimited cardinality (0 or negative), DroppedSeriesCount always 0. In aggregate mode, DroppedSeriesCount 0.
 - Thread safety: cardinality check concurrent-safe.
 - Collect must not expose overflow incorrectly; drop mode overflow not in metrics; aggregate mode overflow series appears with label `__overflow__="true"` and value reflects aggregated operations.
-- Same label set repeated after limit reached must reuse existing instrument if already exists, even at limit. DroppedSeriesCount not increase on reuse.
+- Same label set repeated after limit reached must reuse existing instrument if already exists, even at limit. DroppedSeriesCount must NOT increase on reuse of existing label set.
 - Mixed metric types with same name: if metric name already used as Counter, subsequent Gauge/Histogram with same name should return no-op to avoid type conflict.
 - Label value truncation 256 already required.
+- RatioSampler must ignore SpanName and Kind: same TraceID with different names/kinds must give same decision (based only on TraceID, Status, Priority, fraction).
 
 ## 4. Additional Hardening
 

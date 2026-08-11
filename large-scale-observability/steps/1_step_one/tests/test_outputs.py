@@ -2446,3 +2446,280 @@ def test_tracing_id_generator_nil_fallback():
     assert proc.returncode == 0, (
         f"id generator nil fallback failed: {proc.stdout} {proc.stderr}"
     )
+
+
+def test_tracing_parent_chain_three_levels():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        ctx1, s1 := tracer.Start(context.Background(), "grandparent")
+        ctx2, s2 := tracer.Start(ctx1, "parent")
+        ctx3, s3 := tracer.Start(ctx2, "child")
+        s3.End()
+        s2.End()
+        s1.End()
+        spans := exp.GetSpans()
+        if len(spans)!=3 { panic(fmt.Sprintf("expected 3 got %d", len(spans))) }
+        var gp, par, child *observability.FinishedSpan
+        for i:= range spans {
+            switch spans[i].Name {
+            case "grandparent": gp=&spans[i]
+            case "parent": par=&spans[i]
+            case "child": child=&spans[i]
+            }
+        }
+        if gp==nil || par==nil || child==nil { panic("missing spans") }
+        if gp.SpanContext.TraceID != par.SpanContext.TraceID || par.SpanContext.TraceID != child.SpanContext.TraceID { panic("traceID chain broken") }
+        if par.ParentID != gp.SpanContext.SpanID { panic("parent ParentID != gp SpanID") }
+        if child.ParentID != par.SpanContext.SpanID { panic("child ParentID != parent SpanID") }
+        if child.SpanContext.ParentID != par.SpanContext.SpanID { panic("child SpanContext.ParentID mismatch") }
+        _ = ctx3
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"parent chain three levels failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_exporter_clear_then_reuse():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, s1 := tracer.Start(context.Background(), "a")
+        s1.End()
+        if exp.GetCount()!=1 { panic("count 1") }
+        exp.Clear()
+        if exp.GetCount()!=0 { panic("clear should 0") }
+        if len(exp.GetSpans())!=0 { panic("clear spans not empty") }
+        _, s2 := tracer.Start(context.Background(), "b")
+        s2.End()
+        _, s3 := tracer.Start(context.Background(), "c")
+        s3.End()
+        if exp.GetCount()!=2 { panic(fmt.Sprintf("expected 2 after reuse got %d", exp.GetCount())) }
+        spans := exp.GetSpans()
+        if spans[0].Name!="b" || spans[1].Name!="c" { panic("reuse order wrong") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"exporter clear then reuse failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_event_timestamp_recent():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        before := time.Now()
+        _, span := tracer.Start(context.Background(), "evt-time")
+        time.Sleep(5*time.Millisecond)
+        span.AddEvent("ev1")
+        time.Sleep(5*time.Millisecond)
+        span.AddEvent("ev2")
+        span.End()
+        after := time.Now()
+        evs := exp.GetSpans()[0].Events
+        if len(evs)!=2 { panic("expected 2 events") }
+        if evs[0].Timestamp.Before(before) || evs[0].Timestamp.After(after) { panic("event timestamp out of bounds") }
+        if evs[1].Timestamp.Before(evs[0].Timestamp) { panic("event timestamps not monotonic") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"event timestamp recent failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_attribute_map_non_nil():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "attr-map", observability.WithAttributes(observability.Attribute{Key:"k", Value:"v"}))
+        span.End()
+        s := exp.GetSpans()[0]
+        if s.Attributes==nil { panic("Attributes map must be non-nil when attributes present") }
+        if len(s.Attributes)!=1 { panic("expected 1 attr") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"attribute map non-nil failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_histogram_boundary_and_sum():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        h := prov.Histogram("bound_sum", observability.WithBuckets([]float64{5,10}))
+        h.Observe(5)
+        h.Observe(10)
+        h.Observe(3)
+        h.Observe(12)
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="bound_sum" {
+                m := fam.Metrics[0]
+                if m.Count!=4 { panic(fmt.Sprintf("count expected 4 got %d", m.Count)) }
+                if m.Sum < 29.9 || m.Sum > 30.1 { panic(fmt.Sprintf("sum expected 30 got %f", m.Sum)) }
+                if m.Buckets[0].Count!=2 { panic(fmt.Sprintf("bucket 5 should have 2 (3 and 5), got %d", m.Buckets[0].Count)) }
+                if m.Buckets[1].Count!=3 { panic(fmt.Sprintf("bucket 10 should have 3 (3,5,10), got %d", m.Buckets[1].Count)) }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"histogram boundary and sum failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_id_generator_called_per_span():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    type countingGen struct{
+        mu sync.Mutex
+        traceCalls int
+        spanCalls int
+    }
+    func (g *countingGen) NewTraceID() string {
+        g.mu.Lock()
+        g.traceCalls++
+        n := g.traceCalls
+        g.mu.Unlock()
+        return fmt.Sprintf("%032x", n)
+    }
+    func (g *countingGen) NewSpanID() string {
+        g.mu.Lock()
+        g.spanCalls++
+        n := g.spanCalls
+        g.mu.Unlock()
+        return fmt.Sprintf("%016x", n)
+    }
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        gen := &countingGen{}
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithIDGenerator(gen))
+        for i:=0;i<5;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s%d", i))
+            s.End()
+        }
+        if gen.traceCalls!=5 { panic(fmt.Sprintf("expected 5 traceID calls got %d", gen.traceCalls)) }
+        if gen.spanCalls!=5 { panic(fmt.Sprintf("expected 5 spanID calls got %d", gen.spanCalls)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"id generator called per span failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_logger_json_fields():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "bytes"
+        "encoding/json"
+        "fmt"
+        "context"
+        "ride-observability/observability"
+    )
+    func main(){
+        buf := &bytes.Buffer{}
+        logger := observability.NewLogger("svc", observability.WithOutput(buf))
+        logger.Info(context.Background(), "msg", observability.Field{Key:"int", Value:42}, observability.Field{Key:"bool", Value:true})
+        var obj map[string]interface{}
+        if err:= json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj); err!=nil { panic("not json") }
+        if obj["level"]!="info" { panic("level missing") }
+        if obj["service"]!="svc" { panic("service missing") }
+        if obj["message"]!="msg" { panic("message missing") }
+        if obj["timestamp"]==nil { panic("timestamp missing") }
+        if obj["int"]!=float64(42) { panic(fmt.Sprintf("int field expected 42 got %v", obj["int"])) }
+        if obj["bool"]!=true { panic("bool field missing") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"logger json fields failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_withprocessor_nil_fallback():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(nil), observability.WithProcessor(proc))
+        tracer2 := observability.NewTracer("svc", observability.WithProcessor(nil))
+        _, s := tracer2.Start(context.Background(), "nilproc")
+        s.End()
+        fmt.Println("OK")
+        _ = exp
+        _ = tracer
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"withprocessor nil fallback failed: {proc.stdout} {proc.stderr}"
+    )
