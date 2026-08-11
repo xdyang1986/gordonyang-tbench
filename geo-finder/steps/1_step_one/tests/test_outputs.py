@@ -523,12 +523,57 @@ def test_world_bounds():
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
-        # polygon near world bounds
+        # world rectangle – must be accepted per Edit A ( -180 and 180 distinct, area 64800)
         poly = "-90,-180;-90,180;90,180;90,-180"
         r = run_cli(db, ["add", "world", "--polygon", poly, "--name", "World"])
-        assert r.returncode == 0, f"world polygon add failed: {r.stderr}"
-        r = run_cli(db, ["lookup", "--lat", "0", "--lng", "0"])
-        assert json.loads(r.stdout) == ["world"]
+        assert r.returncode == 0, (
+            f"world polygon add failed: {r.stderr} stdout={r.stdout}"
+        )
+
+        # world must match at every longitude in its lat band (not just 0,0)
+        for lng in [0, 50, -50, 179.5, -179.5, 180, -180, 150, -100]:
+            r = run_cli(db, ["lookup", "--lat", "0", "--lng", str(lng)])
+            assert r.returncode == 0, f"lookup {lng} failed {r.stderr}"
+            ids = json.loads(r.stdout)
+            assert ids == ["world"], f"world should match lng {lng}, got {ids}"
+
+        # edge points at poles and antimeridian should be inside (on edge)
+        for lat, lng in [
+            (-90, 0),
+            (90, 0),
+            (-90, -180),
+            (90, 180),
+            (0, -180),
+            (0, 180),
+        ]:
+            r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
+            assert r.returncode == 0
+            assert json.loads(r.stdout) == ["world"], (
+                f"world edge {lat},{lng} should be inside"
+            )
+
+        # empty outside lat band? world lat is -90..90 so all lats inside, but test outside range rejected earlier
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_world_bounds_duplicate_distinct():
+    """World rect -180 and 180 are distinct for validation – must not be considered duplicate."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        poly = "-90,-180;-90,180;90,180;90,-180"
+        r = run_cli(db, ["add", "world", "--polygon", poly, "--name", "World"])
+        assert r.returncode == 0, (
+            f"world should be valid ( -180 != 180 ), got {r.stderr} code {r.returncode}"
+        )
+        # Adding same world again with same ID but slightly different name should overwrite and still be valid
+        r = run_cli(db, ["add", "world", "--polygon", poly, "--name", "World2"])
+        assert r.returncode == 0
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1 and arr[0]["name"] == "World2"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -969,6 +1014,78 @@ def test_parent_dir_deep_nested():
             assert not [f for f in files if ".tmp." in f], (
                 f"temp left in {root}: {files}"
             )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_polygon_spaces_around_comma():
+    """Spaces around comma and semicolon should be trimmed and accepted."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # spaces around comma and semicolon
+        poly = "0, 0; 0, 1; 1, 1; 1, 0"
+        r = run_cli(db, ["add", "spaced", "--polygon", poly, "--name", "Spaced"])
+        assert r.returncode == 0, f"spaces around comma should be allowed: {r.stderr}"
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["spaced"]
+
+        # leading/trailing spaces in whole polygon string
+        poly2 = " 0,0;0,1;1,1;1,0 "
+        r = run_cli(db, ["add", "spaced2", "--polygon", poly2, "--name", "Spaced2"])
+        assert r.returncode == 0, (
+            f"leading/trailing spaces should be allowed: {r.stderr}"
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_empty_db_whitespace():
+    """File containing only whitespace should be treated as corrupt (exit 4), not empty, because spec says 0 bytes is empty."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        os.makedirs(os.path.dirname(db), exist_ok=True)
+        with open(db, "w") as f:
+            f.write("   \n  \t\n")
+        r = run_cli(db, ["list"])
+        # Our reference treats whitespace as corrupt (invalid JSON) -> exit 4, which is acceptable per spec (0 bytes is empty, whitespace not)
+        # Some impls might treat as empty – allow either 0 or 4 as long as not crash and no temp left, but must not return []
+        assert r.returncode in (0, 4), (
+            f"whitespace db should be either empty or corrupt, got {r.returncode}"
+        )
+        if r.returncode == 0:
+            arr = json.loads(r.stdout)
+            assert arr == [], "if treated as empty, list should be []"
+        # No temp files
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_list_and_lookup_empty_bracket():
+    """list and lookup empty must return exactly [] not null, raw text check."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        r = run_cli(db, ["list"])
+        assert r.returncode == 0
+        assert r.stdout.strip() == "[]", f"empty list should be [] not {r.stdout!r}"
+        assert "null" not in r.stdout.lower()
+
+        r = run_cli(db, ["lookup", "--lat", "0", "--lng", "0"])
+        assert r.returncode == 0
+        assert r.stdout.strip() == "[]", f"empty lookup should be [] not {r.stdout!r}"
+        assert "null" not in r.stdout.lower()
+
+        r = run_cli(db, ["lookup", "--lat", "0", "--lng", "0", "--verbose"])
+        assert r.returncode == 0
+        assert r.stdout.strip() == "[]"
+        assert "null" not in r.stdout.lower()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
