@@ -1123,3 +1123,194 @@ def test_cli_performance_500_zones():
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_area_epsilon_boundary():
+    """Area just below 1e-9 must be rejected, just above accepted – tests epsilon handling."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Tiny triangle area ~ 5e-10 (below threshold)
+        poly_small = "0,0;0,0.000001;0.001,0"
+        r = run_cli(db, ["add", "tiny", "--polygon", poly_small, "--name", "Tiny"])
+        assert r.returncode == 2, (
+            f"tiny area below 1e-9 should be rejected, got {r.returncode} {r.stderr}"
+        )
+
+        # Slightly larger area ~ 2e-9 (above threshold) – compute: (0,0)-(0,0.000002)-(0.001,0) area = 0.5*0.000002*0.001=1e-9 -> boundary, need >1e-9 so use 0.000003 => 1.5e-9
+        poly_ok = "0,0;0,0.000003;0.001,0"
+        r = run_cli(db, ["add", "ok", "--polygon", poly_ok, "--name", "OK"])
+        # Allow either acceptance (if impl uses >1e-9) – this polygon area 1.5e-9 >1e-9 so should be accepted
+        # Some impls use ==0 check and would accept both, so we only enforce that tiny is rejected, ok is allowed (not required to be accepted if they use stricter threshold, but our ref accepts)
+        # To keep fair, assert ok is accepted by our ref, but allow rejection only if they use larger epsilon? We'll assert ok passes for ref, but for grading we require tiny rejected and ok not crash
+        # Actually spec says >1e-9, so ok must be accepted
+        assert r.returncode == 0, (
+            f"area 1.5e-9 should be accepted per spec >1e-9, got {r.returncode} {r.stderr}"
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_duplicate_negative_zero():
+    """Negative zero must be considered duplicate of zero (numeric equality)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # 0 vs -0 duplicate
+        poly = "0,0;-0,0;1,0;0,1"
+        r = run_cli(db, ["add", "negzero", "--polygon", poly, "--name", "NegZero"])
+        assert r.returncode == 2, (
+            f"-0 vs 0 should be duplicate, got {r.returncode} {r.stderr}"
+        )
+
+        poly2 = "0,0;0,-0;1,0;0,1"
+        r = run_cli(db, ["add", "negzero2", "--polygon", poly2, "--name", "NegZero2"])
+        assert r.returncode == 2, f"0 vs -0 lng should be duplicate"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_id_sort_lexicographic():
+    """List and lookup must sort IDs lexicographically, not numerically – zone_10 < zone_2."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for id_ in ["zone_2", "zone_10", "zone_1"]:
+            r = run_cli(db, ["add", id_, "--polygon", "0,0;0,1;1,1;1,0", "--name", id_])
+            assert r.returncode == 0
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        ids = [x["id"] for x in arr]
+        assert ids == ["zone_1", "zone_10", "zone_2"], (
+            f"lexicographic sort failed, got {ids}"
+        )
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        ids_lookup = json.loads(r.stdout)
+        assert ids_lookup == ["zone_1", "zone_10", "zone_2"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_world_crossing_pole_combined():
+    """CLI lookup with world + crossing + pole together must return correct combined sets."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(
+            db,
+            [
+                "add",
+                "world",
+                "--polygon",
+                "-90,-180;-90,180;90,180;90,-180",
+                "--name",
+                "World",
+            ],
+        )
+        run_cli(
+            db,
+            [
+                "add",
+                "cross",
+                "--polygon",
+                "0,179;0,-179;1,-179;1,179",
+                "--name",
+                "Cross",
+            ],
+        )
+        run_cli(
+            db,
+            [
+                "add",
+                "pole_n",
+                "--polygon",
+                "89,-10;89,10;90,10;90,-10",
+                "--name",
+                "PoleN",
+            ],
+        )
+
+        # 0.5,0 -> only world
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0"])
+        ids = json.loads(r.stdout)
+        assert ids == ["world"], f"0.5,0 should be only world, got {ids}"
+
+        # 0.5,179.5 -> world + cross
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "179.5"])
+        ids = json.loads(r.stdout)
+        assert ids == ["cross", "world"], (
+            f"179.5 should be cross+world sorted, got {ids}"
+        )
+
+        # 89.5,0 -> world + pole_n
+        r = run_cli(db, ["lookup", "--lat", "89.5", "--lng", "0"])
+        ids = json.loads(r.stdout)
+        assert ids == ["pole_n", "world"], f"pole+world failed, got {ids}"
+
+        # 89.5,179.5 -> only world (pole_n lng -10..10, cross lat 0-1 only)
+        r = run_cli(db, ["lookup", "--lat", "89.5", "--lng", "179.5"])
+        ids = json.loads(r.stdout)
+        assert ids == ["world"], f"89.5,179.5 should be only world, got {ids}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_name_with_128_after_trim():
+    """Name with leading/trailing spaces that trims to 128 must be allowed, 129 after trim rejected even if raw longer."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        raw_128_trim = "  " + "b" * 128 + "  "
+        r = run_cli(
+            db, ["add", "z128", "--polygon", "0,0;0,1;1,1;1,0", "--name", raw_128_trim]
+        )
+        assert r.returncode == 0, (
+            f"128 after trim should be allowed, got {r.returncode} {r.stderr}"
+        )
+        obj = json.loads(r.stdout)
+        assert obj["name"] == "b" * 128
+        assert len(obj["name"]) == 128
+
+        raw_129_trim = "  " + "c" * 129 + "  "
+        r = run_cli(
+            db, ["add", "z129", "--polygon", "0,0;0,1;1,1;1,0", "--name", raw_129_trim]
+        )
+        assert r.returncode == 2, (
+            f"129 after trim should be rejected, got {r.returncode}"
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_remove_then_add_same_id():
+    """Remove then add same ID with new polygon must show new polygon, old no longer matches."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "First"])
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["z"]
+
+        r = run_cli(db, ["remove", "z"])
+        assert r.returncode == 0
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == []
+
+        r = run_cli(
+            db, ["add", "z", "--polygon", "10,10;10,11;11,11;11,10", "--name", "Second"]
+        )
+        assert r.returncode == 0
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == []
+        r = run_cli(db, ["lookup", "--lat", "10.5", "--lng", "10.5"])
+        assert json.loads(r.stdout) == ["z"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
