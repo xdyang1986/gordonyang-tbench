@@ -53,21 +53,23 @@ Implement a cache for point lookups:
 
 ## HTTP API (All JSON)
 
+- All JSON array fields must be `[]`, not `null`, when empty. This includes `geofences` in `GET /lookup` and in each element of `POST /lookup/batch` `results`, as well as `results` itself for empty input and `GET /geofences` list. In Go, use non-nil empty slices (`make([]T,0)`) so `json.Marshal` produces `[]`, not `null` — returning a nil slice on the cache-hit path is a common bug.
+
 ### `GET /lookup?lat=<float>&lng=<float>[&verbose=true]`
 - Query lat,lng required, valid range else 400 JSON error.
 - Optional `verbose` bool: if true (accept `true`, `1`, `t`), return full Geofence objects instead of IDs.
-- Returns 200 JSON with lat, lng echoed, geofences sorted asc, count.
+- Returns 200 JSON with lat, lng echoed, geofences sorted asc (`[]` not `null` when empty), count.
 - Must use spatial index + bbox + cache internally. Result must match naive point-in-polygon.
 - Increment total_queries, cache_hits on hit.
 
 ### `POST /lookup/batch`
 - Body JSON `{"points":[{"lat":...,"lng":...},...]}`
 - Max 1000 points else 400. Each point must have valid lat/lng else 400. Empty array allowed.
-- Returns 200 `{"results":[{"lat":...,"lng":...,"geofences":[...]},...]}` preserving input order, each geofences sorted asc.
+- Returns 200 `{"results":[{"lat":...,"lng":...,"geofences":[...]},...]}` preserving input order, each geofences sorted asc. Empty `geofences` must be `[]` not `null`; empty `results` must be `[]` not `null`.
 - total_queries += len(points), cache_hits per hit. Must be efficient, no per-request file IO.
 
 ### `GET /geofences`
-- Returns 200 JSON array of all geofence objects sorted by ID asc.
+- Returns 200 JSON array of all geofence objects sorted by ID asc. Empty list must be `[]` not `null`.
 
 ### `GET /geofences/:id`
 - Returns 200 single Geofence if found, else 404 JSON error.
@@ -97,12 +99,14 @@ Instead of absolute QPS/p50/p99 walls that depend on host, tests use **relative*
 
 - **Cold vs cached**: First query for a point is miss, second identical (or very close) is hit and should be counted as hit; cache_size bounded.
 
-- **Correctness under concurrency**: 30 concurrent clients × 100 requests = 3000 lookups, all must succeed and match CLI naive results. All response paths must correctly handle empty results.
+- **Correctness under concurrency**: 30 concurrent clients × 100 requests = 3000 lookups, all must succeed and match CLI naive results. All response paths must correctly handle empty results as `[]` not `null`, including cache-hit paths.
 
-- **Semantic discriminators (under-specified, must be handled)**:
-  - Antimeridian-crossing polygons (lng wrap): e.g., tiny rectangle from 179 to -179 crossing 180. Must correctly answer inside for points near ±180 and outside for 0, and grid must not explode to tens of thousands of cells for a tiny crossing rectangle.
-  - Pole-adjacent bounding boxes: polygons near lat 89-90 must have correct bbox and grid.
-  - Cache invalidation ordering under concurrent DELETE + GET, and read-after-POST visibility: after POST/DELETE, subsequent lookups must see new state immediately, not stale cache.
+- **Semantic discriminators (must be handled)**:
+  - Antimeridian-crossing polygons (lng wrap): e.g., tiny rectangle from 179 to -179 crossing 180. Must correctly answer inside for points near ±180 and outside for 0, and grid must not explode to tens of thousands of cells for a tiny crossing rectangle. Batch lookup must also handle wrapping.
+  - Pole-adjacent bounding boxes: polygons near lat 89-90 and also near -90 must have correct bbox and grid; points on edge at exactly ±90 are inside.
+  - Cache invalidation ordering under concurrent DELETE + GET, and read-after-POST visibility: after POST/DELETE, subsequent lookups must see new state immediately, not stale cache. This includes overwrite via POST (same ID new polygon) and delete of a zone that was previously cached as empty `[]` or as containing the zone. Concurrent DELETE + concurrent lookups must not return stale cached data.
+  - Grid must be updated on POST/DELETE: after POST a new zone, `index_cells` must reflect new cells and lookups must use updated index; after DELETE, `index_cells` may shrink and lookups must not return deleted ID.
+  - Stats: `total_queries` must increment by batch size for `POST /lookup/batch`, `cache_hits` must count hits both in single and batch paths, `total_geofences` must track POST/DELETE, `cache_size` bounded and cleared on mutation.
 
 If relative checks fail, grading fails. Generous absolute upper bounds (e.g., <15s for 1000 reqs) prevent hangs but do not cause flake.
 
@@ -114,6 +118,7 @@ If relative checks fail, grading fails. Generous absolute upper bounds (e.g., <1
 - Must be thread-safe.
 - No per-request file read, except atomic write on POST/DELETE.
 - LRU cache must be own implementation.
+- All empty JSON array fields must be `[]`, not `null` (use non-nil empty slices). Cache-hit path must also return `[]` not `null`.
 
 ### Example
 ```bash
