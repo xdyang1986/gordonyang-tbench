@@ -635,6 +635,38 @@ func (c *LRUCache) Clear() {
 	c.tail = nil
 }
 
+func (c *LRUCache) InvalidateByBBox(bbox BBox) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, node := range c.cache {
+		// key format lat,lng with 6 decimals
+		parts := strings.Split(k, ",")
+		if len(parts) != 2 {
+			continue
+		}
+		lat, err1 := strconv.ParseFloat(parts[0], 64)
+		lng, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if pointInBBox(lat, lng, bbox) {
+			if node.prev != nil {
+				node.prev.next = node.next
+			}
+			if node.next != nil {
+				node.next.prev = node.prev
+			}
+			if c.head == node {
+				c.head = node.next
+			}
+			if c.tail == node {
+				c.tail = node.prev
+			}
+			delete(c.cache, k)
+		}
+	}
+}
+
 func cacheKey(lat, lng float64) string {
 	return strconv.FormatFloat(lat, 'f', 6, 64) + "," + strconv.FormatFloat(lng, 'f', 6, 64)
 }
@@ -918,7 +950,11 @@ func (s *Server) handleGeofencesSingle(w http.ResponseWriter, r *http.Request, i
 		}
 		delete(s.db, id)
 		delete(s.bboxes, id)
-		s.cache.Clear()
+		if hasBBox {
+			s.cache.InvalidateByBBox(oldBBox)
+		} else {
+			s.cache.Clear()
+		}
 		// persist
 		dbCopy := make(DB, len(s.db))
 		for k, v := range s.db {
@@ -977,8 +1013,12 @@ func (s *Server) handleGeofencesPost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	// remove old if exists (handle world-spanning and antimeridian)
-	if oldBBox, ok := s.bboxes[g.ID]; ok {
-		for _, key := range gridCellsForBBox(oldBBox, s.gridSize) {
+	var oldBBox BBox
+	hadOld := false
+	if ob, ok := s.bboxes[g.ID]; ok {
+		oldBBox = ob
+		hadOld = true
+		for _, key := range gridCellsForBBox(ob, s.gridSize) {
 			ids := s.grid[key]
 			newIds := make([]string, 0, len(ids))
 			for _, gid := range ids {
@@ -1000,7 +1040,13 @@ func (s *Server) handleGeofencesPost(w http.ResponseWriter, r *http.Request) {
 		s.grid[key] = append(s.grid[key], g.ID)
 		sort.Strings(s.grid[key])
 	}
-	s.cache.Clear()
+	// selective invalidation: only entries whose point lies within affected bbox(es)
+	if hadOld {
+		s.cache.InvalidateByBBox(oldBBox)
+		s.cache.InvalidateByBBox(bbox)
+	} else {
+		s.cache.InvalidateByBBox(bbox)
+	}
 	dbCopy := make(DB, len(s.db))
 	for k, v := range s.db {
 		dbCopy[k] = v

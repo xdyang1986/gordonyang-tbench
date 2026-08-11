@@ -22,29 +22,21 @@ geofencectl --db <PATH> serve --port <int> [--grid-size <float>] [--cache-size <
 ### Required In-Memory Data Structures
 
 #### 1. Bounding Boxes
-Precompute bounding box per geofence for quick reject. Must correctly handle:
-- Polygons near poles (lat close to ±90)
-- Polygons that cross the antimeridian (lng near ±180, e.g., a rectangle from 179 to -179). When `maxLng-minLng > 180`, the polygon crosses the antimeridian and the bbox check must account for wrapping (point is outside only if it lies in the large gap, not the small wrapping interval).
-- A polygon whose longitude span is ≥ 360 (e.g. the world rectangle -180…180) does not cross the antimeridian — it covers every longitude. Classify world-spanning before applying the >180 crossing rule: its bbox keeps the full longitude range, and it must match points at every longitude in its latitude band.
-- The wrapping rule applies to the point-in-polygon test itself, not only to the bbox and grid. The same answers must come from the CLI lookup command and from GET /lookup.
+Precompute bounding box per geofence for quick reject. Must correctly handle polygons near poles, polygons that cross the antimeridian, and polygons that span all longitudes (world bounds). For antimeridian-crossing cases the bbox logic and the point-in-polygon test must account for longitude wrapping — the same answers must come from the CLI lookup command and from `GET /lookup`.
 
 #### 2. Grid Spatial Index
 Uniform grid over world lat [-90,90], lng [-180,180]. You must implement spatial indexing to reduce candidates. On query, compute cell for point and get candidates from index (empty cell -> empty result). Then bbox check, then point-in-polygon. Must track `index_cells` = number of cells with >=1 geofence.
 
-- For large polygons (e.g., world bounds), grid may contain many cells. Implementation must handle large bboxes without OOM and still be fast for empty-area lookups.
-- Index must be updatable on HTTP POST/DELETE (see CRUD). On mutation, update bboxes, grid, and invalidate cache correctly under concurrency.
-
-- For antimeridian-crossing polygons, grid assignment must handle wrapping: a polygon crossing should be added to cells on both sides of ±180 (e.g., [maxLng,180] and [-180,minLng]), not to the huge interior gap covering most of the world. Otherwise you will create tens of thousands of cells for a tiny crossing rectangle and risk OOM.
-- For world-spanning polygons (span ≥ 360, e.g. -180…180), do NOT treat as antimeridian-crossing — it covers every longitude, so its bbox keeps the full longitude range and it must match points at every longitude in its latitude band. You may either materialize all longitude cells or flag it as global; both are acceptable as long as correctness holds.
+- Implementation must handle large bounding boxes without OOM and remain fast for empty-area lookups.
+- Index must be updatable on HTTP POST/DELETE (see CRUD).
 
 #### 3. Cache
 Implement a cache for point lookups:
 
-- Cache keys are derived from the query point rounded to exactly 6 decimal places. Two points that agree to 6 decimals (e.g. 0.5000001 and 0.5000002) map to one entry: the second is a cache hit and cache_size stays at 1.
+- Cache keys are derived from the query point rounded to 6 decimal places.
 - Must have bounded size = cache-size flag, evict least recently used when exceeding.
-- Thread-safe.
-- Must be consulted before index search.
-- On HTTP POST/DELETE that mutates geofences, cache must be invalidated so that subsequent lookups see new state immediately (read-after-POST visibility). After a DELETE, a point that previously matched must no longer match, even if it was cached.
+- Thread-safe and consulted before index search.
+- On HTTP POST/DELETE that mutates geofences, only cache entries whose query point lies within the affected geofence's bounding box may be invalidated. Entries for points outside that bounding box must survive, remain hits, and continue to count toward `cache_hits` and `cache_size`. For an overwrite via POST, invalidate entries within both the old and new bounding boxes. After a DELETE, a point that previously matched inside the deleted zone's bounding box must no longer match; points outside must stay cached.
 
 #### 4. Concurrency Safety
 - HTTP server handles concurrent requests.
@@ -53,7 +45,7 @@ Implement a cache for point lookups:
 
 ## HTTP API (All JSON)
 
-- All JSON array fields must be `[]`, not `null`, when empty. This includes `geofences` in `GET /lookup` and in each element of `POST /lookup/batch` `results`, as well as `results` itself for empty input and `GET /geofences` list. In Go, use non-nil empty slices (`make([]T,0)`) so `json.Marshal` produces `[]`, not `null` — returning a nil slice on the cache-hit path is a common bug.
+- All JSON array fields must serialize as `[]` when empty, on every response path. This includes `geofences` in `GET /lookup`, each `geofences` in `POST /lookup/batch` results, `results` itself, and `GET /geofences` list.
 
 ### `GET /lookup?lat=<float>&lng=<float>[&verbose=true]`
 - Query lat,lng required, valid range else 400 JSON error.
@@ -93,22 +85,14 @@ Implement a cache for point lookups:
 
 ### Performance & Correctness (No absolute floors)
 
-Instead of absolute QPS/p50/p99 walls that depend on host, tests use **relative** checks proving an index exists:
+Instead of absolute QPS/p50/p99 walls that depend on host, tests use relative checks proving an index exists and cache works:
 
-- **Relative latency**: Measure avg lookup latency with 5 geofences vs 500 geofences for same point (inside and empty area). With a spatial index, 500-zone should be within a small multiple (e.g., ≤5×) of 5-zone latency; naive O(N) would be ~100×. Tests assert ratio, not absolute ms, so no host dependency and no oracle flake.
+- **Relative latency**: Measure avg lookup latency with few geofences vs many geofences for same point (inside and empty area). With a spatial index, latency should not grow linearly with number of zones.
+- **Cold vs cached**: First query for a point is miss, second identical is hit and should be counted as hit; cache_size bounded.
+- **Correctness under concurrency**: Concurrent clients must all succeed and match naive results. All response paths must return `[]` not `null` when empty.
+- **Grid bookkeeping**: `index_cells` must accurately track cells that contain geofences and must reclaim empty cells after DELETE, so stale empty entries are not left behind. Stats must reflect dynamic mutations.
 
-- **Cold vs cached**: First query for a point is miss, second identical (or very close) is hit and should be counted as hit; cache_size bounded.
-
-- **Correctness under concurrency**: 30 concurrent clients × 100 requests = 3000 lookups, all must succeed and match CLI naive results. All response paths must correctly handle empty results as `[]` not `null`, including cache-hit paths.
-
-- **Semantic discriminators (must be handled)**:
-  - Antimeridian-crossing polygons (lng wrap): e.g., tiny rectangle from 179 to -179 crossing 180. Must correctly answer inside for points near ±180 and outside for 0, and grid must not explode to tens of thousands of cells for a tiny crossing rectangle. Batch lookup must also handle wrapping.
-  - Pole-adjacent bounding boxes: polygons near lat 89-90 and also near -90 must have correct bbox and grid; points on edge at exactly ±90 are inside.
-  - Cache invalidation ordering under concurrent DELETE + GET, and read-after-POST visibility: after POST/DELETE, subsequent lookups must see new state immediately, not stale cache. This includes overwrite via POST (same ID new polygon) and delete of a zone that was previously cached as empty `[]` or as containing the zone. Concurrent DELETE + concurrent lookups must not return stale cached data.
-  - Grid must be updated on POST/DELETE: after POST a new zone, `index_cells` must reflect new cells and lookups must use updated index; after DELETE, `index_cells` may shrink and lookups must not return deleted ID.
-  - Stats: `total_queries` must increment by batch size for `POST /lookup/batch`, `cache_hits` must count hits both in single and batch paths, `total_geofences` must track POST/DELETE, `cache_size` bounded and cleared on mutation.
-
-If relative checks fail, grading fails. Generous absolute upper bounds (e.g., <15s for 1000 reqs) prevent hangs but do not cause flake.
+If relative checks fail, grading fails. Generous absolute upper bounds prevent hangs but do not cause flake.
 
 ### Backward Compatibility
 - All Step 1 commands still work.
@@ -118,7 +102,7 @@ If relative checks fail, grading fails. Generous absolute upper bounds (e.g., <1
 - Must be thread-safe.
 - No per-request file read, except atomic write on POST/DELETE.
 - LRU cache must be own implementation.
-- All empty JSON array fields must be `[]`, not `null` (use non-nil empty slices). Cache-hit path must also return `[]` not `null`.
+- All empty JSON array fields must serialize as `[]` when empty, on every response path.
 
 ### Example
 ```bash

@@ -1818,3 +1818,205 @@ def test_stats_covers_batch_and_crud():
             stop_server(proc)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_selective_cache_invalidation():
+    """Selective invalidation: POST near one point must not wipe far-away cached entry. This is prior-violating vs naive full clear."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="20", grid_size="1")
+        try:
+            # warm two far-apart points
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=70&lng=70", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+
+            stats_before = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_before["cache_size"] == 2
+            assert stats_before["total_queries"] == 2
+
+            # POST zone near 0,0 only
+            payload = {
+                "id": "near_zero",
+                "name": "NearZero",
+                "polygon": [
+                    {"lat": 0, "lng": 0},
+                    {"lat": 0, "lng": 1},
+                    {"lat": 1, "lng": 1},
+                    {"lat": 1, "lng": 0},
+                ],
+            }
+            resp = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert resp.status_code in (200, 201)
+
+            # far point must still be cached HIT, cache_size must not drop to 0, total_geofences 1
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=70&lng=70", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+            stats_mid = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            # second lookup to far point should have been a hit (entry survived selective invalidation)
+            assert stats_mid["cache_hits"] == stats_before["cache_hits"] + 1, (
+                f"far point should have been cache hit after selective invalidation, got hits {stats_mid['cache_hits']} vs before {stats_before['cache_hits']}"
+            )
+            # cache_size should be 1 (far entry survived) or 2 after re-caching near point? Actually near entry was invalidated, so only far remains before next lookup
+            # After far HIT, cache_size should still be 1 (only far), not 0
+            assert stats_mid["cache_size"] >= 1, (
+                f"selective invalidation must preserve far entry, cache_size {stats_mid['cache_size']}"
+            )
+            assert stats_mid["total_geofences"] == 1
+
+            # near point must be MISS and now see new zone
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "near_zero" in resp.json()["geofences"]
+            stats_after = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            # near point was MISS (invalidated), so cache_hits should not increase for this lookup
+            assert stats_after["cache_hits"] == stats_mid["cache_hits"], (
+                f"near point should have been MISS after invalidation, hits {stats_after['cache_hits']} vs {stats_mid['cache_hits']}"
+            )
+            # After near MISS, cache should now have both entries again (far + near)
+            assert stats_after["cache_size"] == 2
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_index_cells_reclaim():
+    """Index_cells must be exactly reclaimed after POST+DELETE – leaving stale empty cells is a bug."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, grid_size="1", cache_size="0")
+        try:
+            before = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            payload = {
+                "id": "temp_zone",
+                "name": "Temp",
+                "polygon": [
+                    {"lat": 10, "lng": 10},
+                    {"lat": 10, "lng": 11},
+                    {"lat": 11, "lng": 11},
+                    {"lat": 11, "lng": 10},
+                ],
+            }
+            resp = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert resp.status_code in (200, 201)
+            mid = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            assert mid > before, (
+                f"index_cells should increase after POST, before {before} mid {mid}"
+            )
+
+            resp = requests.delete(
+                f"http://localhost:{port}/geofences/temp_zone", timeout=2
+            )
+            assert resp.status_code == 200
+            after = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            assert after == before, (
+                f"index_cells must be reclaimed after DELETE: before {before} after {after} (stale empty cells left behind)"
+            )
+
+            # second cycle: add two, delete one, ensure count matches
+            payload2 = {
+                "id": "z1",
+                "name": "Z1",
+                "polygon": [
+                    {"lat": 0, "lng": 0},
+                    {"lat": 0, "lng": 1},
+                    {"lat": 1, "lng": 1},
+                    {"lat": 1, "lng": 0},
+                ],
+            }
+            payload3 = {
+                "id": "z2",
+                "name": "Z2",
+                "polygon": [
+                    {"lat": 20, "lng": 20},
+                    {"lat": 20, "lng": 21},
+                    {"lat": 21, "lng": 21},
+                    {"lat": 21, "lng": 20},
+                ],
+            }
+            requests.post(
+                f"http://localhost:{port}/geofences", json=payload2, timeout=2
+            )
+            requests.post(
+                f"http://localhost:{port}/geofences", json=payload3, timeout=2
+            )
+            with_two = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            requests.delete(f"http://localhost:{port}/geofences/z1", timeout=2)
+            with_one = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            # after deleting z1, cells should drop (or stay if overlapping, but these two don't overlap)
+            assert with_one < with_two, (
+                f"index_cells should shrink after DELETE when zones don't overlap: {with_two} -> {with_one}"
+            )
+            requests.delete(f"http://localhost:{port}/geofences/z2", timeout=2)
+            final = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            assert final == before, (
+                f"after deleting all, index_cells should return to {before}, got {final}"
+            )
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_unknown_path_404():
+    """Unknown path must return 404 JSON error – tiny gap but ensures spec coverage."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="5")
+        try:
+            resp = requests.get(
+                f"http://localhost:{port}/this_does_not_exist", timeout=2
+            )
+            assert resp.status_code == 404
+            assert_response_arrays_valid(
+                resp
+            )  # uses generic check – should be JSON error
+            body = resp.json()
+            assert "error" in body
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
