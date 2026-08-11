@@ -152,14 +152,18 @@ Tracer behavior:
 - `Start` creates new span. If ctx already contains a sampled TraceContext, child inherits TraceID and sets ParentID = parent SpanID. Step1 always sampled true. Preserve parent chain.
 - TraceID generation: if parent exists, reuse parent TraceID. Else generate new.
 - SpanID always new.
-- Store span in context internally (private key). New context carries this span's TraceContext.
+- Store span in context internally (private key) storing a **copy** of TraceContext, not reference. Mutating original TraceContext after ContextWithTrace must not affect stored context. New context carries this span's TraceContext.
 - `Span.End()` computes EndTime, calls processor OnEnd. Idempotent, concurrency-safe.
-- `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe.
+- `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe. `AddEvent` must copy its attributes slice; mutating original slice afterwards must not affect recorded event.
+- WithAttributes duplicate keys: if same key appears multiple times in initial attributes or via AddAttribute, last write wins. Duplicate does not increase attribute count.
 - **Resource limits:**
-  - Span Attributes: max 128 per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.
+  - Span Attributes: max 128 distinct keys per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.
   - Span Events: max 128 events per span. Drop excess beyond 128 (keep first 128). Timestamp set at AddEvent time.
-  - Attribute value size: string >1024 truncated to 1024.
+  - Attribute value size: string >1024 truncated to exactly 1024 chars (keep first 1024).
 - `IsRecording()` true if Sampled true and not ended.
+- ParentID rules: root span's ParentID must be empty string, and FinishedSpan.ParentID must equal SpanContext.ParentID. Child span's ParentID must equal parent's SpanID and not empty.
+- MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, or Events must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set.
+- Exporter: Clear() and GetCount() must be concurrency-safe.
 
 #### Context propagation
 
@@ -176,8 +180,8 @@ func Inject(ctx context.Context, carrier map[string]string)
 func Extract(carrier map[string]string) context.Context
 ```
 
-- `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Example: `0102030405060708090a0b0c0d0e0f10:0102030405060708::1` for root, or `0102030405060708090a0b0c0d0e0f10:0102030405060708:0a0b0c0d0e0f0a0b:0`.
-- `UnmarshalTrace` reads `x-ride-trace`, validates hex, returns context with TraceContext. If missing or invalid, return background context (no span).
+- `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Must produce exactly 4 colon-separated parts even when ParentID empty: e.g., `traceID:spanID::1` (empty third part). Example root: `0102030405060708090a0b0c0d0e0f10:0102030405060708::1`, child: `0102030405060708090a0b0c0d0e0f10:0102030405060708:0a0b0c0d0e0f0a0b:0`.
+- `UnmarshalTrace` reads `x-ride-trace`, validates hex (upper or lower case allowed), returns context with TraceContext. If missing or invalid (wrong parts, non-hex, parent non-hex), return background context (no span). Must handle empty ParentID as valid root.
 - Alias `Inject` writes only `x-ride-trace`. Alias `Extract` reads only `x-ride-trace`. Single header is canonical.
 - Validation: TraceID 32 hex, SpanID 16 hex, ParentID empty or 16 hex. If invalid, ignore extraction.
 - Thread-safe.
@@ -227,10 +231,12 @@ Rules:
 - Labels key regex same. Invalid label keys => no-op.
 - **Label value truncate 256 chars** (keep first 256), do not drop metric.
 - Counter Add >=0 only, ignore negative, NaN, Inf. Histogram Observe ignore NaN/Inf.
-- Same name + same label set reuse same instrument (inc on one affects other).
-- Thread safety required.
-- `Collect()` must return deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, or Labels map must not affect provider internal state; subsequent Collect must return original values. Returned Labels map must be non-nil when labels present.
-- Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive. Sorted ascending even if input unsorted.
+- Same name + same label set reuse same instrument (inc on one affects other). Distinct label sets are separate series.
+- Thread safety required for all operations including concurrent Collect and Add/Inc/Observe — no races.
+- `Collect()` must return deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, or Labels map must not affect provider internal state; subsequent Collect must return original values. Returned Labels map must be non-nil when labels present. Buckets slice in returned samples must also be deep copy.
+- Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive: value == upper bound counts in that bucket. So Observe(1) with buckets [1,5,10] => bucket 1 count 1, bucket 5 count 1, bucket 10 count 1. Sorted ascending even if input unsorted.
+- Histogram Observe and bucket counts cumulative: each bucket counts values <= upper bound.
+- Provider isolation: different providers must not share state.
 
 ## 3. Logging
 

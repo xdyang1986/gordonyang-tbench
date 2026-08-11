@@ -1671,3 +1671,314 @@ def test_tracing_tracecontext_field_names():
     assert proc.returncode == 0, (
         f"tracecontext field test failed: {proc.stdout} {proc.stderr}"
     )
+
+
+def test_exporter_getspans_deep_copy():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "deepcopy", observability.WithAttributes(observability.Attribute{Key:"k", Value:"v"}))
+        span.End()
+        spans1 := exp.GetSpans()
+        if len(spans1)!=1 { panic("expected 1") }
+        if spans1[0].Attributes == nil { panic("Attributes nil, expected non-nil map") }
+        spans1[0].Attributes["k"] = "hacked"
+        spans1[0].Attributes["injected"] = "yes"
+        spans1[0].Name = "hacked-name"
+        spans2 := exp.GetSpans()
+        if spans2[0].Attributes["k"] != "v" { panic(fmt.Sprintf("GetSpans should return deep copy of Attributes, expected v got %s", spans2[0].Attributes["k"])) }
+        if _, ok := spans2[0].Attributes["injected"]; ok { panic("GetSpans deep copy failed - injected leaked") }
+        if spans2[0].Name != "deepcopy" { panic("GetSpans deep copy failed - Name mutation leaked") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"exporter GetSpans deep copy failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_context_immutability():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        tc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), tc)
+        // mutate original after storing
+        tc.TraceID = "ffffffffffffffffffffffffffffffff"
+        tc.SpanID = "ffffffffffffffff"
+        got, ok := observability.TraceFromContext(ctx)
+        if !ok { panic("should have trace") }
+        if got.TraceID == "ffffffffffffffffffffffffffffffff" { panic("ContextWithTrace must store copy, not reference - mutation leaked") }
+        if got.TraceID != "0102030405060708090a0b0c0d0e0f10" { panic("traceID mismatch") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"context immutability failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_attribute_duplicate_last_wins():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "dup", observability.WithAttributes(observability.Attribute{Key:"k", Value:"first"}, observability.Attribute{Key:"k", Value:"second"}))
+        span.AddAttribute("k", "third")
+        span.End()
+        s := exp.GetSpans()[0]
+        if s.Attributes["k"] != "third" { panic(fmt.Sprintf("duplicate attr last wins expected third got %v", s.Attributes["k"])) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"duplicate attr last wins failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_event_attr_copy():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "evcopy")
+        attrs := []observability.Attribute{{Key:"a", Value:"1"}, {Key:"b", Value:"2"}}
+        span.AddEvent("ev", attrs...)
+        // mutate original slice after AddEvent
+        attrs[0].Key = "hacked"
+        attrs[0].Value = "hacked"
+        span.End()
+        ev := exp.GetSpans()[0].Events[0]
+        if len(ev.Attributes)!=2 { panic("event attrs count mismatch") }
+        if ev.Attributes[0].Key == "hacked" { panic("AddEvent must copy attributes slice, mutation leaked") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"event attr copy failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracing_marshal_empty_parent_format():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), sc)
+        carrier := map[string]string{}
+        observability.MarshalTrace(ctx, carrier)
+        v, ok := carrier["x-ride-trace"]
+        if !ok { panic("missing x-ride-trace") }
+        parts := strings.Split(v, ":")
+        if len(parts)!=4 { panic(fmt.Sprintf("x-ride-trace must have 4 colon-separated parts, got %d: %s", len(parts), v)) }
+        if parts[2] != "" { panic(fmt.Sprintf("root ParentID should be empty, got %s in %s", parts[2], v)) }
+        if parts[3] != "1" { panic("sampled flag should be 1") }
+        ctx2 := observability.UnmarshalTrace(carrier)
+        sc2, ok := observability.TraceFromContext(ctx2)
+        if !ok { panic("should have trace after unmarshal") }
+        if sc2.ParentID != "" { panic("ParentID should stay empty") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"marshal empty parent format failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_histogram_boundary_inclusive():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        h := prov.Histogram("boundary_hist", observability.WithBuckets([]float64{1,5,10}))
+        h.Observe(1)
+        h.Observe(5)
+        h.Observe(10)
+        fams := prov.Collect()
+        for _, fam := range fams {
+            if fam.Name=="boundary_hist" {
+                m := fam.Metrics[0]
+                if len(m.Buckets)!=3 { panic("expected 3 buckets") }
+                if m.Buckets[0].Count != 1 { panic(fmt.Sprintf("bucket 1 inclusive expected 1 got %d", m.Buckets[0].Count)) }
+                if m.Buckets[1].Count != 2 { panic(fmt.Sprintf("bucket 5 cumulative inclusive expected 2 got %d", m.Buckets[1].Count)) }
+                if m.Buckets[2].Count != 3 { panic(fmt.Sprintf("bucket 10 cumulative inclusive expected 3 got %d", m.Buckets[2].Count)) }
+                if m.Count != 3 { panic("count 3") }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"histogram boundary inclusive failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_exporter_concurrent():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        var wg sync.WaitGroup
+        n:=100
+        wg.Add(n)
+        for i:=0;i<n;i++{
+            go func(idx int){
+                defer wg.Done()
+                for j:=0;j<50;j++{
+                    _, s := tracer.Start(context.Background(), fmt.Sprintf("c-%d-%d", idx, j))
+                    s.End()
+                }
+                // concurrent GetSpans
+                _ = exp.GetSpans()
+            }(i)
+        }
+        wg.Wait()
+        if len(exp.GetSpans()) != n*50 { panic(fmt.Sprintf("expected %d got %d", n*50, len(exp.GetSpans()))) }
+        fmt.Println("OK")
+    }
+    """)
+    tmp = tempfile.mkdtemp(prefix="obs_test_")
+    try:
+        mod = textwrap.dedent(f"""
+        module testharness
+        go 1.22
+        require ride-observability v0.0.0
+        replace ride-observability => {APP_DIR}
+        """)
+        open(os.path.join(tmp, "go.mod"), "w").write(mod)
+        open(os.path.join(tmp, "main.go"), "w").write(code)
+        proc = run(["go", "run", "-race", "."], cwd=tmp, timeout=30)
+        assert proc.returncode == 0, (
+            f"exporter concurrent race failed: {proc.stdout} {proc.stderr}"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_metrics_collect_race():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("race_collect", observability.WithLabels(map[string]string{"a":"1"}))
+        var wg sync.WaitGroup
+        wg.Add(2)
+        go func(){
+            defer wg.Done()
+            for i:=0;i<10000;i++{ c.Inc() }
+        }()
+        go func(){
+            defer wg.Done()
+            for i:=0;i<1000;i++{ prov.Collect() }
+        }()
+        wg.Wait()
+        fmt.Println("OK")
+    }
+    """)
+    tmp = tempfile.mkdtemp(prefix="obs_test_")
+    try:
+        mod = textwrap.dedent(f"""
+        module testharness
+        go 1.22
+        require ride-observability v0.0.0
+        replace ride-observability => {APP_DIR}
+        """)
+        open(os.path.join(tmp, "go.mod"), "w").write(mod)
+        open(os.path.join(tmp, "main.go"), "w").write(code)
+        proc = run(["go", "run", "-race", "."], cwd=tmp, timeout=30)
+        assert proc.returncode == 0, (
+            f"metrics collect race failed: {proc.stdout} {proc.stderr}"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_tracing_parent_id_rules():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, root := tracer.Start(context.Background(), "root")
+        rootCtx, _ := tracer.Start(context.Background(), "root2")
+        _, child := tracer.Start(rootCtx, "child")
+        root.End()
+        child.End()
+        spans := exp.GetSpans()
+        var rootSpan, childSpan *observability.FinishedSpan
+        for i:= range spans {
+            if spans[i].Name=="root" { rootSpan=&spans[i] }
+            if spans[i].Name=="child" { childSpan=&spans[i] }
+        }
+        if rootSpan==nil { panic("root not found") }
+        if rootSpan.ParentID != "" { panic(fmt.Sprintf("root ParentID should be empty, got %s", rootSpan.ParentID)) }
+        if childSpan==nil { panic("child not found") }
+        if childSpan.ParentID == "" { panic("child ParentID should not be empty") }
+        if childSpan.ParentID != childSpan.SpanContext.ParentID { panic("ParentID field and SpanContext.ParentID must match") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"parent id rules failed: {proc.stdout} {proc.stderr}"

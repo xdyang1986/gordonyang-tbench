@@ -313,7 +313,17 @@ func (e *MemoryExporter) GetSpans() []FinishedSpan {
     e.mu.Lock()
     defer e.mu.Unlock()
     cpy := make([]FinishedSpan, len(e.spans))
-    copy(cpy, e.spans)
+    for i, s := range e.spans {
+        ns := s
+        if s.Attributes != nil {
+            ns.Attributes = make(map[string]interface{}, len(s.Attributes))
+            for k, v := range s.Attributes { ns.Attributes[k] = v }
+        }
+        if s.Events != nil {
+            ns.Events = append([]SpanEvent(nil), s.Events...)
+        }
+        cpy[i] = ns
+    }
     return cpy
 }
 func (e *MemoryExporter) Clear() { e.mu.Lock(); defer e.mu.Unlock(); e.spans = nil }
