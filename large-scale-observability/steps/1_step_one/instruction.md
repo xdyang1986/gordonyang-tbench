@@ -180,11 +180,11 @@ func Inject(ctx context.Context, carrier map[string]string)
 func Extract(carrier map[string]string) context.Context
 ```
 
-- `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Must produce exactly 4 colon-separated parts even when ParentID empty: e.g., `traceID:spanID::1` (empty third part). Example root: `0102030405060708090a0b0c0d0e0f10:0102030405060708::1`, child: `0102030405060708090a0b0c0d0e0f10:0102030405060708:0a0b0c0d0e0f0a0b:0`.
-- `UnmarshalTrace` reads `x-ride-trace`, validates hex (upper or lower case allowed), returns context with TraceContext. If missing or invalid (wrong parts, non-hex, parent non-hex), return background context (no span). Must handle empty ParentID as valid root.
-- Alias `Inject` writes only `x-ride-trace`. Alias `Extract` reads only `x-ride-trace`. Single header is canonical.
+- `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Must produce exactly 4 colon-separated parts even when ParentID empty: e.g., `traceID:spanID::1` (empty third part). Example root: `0102030405060708090a0b0c0d0e0f10:0102030405060708::1`, child: `0102030405060708090a0b0c0d0e0f10:0102030405060708:0a0b0c0d0e0f0a0b:0`. Must validate IDs: if TraceID not 32 hex or SpanID not 16 hex or ParentID present but not 16 hex, must NOT write anything. Must not panic on nil carrier or nil context.
+- `UnmarshalTrace` reads `x-ride-trace`, validates hex (upper or lower case allowed), returns context with TraceContext. If missing or invalid (wrong parts count !=4, non-hex, parent non-hex), return background context (no span). Must handle empty ParentID as valid root, nil and empty carrier as no-op returning background.
+- Alias `Inject` writes only `x-ride-trace` with same validation. Alias `Extract` reads only `x-ride-trace`. Single header is canonical.
 - Validation: TraceID 32 hex, SpanID 16 hex, ParentID empty or 16 hex. If invalid, ignore extraction.
-- Thread-safe.
+- Thread-safe and must not panic on nil contexts or carriers. ContextWithTrace(nil, tc) must return non-nil context containing trace.
 
 ## 2. Metrics
 

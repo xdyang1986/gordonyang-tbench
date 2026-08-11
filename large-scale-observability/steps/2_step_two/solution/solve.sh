@@ -267,6 +267,8 @@ func MarshalTrace(ctx context.Context, carrier map[string]string) {
     if carrier == nil { return }
     sc, ok := TraceFromContext(ctx)
     if !ok { return }
+    if !hex32Regex.MatchString(sc.TraceID) || !hex16Regex.MatchString(sc.SpanID) { return }
+    if sc.ParentID != "" && !hex16Regex.MatchString(sc.ParentID) { return }
     samp := "0"
     if sc.Sampled { samp = "1" }
     carrier["x-ride-trace"] = fmt.Sprintf("%s:%s:%s:%s", sc.TraceID, sc.SpanID, sc.ParentID, samp)
@@ -304,7 +306,16 @@ func (e *MemoryExporter) ExportSpans(ctx context.Context, spans []FinishedSpan) 
             cpy.Attributes = make(map[string]interface{}, len(s.Attributes))
             for k, v := range s.Attributes { cpy.Attributes[k] = v }
         }
-        if s.Events != nil { cpy.Events = append([]SpanEvent(nil), s.Events...) }
+        if s.Events != nil {
+            cpy.Events = make([]SpanEvent, len(s.Events))
+            for j, ev := range s.Events {
+                ne := ev
+                if ev.Attributes != nil {
+                    ne.Attributes = append([]Attribute(nil), ev.Attributes...)
+                }
+                cpy.Events[j] = ne
+            }
+        }
         e.spans = append(e.spans, cpy)
     }
     return nil
@@ -320,7 +331,14 @@ func (e *MemoryExporter) GetSpans() []FinishedSpan {
             for k, v := range s.Attributes { ns.Attributes[k] = v }
         }
         if s.Events != nil {
-            ns.Events = append([]SpanEvent(nil), s.Events...)
+            ns.Events = make([]SpanEvent, len(s.Events))
+            for j, ev := range s.Events {
+                ne := ev
+                if ev.Attributes != nil {
+                    ne.Attributes = append([]Attribute(nil), ev.Attributes...)
+                }
+                ns.Events[j] = ne
+            }
         }
         cpy[i] = ns
     }
