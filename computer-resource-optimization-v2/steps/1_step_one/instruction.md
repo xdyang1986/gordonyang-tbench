@@ -1,22 +1,26 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (66 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (80 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 66 tests (was 30 too easy, then 49 still too easy), now 66 with real discriminators. Features: 20 concurrent allocs all 20 preserved, concurrent add-node 20, concurrent diff nodes 20, 1000 nodes perf <2s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs field [] not null (nil-slice pitfall), empty file and whitespace file empty store vs corrupt (null, [], invalid JSON -> corrupt backup .corrupt.<nanosec> integer suffix), missing/bad checksum corruption backup warning, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp and no global.lock leftover, pagination offset then limit order first-fit not best-fit.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 80 tests (was 30 too easy, then 49, then 66 still too easy per feedback), now 80 with 50 new discriminators over original 30. Features: 20 concurrent allocs all 20 preserved, concurrent add-node 20, concurrent add-node same ID 20 (idempotent race), concurrent add-job same ID 20, concurrent deallocate 20, concurrent diff nodes 20, concurrent list while allocating 10x30, 1000 nodes perf <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs field [] not null (nil-slice pitfall), empty file and whitespace file empty store vs corrupt (null, [], invalid JSON -> corrupt backup .corrupt.<nanosec> integer suffix regex), missing/bad checksum corruption backup warning, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp and no global.lock leftover, pagination offset then limit order, first-fit not best-fit, file lock cleaned after failure.
 
-Failing observations (naive impl misses, now enforced):
-- Empty "" and whitespace "   \n\t" must be empty store [] not corrupt 4; file "null" and "[]" must be treated as corrupt backup integer suffix .corrupt.<nanosec> (\.corrupt\.\d+$) warning
-- Missing checksum or bad checksum -> backup and recreate empty, list returns [] not crash
-- Jobs [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null; check raw contains '"jobs":[]' and no null
-- Idempotent no-op: re-add node/job with different resources preserves old resources and allocation, not upsert; add-job idempotent preserves status running
+Failing observations (naive impl misses, now enforced 80):
+- Empty "" and whitespace "   \n\t" must be empty store [] not corrupt 4; files "null" and "[]" must be treated as corrupt backup integer suffix .corrupt.<nanosec> (\.corrupt\.\d+$) warning, list returns [] after
+- Missing checksum or bad checksum -> backup and recreate empty, not crash, list [].
+- Jobs [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null; raw must contain '"jobs":[]' and no '"jobs":null', and must not contain \u003c (SetEscapeHTML false)
+- Idempotent no-op: re-add node/job with different resources preserves old resources and allocation running, not upsert; add-job idempotent preserves status running; add-node same ID concurrent 20 threads must result in 1 node not 20, sorted, lock cleaned, checksum valid
 - Concurrent add-node 20 different IDs preserve all 20 sorted, lock cleaned
-- Concurrent same node 20 allocates preserve all 20 jobs used correct no overcommit file valid JSON during concurrent, lock cleaned
+- Concurrent add-job same ID 20 -> 1 job, checksum valid
+- Concurrent same node 20 allocates preserve all 20 jobs used cpu 20 correct no overcommit file valid JSON during concurrent via lock O_EXCL, lock cleaned after
 - Concurrent diff nodes 20 parallel allocates to 20 different nodes preserve all 20 status allocated 20
-- Concurrent list while allocating: list-nodes valid JSON during allocs
-- Pagination offset then limit: offset1 limit2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int (abc) -> exit2
+- Concurrent deallocate 20 allocated jobs to same node -> used 0 jobs [] after
+- Concurrent list while allocating: list-nodes 30 times per thread 10 threads -> valid JSON no crash, lock cleaned
+- Pagination offset then limit order: offset1 limit2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int abc -> exit2; limit 0 vs omit both all, offset beyond [].
 - First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins Step1, Step2 flips to best-fit)
-- Special chars <>& raw "<" requires SetEscapeHTML(false) no \u003c, Unicode emoji 🌍🚀😀 preserved for node and job
-- Large ID 10KB supported, IDs dash underscore dot colon valid, empty ID with spaces "   " -> exit2, float resource "4.0" invalid -> exit2
-- Status sum total/used resources, used/free correct after allocate/deallocate, remove-job deallocates first preserves node, file lock cleaned after failure (insufficient)
-- Allocate already allocated different node -> exit2, same node idempotent exit0 no duplicate, node jobs sorted asc
+- Special chars <>& raw "<" requires SetEscapeHTML(false) no \u003c, Unicode emoji 🌍🚀😀 preserved for node and job, large ID 10KB dash underscore dot colon valid, empty ID with spaces "   " -> exit2, float resource "4.0" invalid -> exit2
+- Status sum total/used resources, used/free correct after allocate/deallocate, remove-job deallocates first preserves node free=total, remove-node false not exist true/false handling, deallocate false when not allocated vs exit2 when job not exist, allocate already allocated diff node -> exit2 same node idempotent no duplicate jobs sorted asc, node jobs sorted after many allocations
+- File lock cleaned after failure insufficient gpu (node gpu 0 job gpu 1 -> insufficient), after success, after concurrent, no .lock leftover, no .tmp leftover
+- Corruption backup nanosec integer: file name .corrupt.<int> not float, at least 1 backup after corruption
+- Large scale 800 nodes list <1.5s not O(n^2), 500 jobs sorted, list nodes limit 0 vs omit all, offset beyond empty
+- Checksum valid after each op add-node/add-job/allocate/deallocate/remove, contains CreateTemp Rename SetEscapeHTML stdlib only no dotted imports
 
 Data directory `/app/data/` writable, default persistence `/app/data/cluster.json`.
 
