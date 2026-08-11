@@ -558,6 +558,51 @@ def test_temp_file_cleanup():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_invalid_add_does_not_corrupt():
+    """Validation failure must not modify DB and must not leave temp files."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "keep", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Keep"])
+        # Try invalid polygon (self-intersecting bow-tie)
+        r = run_cli(
+            db,
+            ["add", "bad", "--polygon", "0,0;1,1;0,1;1,0", "--name", "Bad"],
+        )
+        assert r.returncode == 2, f"should reject self-intersecting {r.stderr}"
+        # DB must still have only keep
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1 and arr[0]["id"] == "keep"
+        # No temp files
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f], (
+            f"temp left after invalid add: {files}"
+        )
+
+        # Try duplicate point with different string representation (0 vs 0.0) – numeric duplicate
+        r = run_cli(
+            db,
+            ["add", "bad2", "--polygon", "0,0;0.0,0.0;1,0;0,1", "--name", "Bad2"],
+        )
+        assert r.returncode == 2, f"should reject numeric duplicate {r.stderr}"
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1 and arr[0]["id"] == "keep"
+
+        # Invalid ID format must not corrupt
+        r = run_cli(
+            db, ["add", "bad id!", "--polygon", "0,0;0,1;1,1;1,0", "--name", "X"]
+        )
+        assert r.returncode == 2
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_cli_performance():
     """CLI lookup with many geofences should still be reasonably fast (bbox prefilter)."""
     tmpdir = tempfile.mkdtemp()

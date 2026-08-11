@@ -1903,6 +1903,79 @@ def test_selective_cache_invalidation():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_selective_invalidation_antimeridian():
+    """Selective invalidation must handle antimeridian bbox wrapping – far points outside crossing bbox must survive."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="20", grid_size="1")
+        try:
+            # warm far point at 0,0 (outside antimeridian region)
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0&lng=0", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+            # warm point near antimeridian but not crossing yet
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=179.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+
+            stats_before = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_before["cache_size"] == 2
+
+            # POST crossing rect 0,179 to 1,-179
+            payload = {
+                "id": "cross",
+                "name": "Cross",
+                "polygon": [
+                    {"lat": 0, "lng": 179},
+                    {"lat": 0, "lng": -179},
+                    {"lat": 1, "lng": -179},
+                    {"lat": 1, "lng": 179},
+                ],
+            }
+            resp = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert resp.status_code in (200, 201)
+
+            # point at 0,0 is outside crossing bbox (bbox is around 179..-179 wrapping, small gap at 0)
+            # With correct pointInBBox wrapping logic, 0,0 should be outside, so its cache entry should survive as HIT
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0&lng=0", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+            stats_mid = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats_mid["cache_hits"] == stats_before["cache_hits"] + 1, (
+                f"0,0 should be HIT after crossing POST (outside bbox), hits {stats_mid['cache_hits']} vs {stats_before['cache_hits']}"
+            )
+
+            # point at 0.5,179.5 is inside crossing bbox, should have been invalidated -> MISS and now contain cross
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=179.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "cross" in resp.json()["geofences"]
+            stats_after = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_after["cache_hits"] == stats_mid["cache_hits"], (
+                f"179.5 point should be MISS after crossing POST, hits {stats_after['cache_hits']} vs {stats_mid['cache_hits']}"
+            )
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_index_cells_reclaim():
     """Index_cells must be exactly reclaimed after POST+DELETE – leaving stale empty cells is a bug."""
     tmpdir = tempfile.mkdtemp()
