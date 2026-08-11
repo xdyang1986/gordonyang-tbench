@@ -1248,3 +1248,163 @@ def test_list_jobs_with_limit_and_offset():
     assert len(arr2) == 10
     arr3 = json.loads(run_cli("list-jobs").stdout)
     assert len(arr3) == 10
+
+# ---------- Extreme: 96->110 (still too easy) ----------
+
+def test_allocate_exact_fit():
+    clean_data()
+    run_cli("add-node", "nodeExact", "2", "512", "1")
+    run_cli("add-job", "jobExact", "2", "512", "1")
+    r = run_cli("allocate", "jobExact", "nodeExact")
+    assert r.returncode == 0
+    node = json.loads(run_cli("get-node", "nodeExact").stdout)
+    assert node["free"]["cpu"] == 0 and node["free"]["memory"] == 0 and node["free"]["gpu"] == 0
+    run_cli("add-job", "jobNoFit", "1", "256", "0")
+    r2 = run_cli("allocate", "jobNoFit", "nodeExact")
+    assert r2.returncode == 2 and "insufficient" in r2.stderr.lower()
+
+
+def test_list_nodes_zero_padded_limit_offset():
+    clean_data()
+    for i in range(3):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    # "00" and "01" should be parsed as 0 and 1
+    arr = json.loads(run_cli("list-nodes", "00", "00").stdout)
+    assert len(arr) == 3
+    arr2 = json.loads(run_cli("list-nodes", "01", "01").stdout)
+    assert len(arr2) == 1 and arr2[0]["id"] == "node-1"
+
+
+def test_corruption_backup_contains_original():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    invalid_content = "{ not valid json at all"
+    with open(DATA_FILE, "w") as f:
+        f.write(invalid_content)
+    run_cli("list-nodes")
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    corrupt = [fn for fn in files if ".corrupt." in fn]
+    assert len(corrupt) >= 1
+    # At least one backup should contain original invalid content
+    found = False
+    for fn in corrupt:
+        try:
+            if invalid_content in open(os.path.join(os.path.dirname(DATA_FILE), fn), "r", encoding="utf-8", errors="ignore").read():
+                found = True
+                break
+        except:
+            pass
+    assert found, "backup should contain original invalid content"
+
+
+def test_status_after_remove_all():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("remove-job", "job1")
+    run_cli("remove-node", "node1")
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_nodes"] == 0 and st["total_jobs"] == 0 and st["allocated_jobs"] == 0 and st["pending_jobs"] == 0
+    assert st["total_resources"]["cpu"] == 0 and st["used_resources"]["cpu"] == 0
+
+
+def test_concurrent_allocate_and_deallocate_interleaved():
+    clean_data()
+    run_cli("add-node", "node1", "100", "100000", "10")
+    for i in range(30):
+        run_cli("add-job", f"job{i}", "1", "100", "0")
+    def alloc_dealloc_loop(start):
+        for i in range(start, start + 10):
+            run_cli("allocate", f"job{i}", "node1")
+            time.sleep(0.01)
+            run_cli("deallocate", f"job{i}")
+    threads = [threading.Thread(target=alloc_dealloc_loop, args=(i * 10,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
+
+
+def test_list_jobs_pagination_with_allocations():
+    clean_data()
+    run_cli("add-node", "node1", "100", "100000", "0")
+    for i in range(20):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+        if i % 2 == 0:
+            run_cli("allocate", f"job-{i:02d}", "node1")
+    arr = json.loads(run_cli("list-jobs", "5", "5").stdout)
+    assert len(arr) == 5
+    assert [j["id"] for j in arr] == sorted([j["id"] for j in arr])
+
+
+def test_add_node_id_case_sensitive():
+    clean_data()
+    run_cli("add-node", "NodeA", "4", "1024", "0")
+    run_cli("add-node", "nodeA", "4", "1024", "0")
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 2
+    assert set([n["id"] for n in arr]) == {"NodeA", "nodeA"}
+
+
+def test_file_lock_cleaned_even_after_success_many_ops():
+    clean_data()
+    for i in range(50):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+        run_cli("allocate", f"job-{i:02d}", f"node-{i:02d}")
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(f.endswith(".lock") for f in files)
+
+
+def test_jobs_field_sorted_after_deallocate_reallocate():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for jid in ["jobC", "jobA", "jobB"]:
+        run_cli("add-job", jid, "1", "256", "0")
+        run_cli("allocate", jid, "node1")
+    run_cli("deallocate", "jobB")
+    run_cli("allocate", "jobB", "node1")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["jobs"] == sorted(node["jobs"])
+
+
+def test_large_scale_1000_nodes_and_jobs_perf():
+    clean_data()
+    for i in range(600):
+        run_cli("add-node", f"node-{i:04d}", "4", "1024", "0")
+    t0 = time.time()
+    arr = json.loads(run_cli("list-nodes", "100", "100").stdout)
+    elapsed = time.time() - t0
+    assert len(arr) == 100
+    assert elapsed < 1.5
+    for i in range(300):
+        run_cli("add-job", f"job-{i:04d}", "1", "256", "0")
+    t1 = time.time()
+    arr2 = json.loads(run_cli("list-jobs", "100", "100").stdout)
+    elapsed2 = time.time() - t1
+    assert len(arr2) == 100
+    assert elapsed2 < 1.5
+
+
+def test_allocate_with_special_chars_ids():
+    clean_data()
+    run_cli("add-node", "node<>&", "4", "1024", "0")
+    run_cli("add-job", "job<>&", "1", "256", "0")
+    r = run_cli("allocate", "job<>&", "node<>&")
+    assert r.returncode == 0
+    node = json.loads(run_cli("get-node", "node<>&").stdout)
+    assert "job<>&" in node["jobs"]
+
+
+def test_remove_node_has_jobs_even_after_failed_allocate():
+    clean_data()
+    run_cli("add-node", "node1", "1", "256", "0")
+    run_cli("add-job", "jobBig", "10", "10000", "0")
+    r = run_cli("allocate", "jobBig", "node1")
+    assert r.returncode == 2
+    # Node has no jobs, so remove should succeed (not fail due to failed allocate)
+    r2 = run_cli("remove-node", "node1")
+    assert r2.returncode == 0 and "true" in r2.stdout.lower()
