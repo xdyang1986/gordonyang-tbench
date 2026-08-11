@@ -117,8 +117,8 @@ Spec:
 - Background goroutine collects spans up to BatchSize or BatchTimeout elapsed, then calls ExportSpans.
 - Concurrency-safe: many goroutines calling OnEnd.
 - Backpressure: normally non-blocking enqueue (with evict-oldest). Calling goroutines must not be blocked for more than a few milliseconds in normal mode.
-- `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting BatchSize), wait for in-flight exports, respect ctx timeout, return nil or ctx error. After Shutdown, OnEnd should drop (no-op) and not panic. Shutdown must respect context timeout and not block beyond timeout.
-- `ForceFlush(ctx)` blocks until all currently queued spans are exported or ctx timeout. Must export incomplete batches as well, not wait for BatchSize to fill. During ForceFlush, OnEnd must block (not evict/drop) until queue has space or ctx timeout. DroppedCount must not increase during ForceFlush even if queue was full before flush. ForceFlush with empty queue must not panic and return nil.
+- `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting BatchSize), wait for in-flight exports, respect ctx timeout, return nil or ctx error. After Shutdown, OnEnd should drop (no-op) and not panic.
+- `ForceFlush(ctx)` blocks until all currently queued spans are exported or ctx timeout. Must export incomplete batches as well, not wait for BatchSize to fill. During ForceFlush, OnEnd must block (not evict/drop) until queue has space or ctx timeout. DroppedCount must not increase during ForceFlush even if queue was full before flush.
 - Required methods:
   ```go
   func (b *BatchProcessor) DroppedCount() int
