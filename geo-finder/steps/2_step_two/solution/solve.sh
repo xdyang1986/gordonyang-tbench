@@ -125,11 +125,12 @@ func atomicWriteDBErr(path string, db DB) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	f, err := os.Create(tmpPath)
+	// Use unique temp file to allow concurrent POSTs (previous used pid only, causing clash)
+	f, err := os.CreateTemp(dir, "geof_*.tmp")
 	if err != nil {
 		return err
 	}
+	tmpPath := f.Name()
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(db); err != nil {

@@ -796,13 +796,12 @@ def test_relative_index_performance():
             f"ratio inside {avg500_inside / (avg5_inside + 1e-6):.2f}x empty {avg500_empty / (avg5_empty + 1e-6):.2f}x"
         )
 
-        # With index, 500 should be within ~5x of 5 (plus small absolute slack for noise)
-        # Naive without index would be ~100x (500/5)
-        # Use generous factor 8 to avoid flake, plus 0.02s slack for tiny absolute times
-        assert avg500_inside <= avg5_inside * 8 + 0.05, (
+        # With index, 500 should be within small multiple of 5; naive would be ~100x (500/5)
+        # Tightened to 5x to increase difficulty while still generous for indexed impl (typical ratio ~1.5x)
+        assert avg500_inside <= avg5_inside * 5 + 0.05, (
             f"500-zone inside too slow vs 5-zone: {avg500_inside}s vs {avg5_inside}s ratio {avg500_inside / (avg5_inside + 1e-9):.1f}x, expected index to keep it small"
         )
-        assert avg500_empty <= avg5_empty * 8 + 0.05, (
+        assert avg500_empty <= avg5_empty * 5 + 0.05, (
             f"500-zone empty too slow vs 5-zone: {avg500_empty}s vs {avg5_empty}s ratio {avg500_empty / (avg5_empty + 1e-9):.1f}x, expected index to make empty fast"
         )
 
@@ -2091,5 +2090,200 @@ def test_unknown_path_404():
             assert "error" in body
         finally:
             stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_selective_overwrite_far_survival():
+    """Overwrite same ID far away: far point outside both old and new bboxes must survive as HIT, old and new locations must be MISS."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # initial at 0,0
+        run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "A"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="30", grid_size="1")
+        try:
+            # warm three points: old loc, new loc (future), far
+            for lat, lng in [(0.5, 0.5), (20.5, 20.5), (70, 70)]:
+                resp = requests.get(
+                    f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=2
+                )
+                assert_response_arrays_valid(resp)
+
+            stats_before = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_before["cache_size"] == 3
+
+            # overwrite same ID to far location 20,20 (old bbox 0-1, new bbox 20-21)
+            payload = {
+                "id": "z",
+                "name": "Z2",
+                "polygon": [
+                    {"lat": 20, "lng": 20},
+                    {"lat": 20, "lng": 21},
+                    {"lat": 21, "lng": 21},
+                    {"lat": 21, "lng": 20},
+                ],
+            }
+            resp = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert resp.status_code in (200, 201)
+
+            # far point 70,70 outside both bboxes must survive as HIT
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=70&lng=70", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+            stats_mid = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats_mid["cache_hits"] == stats_before["cache_hits"] + 1, (
+                f"far point should be HIT after selective overwrite, hits {stats_mid['cache_hits']} vs {stats_before['cache_hits']}"
+            )
+            # after far HIT, cache should have only far entry (old and new invalidated)
+            assert stats_mid["cache_size"] == 1
+
+            # old location should be MISS and no longer contain z
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == []
+            stats_after_old = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_after_old["cache_hits"] == stats_mid["cache_hits"], (
+                "old loc should be MISS after overwrite"
+            )
+
+            # new location should be MISS and contain z
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=20.5&lng=20.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "z" in resp.json()["geofences"]
+            stats_after_new = requests.get(
+                f"http://localhost:{port}/stats", timeout=2
+            ).json()
+            assert stats_after_new["cache_hits"] == stats_after_old["cache_hits"], (
+                "new loc should be MISS right after overwrite"
+            )
+            assert stats_after_new["cache_size"] == 3  # far + old empty + new
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_concurrent_post_stress():
+    """Concurrent POSTs while doing lookups – must not crash, must remain thread-safe, final state must be consistent and [] not null."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, cache_size="20", grid_size="1")
+        try:
+            # pre-warm empty
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+
+            def do_post(i):
+                payload = {
+                    "id": f"p{i}",
+                    "name": f"P{i}",
+                    "polygon": [
+                        {"lat": float(i), "lng": float(i)},
+                        {"lat": float(i), "lng": float(i) + 0.5},
+                        {"lat": float(i) + 0.5, "lng": float(i) + 0.5},
+                        {"lat": float(i) + 0.5, "lng": float(i)},
+                    ],
+                }
+                try:
+                    r = requests.post(
+                        f"http://localhost:{port}/geofences", json=payload, timeout=2
+                    )
+                    return r.status_code in (200, 201)
+                except Exception as e:
+                    return False
+
+            def do_lookup():
+                for _ in range(30):
+                    try:
+                        r = requests.get(
+                            f"http://localhost:{port}/lookup?lat=0.5&lng=0.5",
+                            timeout=2,
+                        )
+                        if r.status_code != 200:
+                            return False
+                        assert_response_arrays_valid(r)
+                        if r.json().get("geofences") is None:
+                            return False
+                    except Exception:
+                        return False
+                return True
+
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                post_futs = [ex.submit(do_post, i) for i in range(20)]
+                lookup_futs = [ex.submit(do_lookup) for _ in range(10)]
+                post_res = [f.result() for f in post_futs]
+                lookup_res = [f.result() for f in lookup_futs]
+
+            assert all(post_res), f"concurrent POSTs failed: {post_res}"
+            assert all(lookup_res), (
+                f"concurrent lookups during POST failed: {lookup_res}"
+            )
+
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats["total_geofences"] >= 20
+            # final lookup must be valid list not null
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert_is_list_not_null(resp.json(), "geofences")
+        finally:
+            stop_server(proc)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_grid_cells_exact_small():
+    """Small zone at 0,0-0.5,0.5 with grid-size 1 must occupy exactly 1 cell – tight bookkeeping check."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(
+            db,
+            ["add", "tiny", "--polygon", "0,0;0,0.5;0.5,0.5;0.5,0", "--name", "Tiny"],
+        )
+        port = get_free_port()
+        proc = start_server(db, port, grid_size="1", cache_size="0")
+        try:
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            # latIdx = floor((0+90)/1)=90, lngIdx floor((0+180)/1)=180 -> single cell
+            # Even if polygon touches 0.5 boundary, still within same cell for size 1 because floor(0.5)=0 same?
+            # For 0-0.5 range, both 0 and 0.5 fall in same cell when gridSize 1 (except edge inclusive).
+            # The exact expected is 1 for this small zone.
+            assert stats["index_cells"] == 1, (
+                f"small zone should occupy exactly 1 cell with grid-size 1, got {stats['index_cells']}"
+            )
+        finally:
+            stop_server(proc)
+
+        # same zone with grid-size 5 should still be 1 cell
+        port2 = get_free_port()
+        proc2 = start_server(db, port2, grid_size="5", cache_size="0")
+        try:
+            stats2 = requests.get(f"http://localhost:{port2}/stats", timeout=2).json()
+            assert stats2["index_cells"] == 1
+        finally:
+            stop_server(proc2)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
