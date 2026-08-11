@@ -821,3 +821,188 @@ def test_cli_performance():
         assert elapsed < 0.5, f"CLI lookup too slow {elapsed}s for 200 zones"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_concurrent_cli_adds_no_corruption():
+    """Concurrent CLI adds: even though spec says single-process, atomic write must not leave temp files or corrupt DB."""
+    import concurrent.futures
+
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+
+        def add_one(i):
+            base_lat = (i // 20) * 2.0
+            base_lng = (i % 20) * 2.0
+            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.5};{base_lat + 0.5},{base_lng + 0.5};{base_lat + 0.5},{base_lng}"
+            r = run_cli(
+                db, ["add", f"cz_{i:03d}", "--polygon", poly, "--name", f"CZ {i}"]
+            )
+            return r.returncode == 0, r.stdout, r.stderr
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            results = list(ex.map(add_one, range(50)))
+
+        # All adds should succeed (return 0) – if they crash due to temp file handling, fail
+        assert all(rc for rc, _, _ in results), (
+            f"some concurrent adds failed: {results[:3]}"
+        )
+
+        r = run_cli(db, ["list"])
+        assert r.returncode == 0, f"list after concurrent adds failed {r.stderr}"
+        arr = json.loads(r.stdout)
+        # DB must be valid JSON object mapping, not corrupt array or partial
+        assert isinstance(arr, list)
+        # Must be sorted and [] not null
+        ids = [x["id"] for x in arr]
+        assert ids == sorted(ids), f"list not sorted after concurrent: {ids}"
+        # At least some entries must survive (concurrent read-modify-write may lose some without locking, but must not be empty/crash)
+        assert len(arr) >= 1, (
+            f"expected at least 1 after concurrent adds, got {len(arr)}"
+        )
+        assert len(arr) <= 50
+        # No temp files left in tmpdir or any nested?
+        for root, dirs, files in os.walk(tmpdir):
+            assert not [f for f in files if ".tmp." in f], (
+                f"temp left in {root}: {files}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_many_overlapping_sorted():
+    """Overlapping zones must return sorted IDs, [] not null, and verbose sorted."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # 10 overlapping zones all covering 0,0-10,10 but different IDs out of order
+        for i in reversed(range(10)):
+            poly = "0,0;0,10;10,10;10,0"
+            r = run_cli(
+                db, ["add", f"zone_{i:02d}", "--polygon", poly, "--name", f"Z{i}"]
+            )
+            assert r.returncode == 0
+
+        r = run_cli(db, ["lookup", "--lat", "5", "--lng", "5"])
+        assert r.returncode == 0
+        ids = json.loads(r.stdout)
+        assert ids == sorted(ids), f"lookup IDs not sorted: {ids}"
+        assert len(ids) == 10
+        # raw text must be [] not null when empty is already checked elsewhere, but check not null
+        assert "null" not in r.stdout.lower()
+
+        r = run_cli(db, ["lookup", "--lat", "5", "--lng", "5", "--verbose"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 10
+        v_ids = [x["id"] for x in arr]
+        assert v_ids == sorted(v_ids)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_name_and_id_boundaries():
+    """Name 128 allowed, 129 rejected; ID 64 allowed, 65 rejected."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        name_128 = "a" * 128
+        r = run_cli(
+            db, ["add", "b1", "--polygon", "0,0;0,1;1,1;1,0", "--name", name_128]
+        )
+        assert r.returncode == 0, f"128-char name should be allowed: {r.stderr}"
+
+        name_129 = "a" * 129
+        r = run_cli(
+            db, ["add", "b2", "--polygon", "0,0;0,1;1,1;1,0", "--name", name_129]
+        )
+        assert r.returncode == 2, "129-char name should be rejected"
+
+        id_64 = "x" * 64
+        r = run_cli(db, ["add", id_64, "--polygon", "0,0;0,1;1,1;1,0", "--name", "OK"])
+        assert r.returncode == 0, f"64-char ID should be allowed: {r.stderr}"
+
+        id_65 = "y" * 65
+        r = run_cli(db, ["add", id_65, "--polygon", "0,0;0,1;1,1;1,0", "--name", "OK"])
+        assert r.returncode == 2, "65-char ID should be rejected"
+
+        # Empty ID and whitespace-only name already tested elsewhere but check not corrupting
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 2  # b1 and id_64
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_polygon_min_max_points():
+    """Polygon must have at least 3 points, at most 1000; 2 points invalid."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        r = run_cli(db, ["add", "two", "--polygon", "0,0;0,1", "--name", "Two"])
+        assert r.returncode == 2, "2 points should be rejected"
+
+        r = run_cli(db, ["add", "three", "--polygon", "0,0;0,1;1,0", "--name", "Three"])
+        assert r.returncode == 0, "3 points should be allowed"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_parent_dir_deep_nested():
+    """Deep nested parent dir creation must work and not leave temp files in intermediate dirs."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "a", "b", "c", "d", "geof.json")
+    try:
+        r = run_cli(db, ["clear"])
+        assert r.returncode == 0
+        assert os.path.exists(db)
+        r = run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+        assert r.returncode == 0
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1
+        # Check no temp files in any nested dir
+        for root, dirs, files in os.walk(tmpdir):
+            assert not [f for f in files if ".tmp." in f], (
+                f"temp left in {root}: {files}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cli_performance_500_zones():
+    """Tighter performance: 500 zones each 100 points, lookup <0.5s requires bbox prefilter."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        import math
+
+        for i in range(500):
+            base_lat = (i // 20) * 2.0
+            base_lng = (i % 20) * 2.0
+            # 100-point polygon approximating small circle to make naive expensive
+            pts = []
+            for j in range(100):
+                ang = 2 * math.pi * j / 100
+                lat = base_lat + 0.1 * math.sin(ang) + 0.25
+                lng = base_lng + 0.1 * math.cos(ang) + 0.25
+                pts.append(f"{lat},{lng}")
+            poly = ";".join(pts)
+            r = run_cli(
+                db, ["add", f"perf_{i:03d}", "--polygon", poly, "--name", f"P{i}"]
+            )
+            assert r.returncode == 0, f"add perf_{i} failed {r.stderr}"
+
+        start = time.time()
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        elapsed = time.time() - start
+        assert r.returncode == 0
+        assert elapsed < 0.5, (
+            f"500-zone 100-pt lookup too slow {elapsed}s, need bbox prefilter"
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
