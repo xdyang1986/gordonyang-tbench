@@ -1,6 +1,18 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (30 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (49 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 30 tests, 20 concurrent allocs all 20, 1000 nodes history, 200 nodes/200 jobs sorted, checksum strict, special chars <>& no HTML escape, edge validation, Unicode.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 49 tests (was 30 too easy), 20 concurrent allocs all 20 preserved, concurrent add-node 20, 1000 nodes perf <2s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false, special chars <>& raw no escape, Unicode emoji, idempotent no-op preserved, jobs field [] not null not null, empty file and whitespace file empty store vs corrupt, missing/bad checksum corruption backup .corrupt.<nanosec>, atomic CreateTemp+Rename + file lock O_EXCL retry 5ms 2000 tries cleanup, pagination offset then limit order first-fit not best-fit.
+
+Failing observations (naive impl misses):
+- Empty file "" and whitespace "   \n\t" must be empty store [] not corrupt exit4; missing checksum or bad checksum => backup .corrupt.<nanosec> warning and recreate empty
+- Jobs field empty MUST be [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null
+- Idempotent no-op: re-adding existing node/job with different resources must preserve old resources and allocation, not upsert
+- Concurrent same node 20 allocates must preserve all 20 jobs and used counts, file valid JSON during, global.lock cleaned
+- Concurrent diff nodes 20 parallel allocates to 20 different nodes must preserve all 20
+- Concurrent add-node 20 different IDs must preserve all 20 sorted
+- Pagination offset then limit order: offset 1 limit 2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int -> exit2
+- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit job 2 CPU -> nodeA wins for Step1, Step2 will change to best-fit)
+- Special chars <>& raw "<" in file requires SetEscapeHTML(false), Unicode emoji preserved
+- Large ID 10KB supported, status total/used resources sum correct, atomic no tmp leftover
 
 Data directory `/app/data/` writable, default persistence `/app/data/cluster.json`.
 
