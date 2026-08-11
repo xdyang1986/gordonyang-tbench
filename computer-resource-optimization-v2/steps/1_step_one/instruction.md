@@ -27,7 +27,7 @@ Stdlib only: `go list -f '{{join .Imports " "}}' .` must contain no dotted impor
 
 Global: `--data` default `/app/data/cluster.json`
 
-Help: bare binary no args must print help containing keywords `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `data`, `checksum` exit0. `--help`, `-h`, `help` also help exit0. Unknown command → exit2, missing required args → exit2, empty nodeID or jobID → exit2, invalid resources → exit2.
+Help: bare binary no args must print help containing keywords `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `data`, `checksum` exit0. `--help`, `-h`, `help` also help exit0. Unknown command → exit2, missing required args → exit2, surplus positional arguments → exit2, empty nodeID or jobID → exit2, invalid resources → exit2.
 
 Commands:
 ```
