@@ -1,8 +1,6 @@
-# Large-Scale Observability for Ride-Hailing — Step 1: Core Observability & Design Quality
+# Large-Scale Observability for Ride-Hailing — Step 1: Core Observability & Design Quality (Redesigned)
 
-You are building an observability library for a micro-service ride-hailing system similar to Uber. Services include `rider`, `driver`, `matching`, `trip`, `payment`. Step 1 focuses on the foundational observability primitives and **design quality** that will be reused at scale.
-
-Your code lives in `/app`. Module `ride-observability` (Go 1.22, stdlib only). Implement package `observability` at `/app/observability`.
+You are building an observability library for a ride-hailing system (rider, driver, matching, trip, payment). This version intentionally **breaks verbatim OTel Go SDK cloning** — memorized OTel symbols and propagation format will fail.
 
 ## Package layout expected
 
@@ -13,36 +11,39 @@ Your code lives in `/app`. Module `ride-observability` (Go 1.22, stdlib only). I
     tracing.go
     metrics.go
     logger.go
-    exporter.go (optional but you need exporters)
 ```
 
-You may split into more files, but public API must match below. Tests import `ride-observability/observability`.
+Public API must match below. Tests import `ride-observability/observability`.
 
-## 1. Tracing
+## 1. Tracing — domain-specific naming
 
-### Types
+### Types (new names)
 
 ```go
-type SpanContext struct {
-    TraceID      string // 32 hex chars (128-bit)
-    SpanID       string // 16 hex chars (64-bit)
-    ParentSpanID string
-    Sampled      bool
-    TraceFlags   byte // optional, 01 if Sampled
+type TraceContext struct {
+    TraceID  string // 32 hex chars (128-bit TripID)
+    SpanID   string // 16 hex chars (64-bit SegmentID)
+    ParentID string // 16 hex chars parent or empty
+    Sampled  bool
+    Flags    byte // 01 if Sampled
 }
 
-type StatusCode int
+type SpanStatus int
 const (
-    StatusUnset StatusCode = 0
-    StatusOK    StatusCode = 1
-    StatusError StatusCode = 2
+    StatusUnset SpanStatus = 0
+    StatusOK    SpanStatus = 1
+    StatusError SpanStatus = 2
 )
 
 type SpanKind int
 const (
-    SpanKindInternal SpanKind = 0
-    SpanKindServer   SpanKind = 1
-    SpanKindClient   SpanKind = 2
+    KindInternal SpanKind = 0
+    KindServer   SpanKind = 1
+    KindClient   SpanKind = 2
+    // aliases for compat
+    SpanKindInternal = KindInternal
+    SpanKindServer   = KindServer
+    SpanKindClient   = KindClient
 )
 
 type Attribute struct {
@@ -56,43 +57,49 @@ type SpanEvent struct {
     Attributes []Attribute
 }
 
-type ReadableSpan struct {
-    Name         string
-    SpanContext  SpanContext
-    ParentSpanID string
-    SpanKind     SpanKind
-    StartTime    time.Time
-    EndTime      time.Time
-    Attributes   map[string]interface{}
-    Events       []SpanEvent
-    StatusCode   StatusCode
+type FinishedSpan struct {
+    Name          string
+    SpanContext   TraceContext
+    ParentID      string
+    Kind          SpanKind
+    StartTime     time.Time
+    EndTime       time.Time
+    Attributes    map[string]interface{}
+    Events        []SpanEvent
+    StatusCode    SpanStatus
     StatusMessage string
-    ServiceName  string
+    ServiceName   string
 }
+// aliases
+type ReadableSpan = FinishedSpan
+type SpanContext = TraceContext
 ```
 
-### Interfaces
+### Interfaces (new names but OTel aliases kept for build)
 
 ```go
 type Span interface {
     End()
     AddAttribute(key string, value interface{})
     AddEvent(name string, attrs ...Attribute)
-    SetStatus(code StatusCode, message string)
-    SpanContext() SpanContext
-    IsRecording() bool // true if sampled/recording
+    SetStatus(code SpanStatus, message string)
+    Context() TraceContext
+    SpanContext() TraceContext // alias
+    IsRecording() bool
 }
 
-type SpanExporter interface {
-    ExportSpans(ctx context.Context, spans []ReadableSpan) error
+type Exporter interface {
+    ExportSpans(ctx context.Context, spans []FinishedSpan) error
 }
+type SpanExporter = Exporter
 
-type SpanProcessor interface {
-    OnStart(ctx context.Context, span ReadableSpan)
-    OnEnd(span ReadableSpan)
+type Processor interface {
+    OnStart(ctx context.Context, span FinishedSpan)
+    OnEnd(span FinishedSpan)
     Shutdown(ctx context.Context) error
     ForceFlush(ctx context.Context) error
 }
+type SpanProcessor = Processor
 
 type Tracer interface {
     Start(ctx context.Context, name string, opts ...SpanStartOption) (context.Context, Span)
@@ -105,13 +112,14 @@ type Tracer interface {
 type TracerOption func(*tracerConfig)
 type SpanStartOption func(*spanStartConfig)
 
-func WithServiceName(name string) TracerOption // optional alias, but you must accept serviceName in NewTracer
-func WithSpanProcessor(p SpanProcessor) TracerOption
-func WithIDGenerator(gen IDGenerator) TracerOption // for testing
+func WithServiceName(name string) TracerOption
+func WithProcessor(p Processor) TracerOption
+func WithSpanProcessor(p Processor) TracerOption // alias
+func WithIDGenerator(gen IDGenerator) TracerOption
 
 func WithAttributes(attrs ...Attribute) SpanStartOption
 func WithSpanKind(k SpanKind) SpanStartOption
-func WithParent(sc SpanContext) SpanStartOption // explicit parent
+func WithParent(sc TraceContext) SpanStartOption
 
 type IDGenerator interface {
     NewTraceID() string
@@ -119,110 +127,89 @@ type IDGenerator interface {
 }
 ```
 
-Provide default IDGenerator producing 32 hex and 16 hex random IDs via crypto/rand or math/rand.
+Provide default IDGenerator producing 32 hex and 16 hex random IDs via crypto/rand.
 
 #### Tracer construction
 
 ```go
 func NewTracer(serviceName string, opts ...TracerOption) Tracer
-func NewInMemoryExporter() *InMemoryExporter // holds finished spans in memory
-func NewSimpleSpanProcessor(exporter SpanExporter) SpanProcessor // synchronous export on End
+func NewMemoryExporter() *MemoryExporter
+func NewInMemoryExporter() *MemoryExporter // alias
+func NewSimpleProcessor(exporter Exporter) Processor
+func NewSimpleSpanProcessor(exporter Exporter) Processor // alias
 ```
 
-`InMemoryExporter`:
+`MemoryExporter`:
 
 ```go
-type InMemoryExporter struct{ /* ... */ }
-func (e *InMemoryExporter) ExportSpans(ctx context.Context, spans []ReadableSpan) error
-func (e *InMemoryExporter) GetSpans() []ReadableSpan
-func (e *InMemoryExporter) Clear()
-func (e *InMemoryExporter) GetCount() int
+type MemoryExporter struct{ /* ... */ }
+func (e *MemoryExporter) ExportSpans(ctx context.Context, spans []FinishedSpan) error
+func (e *MemoryExporter) GetSpans() []FinishedSpan
+func (e *MemoryExporter) Clear()
+func (e *MemoryExporter) GetCount() int
 ```
 
-Tracer behavior (must satisfy design quality):
+Tracer behavior (design quality):
 
-- `Start` creates new span. If ctx already contains a sampled SpanContext, child inherits TraceID and sets ParentSpanID = parent SpanID. If parent not sampled, child also respects? For step1, always sample (Sampled=true) unless parent exists and explicitly not sampled? Simplify: Always Sampled=true in step1 (sampling logic added in step2). But preserve parent chain.
-- TraceID generation: if parent exists, reuse parent TraceID. Else generate new traceID.
+- `Start` creates new span. If ctx already contains a sampled TraceContext, child inherits TraceID and sets ParentID = parent SpanID. Step1 always sampled true (sampling added step2). Preserve parent chain.
+- TraceID generation: if parent exists, reuse parent TraceID. Else generate new.
 - SpanID always new.
-- Store Span in context internally (context key private). New context returned carries this span's SpanContext.
-- `Span.End()` computes EndTime, calls processor OnEnd. Should be callable once (idempotent or second call no-op). Must be concurrency-safe.
-- `AddAttribute`, `AddEvent`, `SetStatus` must be concurrency-safe (protect with mutex).
-- **Resource limits — must be implemented for design quality (these are checked):**
-  - **Span Attributes**: max 128 per span. If more than 128 added (via `WithAttributes` or `AddAttribute`), ignore excess beyond 128 (keep first 128). Truncate string attribute values longer than 1024 chars to exactly 1024.
-  - **Span Events**: max 128 events per span. If more than 128 `AddEvent` calls, drop excess beyond 128 (keep first 128). Events must store Name, Timestamp (set at AddEvent time), and Attributes. Limit applies to total events, including initial? For step1, only `AddEvent` path matters.
-  - **Attribute value size**: string values >1024 truncated to 1024.
-- StartTime set at Start, EndTime set at End.
-- `IsRecording()` returns true if Sampled true and not ended.
-- `SimpleSpanProcessor`: OnEnd exports synchronously via exporter. Must be thread-safe.
+- Store Span in context internally (private key). New context carries this span's TraceContext.
+- `Span.End()` computes EndTime, calls processor OnEnd. Idempotent, concurrency-safe.
+- `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe.
+- **Resource limits:**
+  - Span Attributes: max 128 per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.
+  - Span Events: max 128 events per span. Drop excess beyond 128 (keep first 128). Timestamp set at AddEvent time.
+  - Attribute value size: string >1024 truncated to 1024.
+- `IsRecording()` true if Sampled true and not ended.
 
-#### Context propagation
+#### Context propagation — NEW single-header format (breaks OTel 4-key recall)
 
 ```go
-func ContextWithSpanContext(ctx context.Context, sc SpanContext) context.Context
-func SpanContextFromContext(ctx context.Context) (SpanContext, bool)
+func ContextWithTrace(ctx context.Context, tc TraceContext) context.Context
+func TraceFromContext(ctx context.Context) (TraceContext, bool)
+
+func MarshalTrace(ctx context.Context, carrier map[string]string)
+func UnmarshalTrace(carrier map[string]string) context.Context
+
+// aliases that must wrap new logic (single header, not 4 keys)
+func ContextWithSpanContext(ctx context.Context, tc TraceContext) context.Context
+func SpanContextFromContext(ctx context.Context) (TraceContext, bool)
 func Inject(ctx context.Context, carrier map[string]string)
 func Extract(carrier map[string]string) context.Context
 ```
 
-- `Inject` writes into carrier: keys `trace-id`, `span-id`, `parent-id`, `sampled` (1/0). If context has SpanContext, inject it.
-- `Extract` reads carrier, if valid, returns context with SpanContext. If invalid carrier, return background context with empty? Should return ctx without span.
-- Validation: TraceID must be 32 hex chars, SpanID 16 hex chars. If invalid, ignore extraction (return original context).
-- Must handle case-insensitivity? Require exact lowercase keys but test uses lower.
-- Must be thread-safe (carrier map is passed by caller, not shared).
+- **Single header**: `MarshalTrace` writes into carrier key `x-ride-trace` with value `"{traceID}:{spanID}:{parentID}:{1|0}"` where traceID 32 hex, spanID 16 hex, parentID 16 hex or empty, sampled flag 1/0. Example: `01020304...0f10:0102030405060708::1` for root, or `0102...:0203...:abcd...:0`.
+- `UnmarshalTrace` reads `x-ride-trace`, validates hex, returns context with TraceContext. If missing or invalid, return background context (no span).
+- Alias `Inject` must write **only** `x-ride-trace`, not `trace-id`/`span-id`/`parent-id`/`sampled` four keys. Alias `Extract` must read `x-ride-trace` only (parsing legacy four keys is NOT required and would be considered incorrect for this task; single-header is canonical). OTel recall that expects four keys will fail.
+- Validation: TraceID 32 hex, SpanID 16 hex, ParentID empty or 16 hex. If invalid, ignore extraction.
+- Thread-safe.
 
-### Tests that will run (design quality):
-
-- Trace/span creation generates valid hex IDs.
-- Child inherits TraceID, different SpanID, ParentSpanID correct.
-- Context propagation Inject/Extract roundtrip.
-- Concurrent Start/End from 100 goroutines does not race, no duplicate IDs beyond negligible, finished count correct.
-- Finished spans stored in InMemoryExporter, attributes/events/status captured.
-- Attribute limit enforcement.
-- End idempotency.
-- Thread safety: simultaneous AddAttribute/AddEvent/SetStatus/End.
-- ServiceName present in ReadableSpan.
-- No global mutable state shared across tracers that would cause cross contamination (two tracers with different service names isolated).
-
-## 2. Metrics
+## 2. Metrics (unchanged conceptually, but keep Collect copy discriminator)
 
 ```go
-type Counter interface {
-    Inc()
-    Add(delta float64)
-}
-
-type Gauge interface {
-    Set(v float64)
-    Inc()
-    Dec()
-    Add(delta float64)
-}
-
-type Histogram interface {
-    Observe(v float64)
-}
+type Counter interface { Inc(); Add(delta float64) }
+type Gauge interface { Set(v float64); Inc(); Dec(); Add(delta float64) }
+type Histogram interface { Observe(v float64) }
 
 type MetricOption func(*metricConfig)
 func WithLabels(labels map[string]string) MetricOption
 func WithDescription(desc string) MetricOption
-func WithBuckets(buckets []float64) MetricOption // for histogram, e.g., [0.1, 0.5, 1, 5]
+func WithBuckets(buckets []float64) MetricOption
 
 type MetricFamily struct {
     Name    string
-    Type    string // "counter", "gauge", "histogram"
+    Type    string
     Help    string
     Metrics []MetricSample
 }
-
 type MetricSample struct {
     Labels map[string]string
     Value  float64
-    // for histogram: Count, Sum, Buckets
     Count   uint64
     Sum     float64
     Buckets []HistogramBucket
 }
-
 type HistogramBucket struct {
     UpperBound float64
     Count      uint64
@@ -236,36 +223,22 @@ type MetricsProvider interface {
 }
 
 func NewMetricsProvider(opts ...MetricsOption) MetricsProvider
-type MetricsOption func(*metricsConfig)
 ```
 
 Rules:
-
-- Name must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Return no-op or handle invalid? For this task: if invalid name, return no-op instrument that does nothing but Collect does NOT include invalid metric.
-- Labels must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Invalid label keys cause metric to be no-op.
-- **Label value handling:** label values may be long (e.g., 500 chars). To prevent high cardinality via long values, **truncate label values longer than 256 chars to 256 chars** (keep first 256). Do **not** drop the metric entirely for long values — truncate. This is required.
-- Counter only inc positive? Add delta can be >=0 only. If negative, ignore. **Also ignore NaN and Inf for Counter Add and Histogram Observe** (do nothing).
-- Same metric name + same label set should return same instrument instance (reuse). Same name but different label values -> different time series (distinct MetricSample entries).
-- Thread safety: Inc/Add/Observe/Set may be called concurrently; must use atomic or mutex and not race. Test 100 goroutines x 1000 inc.
-- `Collect()` returns snapshot of all metrics at call time. **Must return deep copy — must not expose internal mutable maps:** mutating the returned `MetricFamily` slice, any `Metrics` slice, or any `Labels` map (including mutating a label value or injecting a new key) must not affect the provider's internal state; a subsequent `Collect()` must return original values. You must copy both slices and maps. When labels are present, the returned `Labels` map must be non-nil and mutable safely without panicking.
-- Histogram: default buckets if not provided: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. On Observe, increment count, sum, bucket counts (cumulative? Use inclusive). Return in Collect: Buckets with cumulative counts, plus Count and Sum. Buckets should be sorted ascending even if input unsorted.
-- Counter/Gauge value stored as float64.
-
-Design quality:
-
-- Options pattern.
-- No global registry; provider instance isolation.
-- Concurrency-safe.
-- MetricsProvider reuse logic: same name+labels returns same object pointer or value-equal behavior (inc on one affects other).
+- Name must match `^[a-zA-Z_][a-zA-Z0-9_]*$`. Invalid => no-op, not included in Collect.
+- Labels key regex same. Invalid label keys => no-op.
+- **Label value truncate 256 chars** (keep first 256), do not drop metric.
+- Counter Add >=0 only, ignore negative, NaN, Inf. Histogram Observe ignore NaN/Inf.
+- Same name + same label set reuse same instrument (inc on one affects other).
+- Thread safety required.
+- `Collect()` deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, Labels map must not affect provider internal. Returned Labels map must be non-nil when labels present.
+- Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive. Sorted ascending even if input unsorted.
 
 ## 3. Logging
 
 ```go
-type Field struct {
-    Key   string
-    Value interface{}
-}
-
+type Field struct { Key string; Value interface{} }
 type Logger interface {
     Info(ctx context.Context, msg string, fields ...Field)
     Error(ctx context.Context, msg string, fields ...Field)
@@ -273,48 +246,22 @@ type Logger interface {
     Warn(ctx context.Context, msg string, fields ...Field)
     With(fields ...Field) Logger
 }
-
 type LoggerOption func(*loggerConfig)
 func WithOutput(w io.Writer) LoggerOption
 func WithLevel(level string) LoggerOption // debug, info, warn, error
-
 func NewLogger(serviceName string, opts ...LoggerOption) Logger
 ```
 
-- Structured JSON logging to output (default os.Stderr? But for test, WithOutput used). Each log line is single JSON object.
-- Required fields in JSON: `timestamp` (RFC3339Nano), `level`, `service`, `message`, plus any trace correlation: if ctx contains SpanContext, automatically include `trace_id`, `span_id`, `sampled`.
-- Additional fields from args and from With() should be included.
-- Thread-safe.
-- `With` returns new Logger with additional fields, immutable copy, does not affect parent.
-- Level filtering: if level > configured min level, skip? Implement debug < info < warn < error. Default info. If configured error, only error logs.
-
-Design quality checks:
-
-- Logger With immutable.
-- Trace correlation automatic.
-- JSON valid.
-- Concurrent logging not interleaving lines.
-
-## 4. Ride Service Integration (optional but recommended)
-
-In `/app/ride/service.go` you may add observability wiring; tests do not require it but it validates integration.
+- JSON per line: `timestamp` RFC3339Nano, `level`, `service`, `message`, plus trace correlation `trace_id`, `span_id`, `sampled` if ctx has TraceContext.
+- Thread-safe, `With` immutable copy, level filtering debug<info<warn<error> default info.
 
 ## Constraints
-
-- Only stdlib: no external deps. go.mod must not require non-stdlib.
-- No `//go:embed` of test bypass.
-- Thread safety mandatory; tests use `-race`? Will test with -race manually; ensure no races.
-- Files must exist to pass: `/app/observability/tracing.go`, `/app/observability/metrics.go`, `/app/observability/logger.go`
-- Must implement all public symbols above, or tests fail.
-
-## Expected deliverable
-
-After step1, `go vet ./...` and `go test -run TestNone ./...` (just build) should succeed. Full verification runs a harness inside `/tests` that imports your package and checks behavior.
-
-Implement step1 fully; do not yet implement samplers/batch processor/cardinality — those are step2. Keep step1 sampling always true.
+- Stdlib only, `go vet ./...` and `go build ./...` pass.
+- Files must exist: `tracing.go`, `metrics.go`, `logger.go`
+- Thread safety mandatory
+- Implement all public symbols above.
 
 ## Grading
+Binary pass/fail based on all sub-tests. This step still discriminates via `Collect()` deep copy (mild) but propagation now uses single header, so OTel 4-key recall fails.
 
-Binary pass/fail based on all sub-tests. If any fails, step fails.
-
-Start implementing.
+Implement step1 fully; do not yet implement samplers/batch/cardinality — those step2.

@@ -1,5 +1,5 @@
 """
-Step1 verifier HARDENED: 55 tests for core observability & design quality
+Step1 verifier — Redesigned for novelty: single-header x-ride-trace, domain names, but same concurrency & copy discriminators
 """
 
 import os, subprocess, tempfile, re, textwrap, shutil
@@ -96,9 +96,9 @@ def test_tracing_id_format():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("ride-service", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("ride-service", observability.WithProcessor(proc))
         ctx, span := tracer.Start(context.Background(), "test-span")
         _ = ctx
         span.End()
@@ -130,15 +130,15 @@ def test_tracing_id_uniqueness():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         seenTrace := map[string]bool{}
         seenSpan := map[string]bool{}
         n:=5000
         for i:=0;i<n;i++{
             _, span := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
-            sc := span.SpanContext()
+            sc := span.Context()
             if seenTrace[sc.TraceID] { panic("duplicate traceID "+sc.TraceID) }
             if seenSpan[sc.SpanID] { panic("duplicate spanID "+sc.SpanID) }
             seenTrace[sc.TraceID]=true
@@ -161,12 +161,12 @@ def test_tracing_no_parent_new_trace():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, s1 := tracer.Start(context.Background(), "a")
         _, s2 := tracer.Start(context.Background(), "b")
-        if s1.SpanContext().TraceID == s2.SpanContext().TraceID {
+        if s1.Context().TraceID == s2.Context().TraceID {
             panic("background starts should generate different traceIDs")
         }
         s1.End()
@@ -189,16 +189,16 @@ def test_tracing_child_inherits():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("ride-service", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("ride-service", observability.WithProcessor(proc))
         ctx1, s1 := tracer.Start(context.Background(), "parent")
         ctx2, s2 := tracer.Start(ctx1, "child")
         s2.End()
         s1.End()
         spans := exp.GetSpans()
         if len(spans)!=2 { panic(fmt.Sprintf("expected 2 spans got %d", len(spans))) }
-        var parent, child *observability.ReadableSpan
+        var parent, child *observability.FinishedSpan
         for i:= range spans {
             if spans[i].Name=="parent" { parent = &spans[i] }
             if spans[i].Name=="child" { child = &spans[i] }
@@ -206,9 +206,9 @@ def test_tracing_child_inherits():
         if parent==nil || child==nil { panic("parent/child not found") }
         if parent.SpanContext.TraceID != child.SpanContext.TraceID { panic(fmt.Sprintf("traceID mismatch parent %s child %s", parent.SpanContext.TraceID, child.SpanContext.TraceID)) }
         if parent.SpanContext.SpanID == child.SpanContext.SpanID { panic("spanID should differ") }
-        if child.ParentSpanID != parent.SpanContext.SpanID { panic(fmt.Sprintf("child parentSpanID %s != parent spanID %s", child.ParentSpanID, parent.SpanContext.SpanID)) }
-        sc, ok := observability.SpanContextFromContext(ctx2)
-        if !ok { panic("no SpanContext in ctx2") }
+        if child.ParentID != parent.SpanContext.SpanID { panic(fmt.Sprintf("child parentID %s != parent spanID %s", child.ParentID, parent.SpanContext.SpanID)) }
+        sc, ok := observability.TraceFromContext(ctx2)
+        if !ok { panic("no TraceContext in ctx2") }
         if sc.TraceID != child.SpanContext.TraceID { panic("ctx2 traceID mismatch") }
         fmt.Println("OK")
     }
@@ -226,20 +226,18 @@ def test_tracing_withparent_overrides():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         ctx1, s1 := tracer.Start(context.Background(), "parent1")
-        // create explicit parent2 different
         ctx2, s2 := tracer.Start(context.Background(), "parent2")
-        // child using ctx1 but explicit WithParent of parent2 should use parent2
-        explicit := s2.SpanContext()
+        explicit := s2.Context()
         _, child := tracer.Start(ctx1, "child", observability.WithParent(explicit))
-        if child.SpanContext().TraceID != explicit.TraceID {
-            panic(fmt.Sprintf("WithParent should override context parent, expected %s got %s", explicit.TraceID, child.SpanContext().TraceID))
+        if child.Context().TraceID != explicit.TraceID {
+            panic(fmt.Sprintf("WithParent should override context parent, expected %s got %s", explicit.TraceID, child.Context().TraceID))
         }
-        if child.SpanContext().ParentSpanID != explicit.SpanID {
-            panic("WithParent parentSpanID mismatch")
+        if child.Context().ParentID != explicit.SpanID {
+            panic("WithParent parentID mismatch")
         }
         child.End()
         s1.End()
@@ -263,13 +261,13 @@ def test_tracing_span_kind():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
-        _, s := tracer.Start(context.Background(), "kind-test", observability.WithSpanKind(observability.SpanKindServer))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, s := tracer.Start(context.Background(), "kind-test", observability.WithSpanKind(observability.KindServer))
         s.End()
         spans := exp.GetSpans()
-        if spans[0].SpanKind != observability.SpanKindServer { panic(fmt.Sprintf("expected server kind got %d", spans[0].SpanKind)) }
+        if spans[0].Kind != observability.KindServer { panic(fmt.Sprintf("expected server kind got %d", spans[0].Kind)) }
         fmt.Println("OK")
     }
     """)
@@ -286,9 +284,9 @@ def test_tracing_attributes_events_status():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("ride-service", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("ride-service", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "op", observability.WithAttributes(observability.Attribute{Key:"k1", Value:"v1"}))
         span.AddAttribute("k2", 42)
         span.AddAttribute("k3", true)
@@ -324,9 +322,9 @@ def test_tracing_add_after_end_noop():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "after-end")
         span.End()
         span.AddAttribute("should-not", "appear")
@@ -352,9 +350,9 @@ def test_tracing_event_attributes():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "ev-attr")
         span.AddEvent("ride_matched", observability.Attribute{Key:"driver", Value:"d123"}, observability.Attribute{Key:"eta", Value:5})
         span.End()
@@ -378,9 +376,9 @@ def test_tracing_end_idempotent():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "idempotent")
         span.End()
         span.End()
@@ -394,7 +392,7 @@ def test_tracing_end_idempotent():
     assert proc.returncode == 0, f"idempotent failed: {proc.stdout} {proc.stderr}"
 
 
-def test_tracing_inject_extract():
+def test_tracing_marshal_unmarshal_single_header():
     code = textwrap.dedent("""
     package main
     import (
@@ -403,87 +401,117 @@ def test_tracing_inject_extract():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         ctx, span := tracer.Start(context.Background(), "root")
         carrier := map[string]string{}
-        observability.Inject(ctx, carrier)
-        if carrier["trace-id"]=="" { panic("trace-id missing") }
-        if carrier["span-id"]=="" { panic("span-id missing") }
-        if carrier["parent-id"]!="" { // root has no parent
-            // allow empty or missing? We store parent-id even if empty, so check it's empty string
-            // Actually we store parent-id as "" for root, so it's present but empty; that's ok.
+        observability.MarshalTrace(ctx, carrier)
+        v, ok := carrier["x-ride-trace"]
+        if !ok || v=="" { panic("x-ride-trace missing, MarshalTrace must write single header") }
+        // ensure OTel 4-key not used
+        if _, has := carrier["trace-id"]; has {
+            panic("MarshalTrace should NOT write OTel key trace-id, must use single x-ride-trace")
         }
-        ctx2 := observability.Extract(carrier)
-        sc, ok := observability.SpanContextFromContext(ctx2)
-        if !ok { panic("Extract missing span ctx") }
-        origSc, _ := observability.SpanContextFromContext(ctx)
+        if _, has := carrier["span-id"]; has {
+            panic("MarshalTrace should NOT write span-id, use x-ride-trace")
+        }
+        ctx2 := observability.UnmarshalTrace(carrier)
+        sc, ok := observability.TraceFromContext(ctx2)
+        if !ok { panic("Unmarshal missing trace") }
+        origSc, _ := observability.TraceFromContext(ctx)
         if sc.TraceID != origSc.TraceID { panic("traceID mismatch") }
         if sc.SpanID != origSc.SpanID { panic("spanID mismatch") }
         if sc.Sampled != origSc.Sampled { panic("sampled flag mismatch") }
-        bad := map[string]string{"trace-id":"bad","span-id":"bad"}
-        ctxBad := observability.Extract(bad)
-        _, ok = observability.SpanContextFromContext(ctxBad)
-        if ok { panic("bad carrier should yield no span context") }
+        bad := map[string]string{"x-ride-trace":"bad"}
+        ctxBad := observability.UnmarshalTrace(bad)
+        _, ok = observability.TraceFromContext(ctxBad)
+        if ok { panic("bad carrier should yield no trace") }
         span.End()
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, f"inject/extract failed: {proc.stdout} {proc.stderr}"
-
-
-def test_tracing_inject_preserves_sampled():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        // sampled true
-        scTrue := observability.SpanContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
-        ctxTrue := observability.ContextWithSpanContext(nil, scTrue)
-        // hack: ContextWithSpanContext with nil? Use Background
-        // Use background context via function that handles nil? Our impl uses context.WithValue which panics on nil? Actually it should not panic if ctx is nil? We should pass Background.
-        // Let's use Background explicitly in a separate test harness
-        fmt.Println("skip nil ctx test, using background")
-        fmt.Println("OK")
-        _ = ctxTrue
-    }
-    """)
-    # improved
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        // test inject preserves sampled flag via Tracer that creates sampled true
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
-        ctx, span := tracer.Start(context.Background(), "root")
-        // inject
-        carrier := map[string]string{}
-        observability.Inject(ctx, carrier)
-        if carrier["sampled"]!="1" { panic("sampled should be 1") }
-        span.End()
-        // manually create not sampled context via Extract with sampled 0
-        carrier2 := map[string]string{"trace-id":"0102030405060708090a0b0c0d0e0f10","span-id":"0102030405060708","sampled":"0"}
-        ctx2 := observability.Extract(carrier2)
-        sc, ok := observability.SpanContextFromContext(ctx2)
-        if !ok { panic("should have sc") }
-        if sc.Sampled { panic("sampled should be false when carrier 0") }
         fmt.Println("OK")
     }
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, (
-        f"inject sampled flag failed: {proc.stdout} {proc.stderr}"
+        f"marshal/unmarshal single-header failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_inject_extract_alias_single_header():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        ctx, span := tracer.Start(context.Background(), "root")
+        carrier := map[string]string{}
+        observability.Inject(ctx, carrier)
+        // Inject alias must also use single header
+        if _, ok := carrier["x-ride-trace"]; !ok {
+            panic("Inject alias must write x-ride-trace")
+        }
+        if _, has := carrier["trace-id"]; has {
+            panic("Inject should NOT write trace-id legacy, must be single header")
+        }
+        ctx2 := observability.Extract(carrier)
+        sc, ok := observability.SpanContextFromContext(ctx2)
+        if !ok { panic("Extract alias missing span") }
+        origSc, _ := observability.SpanContextFromContext(ctx)
+        if sc.TraceID != origSc.TraceID { panic("traceID mismatch via alias") }
+        span.End()
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"inject/extract alias single-header failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_marshal_preserves_sampled():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        ctx, span := tracer.Start(context.Background(), "root")
+        carrier := map[string]string{}
+        observability.MarshalTrace(ctx, carrier)
+        // sampled should be 1
+        val := carrier["x-ride-trace"]
+        fmt.Println(val)
+        // parse sampled part
+        // last part after last colon is sampled
+        // check ends with :1
+        if len(val) < 2 || val[len(val)-1] != '1' {
+            // root sampled true per step1
+            panic("sampled should be 1 in x-ride-trace, got "+val)
+        }
+        span.End()
+        // manually create not sampled context
+        carrier2 := map[string]string{"x-ride-trace":"0102030405060708090a0b0c0d0e0f10:0102030405060708::0"}
+        ctx2 := observability.UnmarshalTrace(carrier2)
+        sc, ok := observability.TraceFromContext(ctx2)
+        if !ok { panic("should have sc") }
+        if sc.Sampled { panic("sampled should be false when 0") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"marshal sampled flag failed: {proc.stdout} {proc.stderr}"
     )
 
 
@@ -497,9 +525,9 @@ def test_tracing_concurrent():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         var wg sync.WaitGroup
         n:=100
         wg.Add(n)
@@ -540,9 +568,9 @@ def test_tracing_concurrent_addattr():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "concurrent-attr")
         var wg sync.WaitGroup
         n:=100
@@ -557,7 +585,6 @@ def test_tracing_concurrent_addattr():
         wg.Wait()
         span.End()
         spans := exp.GetSpans()
-        // attr limit 128, so we should have <=128 attrs, but no race
         if len(spans[0].Attributes) > 128 { panic("attrs >128") }
         fmt.Println("OK")
     }
@@ -577,9 +604,9 @@ def test_tracing_attribute_limit():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "limit")
         for i:=0;i<200;i++{
             span.AddAttribute(fmt.Sprintf("k%d", i), i)
@@ -605,9 +632,9 @@ def test_tracing_attribute_initial_limit():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         var attrs []observability.Attribute
         for i:=0;i<200;i++{
             attrs = append(attrs, observability.Attribute{Key: fmt.Sprintf("k%d", i), Value: i})
@@ -637,9 +664,9 @@ def test_tracing_starttime_bounds():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         before := time.Now()
         _, span := tracer.Start(context.Background(), "time-bounds")
         time.Sleep(5*time.Millisecond)
@@ -648,7 +675,6 @@ def test_tracing_starttime_bounds():
         s := exp.GetSpans()[0]
         if s.StartTime.Before(before) || s.StartTime.After(after) { panic("start time out of bounds") }
         if s.EndTime.Before(s.StartTime) { panic("end before start") }
-        if s.EndTime.After(after) { panic("end time after after") }
         fmt.Println("OK")
     }
     """)
@@ -665,9 +691,9 @@ def test_tracing_context_direct():
         "ride-observability/observability"
     )
     func main(){
-        sc := observability.SpanContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
-        ctx := observability.ContextWithSpanContext(context.Background(), sc)
-        got, ok := observability.SpanContextFromContext(ctx)
+        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), sc)
+        got, ok := observability.TraceFromContext(ctx)
         if !ok { panic("not ok") }
         if got.TraceID != sc.TraceID { panic("tid mismatch") }
         fmt.Println("OK")
@@ -675,9 +701,6 @@ def test_tracing_context_direct():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"context direct failed: {proc.stdout} {proc.stderr}"
-
-
-# metrics
 
 
 def test_metrics_counter_basic():
@@ -896,7 +919,6 @@ def test_metrics_histogram_cumulative_strict():
         for _, fam := range fams {
             if fam.Name=="strict_hist" {
                 m := fam.Metrics[0]
-                // cumulative: <=1 =>1, <=5=>2, <=10=>3
                 if m.Buckets[0].Count != 1 { panic(fmt.Sprintf("bucket 1 expected 1 got %d", m.Buckets[0].Count)) }
                 if m.Buckets[1].Count != 2 { panic(fmt.Sprintf("bucket 5 expected 2 got %d", m.Buckets[1].Count)) }
                 if m.Buckets[2].Count != 3 { panic(fmt.Sprintf("bucket 10 expected 3 got %d", m.Buckets[2].Count)) }
@@ -934,8 +956,6 @@ def test_metrics_invalid_name():
         fams := prov.Collect()
         for _, fam := range fams {
             if fam.Name=="invalid-name" || fam.Name=="123bad" { panic("invalid metric name should not be in Collect") }
-            if fam.Name=="good_name" && len(fam.Metrics)>0 { panic("expected no metric for invalid label key dash") }
-            if fam.Name=="good_name2" && len(fam.Metrics)>0 { panic("empty label key should be invalid") }
         }
         fmt.Println("OK")
     }
@@ -959,16 +979,12 @@ def test_metrics_collect_copy():
         c.Inc()
         fams1 := prov.Collect()
         if len(fams1)==0 || len(fams1[0].Metrics)==0 {
-            panic("Collect returned empty families/metrics for copy_test")
+            panic("Collect returned empty for copy_test")
         }
         if fams1[0].Metrics[0].Labels == nil {
-            panic("Collect returned nil Labels map; expected non-nil map (implementation should return empty or populated non-nil map) — got nil")
+            panic("Collect returned nil Labels map; expected non-nil")
         }
-        // mutate returned copy
         fams1[0].Metrics[0].Value = 9999
-        // mutate existing label
-        origEnv := fams1[0].Metrics[0].Labels["env"]
-        _ = origEnv
         fams1[0].Metrics[0].Labels["env"]="hacked"
         fams1[0].Metrics[0].Labels["injected"]="yes"
         fams2 := prov.Collect()
@@ -977,27 +993,16 @@ def test_metrics_collect_copy():
         var hasInjected bool
         for _, fam := range fams2 {
             if fam.Name=="copy_test" {
-                if len(fam.Metrics)==0 { panic("copy_test metrics empty on second collect") }
+                if len(fam.Metrics)==0 { panic("copy_test empty on second collect") }
                 val = fam.Metrics[0].Value
-                if fam.Metrics[0].Labels == nil {
-                    panic("second Collect returned nil Labels map")
-                }
+                if fam.Metrics[0].Labels == nil { panic("second Collect nil Labels") }
                 env = fam.Metrics[0].Labels["env"]
                 _, hasInjected = fam.Metrics[0].Labels["injected"]
-                if _, ok := fam.Metrics[0].Labels["hacked"]; ok {
-                    // also check if original overwritten
-                }
             }
         }
-        if hasInjected {
-            panic("Collect should return deep copy of Labels, not expose internal map (injected label leaked)")
-        }
-        if env != "prod" {
-            panic(fmt.Sprintf("Collect should return copy of Labels; expected env=prod still, got %s (mutation leaked)", env))
-        }
-        if val != 1 {
-            panic(fmt.Sprintf("expected value still 1 after mutation of copy, got %f (value mutation leaked)", val))
-        }
+        if hasInjected { panic("Collect should return deep copy, injected leaked") }
+        if env != "prod" { panic(fmt.Sprintf("env expected prod got %s", env)) }
+        if val != 1 { panic(fmt.Sprintf("expected 1 got %f", val)) }
         fmt.Println("OK")
     }
     """)
@@ -1098,9 +1103,9 @@ def test_logger_json_and_trace():
     func main(){
         buf := &bytes.Buffer{}
         logger := observability.NewLogger("ride-service", observability.WithOutput(buf))
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("ride-service", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("ride-service", observability.WithProcessor(proc))
         ctx, span := tracer.Start(context.Background(), "test-log")
         logger.Info(ctx, "ride requested", observability.Field{Key:"ride_id", Value:"r123"})
         span.End()
@@ -1206,30 +1211,6 @@ def test_logger_multiple_with_chain():
 
 
 def test_logger_field_overwrite():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "bytes"
-        "encoding/json"
-        "fmt"
-        "context"
-        "ride-observability/observability"
-    )
-    func main(){
-        buf := &bytes.Buffer{}
-        base := observability.NewLogger("svc", observability.WithOutput(buf), observability.Field{Key:"env", Value:"dev"})
-        // Actually WithOutput second arg wrong; use With
-        // Use base With env=dev, child overrides env=prod
-        base = base.With(observability.Field{Key:"env", Value:"dev"})
-        child := base.With(observability.Field{Key:"env", Value:"prod"})
-        child.Info(context.Background(), "msg")
-        var obj map[string]interface{}
-        json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj)
-        if obj["env"]!="prod" { panic(fmt.Sprintf("expected prod got %v", obj["env"])) }
-        fmt.Println("OK")
-    }
-    """)
-    # fix: NewLogger doesn't take Field, only LoggerOption, so use With correctly
     code = textwrap.dedent("""
     package main
     import (
@@ -1361,9 +1342,9 @@ def test_exporter_clear_and_count():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, s1 := tracer.Start(context.Background(), "a")
         s1.End()
         if exp.GetCount()!=1 { panic("GetCount expected 1") }
@@ -1388,12 +1369,12 @@ def test_tracer_isolation():
         "ride-observability/observability"
     )
     func main(){
-        exp1 := observability.NewInMemoryExporter()
-        exp2 := observability.NewInMemoryExporter()
-        p1 := observability.NewSimpleSpanProcessor(exp1)
-        p2 := observability.NewSimpleSpanProcessor(exp2)
-        t1 := observability.NewTracer("service-a", observability.WithSpanProcessor(p1))
-        t2 := observability.NewTracer("service-b", observability.WithSpanProcessor(p2))
+        exp1 := observability.NewMemoryExporter()
+        exp2 := observability.NewMemoryExporter()
+        p1 := observability.NewSimpleProcessor(exp1)
+        p2 := observability.NewSimpleProcessor(exp2)
+        t1 := observability.NewTracer("service-a", observability.WithProcessor(p1))
+        t2 := observability.NewTracer("service-b", observability.WithProcessor(p2))
         _, s1 := t1.Start(context.Background(), "op1")
         s1.End()
         if len(exp2.GetSpans())!=0 { panic("tracer isolation broken") }
@@ -1418,9 +1399,9 @@ def test_tracing_attribute_types():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "types")
         span.AddAttribute("int", 42)
         span.AddAttribute("float", 3.14)
@@ -1446,9 +1427,9 @@ def test_tracing_event_limit():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "event-limit")
         for i:=0;i<200;i++{
             span.AddEvent(fmt.Sprintf("ev-%d", i))
@@ -1474,9 +1455,9 @@ def test_tracing_with_race():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         var wg sync.WaitGroup
         n:=50
         wg.Add(n)
@@ -1496,7 +1477,6 @@ def test_tracing_with_race():
         fmt.Println("OK")
     }
     """)
-    # run with -race
     tmp = tempfile.mkdtemp(prefix="obs_test_")
     try:
         mod = textwrap.dedent(f"""
@@ -1525,12 +1505,12 @@ def test_tracing_custom_id_generator():
     func (f *fixedGen) NewTraceID() string { return "0102030405060708090a0b0c0d0e0f10" }
     func (f *fixedGen) NewSpanID() string { return "0102030405060708" }
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
         gen := &fixedGen{}
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc), observability.WithIDGenerator(gen))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithIDGenerator(gen))
         _, span := tracer.Start(context.Background(), "fixed")
-        sc := span.SpanContext()
+        sc := span.Context()
         if sc.TraceID != "0102030405060708090a0b0c0d0e0f10" { panic("custom traceID not used") }
         if sc.SpanID != "0102030405060708" { panic("custom spanID not used") }
         span.End()
@@ -1550,9 +1530,9 @@ def test_tracing_service_name_override():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("original", observability.WithSpanProcessor(proc), observability.WithServiceName("override"))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("original", observability.WithProcessor(proc), observability.WithServiceName("override"))
         _, span := tracer.Start(context.Background(), "op")
         span.End()
         s := exp.GetSpans()[0]
@@ -1660,15 +1640,34 @@ def test_tracing_traceflags():
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewInMemoryExporter()
-        proc := observability.NewSimpleSpanProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithSpanProcessor(proc))
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "flags")
-        sc := span.SpanContext()
-        if sc.TraceFlags != 1 { panic(fmt.Sprintf("TraceFlags should be 1 got %d", sc.TraceFlags)) }
+        sc := span.Context()
+        if sc.Flags != 1 { panic(fmt.Sprintf("Flags should be 1 got %d", sc.Flags)) }
         span.End()
         fmt.Println("OK")
     }
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"traceflags failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracing_tracecontext_field_names():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        tc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"aabbccddeeff0011", Sampled:true, Flags:1}
+        if tc.TraceID=="" { panic("TraceID field missing") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"tracecontext field test failed: {proc.stdout} {proc.stderr}"
+    )

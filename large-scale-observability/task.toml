@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/large-scale-observability"
-description = "Multi-turn Go observability for ride-hailing (like Uber): Step1 builds core tracing with W3C-style propagation, metrics (counter/gauge/histogram) and structured contextual logging with design quality (thread-safety, interfaces, context propagation). Step2 hardens for large scale — TraceID ratio & parent-based sampling, async BatchSpanProcessor with queue/backpressure/shutdown, metrics cardinality limiting with overflow handling, high-concurrency correctness, and resource limits. Graded via black-box Go harnesses exercising the observability package API under concurrency and scale."
+description = "Multi-turn Go observability for ride-hailing (like Uber) with domain-specific contract that punishes OTel SDK recall: Step1 core tracing with single-header x-ride-trace propagation (not 4-key OTel), metrics and structured logging. Step2 hardens for large scale — RatioSampler using last-8-hex + error/critical override (OTel uses first-16-hex ignoring status), ParentAwareSampler requiring parent AND root to sample (OTel samples on parent alone), BatchProcessor evicting oldest on full queue with block-and-drain ForceFlush (OTel drops newest non-blocking). Graded via black-box Go harnesses with fixed TraceIDs where OTel recall fails."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "observability", "tracing", "metrics", "logging", "sampling", "batch", "scalability", "uber", "ride-sharing"]
 format = "terminal_bench_multi_turn"

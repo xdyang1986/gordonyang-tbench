@@ -10,30 +10,36 @@ import (
     "encoding/hex"
     "fmt"
     "regexp"
+    "strings"
     "sync"
     "time"
 )
 
-type SpanContext struct {
-    TraceID      string
-    SpanID       string
-    ParentSpanID string
-    Sampled      bool
-    TraceFlags   byte
+type TraceContext struct {
+    TraceID  string
+    SpanID   string
+    ParentID string
+    Sampled  bool
+    Flags    byte
 }
+type SpanContext = TraceContext
 
-type StatusCode int
+type SpanStatus int
 const (
-    StatusUnset StatusCode = 0
-    StatusOK    StatusCode = 1
-    StatusError StatusCode = 2
+    StatusUnset SpanStatus = 0
+    StatusOK    SpanStatus = 1
+    StatusError SpanStatus = 2
 )
+type StatusCode = SpanStatus
 
 type SpanKind int
 const (
-    SpanKindInternal SpanKind = 0
-    SpanKindServer   SpanKind = 1
-    SpanKindClient   SpanKind = 2
+    KindInternal SpanKind = 0
+    KindServer   SpanKind = 1
+    KindClient   SpanKind = 2
+    SpanKindInternal SpanKind = KindInternal
+    SpanKindServer   SpanKind = KindServer
+    SpanKindClient   SpanKind = KindClient
 )
 
 type Attribute struct {
@@ -47,39 +53,43 @@ type SpanEvent struct {
     Attributes []Attribute
 }
 
-type ReadableSpan struct {
+type FinishedSpan struct {
     Name          string
-    SpanContext   SpanContext
-    ParentSpanID  string
-    SpanKind      SpanKind
+    SpanContext   TraceContext
+    ParentID      string
+    Kind          SpanKind
     StartTime     time.Time
     EndTime       time.Time
     Attributes    map[string]interface{}
     Events        []SpanEvent
-    StatusCode    StatusCode
+    StatusCode    SpanStatus
     StatusMessage string
     ServiceName   string
 }
+type ReadableSpan = FinishedSpan
 
 type Span interface {
     End()
     AddAttribute(key string, value interface{})
     AddEvent(name string, attrs ...Attribute)
-    SetStatus(code StatusCode, message string)
-    SpanContext() SpanContext
+    SetStatus(code SpanStatus, message string)
+    Context() TraceContext
+    SpanContext() TraceContext
     IsRecording() bool
 }
 
-type SpanExporter interface {
-    ExportSpans(ctx context.Context, spans []ReadableSpan) error
+type Exporter interface {
+    ExportSpans(ctx context.Context, spans []FinishedSpan) error
 }
+type SpanExporter = Exporter
 
-type SpanProcessor interface {
-    OnStart(ctx context.Context, span ReadableSpan)
-    OnEnd(span ReadableSpan)
+type Processor interface {
+    OnStart(ctx context.Context, span FinishedSpan)
+    OnEnd(span FinishedSpan)
     Shutdown(ctx context.Context) error
     ForceFlush(ctx context.Context) error
 }
+type SpanProcessor = Processor
 
 type Tracer interface {
     Start(ctx context.Context, name string, opts ...SpanStartOption) (context.Context, Span)
@@ -105,81 +115,100 @@ func (g *defaultIDGenerator) NewSpanID() string {
 type SamplingDecision int
 const (
     DecisionDrop SamplingDecision = iota
-    DecisionRecordAndSample
+    DecisionKeep
     DecisionRecordOnly
+    DecisionRecordAndSample = DecisionKeep
+)
+const (
+    SamplingDrop = DecisionDrop
+    SamplingKeep = DecisionKeep
 )
 
-type SamplingParameters struct {
-    TraceID       string
-    SpanName      string
-    SpanKind      SpanKind
-    ParentContext SpanContext
-    HasParent     bool
-    Attributes    []Attribute
+type SamplingRequest struct {
+    TraceID    string
+    SpanName   string
+    Kind       SpanKind
+    Parent     TraceContext
+    HasParent  bool
+    Attributes []Attribute
+    Status     SpanStatus
+    Priority   string
 }
+type SamplingParameters = SamplingRequest
 
 type Sampler interface {
-    ShouldSample(p SamplingParameters) SamplingDecision
+    ShouldSample(p SamplingRequest) SamplingDecision
     Description() string
 }
 
-// Minimal samplers for step1: all always sample
-type alwaysOnSampler struct{}
-func NewAlwaysOnSampler() Sampler { return &alwaysOnSampler{} }
-func (s *alwaysOnSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample }
-func (s *alwaysOnSampler) Description() string { return "AlwaysOnSampler" }
+type alwaysSampler struct{}
+func NewAlwaysSampler() Sampler { return &alwaysSampler{} }
+func (s *alwaysSampler) ShouldSample(p SamplingRequest) SamplingDecision { return DecisionKeep }
+func (s *alwaysSampler) Description() string { return "AlwaysSampler" }
+func NewAlwaysOnSampler() Sampler { return NewAlwaysSampler() }
 
-type alwaysOffSampler struct{}
-func NewAlwaysOffSampler() Sampler { return &alwaysOffSampler{} }
-func (s *alwaysOffSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample } // naive: always sample (fails step2)
-func (s *alwaysOffSampler) Description() string { return "AlwaysOffSampler" }
+type neverSampler struct{}
+func NewNeverSampler() Sampler { return &neverSampler{} }
+func (s *neverSampler) ShouldSample(p SamplingRequest) SamplingDecision { return DecisionDrop }
+func (s *neverSampler) Description() string { return "NeverSampler" }
+func NewAlwaysOffSampler() Sampler { return NewNeverSampler() }
 
-type traceIDRatioSampler struct{ fraction float64 }
-func NewTraceIDRatioSampler(fraction float64) Sampler { return &traceIDRatioSampler{fraction: fraction} }
-func (s *traceIDRatioSampler) Description() string { return fmt.Sprintf("TraceIDRatioBased{%.4f}", s.fraction) }
-func (s *traceIDRatioSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample } // naive
+// stubs for step2 - step1 minimal always keep
+type ratioSampler struct{ fraction float64 }
+func NewRatioSampler(fraction float64) Sampler { return &ratioSampler{fraction: fraction} }
+func (s *ratioSampler) Description() string { return fmt.Sprintf("RatioSampler{%.4f}", s.fraction) }
+func (s *ratioSampler) ShouldSample(p SamplingRequest) SamplingDecision { return DecisionKeep }
+func NewTraceIDRatioSampler(fraction float64) Sampler { return NewRatioSampler(fraction) }
 
-type parentBasedSampler struct{ root Sampler }
-func NewParentBasedSampler(root Sampler) Sampler {
-    if root == nil { root = NewAlwaysOnSampler() }
-    return &parentBasedSampler{root: root}
+type parentAwareSampler struct{ root Sampler }
+func NewParentAwareSampler(root Sampler) Sampler {
+    if root == nil { root = NewAlwaysSampler() }
+    return &parentAwareSampler{root: root}
 }
-func (s *parentBasedSampler) Description() string { return fmt.Sprintf("ParentBased{root=%s}", s.root.Description()) }
-func (s *parentBasedSampler) ShouldSample(p SamplingParameters) SamplingDecision { return DecisionRecordAndSample } // naive
+func (s *parentAwareSampler) Description() string { return fmt.Sprintf("ParentAware{root=%s}", s.root.Description()) }
+func (s *parentAwareSampler) ShouldSample(p SamplingRequest) SamplingDecision { return DecisionKeep }
+func NewParentBasedSampler(root Sampler) Sampler { return NewParentAwareSampler(root) }
 
 type tracerConfig struct {
     serviceName string
-    processor   SpanProcessor
+    processor   Processor
     idGen       IDGenerator
     sampler     Sampler
 }
 type TracerOption func(*tracerConfig)
 func WithServiceName(name string) TracerOption { return func(c *tracerConfig) { c.serviceName = name } }
-func WithSpanProcessor(p SpanProcessor) TracerOption { return func(c *tracerConfig) { c.processor = p } }
+func WithProcessor(p Processor) TracerOption { return func(c *tracerConfig) { c.processor = p } }
+func WithSpanProcessor(p Processor) TracerOption { return func(c *tracerConfig) { c.processor = p } }
 func WithIDGenerator(gen IDGenerator) TracerOption { return func(c *tracerConfig) { c.idGen = gen } }
 func WithSampler(s Sampler) TracerOption { return func(c *tracerConfig) { c.sampler = s } }
 
 type spanStartConfig struct {
     attributes []Attribute
     kind       SpanKind
-    parent     *SpanContext
+    parent     *TraceContext
 }
 type SpanStartOption func(*spanStartConfig)
 func WithAttributes(attrs ...Attribute) SpanStartOption {
     return func(c *spanStartConfig) { c.attributes = append(c.attributes, attrs...) }
 }
 func WithSpanKind(k SpanKind) SpanStartOption { return func(c *spanStartConfig) { c.kind = k } }
-func WithParent(sc SpanContext) SpanStartOption { return func(c *spanStartConfig) { c.parent = &sc } }
+func WithParent(sc TraceContext) SpanStartOption { return func(c *spanStartConfig) { c.parent = &sc } }
 
-type spanContextKey struct{}
-func ContextWithSpanContext(ctx context.Context, sc SpanContext) context.Context {
+type traceContextKey struct{}
+func ContextWithTrace(ctx context.Context, tc TraceContext) context.Context {
     if ctx == nil { ctx = context.Background() }
-    return context.WithValue(ctx, spanContextKey{}, sc)
+    return context.WithValue(ctx, traceContextKey{}, tc)
 }
-func SpanContextFromContext(ctx context.Context) (SpanContext, bool) {
-    if ctx == nil { return SpanContext{}, false }
-    sc, ok := ctx.Value(spanContextKey{}).(SpanContext)
+func TraceFromContext(ctx context.Context) (TraceContext, bool) {
+    if ctx == nil { return TraceContext{}, false }
+    sc, ok := ctx.Value(traceContextKey{}).(TraceContext)
     return sc, ok
+}
+func ContextWithSpanContext(ctx context.Context, sc TraceContext) context.Context {
+    return ContextWithTrace(ctx, sc)
+}
+func SpanContextFromContext(ctx context.Context) (TraceContext, bool) {
+    return TraceFromContext(ctx)
 }
 
 var (
@@ -187,38 +216,42 @@ var (
     hex16Regex = regexp.MustCompile(`^[0-9a-fA-F]{16}$`)
 )
 
-func Inject(ctx context.Context, carrier map[string]string) {
+func MarshalTrace(ctx context.Context, carrier map[string]string) {
     if carrier == nil { return }
-    sc, ok := SpanContextFromContext(ctx)
+    sc, ok := TraceFromContext(ctx)
     if !ok { return }
-    carrier["trace-id"] = sc.TraceID
-    carrier["span-id"] = sc.SpanID
-    carrier["parent-id"] = sc.ParentSpanID
-    if sc.Sampled { carrier["sampled"] = "1" } else { carrier["sampled"] = "0" }
+    samp := "0"
+    if sc.Sampled { samp = "1" }
+    carrier["x-ride-trace"] = fmt.Sprintf("%s:%s:%s:%s", sc.TraceID, sc.SpanID, sc.ParentID, samp)
 }
-
-func Extract(carrier map[string]string) context.Context {
+func UnmarshalTrace(carrier map[string]string) context.Context {
     if carrier == nil { return context.Background() }
-    tid, hasTid := carrier["trace-id"]
-    sid, hasSid := carrier["span-id"]
-    if !hasTid || !hasSid { return context.Background() }
+    val, ok := carrier["x-ride-trace"]
+    if !ok { return context.Background() }
+    parts := strings.Split(val, ":")
+    if len(parts) != 4 { return context.Background() }
+    tid, sid, pid, sampStr := parts[0], parts[1], parts[2], parts[3]
     if !hex32Regex.MatchString(tid) || !hex16Regex.MatchString(sid) { return context.Background() }
-    parentID := carrier["parent-id"]
-    if parentID != "" && !hex16Regex.MatchString(parentID) { parentID = "" }
-    sampledStr := carrier["sampled"]
-    sampled := false
-    if sampledStr == "1" || sampledStr == "true" || sampledStr == "True" || sampledStr == "TRUE" { sampled = true }
-    sc := SpanContext{TraceID: tid, SpanID: sid, ParentSpanID: parentID, Sampled: sampled}
-    if sampled { sc.TraceFlags = 1 }
-    return ContextWithSpanContext(context.Background(), sc)
+    if pid != "" && !hex16Regex.MatchString(pid) { return context.Background() }
+    sampled := sampStr == "1"
+    tc := TraceContext{TraceID: tid, SpanID: sid, ParentID: pid, Sampled: sampled}
+    if sampled { tc.Flags = 1 }
+    return ContextWithTrace(context.Background(), tc)
+}
+func Inject(ctx context.Context, carrier map[string]string) {
+    MarshalTrace(ctx, carrier)
+}
+func Extract(carrier map[string]string) context.Context {
+    return UnmarshalTrace(carrier)
 }
 
-type InMemoryExporter struct {
+type MemoryExporter struct {
     mu    sync.Mutex
-    spans []ReadableSpan
+    spans []FinishedSpan
 }
-func NewInMemoryExporter() *InMemoryExporter { return &InMemoryExporter{} }
-func (e *InMemoryExporter) ExportSpans(ctx context.Context, spans []ReadableSpan) error {
+func NewMemoryExporter() *MemoryExporter { return &MemoryExporter{} }
+func NewInMemoryExporter() *MemoryExporter { return NewMemoryExporter() }
+func (e *MemoryExporter) ExportSpans(ctx context.Context, spans []FinishedSpan) error {
     e.mu.Lock()
     defer e.mu.Unlock()
     for _, s := range spans {
@@ -232,78 +265,80 @@ func (e *InMemoryExporter) ExportSpans(ctx context.Context, spans []ReadableSpan
     }
     return nil
 }
-func (e *InMemoryExporter) GetSpans() []ReadableSpan {
+func (e *MemoryExporter) GetSpans() []FinishedSpan {
     e.mu.Lock()
     defer e.mu.Unlock()
-    cpy := make([]ReadableSpan, len(e.spans))
+    cpy := make([]FinishedSpan, len(e.spans))
     copy(cpy, e.spans)
     return cpy
 }
-func (e *InMemoryExporter) Clear() { e.mu.Lock(); defer e.mu.Unlock(); e.spans = nil }
-func (e *InMemoryExporter) GetCount() int { e.mu.Lock(); defer e.mu.Unlock(); return len(e.spans) }
+func (e *MemoryExporter) Clear() { e.mu.Lock(); defer e.mu.Unlock(); e.spans = nil }
+func (e *MemoryExporter) GetCount() int { e.mu.Lock(); defer e.mu.Unlock(); return len(e.spans) }
+type InMemoryExporter = MemoryExporter
 
-type simpleSpanProcessor struct{ exporter SpanExporter }
-func NewSimpleSpanProcessor(exporter SpanExporter) SpanProcessor { return &simpleSpanProcessor{exporter: exporter} }
-func (p *simpleSpanProcessor) OnStart(ctx context.Context, span ReadableSpan) {}
-func (p *simpleSpanProcessor) OnEnd(span ReadableSpan) { _ = p.exporter.ExportSpans(context.Background(), []ReadableSpan{span}) }
-func (p *simpleSpanProcessor) Shutdown(ctx context.Context) error { return nil }
-func (p *simpleSpanProcessor) ForceFlush(ctx context.Context) error { return nil }
+type simpleProcessor struct{ exporter Exporter }
+func NewSimpleProcessor(exporter Exporter) Processor { return &simpleProcessor{exporter: exporter} }
+func NewSimpleSpanProcessor(exporter Exporter) Processor { return NewSimpleProcessor(exporter) }
+func (p *simpleProcessor) OnStart(ctx context.Context, span FinishedSpan) {}
+func (p *simpleProcessor) OnEnd(span FinishedSpan) { _ = p.exporter.ExportSpans(context.Background(), []FinishedSpan{span}) }
+func (p *simpleProcessor) Shutdown(ctx context.Context) error { return nil }
+func (p *simpleProcessor) ForceFlush(ctx context.Context) error { return nil }
 
 type tracerImpl struct {
     serviceName string
-    processor   SpanProcessor
+    processor   Processor
     idGen       IDGenerator
     sampler     Sampler
 }
 
 func NewTracer(serviceName string, opts ...TracerOption) Tracer {
-    cfg := &tracerConfig{serviceName: serviceName, idGen: &defaultIDGenerator{}, sampler: NewAlwaysOnSampler()}
+    cfg := &tracerConfig{serviceName: serviceName, idGen: &defaultIDGenerator{}, sampler: NewAlwaysSampler()}
     for _, o := range opts { if o!=nil { o(cfg) } }
     if cfg.serviceName == "" { cfg.serviceName = serviceName }
-    if cfg.processor == nil { cfg.processor = &simpleSpanProcessor{exporter: NewInMemoryExporter()} }
+    if cfg.processor == nil { cfg.processor = &simpleProcessor{exporter: NewMemoryExporter()} }
     if cfg.idGen == nil { cfg.idGen = &defaultIDGenerator{} }
-    if cfg.sampler == nil { cfg.sampler = NewAlwaysOnSampler() }
+    if cfg.sampler == nil { cfg.sampler = NewAlwaysSampler() }
     return &tracerImpl{serviceName: cfg.serviceName, processor: cfg.processor, idGen: cfg.idGen, sampler: cfg.sampler}
 }
 
 type spanImpl struct {
     mu            sync.Mutex
     name          string
-    spanContext   SpanContext
-    parentSpanID  string
+    traceContext  TraceContext
+    parentID      string
     kind          SpanKind
     startTime     time.Time
     endTime       time.Time
     attributes    map[string]interface{}
     events        []SpanEvent
-    statusCode    StatusCode
+    statusCode    SpanStatus
     statusMessage string
     serviceName   string
-    processor     SpanProcessor
+    processor     Processor
     ended         bool
     recording     bool
 }
 
 func (t *tracerImpl) Start(ctx context.Context, name string, opts ...SpanStartOption) (context.Context, Span) {
-    cfg := &spanStartConfig{kind: SpanKindInternal}
+    cfg := &spanStartConfig{kind: KindInternal}
     for _, o := range opts { if o!=nil { o(cfg) } }
-    var parentSC *SpanContext
-    if cfg.parent != nil { parentSC = cfg.parent } else if sc, ok := SpanContextFromContext(ctx); ok { tmp := sc; parentSC = &tmp }
+    var parentSC *TraceContext
+    if cfg.parent != nil { parentSC = cfg.parent } else if sc, ok := TraceFromContext(ctx); ok { tmp := sc; parentSC = &tmp }
     var traceID string
-    var parentSpanID string
-    if parentSC != nil { traceID = parentSC.TraceID; parentSpanID = parentSC.SpanID } else { traceID = t.idGen.NewTraceID() }
+    var parentID string
+    if parentSC != nil { traceID = parentSC.TraceID; parentID = parentSC.SpanID } else { traceID = t.idGen.NewTraceID() }
     spanID := t.idGen.NewSpanID()
-    sc := SpanContext{TraceID: traceID, SpanID: spanID, ParentSpanID: parentSpanID, Sampled: true, TraceFlags: 1}
-    span := &spanImpl{name: name, spanContext: sc, parentSpanID: parentSpanID, kind: cfg.kind, startTime: time.Now(), attributes: make(map[string]interface{}), events: []SpanEvent{}, statusCode: StatusUnset, serviceName: t.serviceName, processor: t.processor, recording: true}
+    sc := TraceContext{TraceID: traceID, SpanID: spanID, ParentID: parentID, Sampled: true, Flags: 1}
+    span := &spanImpl{name: name, traceContext: sc, parentID: parentID, kind: cfg.kind, startTime: time.Now(), attributes: make(map[string]interface{}), events: []SpanEvent{}, statusCode: StatusUnset, serviceName: t.serviceName, processor: t.processor, recording: true}
     for _, a := range cfg.attributes {
         if len(span.attributes) >= 128 { break }
         val := a.Value
         if s, ok := val.(string); ok && len(s) > 1024 { val = s[:1024] }
         span.attributes[a.Key] = val
     }
-    rs := ReadableSpan{Name: span.name, SpanContext: span.spanContext, ParentSpanID: span.parentSpanID, SpanKind: span.kind, StartTime: span.startTime, Attributes: copyMap(span.attributes), ServiceName: span.serviceName}
+    rs := FinishedSpan{Name: span.name, SpanContext: span.traceContext, ParentID: span.parentID, Kind: span.kind, StartTime: span.startTime, Attributes: copyMap(span.attributes), ServiceName: span.serviceName}
     t.processor.OnStart(ctx, rs)
-    newCtx := ContextWithSpanContext(ctx, sc)
+    newCtx := ContextWithTrace(ctx, sc)
     return newCtx, span
 }
 
@@ -321,8 +356,8 @@ func (s *spanImpl) End() {
     s.endTime = time.Now()
     attrs := copyMap(s.attributes)
     events := append([]SpanEvent(nil), s.events...)
-    sc := s.spanContext
-    parentID := s.parentSpanID
+    tc := s.traceContext
+    parentID := s.parentID
     name := s.name
     kind := s.kind
     start := s.startTime
@@ -332,7 +367,7 @@ func (s *spanImpl) End() {
     service := s.serviceName
     processor := s.processor
     s.mu.Unlock()
-    rs := ReadableSpan{Name: name, SpanContext: sc, ParentSpanID: parentID, SpanKind: kind, StartTime: start, EndTime: end, Attributes: attrs, Events: events, StatusCode: status, StatusMessage: statusMsg, ServiceName: service}
+    rs := FinishedSpan{Name: name, SpanContext: tc, ParentID: parentID, Kind: kind, StartTime: start, EndTime: end, Attributes: attrs, Events: events, StatusCode: status, StatusMessage: statusMsg, ServiceName: service}
     processor.OnEnd(rs)
 }
 
@@ -353,40 +388,45 @@ func (s *spanImpl) AddEvent(name string, attrs ...Attribute) {
     if len(attrs) > 0 { ev.Attributes = append([]Attribute(nil), attrs...) }
     s.events = append(s.events, ev)
 }
-func (s *spanImpl) SetStatus(code StatusCode, message string) {
+func (s *spanImpl) SetStatus(code SpanStatus, message string) {
     s.mu.Lock()
     defer s.mu.Unlock()
     if s.ended { return }
     s.statusCode = code
     s.statusMessage = message
 }
-func (s *spanImpl) SpanContext() SpanContext { s.mu.Lock(); defer s.mu.Unlock(); return s.spanContext }
+func (s *spanImpl) Context() TraceContext { s.mu.Lock(); defer s.mu.Unlock(); return s.traceContext }
+func (s *spanImpl) SpanContext() TraceContext { return s.Context() }
 func (s *spanImpl) IsRecording() bool { s.mu.Lock(); defer s.mu.Unlock(); return !s.ended }
 
 type batchConfig struct {
-    batchSize          int
-    queueSize          int
-    batchTimeout       time.Duration
-    exportTimeout      time.Duration
-    maxExportBatchSize int
+    batchSize     int
+    queueSize     int
+    batchTimeout  time.Duration
+    exportTimeout time.Duration
 }
-type BatchSpanProcessorOption func(*batchConfig)
-func WithBatchSize(n int) BatchSpanProcessorOption { return func(c *batchConfig) { c.batchSize = n } }
-func WithQueueSize(n int) BatchSpanProcessorOption { return func(c *batchConfig) { c.queueSize = n } }
-func WithBatchTimeout(d time.Duration) BatchSpanProcessorOption { return func(c *batchConfig) { c.batchTimeout = d } }
-func WithExportTimeout(d time.Duration) BatchSpanProcessorOption { return func(c *batchConfig) { c.exportTimeout = d } }
-func WithMaxExportBatchSize(n int) BatchSpanProcessorOption { return func(c *batchConfig) { c.maxExportBatchSize = n; c.batchSize = n } }
+type BatchOption func(*batchConfig)
+type BatchSpanProcessorOption = BatchOption
+func WithBatchSize(n int) BatchOption { return func(c *batchConfig) { c.batchSize = n } }
+func WithQueueSize(n int) BatchOption { return func(c *batchConfig) { c.queueSize = n } }
+func WithBatchTimeout(d time.Duration) BatchOption { return func(c *batchConfig) { c.batchTimeout = d } }
+func WithExportTimeout(d time.Duration) BatchOption { return func(c *batchConfig) { c.exportTimeout = d } }
+func WithMaxBatchSize(n int) BatchOption { return func(c *batchConfig) { c.batchSize = n } }
+func WithMaxExportBatchSize(n int) BatchOption { return func(c *batchConfig) { c.batchSize = n } }
+func WithQueueLimit(n int) BatchOption { return WithQueueSize(n) }
+func WithBatchCapacity(n int) BatchOption { return WithBatchSize(n) }
+func WithFlushPeriod(d time.Duration) BatchOption { return WithBatchTimeout(d) }
+func WithExportDeadline(d time.Duration) BatchOption { return WithExportTimeout(d) }
 
-// Minimal batch for step1: actually just simple synchronous, no drop, no queue
-type batchSpanProcessor struct {
-    exporter SpanExporter
+type batchSpanProcessor struct{ exporter Exporter }
+func NewBatchProcessor(exporter Exporter, opts ...BatchOption) Processor {
+    return &simpleProcessor{exporter: exporter}
 }
-func NewBatchSpanProcessor(exporter SpanExporter, opts ...BatchSpanProcessorOption) SpanProcessor {
-    // step1 minimal: ignore opts, use simple processor behavior
-    return &simpleSpanProcessor{exporter: exporter}
+func NewBatchSpanProcessor(exporter Exporter, opts ...BatchOption) Processor {
+    return NewBatchProcessor(exporter, opts...)
 }
-func (b *batchSpanProcessor) OnStart(ctx context.Context, span ReadableSpan) {}
-func (b *batchSpanProcessor) OnEnd(span ReadableSpan) { _ = b.exporter.ExportSpans(context.Background(), []ReadableSpan{span}) }
+func (b *batchSpanProcessor) OnStart(ctx context.Context, span FinishedSpan) {}
+func (b *batchSpanProcessor) OnEnd(span FinishedSpan) { _ = b.exporter.ExportSpans(context.Background(), []FinishedSpan{span}) }
 func (b *batchSpanProcessor) Shutdown(ctx context.Context) error { return nil }
 func (b *batchSpanProcessor) ForceFlush(ctx context.Context) error { return nil }
 func (b *batchSpanProcessor) DroppedCount() int { return 0 }
@@ -394,7 +434,6 @@ func (b *batchSpanProcessor) QueueLen() int { return 0 }
 
 GO
 cat > /app/observability/metrics.go <<'GO'
-
 package observability
 
 import (
@@ -685,168 +724,136 @@ cat > /app/observability/logger.go <<'GO'
 package observability
 
 import (
-	"context"
-	"encoding/json"
-	"io"
-	"os"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "encoding/json"
+    "io"
+    "os"
+    "strings"
+    "sync"
+    "time"
 )
 
 type Field struct {
-	Key   string
-	Value interface{}
+    Key   string
+    Value interface{}
 }
 
 type Logger interface {
-	Info(ctx context.Context, msg string, fields ...Field)
-	Error(ctx context.Context, msg string, fields ...Field)
-	Debug(ctx context.Context, msg string, fields ...Field)
-	Warn(ctx context.Context, msg string, fields ...Field)
-	With(fields ...Field) Logger
+    Info(ctx context.Context, msg string, fields ...Field)
+    Error(ctx context.Context, msg string, fields ...Field)
+    Debug(ctx context.Context, msg string, fields ...Field)
+    Warn(ctx context.Context, msg string, fields ...Field)
+    With(fields ...Field) Logger
 }
 
 type loggerConfig struct {
-	output io.Writer
-	level  string
+    output io.Writer
+    level  string
 }
-
 type LoggerOption func(*loggerConfig)
 
 func WithOutput(w io.Writer) LoggerOption {
-	return func(c *loggerConfig) { c.output = w }
+    return func(c *loggerConfig) { c.output = w }
 }
 func WithLevel(level string) LoggerOption {
-	return func(c *loggerConfig) { c.level = level }
+    return func(c *loggerConfig) { c.level = level }
 }
 
 type loggerImpl struct {
-	serviceName string
-	output      io.Writer
-	minLevel    int
-	fields      []Field
-	mu          sync.Mutex
+    serviceName string
+    output      io.Writer
+    minLevel    int
+    fields      []Field
+    mu          sync.Mutex
 }
 
 func levelToInt(l string) int {
-	switch strings.ToLower(l) {
-	case "debug":
-		return 0
-	case "info":
-		return 1
-	case "warn", "warning":
-		return 2
-	case "error":
-		return 3
-	default:
-		return 1 // info default
-	}
+    switch strings.ToLower(l) {
+    case "debug":
+        return 0
+    case "info":
+        return 1
+    case "warn", "warning":
+        return 2
+    case "error":
+        return 3
+    default:
+        return 1
+    }
 }
 func intToLevelStr(i int) string {
-	switch i {
-	case 0:
-		return "debug"
-	case 1:
-		return "info"
-	case 2:
-		return "warn"
-	case 3:
-		return "error"
-	default:
-		return "info"
-	}
+    switch i {
+    case 0:
+        return "debug"
+    case 1:
+        return "info"
+    case 2:
+        return "warn"
+    case 3:
+        return "error"
+    default:
+        return "info"
+    }
 }
 
 func NewLogger(serviceName string, opts ...LoggerOption) Logger {
-	cfg := &loggerConfig{
-		output: os.Stderr,
-		level:  "info",
-	}
-	for _, o := range opts {
-		if o == nil {
-			continue
-		}
-		o(cfg)
-	}
-	if cfg.output == nil {
-		cfg.output = os.Stderr
-	}
-	return &loggerImpl{
-		serviceName: serviceName,
-		output:      cfg.output,
-		minLevel:    levelToInt(cfg.level),
-		fields:      []Field{},
-	}
+    cfg := &loggerConfig{
+        output: os.Stderr,
+        level:  "info",
+    }
+    for _, o := range opts {
+        if o == nil { continue }
+        o(cfg)
+    }
+    if cfg.output == nil { cfg.output = os.Stderr }
+    return &loggerImpl{
+        serviceName: serviceName,
+        output:      cfg.output,
+        minLevel:    levelToInt(cfg.level),
+        fields:      []Field{},
+    }
 }
 
 func (l *loggerImpl) With(fields ...Field) Logger {
-	// copy existing fields
-	newFields := append([]Field(nil), l.fields...)
-	newFields = append(newFields, fields...)
-	return &loggerImpl{
-		serviceName: l.serviceName,
-		output:      l.output,
-		minLevel:    l.minLevel,
-		fields:      newFields,
-	}
+    newFields := append([]Field(nil), l.fields...)
+    newFields = append(newFields, fields...)
+    return &loggerImpl{
+        serviceName: l.serviceName,
+        output:      l.output,
+        minLevel:    l.minLevel,
+        fields:      newFields,
+    }
 }
 
 func (l *loggerImpl) log(ctx context.Context, level int, msg string, fields ...Field) {
-	if level < l.minLevel {
-		return
-	}
-	// build map
-	m := make(map[string]interface{})
-	m["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
-	m["level"] = intToLevelStr(level)
-	m["service"] = l.serviceName
-	m["message"] = msg
-
-	// trace correlation
-	if ctx != nil {
-		if sc, ok := SpanContextFromContext(ctx); ok {
-			m["trace_id"] = sc.TraceID
-			m["span_id"] = sc.SpanID
-			m["sampled"] = sc.Sampled
-			if sc.ParentSpanID != "" {
-				m["parent_id"] = sc.ParentSpanID
-			}
-		}
-	}
-	// logger base fields
-	for _, f := range l.fields {
-		m[f.Key] = f.Value
-	}
-	// per-call fields
-	for _, f := range fields {
-		m[f.Key] = f.Value
-	}
-
-	// marshal
-	b, err := json.Marshal(m)
-	if err != nil {
-		// fallback
-		b = []byte(`{"error":"marshal failed"}`)
-	}
-	b = append(b, '\n')
-	l.mu.Lock()
-	_, _ = l.output.Write(b)
-	l.mu.Unlock()
+    if level < l.minLevel { return }
+    m := make(map[string]interface{})
+    m["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+    m["level"] = intToLevelStr(level)
+    m["service"] = l.serviceName
+    m["message"] = msg
+    if ctx != nil {
+        if sc, ok := TraceFromContext(ctx); ok {
+            m["trace_id"] = sc.TraceID
+            m["span_id"] = sc.SpanID
+            m["sampled"] = sc.Sampled
+            if sc.ParentID != "" { m["parent_id"] = sc.ParentID }
+        }
+    }
+    for _, f := range l.fields { m[f.Key] = f.Value }
+    for _, f := range fields { m[f.Key] = f.Value }
+    b, err := json.Marshal(m)
+    if err != nil { b = []byte(`{"error":"marshal failed"}`) }
+    b = append(b, '\n')
+    l.mu.Lock()
+    _, _ = l.output.Write(b)
+    l.mu.Unlock()
 }
 
-func (l *loggerImpl) Info(ctx context.Context, msg string, fields ...Field) {
-	l.log(ctx, 1, msg, fields...)
-}
-func (l *loggerImpl) Error(ctx context.Context, msg string, fields ...Field) {
-	l.log(ctx, 3, msg, fields...)
-}
-func (l *loggerImpl) Debug(ctx context.Context, msg string, fields ...Field) {
-	l.log(ctx, 0, msg, fields...)
-}
-func (l *loggerImpl) Warn(ctx context.Context, msg string, fields ...Field) {
-	l.log(ctx, 2, msg, fields...)
-}
+func (l *loggerImpl) Info(ctx context.Context, msg string, fields ...Field) { l.log(ctx, 1, msg, fields...) }
+func (l *loggerImpl) Error(ctx context.Context, msg string, fields ...Field) { l.log(ctx, 3, msg, fields...) }
+func (l *loggerImpl) Debug(ctx context.Context, msg string, fields ...Field) { l.log(ctx, 0, msg, fields...) }
+func (l *loggerImpl) Warn(ctx context.Context, msg string, fields ...Field) { l.log(ctx, 2, msg, fields...) }
 
 GO
 cat > /app/observability/doc.go <<'GO'
