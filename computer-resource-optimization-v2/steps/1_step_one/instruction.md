@@ -1,26 +1,21 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (80 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (96 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 80 tests (was 30 too easy, then 49, then 66 still too easy per feedback), now 80 with 50 new discriminators over original 30. Features: 20 concurrent allocs all 20 preserved, concurrent add-node 20, concurrent add-node same ID 20 (idempotent race), concurrent add-job same ID 20, concurrent deallocate 20, concurrent diff nodes 20, concurrent list while allocating 10x30, 1000 nodes perf <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs field [] not null (nil-slice pitfall), empty file and whitespace file empty store vs corrupt (null, [], invalid JSON -> corrupt backup .corrupt.<nanosec> integer suffix regex), missing/bad checksum corruption backup warning, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp and no global.lock leftover, pagination offset then limit order, first-fit not best-fit, file lock cleaned after failure.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 96 tests (was 30 too easy, 49/66/80 still easy per feedback), now 96 with 66 new discriminators over original 30. Features: concurrent same ID race add-node same ID 20 ->1, add-job same ID 20 ->1, add-node 20 sorted, same node 20 preserve all 20, diff nodes 20, deallocate 20 -> used 0, list while allocating 10x30 valid JSON, 1000 nodes <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs [] not null (nil-slice pitfall), empty/whitespace empty store vs corrupt null/[]/invalid JSON -> backup .corrupt.<nanosec> integer suffix regex, missing/bad checksum corruption, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp/global.lock, pagination offset then limit order, first-fit not best-fit, lock retry 100ms, gpu insufficient, etc.
 
-Failing observations (naive impl misses, now enforced 80):
-- Empty "" and whitespace "   \n\t" must be empty store [] not corrupt 4; files "null" and "[]" must be treated as corrupt backup integer suffix .corrupt.<nanosec> (\.corrupt\.\d+$) warning, list returns [] after
-- Missing checksum or bad checksum -> backup and recreate empty, not crash, list [].
-- Jobs [] not null: Go nil slice marshals as null -> bug, after add-node, deallocate, remove-job must be [] not null; raw must contain '"jobs":[]' and no '"jobs":null', and must not contain \u003c (SetEscapeHTML false)
-- Idempotent no-op: re-add node/job with different resources preserves old resources and allocation running, not upsert; add-job idempotent preserves status running; add-node same ID concurrent 20 threads must result in 1 node not 20, sorted, lock cleaned, checksum valid
-- Concurrent add-node 20 different IDs preserve all 20 sorted, lock cleaned
-- Concurrent add-job same ID 20 -> 1 job, checksum valid
-- Concurrent same node 20 allocates preserve all 20 jobs used cpu 20 correct no overcommit file valid JSON during concurrent via lock O_EXCL, lock cleaned after
-- Concurrent diff nodes 20 parallel allocates to 20 different nodes preserve all 20 status allocated 20
-- Concurrent deallocate 20 allocated jobs to same node -> used 0 jobs [] after
-- Concurrent list while allocating: list-nodes 30 times per thread 10 threads -> valid JSON no crash, lock cleaned
-- Pagination offset then limit order: offset1 limit2 -> nodes 1,2 not 0,1; invalid limit/offset negative non-int abc -> exit2; limit 0 vs omit both all, offset beyond [].
-- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins Step1, Step2 flips to best-fit)
-- Special chars <>& raw "<" requires SetEscapeHTML(false) no \u003c, Unicode emoji 🌍🚀😀 preserved for node and job, large ID 10KB dash underscore dot colon valid, empty ID with spaces "   " -> exit2, float resource "4.0" invalid -> exit2
-- Status sum total/used resources, used/free correct after allocate/deallocate, remove-job deallocates first preserves node free=total, remove-node false not exist true/false handling, deallocate false when not allocated vs exit2 when job not exist, allocate already allocated diff node -> exit2 same node idempotent no duplicate jobs sorted asc, node jobs sorted after many allocations
-- File lock cleaned after failure insufficient gpu (node gpu 0 job gpu 1 -> insufficient), after success, after concurrent, no .lock leftover, no .tmp leftover
-- Corruption backup nanosec integer: file name .corrupt.<int> not float, at least 1 backup after corruption
-- Large scale 800 nodes list <1.5s not O(n^2), 500 jobs sorted, list nodes limit 0 vs omit all, offset beyond empty
-- Checksum valid after each op add-node/add-job/allocate/deallocate/remove, contains CreateTemp Rename SetEscapeHTML stdlib only no dotted imports
+Failing observations (naive misses enforced 96):
+- Empty "" whitespace "   \n\t" -> empty store [] not corrupt 4; files "null" "[]" -> corrupt backup integer suffix \.corrupt\.\d+$ warning list [] after. Missing checksum / bad checksum / data missing / data not object -> corrupt backup
+- Jobs [] not null: nil slice marshals null -> bug, after add-node/deallocate/remove-job/remove-all must be [] not null raw '"jobs":[]', no \u003c raw "<" and emoji preserved
+- Idempotent no-op: re-add node/job diff resources preserves old and allocation running not upsert; same ID concurrent 20 threads -> 1 node/job not 20 sorted lock cleaned checksum valid
+- Concurrent add-node 20 diff IDs preserve all 20 sorted, add-job same ID race, same node 20 alloc preserve all 20 used cpu 20 correct no overcommit valid JSON during via O_EXCL, diff nodes 20 status allocated 20, deallocate 20 -> used 0 jobs [], list while allocating 10x30 valid JSON no crash, remove-node while allocating fails/ok not crash, list 100 times 10 threads no crash
+- Pagination offset then limit: offset1 limit2 -> 1,2 not 0,1; invalid negative abc -> exit2; limit0 vs omit both all, offset beyond [] both nodes/jobs; list nodes/jobs sorted asc
+- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins Step1, Step2 best-fit nodeB wins), fragmented A free2 B free1 C free4 job2 CPU2 -> first-fit picks A not C
+- Timestamp integer required: cpu/mem/gpu must be int not float "4.0" -> exit2; empty ID with spaces "   " -> exit2
+- Status total/used sum, used/free correct after allocate/deallocate, remove-job deallocates first preserves node free=total, remove false not exist, deallocate false when not allocated vs exit2 nonexist, allocate diff node exit2 same node idempotent no duplicate jobs sorted asc, node jobs sorted after many, insufficient memory/gpu/cpu all insufficient
+- File lock cleaned after success and after failure insufficient, no .lock leftover, no .tmp leftover, checksum valid after each op contains CreateTemp Rename SetEscapeHTML stdlib only no dotted imports, lock retry: manually create lock file then thread removes after 100ms command should retry and succeed
+- Large scale 800 nodes list <1.5s O(n log n) limit100 offset100 <1.5s 500 jobs sorted, large ID 10KB dash underscore dot colon valid, special chars <>& job and node, unicode job, etc.
+- Schedule fragmented, empty jobs after remove all 5 jobs -> [] not null, status pending vs allocated, zero gpu valid neg invalid, etc.
+
+
 
 Data directory `/app/data/` writable, default persistence `/app/data/cluster.json`.
 

@@ -1041,3 +1041,210 @@ def test_concurrent_list_nodes_100_times_no_crash():
         t.start()
     for t in threads:
         t.join()
+
+# ---------- Extra 80->96 (still too easy) ----------
+
+def test_timestamp_integer_required():
+    clean_data()
+    assert run_cli("add-node", "nodeFloat", "4.0", "1024", "0").returncode == 2
+    assert run_cli("add-node", "nodeFloat2", "4", "1024.0", "0").returncode == 2
+    assert run_cli("add-job", "jobFloat", "1.0", "256", "0").returncode == 2
+    assert run_cli("add-job", "jobFloat2", "1", "256.5", "0").returncode == 2
+    assert run_cli("add-node", "nodeInt", "4", "1024", "0").returncode == 0
+
+
+def test_allocate_insufficient_memory_and_gpu():
+    clean_data()
+    run_cli("add-node", "node1", "4", "512", "0")
+    run_cli("add-job", "jobMem", "1", "1024", "0")
+    r = run_cli("allocate", "jobMem", "node1")
+    assert r.returncode == 2 and "insufficient" in r.stderr.lower()
+    run_cli("add-node", "nodeGPU", "4", "1024", "0")
+    run_cli("add-job", "jobGPU", "1", "256", "1")
+    r2 = run_cli("allocate", "jobGPU", "nodeGPU")
+    assert r2.returncode == 2 and "insufficient" in r2.stderr.lower()
+
+
+def test_schedule_first_fit_fragmented():
+    clean_data()
+    run_cli("add-node", "nodeA", "4", "1024", "0")
+    run_cli("add-node", "nodeB", "4", "1024", "0")
+    run_cli("add-node", "nodeC", "4", "1024", "0")
+    run_cli("add-job", "jobA1", "2", "256", "0")
+    run_cli("allocate", "jobA1", "nodeA")
+    run_cli("add-job", "jobB1", "3", "256", "0")
+    run_cli("allocate", "jobB1", "nodeB")
+    run_cli("add-job", "job2", "2", "256", "0")
+    out = json.loads(run_cli("schedule", "job2").stdout)
+    assert out["node_id"] == "nodeA", f"first-fit should pick nodeA not {out['node_id']}"
+
+
+def test_list_nodes_offset_beyond_and_limit():
+    clean_data()
+    for i in range(3):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    assert json.loads(run_cli("list-nodes", "0", "100").stdout) == []
+    assert json.loads(run_cli("list-nodes", "100", "100").stdout) == []
+
+
+def test_concurrent_add_node_and_job_interleaved():
+    clean_data()
+    def worker(i):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 20
+    assert len(json.loads(run_cli("list-jobs").stdout)) == 20
+    assert checksum_valid()
+
+
+def test_concurrent_remove_job_20():
+    clean_data()
+    run_cli("add-node", "node1", "100", "100000", "10")
+    for i in range(20):
+        run_cli("add-job", f"job{i}", "1", "100", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    def rem(j):
+        run_cli("remove-job", f"job{j}")
+    threads = [threading.Thread(target=rem, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    assert st["allocated_jobs"] == 0 and st["total_jobs"] == 0
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["jobs"] == [] and node["used"]["cpu"] == 0
+
+
+def test_corruption_missing_data_field():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    with open(DATA_FILE, "w") as f:
+        f.write('{"checksum": "abc"}')
+    r = run_cli("list-nodes")
+    assert r.returncode == 0 and json.loads(r.stdout) == []
+    assert any(".corrupt." in fn for fn in os.listdir(os.path.dirname(DATA_FILE)))
+
+
+def test_corruption_data_not_object():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    with open(DATA_FILE, "w") as f:
+        f.write('{"data": [], "checksum": "dummy"}')
+    r = run_cli("list-nodes")
+    assert r.returncode == 0 and json.loads(r.stdout) == []
+
+
+def test_file_lock_retry_success():
+    clean_data()
+    lock_path = DATA_FILE + ".lock"
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+    try:
+        os.remove(lock_path)
+    except:
+        pass
+    with open(lock_path, "w") as f:
+        f.write("locked")
+    def remove_lock():
+        time.sleep(0.1)
+        try:
+            os.remove(lock_path)
+        except:
+            pass
+    t = threading.Thread(target=remove_lock)
+    t.start()
+    r = run_cli("add-node", "nodeRetry", "4", "1024", "0")
+    t.join()
+    assert r.returncode == 0
+    assert not os.path.exists(lock_path)
+
+
+def test_empty_jobs_after_remove_all():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for i in range(5):
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    for i in range(5):
+        run_cli("remove-job", f"job{i}")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["jobs"] == []
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    assert '"jobs":[]' in raw or '"jobs": []' in raw
+    assert json.loads(run_cli("list-jobs").stdout) == []
+
+
+def test_status_pending_vs_allocated():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("add-job", "job2", "1", "256", "0")
+    st1 = json.loads(run_cli("status").stdout)
+    assert st1["allocated_jobs"] == 0 and st1["pending_jobs"] == 2
+    run_cli("allocate", "job1", "node1")
+    st2 = json.loads(run_cli("status").stdout)
+    assert st2["allocated_jobs"] == 1 and st2["pending_jobs"] == 1
+
+
+def test_add_node_zero_gpu_valid():
+    clean_data()
+    assert run_cli("add-node", "nodeZeroGPU", "4", "1024", "0").returncode == 0
+    assert run_cli("add-node", "nodeNegGPU", "4", "1024", "-1").returncode == 2
+
+
+def test_add_job_zero_gpu_valid():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    assert run_cli("add-job", "jobZeroGPU", "1", "256", "0").returncode == 0
+    assert run_cli("add-job", "jobNegGPU", "1", "256", "-1").returncode == 2
+
+
+def test_allocate_job_special_chars_and_unicode():
+    clean_data()
+    run_cli("add-node", "node<>&", "4", "1024", "0")
+    run_cli("add-job", "job-🌍", "1", "256", "0")
+    r = run_cli("allocate", "job-🌍", "node<>&")
+    assert r.returncode == 0
+    job = json.loads(run_cli("get-job", "job-🌍").stdout)
+    assert job["node_id"] == "node<>&"
+    raw = open(DATA_FILE, encoding="utf-8").read()
+    assert "🌍" in raw and "<" in raw
+
+
+def test_concurrent_remove_node_while_allocating():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for i in range(10):
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+    def alloc(i):
+        run_cli("allocate", f"job{i}", "node1")
+    def remove():
+        time.sleep(0.05)
+        r = run_cli("remove-node", "node1")
+        assert r.returncode in (0, 2)
+    threads = []
+    for i in range(10):
+        threads.append(threading.Thread(target=alloc, args=(i,)))
+    threads.append(threading.Thread(target=remove))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+
+
+def test_list_jobs_with_limit_and_offset():
+    clean_data()
+    for i in range(10):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    arr = json.loads(run_cli("list-jobs", "3", "2").stdout)
+    assert [j["id"] for j in arr] == ["job-02", "job-03", "job-04"]
+    arr2 = json.loads(run_cli("list-jobs", "0", "0").stdout)
+    assert len(arr2) == 10
+    arr3 = json.loads(run_cli("list-jobs").stdout)
+    assert len(arr3) == 10
