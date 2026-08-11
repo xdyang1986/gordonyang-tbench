@@ -1408,3 +1408,129 @@ def test_remove_node_has_jobs_even_after_failed_allocate():
     # Node has no jobs, so remove should succeed (not fail due to failed allocate)
     r2 = run_cli("remove-node", "node1")
     assert r2.returncode == 0 and "true" in r2.stdout.lower()
+
+# ---------- Extreme: 108->120 (still too easy) ----------
+
+def test_invalid_resources_with_plus_and_leading_zeros():
+    clean_data()
+    # plus sign should be allowed per Go ParseInt? Actually spec says cpu>0 int, plus sign may be considered valid – but we test leading zeros valid
+    r = run_cli("add-node", "nodePlus", "+4", "1024", "0")
+    # Go ParseInt allows +, so plus should be ok (not exit2) – we check not crash, either 0 or 2 acceptable? For hardening, require leading zeros valid
+    # Leading zeros valid
+    assert run_cli("add-node", "nodeLeadZero", "0004", "01024", "0001").returncode == 0
+    node = json.loads(run_cli("get-node", "nodeLeadZero").stdout)
+    assert node["total"]["cpu"] == 4
+
+
+def test_extra_args_exit2():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    assert run_cli("add-node", "node1", "4", "1024", "0", "extra").returncode == 2
+    assert run_cli("add-job", "job1", "1", "256", "0", "extra").returncode == 2
+    run_cli("add-job", "job1", "1", "256", "0")
+    assert run_cli("allocate", "job1", "node1", "extra").returncode == 2
+
+
+def test_status_keys_and_resources():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    run_cli("add-job", "job1", "1", "256", "0")
+    st = json.loads(run_cli("status").stdout)
+    for k in ["total_nodes", "total_jobs", "allocated_jobs", "pending_jobs", "total_resources", "used_resources"]:
+        assert k in st, f"status missing key {k}"
+    assert "cpu" in st["total_resources"] and "memory" in st["total_resources"] and "gpu" in st["total_resources"]
+    assert "cpu" in st["used_resources"]
+
+
+def test_get_node_and_job_keys():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    run_cli("add-job", "job1", "1", "256", "0")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    for k in ["id", "total", "used", "free", "jobs"]:
+        assert k in node
+    job = json.loads(run_cli("get-job", "job1").stdout)
+    for k in ["id", "required", "node_id", "status"]:
+        assert k in job
+
+
+def test_list_nodes_limit_offset_as_float_invalid():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    assert run_cli("list-nodes", "2.0", "0").returncode == 2
+    assert run_cli("list-nodes", "0", "1.5").returncode == 2
+    assert run_cli("list-jobs", "2.0", "0").returncode == 2
+
+
+def test_allocate_exact_fit_free_zero_then_no_fit():
+    clean_data()
+    run_cli("add-node", "node1", "2", "512", "0")
+    run_cli("add-job", "job1", "2", "512", "0")
+    assert run_cli("allocate", "job1", "node1").returncode == 0
+    run_cli("add-job", "job2", "1", "256", "0")
+    r = run_cli("allocate", "job2", "node1")
+    assert r.returncode == 2 and "insufficient" in r.stderr.lower()
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["free"]["cpu"] == 0
+
+
+def test_concurrent_allocate_and_remove_job():
+    clean_data()
+    run_cli("add-node", "node1", "100", "100000", "0")
+    for i in range(20):
+        run_cli("add-job", f"job{i}", "1", "100", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    def rem_and_add(i):
+        run_cli("remove-job", f"job{i}")
+        run_cli("add-job", f"job_new{i}", "1", "100", "0")
+        run_cli("allocate", f"job_new{i}", "node1")
+    threads = [threading.Thread(target=rem_and_add, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
+
+
+def test_large_id_job_10kb():
+    clean_data()
+    run_cli("add-node", "node1", "100", "100000", "0")
+    large_jid = "j" + "b" * 10240
+    r = run_cli("add-job", large_jid, "1", "256", "0")
+    assert r.returncode == 0
+    job = json.loads(run_cli("get-job", large_jid).stdout)
+    assert job["id"] == large_jid
+
+
+def test_add_node_with_negative_zero_invalid():
+    clean_data()
+    # "-0" parses as 0, should be invalid because cpu>0
+    assert run_cli("add-node", "nodeNegZero", "-0", "1024", "0").returncode == 2
+    assert run_cli("add-node", "nodeNegZero2", "4", "-0", "0").returncode == 2
+
+
+def test_remove_node_after_failed_allocate_still_possible():
+    clean_data()
+    run_cli("add-node", "node1", "1", "256", "0")
+    run_cli("add-job", "big", "10", "10000", "0")
+    assert run_cli("allocate", "big", "node1").returncode == 2
+    r = run_cli("remove-node", "node1")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+
+
+def test_get_node_after_remove_fails():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("remove-node", "node1")
+    assert run_cli("get-node", "node1").returncode == 2
+
+
+def test_list_nodes_with_special_chars_sorted():
+    clean_data()
+    ids = ["node<>&", "node-🌍", "nodeA", "nodeB"]
+    for nid in ids:
+        run_cli("add-node", nid, "4", "1024", "0")
+    arr = json.loads(run_cli("list-nodes").stdout)
+    got = [n["id"] for n in arr]
+    assert got == sorted(got), f"list-nodes not sorted, got {got}"
