@@ -283,6 +283,8 @@ func (p *simpleProcessor) OnStart(ctx context.Context, span FinishedSpan) {}
 func (p *simpleProcessor) OnEnd(span FinishedSpan) { _ = p.exporter.ExportSpans(context.Background(), []FinishedSpan{span}) }
 func (p *simpleProcessor) Shutdown(ctx context.Context) error { return nil }
 func (p *simpleProcessor) ForceFlush(ctx context.Context) error { return nil }
+func (p *simpleProcessor) DroppedCount() int { return 0 }
+func (p *simpleProcessor) QueueLen() int { return 0 }
 
 type tracerImpl struct {
     serviceName string
