@@ -1518,7 +1518,7 @@ def test_post_overwrite_and_grid_update():
 
 
 def test_concurrent_delete_and_lookup_stress():
-    """Heavy concurrent DELETE + lookup must not return null and final state must be empty (tests cache invalidation, not in-flight overlap)."""
+    """Deterministic stale-cache discriminator: DELETE fully committed, then fresh concurrent pool must not see stale entry."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -1527,7 +1527,7 @@ def test_concurrent_delete_and_lookup_stress():
         port = get_free_port()
         proc = start_server(db, port, cache_size="20", grid_size="1")
         try:
-            # pre-warm cache with hit
+            # pre-warm cache with hit (populates cache with ["sq"])
             for _ in range(3):
                 resp = requests.get(
                     f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
@@ -1535,42 +1535,28 @@ def test_concurrent_delete_and_lookup_stress():
                 assert_response_arrays_valid(resp)
                 assert "sq" in resp.json()["geofences"]
 
-            def lookup_worker():
-                for _ in range(50):
-                    try:
-                        resp = requests.get(
-                            f"http://localhost:{port}/lookup?lat=0.5&lng=0.5",
-                            timeout=2,
-                        )
-                        if resp.status_code != 200:
-                            return False, f"status {resp.status_code}"
-                        assert_response_arrays_valid(resp)
-                        data = resp.json()
-                        if data.get("geofences") is None:
-                            return False, "null during concurrent"
-                        # don't enforce stale after delete here – in-flight requests that started
-                        # before delete may legitimately return sq after delete flag; final check is stricter
-                    except Exception as e:
-                        return False, str(e)
-                return True, ""
-
-            with ThreadPoolExecutor(max_workers=20) as ex:
-                futures = [ex.submit(lookup_worker) for _ in range(20)]
-                time.sleep(0.2)
-                # delete while lookups in flight
-                resp = requests.delete(
-                    f"http://localhost:{port}/geofences/sq", timeout=2
-                )
-                assert resp.status_code == 200
-                results = [f.result() for f in futures]
-
-            # show all failures for debugging
-            failed = [r for r in results if not r[0]]
-            assert not failed, (
-                f"concurrent delete stress failed: {failed[:5]} results={results[:5]}"
+            # 1. DELETE and wait for the response — delete is now fully committed, cache must be invalidated
+            resp = requests.delete(f"http://localhost:{port}/geofences/sq", timeout=2)
+            assert resp.status_code in (200, 204), (
+                f"delete failed {resp.status_code} {resp.text}"
             )
 
-            # final lookup after all workers done must be empty – tests cache invalidation
+            # 2. NOW start a fresh pool of lookup workers. No request was in flight
+            #    across the delete, so any worker seeing "sq" is unambiguously stale cache.
+            def check(_):
+                r = requests.get(
+                    f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
+                )
+                assert_response_arrays_valid(r)
+                d = r.json()
+                assert_is_list_not_null(d, "geofences")
+                return ("sq" not in d["geofences"], d["geofences"])
+
+            with ThreadPoolExecutor(max_workers=30) as ex:
+                bad = [r for r in ex.map(check, range(300)) if not r[0]]
+            assert not bad, f"stale cache after committed DELETE: {bad[:5]}"
+
+            # final lookup after all workers done must be empty
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.5&lng=0.5", timeout=2
             )
