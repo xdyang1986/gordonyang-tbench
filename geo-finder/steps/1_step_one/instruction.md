@@ -35,13 +35,13 @@ On `add`, after basic parsing and range checks, you must also enforce:
 
 1. **No empty segments**: Polygon string format `"lat,lng;lat,lng;..."` split by `;`. If any segment after trimming is empty (e.g., consecutive `;;`, leading `;`, trailing `;`), reject with exit 2. Example `"0,0;;0,1;1,1"` or `"0,0;0,1;1,1;1,0;"` is invalid.
 
-2. **No duplicate points**: Polygon must not contain duplicate points (exact same lat and lng). If any two points have identical coordinates, reject exit 2. This includes duplicate first/last point – you should not require explicit closure; closure is implicit. So `"0,0;0,1;1,1;1,0;0,0"` contains duplicate `0,0` and must be rejected (client should not include closing point).
+2. **No duplicate points**: Polygon must not contain duplicate points with numerically equal lat and lng (e.g., `0,0` and `0.0,0.0` are duplicates). If any two points have identical coordinates, reject exit 2. This includes duplicate first/last point – you should not require explicit closure; closure is implicit. So `"0,0;0,1;1,1;1,0;0,0"` contains duplicate `0,0` and must be rejected.
 
-3. **Non-zero area**: Polygon area computed via shoelace must have absolute area > 1e-9 (not colinear or degenerate). If degenerate (all points colinear or colapsed), reject exit 2.
+3. **Non-zero area**: Polygon area computed via shoelace must have absolute area > 1e-9 (not colinear or degenerate). If degenerate (all points colinear or collapsed), reject exit 2.
 
-4. **Self-intersection**: Polygon must be simple – no two non-adjacent edges may intersect, including colinear overlapping. Adjacent edges share a vertex and are allowed to meet at that vertex. If self-intersecting (e.g., bow-tie `"0,0;1,1;0,1;1,0"`), reject exit 2. Implement correct segment intersection with orientation and on-segment checks, handling colinear cases. Complexity O(n^2) is acceptable for n<=1000.
+4. **Self-intersection**: Polygon must be simple – no two non-adjacent edges may intersect, including colinear overlapping segments. Adjacent edges share a vertex and are allowed to meet at that vertex. If self-intersecting (e.g., bow-tie `"0,0;1,1;0,1;1,0"` or colinear overlap `"0,0;0,2;0,1;1,1;1,0"` where `0,0-0,2` overlaps `0,2-0,1`), reject exit 2. Implement correct segment intersection with orientation and on-segment checks, handling colinear cases. Complexity O(n^2) is acceptable for n<=1000.
 
-If any validation fails, print error to stderr, do NOT modify DB, exit 2.
+If any validation fails, print error to stderr, do NOT modify DB (including overwrite attempts – old entry must survive), do not leave temp files, exit 2.
 
 ### Persistence Format
 DB file is JSON object mapping ID -> Geofence:
@@ -71,7 +71,7 @@ DB file is JSON object mapping ID -> Geofence:
 #### 4. `lookup --lat <float> --lng <float> [--verbose]`
 - Find geofences containing point.
 - lat in [-90,90], lng in [-180,180], else exit 2.
-- Points on edge or vertex are considered **inside** (epsilon 1e-9). Must handle horizontal edges, vertices, concave polygons correctly. Do NOT rely on external library; implement robust ray casting.
+- Points on edge or vertex are considered **inside** (epsilon 1e-9). Must handle horizontal edges, vertices, concave polygons correctly. Must also handle polygons that cross the antimeridian and world-spanning polygons correctly, with same answers as HTTP service will require in step 2.
 - Output: default JSON array of matching IDs sorted asc. Must be `[]`, not `null`, when no matches. `--verbose` → JSON array of matching Geofence objects sorted by ID asc, must be `[]` not `null` when empty.
 - Exit 0 even if empty (print `[]`, not `null`).
 - Performance: With 500 geofences each up to 100 points, lookup should complete in <200ms via CLI (tests will measure). Implement bounding-box prefilter even for CLI to meet this.

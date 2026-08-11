@@ -603,6 +603,201 @@ def test_invalid_add_does_not_corrupt():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_overwrite_invalid_preserves_old():
+    """Overwrite attempt with invalid polygon must keep old entry, not delete or corrupt."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(
+            db, ["add", "zone", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Original"]
+        )
+        r = run_cli(
+            db, ["add", "zone", "--polygon", "0,0;1,1;0,1;1,0", "--name", "Bad"]
+        )
+        assert r.returncode == 2
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1
+        assert arr[0]["name"] == "Original"
+        assert len(arr[0]["polygon"]) == 4
+        # lookup must still work for original
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["zone"]
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_colinear_overlap_self_intersect():
+    """Colinear overlapping edges must be detected as self-intersection."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Overlapping colinear: 0,0-0,2 contains 0,1 overlapping with 0,2-0,1
+        poly = "0,0;0,2;0,1;1,1;1,0"
+        r = run_cli(db, ["add", "bad", "--polygon", poly, "--name", "Bad"])
+        assert r.returncode == 2, f"should reject colinear overlap {r.stderr}"
+
+        # Another overlapping: horizontal overlap
+        poly2 = "0,0;2,0;1,0;1,1;0,1"
+        r = run_cli(db, ["add", "bad2", "--polygon", poly2, "--name", "Bad2"])
+        assert r.returncode == 2, (
+            f"should reject horizontal colinear overlap {r.stderr}"
+        )
+
+        # Valid touching at shared vertex only (adjacent) should be allowed
+        poly_ok = "0,0;0,1;1,1;1,0"
+        r = run_cli(db, ["add", "ok", "--polygon", poly_ok, "--name", "OK"])
+        assert r.returncode == 0, f"valid rect should pass {r.stderr}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_polygon_1000_boundary():
+    """1000 points allowed, 1001 rejected – boundary check."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Build 1000-point polygon approximating circle (valid)
+        import math
+
+        pts = []
+        for i in range(1000):
+            ang = 2 * math.pi * i / 1000
+            lat = 0.5 + 0.1 * math.sin(ang)
+            lng = 0.5 + 0.1 * math.cos(ang)
+            pts.append(f"{lat},{lng}")
+        poly_1000 = ";".join(pts)
+        r = run_cli(db, ["add", "max", "--polygon", poly_1000, "--name", "Max"])
+        assert r.returncode == 0, f"1000 points should be allowed: {r.stderr}"
+
+        # 1001 points should be rejected
+        pts.append("0.6,0.5")
+        poly_1001 = ";".join(pts)
+        r = run_cli(
+            db, ["add", "too_many", "--polygon", poly_1001, "--name", "TooMany"]
+        )
+        assert r.returncode == 2, f"1001 points should be rejected: {r.stderr}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_antimeridian_cli():
+    """CLI lookup must correctly handle antimeridian-crossing polygon."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Tiny rect crossing 180
+        poly = "0,179;0,-179;1,-179;1,179"
+        r = run_cli(db, ["add", "cross", "--polygon", poly, "--name", "Cross"])
+        assert r.returncode == 0, f"crossing add failed {r.stderr}"
+
+        tests = [
+            (0.5, 179.5, True),
+            (0.5, -179.5, True),
+            (0.5, 180, True),
+            (0.5, -180, True),
+            (0.5, 0, False),
+        ]
+        for lat, lng, should_inside in tests:
+            r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
+            assert r.returncode == 0
+            ids = json.loads(r.stdout)
+            assert isinstance(ids, list), f"should be list not {ids}"
+            assert ids == [] or ids is not None
+            # empty must be [] not null – check raw text
+            if not should_inside:
+                assert r.stdout.strip() == "[]", f"empty should be [] not {r.stdout}"
+            if should_inside:
+                assert "cross" in ids, f"{lat},{lng} should be inside crossing"
+            else:
+                assert "cross" not in ids, f"{lat},{lng} should be outside crossing"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_pole_cli():
+    """CLI lookup near poles, including edge at exactly ±90."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        poly_n = "89,-10;89,10;90,10;90,-10"
+        r = run_cli(db, ["add", "pole_n", "--polygon", poly_n, "--name", "N"])
+        assert r.returncode == 0
+
+        poly_s = "-90,-10;-90,10;-89,10;-89,-10"
+        r = run_cli(db, ["add", "pole_s", "--polygon", poly_s, "--name", "S"])
+        assert r.returncode == 0
+
+        r = run_cli(db, ["lookup", "--lat", "89.5", "--lng", "0"])
+        assert "pole_n" in json.loads(r.stdout)
+
+        r = run_cli(db, ["lookup", "--lat", "90", "--lng", "0"])
+        assert "pole_n" in json.loads(r.stdout), "90,0 on edge should be inside"
+
+        r = run_cli(db, ["lookup", "--lat", "-89.5", "--lng", "0"])
+        assert "pole_s" in json.loads(r.stdout)
+
+        r = run_cli(db, ["lookup", "--lat", "-90", "--lng", "0"])
+        assert "pole_s" in json.loads(r.stdout)
+
+        r = run_cli(db, ["lookup", "--lat", "88", "--lng", "0"])
+        ids = json.loads(r.stdout)
+        assert "pole_n" not in ids and "pole_s" not in ids
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_name_trimming():
+    """Name with leading/trailing spaces must be trimmed and persisted trimmed."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        r = run_cli(
+            db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "  My Zone  "]
+        )
+        assert r.returncode == 0
+        obj = json.loads(r.stdout)
+        assert obj["name"] == "My Zone", f"name should be trimmed, got {obj['name']!r}"
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert arr[0]["name"] == "My Zone"
+
+        # Name that is only whitespace should be rejected
+        r = run_cli(db, ["add", "z2", "--polygon", "0,0;0,1;1,1;1,0", "--name", "   "])
+        assert r.returncode == 2
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_remove_invalid_format():
+    """remove with invalid ID format must exit 2, not 3, and not corrupt DB."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "keep", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Keep"])
+        r = run_cli(db, ["remove", "bad id!"])
+        assert r.returncode == 2, (
+            f"invalid id format should be exit 2, got {r.returncode}"
+        )
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1 and arr[0]["id"] == "keep"
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_cli_performance():
     """CLI lookup with many geofences should still be reasonably fast (bbox prefilter)."""
     tmpdir = tempfile.mkdtemp()
