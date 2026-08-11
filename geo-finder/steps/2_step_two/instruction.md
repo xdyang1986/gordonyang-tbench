@@ -22,7 +22,8 @@ geofencectl --db <PATH> serve --port <int> [--grid-size <float>] [--cache-size <
 ### Required In-Memory Data Structures
 
 #### 1. Bounding Boxes
-Precompute bounding box per geofence for quick reject. Must correctly handle polygons near poles, polygons that cross the antimeridian, and polygons that span all longitudes (world bounds). For antimeridian-crossing cases the bbox logic and the point-in-polygon test must account for longitude wrapping — the same answers must come from the CLI lookup command and from `GET /lookup`.
+Precompute bounding box per geofence for quick reject. Must correctly handle polygons near the poles, polygons that cross the antimeridian, and polygons that span all longitudes.
+Longitude classification is the same rule as step 1, applied to the bbox as well as the point-in-polygon test: span ≥ 360 covers every longitude and is not crossing, so the bbox keeps the full longitude range; 180 < span < 360 crosses the antimeridian and must be unwrapped; span ≤ 180 is ordinary. Classify world-spanning before applying the crossing rule. The same answers must come from the CLI lookup command and from GET /lookup.
 
 #### 2. Grid Spatial Index
 Uniform grid over world lat [-90,90], lng [-180,180]. You must implement spatial indexing to reduce candidates. On query, compute cell for point and get candidates from index (empty cell -> empty result). Then bbox check, then point-in-polygon. Must track `index_cells` = number of cells with >=1 geofence.
