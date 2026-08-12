@@ -1884,14 +1884,165 @@ def test_add_with_tabs_and_newlines_in_polygon():
         run_cli(db, ["clear"])
         poly = "0,0;\t0,1;\n1,1;\t1,0"
         r = run_cli(db, ["add", "ws", "--polygon", poly, "--name", "WS"])
-        # Our reference splits by ';' and trims spaces/tabs/newlines, so should be allowed
-        # Some impls that don't trim will reject – allow both but check no crash
-        # To keep fair and hard, require acceptance (since spec says after trimming empty check, so whitespace around should be trimmed)
         assert r.returncode == 0, (
             f"tabs/newlines around ; should be allowed: {r.stderr}"
         )
 
         r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
         assert json.loads(r.stdout) == ["ws"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_lat_lng_out_of_range():
+    """Lookup with lat/lng out of [-90,90]/[-180,180] must exit 2, not crash or return []."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+
+        for lat, lng in [
+            ("91", "0"),
+            ("-91", "0"),
+            ("0", "181"),
+            ("0", "-181"),
+            ("100", "200"),
+        ]:
+            r = run_cli(db, ["lookup", "--lat", lat, "--lng", lng])
+            assert r.returncode == 2, (
+                f"lookup {lat},{lng} should exit 2, got {r.returncode} {r.stderr}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_name_unicode_and_trim():
+    """Name may contain unicode and must be trimmed, counted by runes or bytes len<=128 after trim."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # unicode name
+        name = "Café 🚀 Zone"
+        r = run_cli(db, ["add", "uni", "--polygon", "0,0;0,1;1,1;1,0", "--name", name])
+        assert r.returncode == 0, f"unicode name should be allowed {r.stderr}"
+        obj = json.loads(r.stdout)
+        assert obj["name"] == name.strip()
+
+        # name with 128 unicode chars (ascii still) after trim
+        name_128 = (
+            "é" * 64
+        )  # 64 runes, but bytes >128? Our ref counts len() bytes, so this would be 128 bytes? Actually é is 2 bytes, 64*2=128 bytes
+        r = run_cli(
+            db, ["add", "uni128", "--polygon", "0,0;0,1;1,1;1,0", "--name", name_128]
+        )
+        # Allow either 0 or 2 depending on byte vs rune counting, but must not crash
+        assert r.returncode in (0, 2)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_overwrite_many_times_stable():
+    """Overwrite same ID 50 times with different polygons – final must be last, list sorted, no tmp leak."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(50):
+            poly = f"{i},{i};{i},{i + 1};{i + 1},{i + 1};{i + 1},{i}"
+            r = run_cli(db, ["add", "same_id", "--polygon", poly, "--name", f"V{i}"])
+            assert r.returncode == 0
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1
+        assert arr[0]["name"] == "V49"
+        # final polygon should contain point 49.5,49.5
+        r = run_cli(db, ["lookup", "--lat", "49.5", "--lng", "49.5"])
+        assert json.loads(r.stdout) == ["same_id"]
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == []
+
+        for root, dirs, files in os.walk(tmpdir):
+            assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_list_after_overwrites_and_removes():
+    """List after many overwrites/removes must remain sorted and file valid."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        ids = [f"a_{i}" for i in range(20)]
+        for id_ in ids:
+            run_cli(db, ["add", id_, "--polygon", "0,0;0,1;1,1;1,0", "--name", id_])
+
+        # overwrite 10 of them
+        for id_ in ids[:10]:
+            run_cli(
+                db,
+                [
+                    "add",
+                    id_,
+                    "--polygon",
+                    "10,10;10,11;11,11;11,10",
+                    "--name",
+                    f"New{id_}",
+                ],
+            )
+
+        # remove 5
+        for id_ in ids[10:15]:
+            run_cli(db, ["remove", id_])
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        got_ids = [x["id"] for x in arr]
+        assert got_ids == sorted(got_ids)
+        assert len(arr) == 15
+
+        # verify file is valid dict
+        with open(db) as f:
+            data = json.load(f)
+            assert isinstance(data, dict)
+            assert len(data) == 15
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cli_lookup_1000_zones():
+    """1000 overlapping zones lookup must be sorted and fast – absolute upper bound."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(1000):
+            # tiny square at same area to make overlapping list large
+            r = run_cli(
+                db,
+                [
+                    "add",
+                    f"big_{i:04d}",
+                    "--polygon",
+                    "0,0;0,10;10,10;10,0",
+                    "--name",
+                    f"Big {i}",
+                ],
+            )
+            assert r.returncode == 0
+
+        start = time.time()
+        r = run_cli(db, ["lookup", "--lat", "5", "--lng", "5"])
+        elapsed = time.time() - start
+        assert r.returncode == 0
+        ids = json.loads(r.stdout)
+        assert len(ids) == 1000
+        assert ids == sorted(ids)
+        # Should be reasonably fast even with 1000 (bbox prefilter still 1000, but 1000*4 edges ~4000 checks)
+        # Allow <1s to avoid flake
+        assert elapsed < 1.0, f"1000 overlapping lookup too slow {elapsed}s"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
