@@ -1829,3 +1829,162 @@ def test_concurrent_get_node_while_allocating():
     t1.join()
     t2.join()
     assert not os.path.exists(LOCK_FILE)
+
+# ---------- Further hardening: 135->150 (still too easy) ----------
+
+def test_status_keys_exact():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    st = json.loads(run_cli("status").stdout)
+    expected_keys = {"total_nodes", "total_jobs", "allocated_jobs", "pending_jobs", "total_resources", "used_resources"}
+    assert expected_keys.issubset(set(st.keys())), f"status missing keys {expected_keys - set(st.keys())}"
+    assert "cpu" in st["total_resources"] and "memory" in st["total_resources"] and "gpu" in st["total_resources"]
+
+
+def test_node_json_keys_and_structure():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    for k in ["id", "total", "used", "free", "jobs"]:
+        assert k in node, f"node missing key {k}"
+    for rk in ["cpu", "memory", "gpu"]:
+        assert rk in node["total"] and rk in node["used"] and rk in node["free"]
+    assert isinstance(node["jobs"], list)
+
+
+def test_job_json_keys_and_structure():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    job = json.loads(run_cli("get-job", "job1").stdout)
+    for k in ["id", "required", "node_id", "status"]:
+        assert k in job, f"job missing key {k}"
+    for rk in ["cpu", "memory", "gpu"]:
+        assert rk in job["required"]
+    assert job["status"] in ("pending", "running")
+
+
+def test_allocate_json_keys():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    out = json.loads(run_cli("allocate", "job1", "node1").stdout)
+    for k in ["job_id", "node_id", "allocated"]:
+        assert k in out
+    assert out["allocated"] is True
+
+
+def test_schedule_json_keys():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    out = json.loads(run_cli("schedule", "job1").stdout)
+    for k in ["job_id", "node_id", "scheduled"]:
+        assert k in out
+    assert out["scheduled"] is True
+
+
+def test_list_nodes_returns_full_objects():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 1
+    assert isinstance(arr[0], dict) and "id" in arr[0] and "total" in arr[0]
+
+
+def test_list_jobs_returns_full_objects():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    arr = json.loads(run_cli("list-jobs").stdout)
+    assert len(arr) == 1 and isinstance(arr[0], dict) and "id" in arr[0]
+
+
+def test_remove_node_true_false_lowercase():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    r_true = run_cli("remove-node", "node1")
+    assert r_true.stdout.strip().lower() == "true"
+    r_false = run_cli("remove-node", "node1")
+    assert r_false.stdout.strip().lower() == "false"
+
+
+def test_deallocate_true_false_lowercase():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    r_false = run_cli("deallocate", "job1")
+    assert r_false.stdout.strip().lower() == "false"
+    run_cli("allocate", "job1", "node1")
+    r_true = run_cli("deallocate", "job1")
+    assert r_true.stdout.strip().lower() == "true"
+
+
+def test_large_scale_1000_nodes_and_1000_jobs_sorted():
+    clean_data()
+    for i in range(500):
+        run_cli("add-node", f"node-{i:04d}", "4", "1024", "0")
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 500 and [n["id"] for n in arr] == sorted([n["id"] for n in arr])
+    for i in range(500):
+        run_cli("add-job", f"job-{i:04d}", "1", "256", "0")
+    arr2 = json.loads(run_cli("list-jobs").stdout)
+    assert len(arr2) == 500 and [j["id"] for j in arr2] == sorted([j["id"] for j in arr2])
+
+
+def test_allocate_exact_fit_memory_and_gpu():
+    clean_data()
+    run_cli("add-node", "nodeMem", "10", "512", "0")
+    run_cli("add-job", "jobMem", "1", "512", "0")
+    assert run_cli("allocate", "jobMem", "nodeMem").returncode == 0
+    assert json.loads(run_cli("get-node", "nodeMem").stdout)["free"]["memory"] == 0
+    run_cli("add-node", "nodeGPU", "4", "1024", "1")
+    run_cli("add-job", "jobGPU2", "1", "256", "1")
+    assert run_cli("allocate", "jobGPU2", "nodeGPU").returncode == 0
+    assert json.loads(run_cli("get-node", "nodeGPU").stdout)["free"]["gpu"] == 0
+
+
+def test_add_node_with_leading_zeros_preserves_id():
+    clean_data()
+    assert run_cli("add-node", "node-001", "4", "1024", "0").returncode == 0
+    assert json.loads(run_cli("get-node", "node-001").stdout)["id"] == "node-001"
+
+
+def test_get_nonexist_after_many_ops():
+    clean_data()
+    for i in range(20):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    assert run_cli("get-node", "node-not-exist-xyz").returncode == 2
+    assert run_cli("get-job", "job-not-exist-xyz").returncode == 2
+
+
+def test_concurrent_remove_job_while_allocating_same_job():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    run_cli("add-job", "jobRace", "1", "256", "0")
+    def alloc():
+        for _ in range(10):
+            run_cli("allocate", "jobRace", "node1")
+            run_cli("deallocate", "jobRace")
+    def remove():
+        time.sleep(0.02)
+        run_cli("remove-job", "jobRace")
+    threads = [threading.Thread(target=alloc), threading.Thread(target=remove)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+
+
+def test_status_after_many_dealloc():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for i in range(10):
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    for i in range(10):
+        run_cli("deallocate", f"job{i}")
+    st = json.loads(run_cli("status").stdout)
+    assert st["allocated_jobs"] == 0 and st["pending_jobs"] == 10
+    assert st["used_resources"]["cpu"] == 0
