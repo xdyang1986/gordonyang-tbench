@@ -1613,12 +1613,196 @@ def test_clear_reclaims_and_empty():
         assert r.stdout.strip() == "[]"
         assert json.loads(r.stdout) == []
 
-        # file content should be {} (or []? spec says {} for clear)
         with open(db) as f:
             content = f.read().strip()
             assert content in ("{}", "{ }", "{  }") or json.loads(content) == {}
 
         files = os.listdir(tmpdir)
         assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_polygon_order_preserved():
+    """Polygon point order must be preserved exactly as given, not sorted or normalized."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Add points in specific order
+        poly_str = "0,0;0,2;2,2;2,0"
+        r = run_cli(db, ["add", "order", "--polygon", poly_str, "--name", "Order"])
+        assert r.returncode == 0
+        obj = json.loads(r.stdout)
+        # Check order preserved
+        assert len(obj["polygon"]) == 4
+        assert obj["polygon"][0]["lat"] == 0 and obj["polygon"][0]["lng"] == 0
+        assert obj["polygon"][1]["lat"] == 0 and obj["polygon"][1]["lng"] == 2
+        assert obj["polygon"][2]["lat"] == 2 and obj["polygon"][2]["lng"] == 2
+        assert obj["polygon"][3]["lat"] == 2 and obj["polygon"][3]["lng"] == 0
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert arr[0]["polygon"][1]["lng"] == 2
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_scientific_notation():
+    """Lookup lat/lng may be given in scientific notation and must be parsed."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+
+        r = run_cli(db, ["lookup", "--lat", "5e-1", "--lng", "5e-1"])
+        assert r.returncode == 0, f"sci lookup should be allowed {r.stderr}"
+        assert json.loads(r.stdout) == ["z"]
+
+        r = run_cli(db, ["lookup", "--lat", "5E-1", "--lng", "5E-1"])
+        assert r.returncode == 0
+        assert json.loads(r.stdout) == ["z"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_on_edge_midpoint():
+    """Points exactly on edge midpoint and vertex must be considered inside."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "sq", "--polygon", "0,0;0,2;2,2;2,0", "--name", "Sq"])
+
+        # midpoint of bottom edge
+        r = run_cli(db, ["lookup", "--lat", "0", "--lng", "1"])
+        assert json.loads(r.stdout) == ["sq"], (
+            f"bottom edge midpoint should be inside, got {r.stdout}"
+        )
+
+        # midpoint of left edge
+        r = run_cli(db, ["lookup", "--lat", "1", "--lng", "0"])
+        assert json.loads(r.stdout) == ["sq"]
+
+        # vertex
+        r = run_cli(db, ["lookup", "--lat", "0", "--lng", "0"])
+        assert json.loads(r.stdout) == ["sq"]
+
+        # top edge
+        r = run_cli(db, ["lookup", "--lat", "2", "--lng", "1"])
+        assert json.loads(r.stdout) == ["sq"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_concurrent_reads_during_writes():
+    """Concurrent list and lookup during adds must not crash or see corrupt JSON."""
+    import concurrent.futures
+
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+
+        def add_many():
+            for i in range(30):
+                poly = "0,0;0,1;1,1;1,0"
+                run_cli(
+                    db, ["add", f"cr_{i:02d}", "--polygon", poly, "--name", f"CR{i}"]
+                )
+
+        def read_many():
+            for _ in range(30):
+                r1 = run_cli(db, ["list"])
+                if r1.returncode not in (0, 4):
+                    return False
+                try:
+                    json.loads(r1.stdout)
+                except:
+                    return False
+                r2 = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+                if r2.returncode != 0:
+                    return False
+                try:
+                    json.loads(r2.stdout)
+                except:
+                    return False
+            return True
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+            fut_add = ex.submit(add_many)
+            futs_read = [ex.submit(read_many) for _ in range(5)]
+            add_ok = fut_add.result()
+            read_oks = [f.result() for f in futs_read]
+
+        # add_many runs in same thread as CLI processes, each CLI is separate process so concurrent file writes may interleave
+        # We only require no crash and valid JSON, not exact count (single-process spec)
+        assert all(read_oks), (
+            f"concurrent reads during writes saw corrupt JSON: {read_oks}"
+        )
+
+        r = run_cli(db, ["list"])
+        assert r.returncode == 0
+        arr = json.loads(r.stdout)
+        assert isinstance(arr, list)
+
+        for root, dirs, files in os.walk(tmpdir):
+            assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_list_stable_after_many_ops():
+    """After many adds/removes/overwrites, list must remain sorted and file valid."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # add 30
+        for i in range(30):
+            r = run_cli(
+                db,
+                [
+                    "add",
+                    f"id_{i:02d}",
+                    "--polygon",
+                    "0,0;0,1;1,1;1,0",
+                    "--name",
+                    f"N{i}",
+                ],
+            )
+            assert r.returncode == 0
+
+        # remove even
+        for i in range(0, 30, 2):
+            r = run_cli(db, ["remove", f"id_{i:02d}"])
+            assert r.returncode == 0
+
+        # overwrite odd with new polygon far away
+        for i in range(1, 30, 2):
+            r = run_cli(
+                db,
+                [
+                    "add",
+                    f"id_{i:02d}",
+                    "--polygon",
+                    "10,10;10,11;11,11;11,10",
+                    "--name",
+                    f"New{i}",
+                ],
+            )
+            assert r.returncode == 0
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        ids = [x["id"] for x in arr]
+        assert ids == sorted(ids), f"not sorted after many ops: {ids}"
+        assert len(arr) == 15
+        # old location should be empty, new location should have 15
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == []
+        r = run_cli(db, ["lookup", "--lat", "10.5", "--lng", "10.5"])
+        assert len(json.loads(r.stdout)) == 15
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
