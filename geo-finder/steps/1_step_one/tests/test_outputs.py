@@ -1517,16 +1517,108 @@ def test_colinear_points_on_edge_allowed():
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
-        # Square with extra colinear point on top edge: 0,0->0,1->0,2? Actually colinear on edge 0,1 to 1,1 with point 0.5,1 on edge
         poly = "0,0;0,1;0.5,1;1,1;1,0"
         r = run_cli(db, ["add", "colinear_ok", "--polygon", poly, "--name", "Colinear"])
-        # Our reference allows colinear adjacent sharing vertex (0,1)-(0.5,1)-(1,1) all colinear on y=1
-        # This is not considered self-intersecting, just extra vertex on edge – should be allowed
         assert r.returncode == 0, (
             f"colinear points on edge should be allowed: {r.stderr}"
         )
 
         r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
         assert json.loads(r.stdout) == ["colinear_ok"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_large_file_1000_zones():
+    """1000 zones persistence – list must have 1000 sorted, no temp, file valid JSON object."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(1000):
+            base = i * 0.01
+            poly = f"{base},{base};{base},{base + 0.005};{base + 0.005},{base + 0.005};{base + 0.005},{base}"
+            r = run_cli(
+                db, ["add", f"big_{i:04d}", "--polygon", poly, "--name", f"Big {i}"]
+            )
+            assert r.returncode == 0, f"add big_{i} failed {r.stderr}"
+
+        r = run_cli(db, ["list"])
+        assert r.returncode == 0
+        arr = json.loads(r.stdout)
+        assert len(arr) == 1000, f"expected 1000, got {len(arr)}"
+        ids = [x["id"] for x in arr]
+        assert ids == sorted(ids)
+
+        # raw file must be valid JSON object mapping, not array
+        with open(db) as f:
+            data = json.load(f)
+            assert isinstance(data, dict)
+            assert len(data) == 1000
+
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_on_world_edge_points():
+    """Points exactly on world rectangle edge (lat -90,90 lng -180,180) must be considered inside."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        poly = "-90,-180;-90,180;90,180;90,-180"
+        r = run_cli(db, ["add", "world", "--polygon", poly, "--name", "World"])
+        assert r.returncode == 0
+
+        edge_points = [
+            (-90, -180),
+            (-90, 180),
+            (90, -180),
+            (90, 180),
+            (-90, 0),
+            (90, 0),
+            (0, -180),
+            (0, 180),
+        ]
+        for lat, lng in edge_points:
+            r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
+            assert r.returncode == 0, f"lookup edge {lat},{lng} failed"
+            ids = json.loads(r.stdout)
+            assert ids == ["world"], (
+                f"edge {lat},{lng} should be inside world, got {ids}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_clear_reclaims_and_empty():
+    """clear must atomically write {} and list must be [] not null, no temp left."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(20):
+            r = run_cli(
+                db, ["add", f"z{i}", "--polygon", "0,0;0,1;1,1;1,0", "--name", f"Z{i}"]
+            )
+            assert r.returncode == 0
+
+        r = run_cli(db, ["clear"])
+        assert r.returncode == 0
+        assert "cleared" in r.stdout.lower()
+
+        r = run_cli(db, ["list"])
+        assert r.stdout.strip() == "[]"
+        assert json.loads(r.stdout) == []
+
+        # file content should be {} (or []? spec says {} for clear)
+        with open(db) as f:
+            content = f.read().strip()
+            assert content in ("{}", "{ }", "{  }") or json.loads(content) == {}
+
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
