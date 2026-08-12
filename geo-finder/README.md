@@ -2,89 +2,78 @@
 
 ## Latest online validation status
 
-**Commit `2898b43b` (v1.13) · run 2026-08-11 · jobs 4525004 / 4525005 / 4525006 / 4525007**
+**Commit `b36ea0b9` (v1.25) · run 2026-08-12 · jobs 4580997 / 4580998 / 4580999 / 4581000**
 
 Platform verdict: `validation = passing`, `tbdReviewStatus = pass`, status `draft`.
-Contamination LOW · novelty risk MEDIUM · embedding dedup 0.5235 · quality dimensions
-depth 3 / realism 3 / originality 2.
+Contamination MEDIUM · novelty risk MEDIUM · embedding dedup 0.5244 · quality dimensions
+**depth 3 / realism 3 / originality 3** — all three at maximum.
 
 All four jobs complete. The "Metacode or Opus pass/fail balance" row has still not
 appeared in `validationDetails` — aggregation lag, not a failure.
 
 | Stage | Job | Result | Reward split |
 | --- | --- | --- | --- |
-| oracle | 4525005 | **3/3** | 3 × 1.00 |
-| codex (`gpt-5.5`) | 4525006 | **8/10** | 8 × 1.00, 2 × 0.00 |
-| metacode (avocado) | 4525004 | **1/10** | 1 × 1.00, 3 × 0.50, 6 × 0.00 |
-| agent (`claude-opus-4-8`) | 4525007 | **1/10** | 1 × 1.00, 9 × 0.00 |
+| oracle | 4580998 | **3/3** | 3 × 1.00 |
+| codex (`gpt-5.5`) | 4580997 | **10/10** | 10 × 1.00 |
+| metacode (avocado) | 4581000 | **4/10** | 4 × 1.00, 5 × 0.50, 1 × 0.00 |
+| agent (`claude-opus-4-8`) | 4580999 | **5/10** | 5 × 1.00, 4 × 0.50, 1 × 0.00 |
 
-### The task has swung to too-hard, and step 1 is what kills trials
-
-A reward of `0.00` means step 1 failed, so step 2 never runs (`min_reward = 1`).
-Opus scored 0.00 on 9 of 10 trials; avocado on 6 of 10.
-
-All 20 failing trials were analysed. **Every one is a single-test miss** — 29/30 on step 1
-or 37/38 on step 2 — and 17 of the 20 die in step 1:
-
-| Test | Step | Trials failing | opus | avocado | codex |
-| --- | --- | --- | --- | --- | --- |
-| `test_world_bounds` | 1 | **11** | 4 | 6 | 1 |
-| `test_lookup_antimeridian_cli` | 1 | **6** | 5 | 0 | 1 |
-| `test_concurrent_post_stress` | 2 | 3 | 0 | 3 | 0 |
-
-Both step-1 discriminators are the same thing: **world-spanning vs antimeridian
-classification**. `test_concurrent_post_stress` is the only step-2 test that ever fires,
-and only for avocado.
-
-### Reading of the result — the difficulty is an unstated rule, not reasoning depth
-
-`test_world_bounds` fails at *add* time, before any lookup:
+### TBR: 18/18, full marks
 
 ```
-add world --polygon "-90,-180;-90,180;90,180;90,-180"
-→ exit 2  "error: polygon has zero area (degenerate or colinear)"
+total_score = 18            all six axes = 3          quality_concern_titles = null
+is_memorizable = False      is_trivial = False        is_realistic = True
+tests_fail_before_solution = True    tests_pass_after_solution = True
 ```
 
-Two separately-required rules collide. Longitude wrapping normalises `-180 ≡ 180`, which
-collapses the world rectangle to a degenerate shape; the also-required "non-zero area"
-validation then rejects it. The instruction never says which rule wins, nor that the world
-rectangle must be accepted as a valid polygon.
+> "M1 a strict-validation CLI with atomic persistence and correct point-in-polygon lookup
+> (75 tests), M2 evolving it into a concurrent HTTP service with spatial index, LRU cache,
+> batch/CRUD, and stats (38 tests). Tests fail before and pass after each cumulative
+> solution, with no cross-milestone leakage and no regression. Verification is fully
+> execution-based and deterministic (fixed fuzz seeds, reference cross-checks, relative
+> performance thresholds), the environment is clean with no answer leakage… No trivial
+> shortcuts or quality concerns found. Full marks: 18/18."
 
-`test_lookup_antimeridian_cli` is the `>180` vs `≥360` misclassification on the lookup
-path — a point that should be inside the crossing rectangle comes back `[]`.
+### The world-bounds unfairness is resolved
 
-The step-1 instruction states only (L74):
+At `2898b43b` two classification tests carried 17 of 20 failures — `test_world_bounds`
+(11×), which was unwinnable for any implementation that normalised longitudes before
+running the zero-area check, and `test_lookup_antimeridian_cli` (6×). **Neither appears in
+the failure set at this commit.**
 
-> "Must also handle polygons that cross the antimeridian and world-spanning polygons
-> correctly, with same answers as HTTP service will require in step 2."
+### Failure spread (11 failing trials)
 
-No threshold, no classification order, no statement that the world rectangle is
-non-degenerate. The disambiguation that used to live in the step-2 spec was removed by
-`0619c25` (de-over-specification) and was never present in step 1. `f57dd07` then added
-these two tests to step 1, where a failure is fatal to the whole trial.
+| Test | Step | Count | opus | avocado |
+| --- | --- | --- | --- | --- |
+| `test_concurrent_post_stress` | 2 | 5 | 0 | 5 |
+| `test_grid_cells_exact_small` | 2 | 3 | 3 | 0 |
+| `test_id_starting_with_hyphen_underscore` | 1 | 2 | 1 | 1 |
+| `test_world_plus_crossing_batch` | 2 | 2 | 2 | 0 |
 
-The model ordering is inverted as a result — **codex 8/10 while opus and avocado are both
-1/10**. That is a coin flip on an unstated rule, not a capability difference: codex happens
-to pick the intended reading, the other two do not, and the split is near-total in each
-direction.
+Every failure is a one- or two-test miss (74/75 on step 1, 36–37/38 on step 2). The two
+dominant discriminators are now the fair concurrency and exact-reclaim families:
+`test_concurrent_post_stress` (cache invalidation under concurrent POST) and
+`test_grid_cells_exact_small` (index cells reclaimed exactly). No single assertion is
+load-bearing, so an under-specified test could not by itself be driving the calibration.
 
-### Action before landing
+### Reading
 
-State explicitly, in both steps' `instruction.md`:
+Fair difficulty with a real three-way spread and the best quality dimensions in the repo.
+Two things to note:
 
-1. A polygon whose longitude span is ≥ 360 covers every longitude and is **not**
-   antimeridian-crossing; classify world-spanning *before* applying the crossing rule.
-2. The world rectangle is a valid, non-degenerate polygon — the zero-area/colinearity
-   check must run on unwrapped coordinates, before any longitude normalisation.
+1. **codex 10/10** — the top of the range is saturated. avocado 4/10 and opus 5/10 still
+   give genuine separation, but further difficulty should come from the concurrency /
+   exact-reclaim family where every real failure already lands.
+2. **`test_id_starting_with_hyphen_underscore` is borderline.** It requires
+   `add -abc --polygon …` to succeed; failing implementations return
+   `error: unknown flag -abc`. The ID regex `^[A-Za-z0-9_-]{1,64}$` (step 1 spec, L29) does
+   permit a leading hyphen, so it is derivable — but nothing states that a positional
+   argument beginning with `-` must not be flag-parsed, which is the default in Go's `flag`
+   package and most parsers. At 2 of 11 failures it is not carrying the calibration. One
+   clause on L29 would close it: *an ID may begin with `-` or `_`; positional arguments must
+   not be parsed as flags*.
 
-Without (2), `test_world_bounds` is unwinnable for any implementation that follows the
-wrapping rule — it accounts for 11 of the 20 failures on its own.
-
-Expect pass rates to rise sharply once both are stated: removing the two step-1 tests from
-the tally would put opus at 10/10, avocado at 4/10 and codex at 10/10. The only fair
-discriminator still firing is `test_concurrent_post_stress` (3 × avocado), so the task will
-need real difficulty rebuilt on top of the selective-invalidation / concurrency family
-rather than on classification ambiguity.
+Contamination moved LOW → MEDIUM at this commit. Still passing, but worth a glance.
 
 ## Authoring policy
 
