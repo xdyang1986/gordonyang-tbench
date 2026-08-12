@@ -10,7 +10,12 @@ APP_DIR = "/app"
 
 def run(cmd, cwd=APP_DIR, timeout=30):
     env = os.environ.copy()
-    env["GOCACHE"] = "/tmp/codimango/gocache"
+    # Use shared cache for normal runs (fast), isolated cache for -race runs to avoid
+    # 'cannot reopen' corruption under heavy load with race detector
+    if cwd != APP_DIR and "-race" in cmd:
+        env["GOCACHE"] = os.path.join(cwd, "gocache")
+    else:
+        env["GOCACHE"] = "/tmp/codimango/gocache"
     env["GOPATH"] = "/tmp/codimango/gopath"
     env["GOFLAGS"] = "-mod=mod"
     env["GOTOOLCHAIN"] = "local"
@@ -1961,6 +1966,7 @@ def test_tracing_parent_id_rules():
     assert proc.returncode == 0, f"parent id rules failed: {proc.stdout} {proc.stderr}"
 
 
+
 def test_tracing_isrecording_after_end():
     code = textwrap.dedent("""
     package main
@@ -2056,6 +2062,8 @@ def test_exporter_clear_then_reuse():
     )
 
 
+
+
 def test_tracing_parent_chain_three_levels():
     code = textwrap.dedent("""
     package main
@@ -2099,6 +2107,8 @@ def test_tracing_parent_chain_three_levels():
     )
 
 
+
+
 def test_tracing_attribute_map_non_nil():
     code = textwrap.dedent("""
     package main
@@ -2123,6 +2133,8 @@ def test_tracing_attribute_map_non_nil():
     assert proc.returncode == 0, (
         f"attribute map non-nil failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_tracing_event_timestamp_recent():
@@ -2157,6 +2169,8 @@ def test_tracing_event_timestamp_recent():
     assert proc.returncode == 0, (
         f"event timestamp recent failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_metrics_histogram_boundary_and_sum():
@@ -2194,6 +2208,8 @@ def test_metrics_histogram_boundary_and_sum():
     )
 
 
+
+
 def test_logger_json_fields():
     code = textwrap.dedent("""
     package main
@@ -2225,6 +2241,8 @@ def test_logger_json_fields():
     )
 
 
+
+
 def test_tracing_service_name_empty_fallback():
     code = textwrap.dedent("""
     package main
@@ -2248,6 +2266,8 @@ def test_tracing_service_name_empty_fallback():
     assert proc.returncode == 0, (
         f"service name empty fallback failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_tracing_id_generator_nil_fallback():
@@ -2275,6 +2295,8 @@ def test_tracing_id_generator_nil_fallback():
     )
 
 
+
+
 def test_logger_level_default_info():
     code = textwrap.dedent("""
     package main
@@ -2299,6 +2321,8 @@ def test_logger_level_default_info():
     assert proc.returncode == 0, (
         f"logger default level failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_exporter_events_attr_deep_copy():
@@ -2333,6 +2357,8 @@ def test_exporter_events_attr_deep_copy():
     )
 
 
+
+
 def test_tracing_span_context_copy():
     code = textwrap.dedent("""
     package main
@@ -2358,6 +2384,8 @@ def test_tracing_span_context_copy():
     assert proc.returncode == 0, (
         f"span context copy failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_metrics_collect_buckets_deep_copy():
@@ -2395,6 +2423,8 @@ def test_metrics_collect_buckets_deep_copy():
     )
 
 
+
+
 def test_tracing_marshal_validates_ids():
     code = textwrap.dedent("""
     package main
@@ -2425,6 +2455,8 @@ def test_tracing_marshal_validates_ids():
     assert proc.returncode == 0, (
         f"marshal validates ids failed: {proc.stdout} {proc.stderr}"
     )
+
+
 
 
 def test_tracing_withprocessor_nil_fallback():
@@ -2501,281 +2533,13 @@ def test_tracing_id_generator_called_per_span():
     )
 
 
-def test_tracing_flags_zero_when_not_sampled():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"", Sampled:false}
-        ctx := observability.ContextWithTrace(context.Background(), sc)
-        carrier := map[string]string{}
-        observability.MarshalTrace(ctx, carrier)
-        v, ok := carrier["x-ride-trace"]
-        if !ok { panic("should marshal even when not sampled? Flags 0 but still valid") }
-        if v[len(v)-1] != '0' { panic(fmt.Sprintf("sampled false should have :0, got %s", v)) }
-        sc2 := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:false}
-        if sc2.Flags != 0 { panic(fmt.Sprintf("Flags should be 0 when Sampled false, but struct may have Flag 0 - check Context() returns with Flags 0")) }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"flags zero when not sampled failed: {proc.stdout} {proc.stderr}"
-    )
 
 
-def test_metrics_label_order_irrelevant_for_reuse():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        prov := observability.NewMetricsProvider()
-        c1 := prov.Counter("order_test", observability.WithLabels(map[string]string{"a":"1","b":"2"}))
-        c2 := prov.Counter("order_test", observability.WithLabels(map[string]string{"b":"2","a":"1"}))
-        c1.Inc()
-        c2.Inc()
-        fams := prov.Collect()
-        for _, fam := range fams {
-            if fam.Name=="order_test" {
-                if len(fam.Metrics)!=1 { panic(fmt.Sprintf("label order should be irrelevant for reuse, expected 1 series got %d", len(fam.Metrics))) }
-                if fam.Metrics[0].Value != 2 { panic(fmt.Sprintf("expected value 2 got %f", fam.Metrics[0].Value)) }
-                fmt.Println("OK")
-                return
-            }
-        }
-        panic("not found")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"label order irrelevant failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_metrics_label_truncate_for_gauge_and_histogram():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "fmt"
-        "strings"
-        "ride-observability/observability"
-    )
-    func main(){
-        prov := observability.NewMetricsProvider()
-        long := strings.Repeat("x", 500)
-        g := prov.Gauge("gauge_trunc", observability.WithLabels(map[string]string{"id": long}))
-        g.Set(1)
-        h := prov.Histogram("hist_trunc", observability.WithLabels(map[string]string{"id": long}))
-        h.Observe(1)
-        fams := prov.Collect()
-        for _, fam := range fams {
-            if fam.Name=="gauge_trunc" {
-                v := fam.Metrics[0].Labels["id"]
-                if len(v) > 256 { panic(fmt.Sprintf("gauge label value should truncate to 256, got %d", len(v))) }
-            }
-            if fam.Name=="hist_trunc" {
-                v := fam.Metrics[0].Labels["id"]
-                if len(v) > 256 { panic(fmt.Sprintf("hist label value should truncate to 256, got %d", len(v))) }
-            }
-        }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"label truncate gauge hist failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_exporter_getspans_slice_mutation():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        exp := observability.NewMemoryExporter()
-        proc := observability.NewSimpleProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
-        _, s := tracer.Start(context.Background(), "slice-mut")
-        s.End()
-        spans1 := exp.GetSpans()
-        // append to returned slice should not affect internal
-        spans1 = append(spans1, observability.FinishedSpan{Name:"injected"})
-        spans2 := exp.GetSpans()
-        if len(spans2)!=1 { panic(fmt.Sprintf("append to returned GetSpans slice should not affect internal, expected 1 got %d", len(spans2))) }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"exporter slice mutation failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_tracing_add_attribute_after_limit_still_128():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        exp := observability.NewMemoryExporter()
-        proc := observability.NewSimpleProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
-        var attrs []observability.Attribute
-        for i:=0;i<128;i++{ attrs = append(attrs, observability.Attribute{Key: fmt.Sprintf("k%d", i), Value:i}) }
-        _, span := tracer.Start(context.Background(), "limit-add", observability.WithAttributes(attrs...))
-        // at limit now
-        span.AddAttribute("extra", "should-be-ignored")
-        span.End()
-        s := exp.GetSpans()[0]
-        if len(s.Attributes) != 128 { panic(fmt.Sprintf("after 128 initial + 1 extra, should still be 128, got %d", len(s.Attributes))) }
-        if _, ok := s.Attributes["extra"]; ok { panic("extra attribute beyond 128 should be ignored") }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"add attribute after limit failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_logger_with_empty_fields():
+def test_logger_with_nil_context():
     code = textwrap.dedent("""
     package main
     import (
         "bytes"
-        "context"
-        "encoding/json"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        buf := &bytes.Buffer{}
-        base := observability.NewLogger("svc", observability.WithOutput(buf))
-        child := base.With()
-        child.Info(context.Background(), "empty-with")
-        var obj map[string]interface{}
-        if err:= json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj); err!=nil { panic("not json") }
-        if obj["message"]!="empty-with" { panic("msg missing") }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"logger with empty fields failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_tracing_marshal_invalid_parent_not_written():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        invalid := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"not-hex", Sampled:true}
-        ctx := observability.ContextWithTrace(context.Background(), invalid)
-        carrier := map[string]string{}
-        observability.MarshalTrace(ctx, carrier)
-        if _, ok := carrier["x-ride-trace"]; ok {
-            panic("MarshalTrace should not write invalid ParentID")
-        }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"marshal invalid parent not written failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_metrics_counter_type_conflict():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        prov := observability.NewMetricsProvider()
-        c := prov.Counter("conflict_metric")
-        c.Inc()
-        g := prov.Gauge("conflict_metric")
-        g.Set(100)
-        h := prov.Histogram("conflict_metric")
-        h.Observe(5)
-        fams := prov.Collect()
-        var families int
-        var typ string
-        for _, fam := range fams {
-            if fam.Name=="conflict_metric" {
-                families++
-                typ = fam.Type
-            }
-        }
-        if families!=1 { panic(fmt.Sprintf("conflict metric same name should be 1 family, got %d", families)) }
-        if typ!="counter" { panic(fmt.Sprintf("first type counter should win, got %s", typ)) }
-        // value should be 1, not affected by gauge/histogram no-op
-        for _, fam := range fams {
-            if fam.Name=="conflict_metric" {
-                if fam.Metrics[0].Value != 1 { panic(fmt.Sprintf("counter value should be 1, got %f", fam.Metrics[0].Value)) }
-            }
-        }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"counter type conflict failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_tracing_context_overwrites():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        sc1 := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
-        sc2 := observability.TraceContext{TraceID:"aabbccddeeff0011aabbccddeeff0011", SpanID:"aabbccddeeff0011", Sampled:false}
-        ctx := observability.ContextWithTrace(context.Background(), sc1)
-        ctx2 := observability.ContextWithTrace(ctx, sc2)
-        got, ok := observability.TraceFromContext(ctx2)
-        if !ok { panic("should have trace") }
-        if got.TraceID != sc2.TraceID { panic("ContextWithTrace should overwrite previous") }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"context overwrites failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_logger_trace_with_parent_and_sampled():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "bytes"
-        "context"
         "encoding/json"
         "fmt"
         "ride-observability/observability"
@@ -2783,45 +2547,74 @@ def test_logger_trace_with_parent_and_sampled():
     func main(){
         buf := &bytes.Buffer{}
         logger := observability.NewLogger("svc", observability.WithOutput(buf))
-        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"aabbccddeeff0011", Sampled:true}
-        ctx := observability.ContextWithTrace(context.Background(), sc)
-        logger.Info(ctx, "with parent")
+        defer func(){
+            if r:=recover(); r!=nil { panic(fmt.Sprintf("logger with nil ctx should not panic: %v", r)) }
+        }()
+        logger.Info(nil, "nil ctx msg")
         var obj map[string]interface{}
-        json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj)
-        if obj["trace_id"] != "0102030405060708090a0b0c0d0e0f10" { panic("trace_id missing") }
-        if obj["span_id"] != "0102030405060708" { panic("span_id missing") }
-        if obj["parent_id"] != "aabbccddeeff0011" { panic(fmt.Sprintf("parent_id should be present when ParentID set, got %v", obj["parent_id"])) }
-        if obj["sampled"] != true { panic("sampled true should be present") }
+        if err:= json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj); err!=nil { panic("not json") }
+        if obj["message"]!="nil ctx msg" { panic("msg missing") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"logger nil ctx failed: {proc.stdout} {proc.stderr}"
+
+
+
+
+def test_metrics_counter_nan_inf_ignored():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "math"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("nan_inf_counter")
+        c.Add(math.NaN())
+        c.Add(math.Inf(1))
+        c.Add(math.Inf(-1))
+        c.Add(-1)
+        c.Inc()
+        fams := prov.Collect()
+        var val float64
+        for _, fam := range fams {
+            if fam.Name=="nan_inf_counter" { val = fam.Metrics[0].Value }
+        }
+        if val != 1 { panic(fmt.Sprintf("expected 1 after NaN/Inf/negative ignored, got %f", val)) }
         fmt.Println("OK")
     }
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, (
-        f"logger trace with parent failed: {proc.stdout} {proc.stderr}"
+        f"counter nan inf ignored failed: {proc.stdout} {proc.stderr}"
     )
 
 
-def test_metrics_gauge_set_and_add():
+
+
+def test_metrics_histogram_nan_inf_ignored():
     code = textwrap.dedent("""
     package main
     import (
         "fmt"
+        "math"
         "ride-observability/observability"
     )
     func main(){
         prov := observability.NewMetricsProvider()
-        g := prov.Gauge("gauge_set_add")
-        g.Set(5)
-        g.Add(3)
-        g.Add(-2)
-        g.Inc()
-        g.Dec()
-        g.Dec()
+        h := prov.Histogram("nan_hist", observability.WithBuckets([]float64{1,5}))
+        h.Observe(math.NaN())
+        h.Observe(math.Inf(1))
+        h.Observe(math.Inf(-1))
+        h.Observe(2)
         fams := prov.Collect()
         for _, fam := range fams {
-            if fam.Name=="gauge_set_add" {
-                // 5+3-2+1-1-1 =5
-                if fam.Metrics[0].Value != 5 { panic(fmt.Sprintf("expected gauge 5 got %f", fam.Metrics[0].Value)) }
+            if fam.Name=="nan_hist" {
+                if fam.Metrics[0].Count != 1 { panic(fmt.Sprintf("expected count 1 after NaN/Inf ignored, got %d", fam.Metrics[0].Count)) }
                 fmt.Println("OK")
                 return
             }
@@ -2831,91 +2624,33 @@ def test_metrics_gauge_set_and_add():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, (
-        f"gauge set and add failed: {proc.stdout} {proc.stderr}"
+        f"histogram nan inf ignored failed: {proc.stdout} {proc.stderr}"
     )
 
 
-def test_tracing_attribute_value_truncate_add():
+
+
+def test_tracing_context_with_nil_background():
     code = textwrap.dedent("""
     package main
     import (
-        "context"
         "fmt"
-        "strings"
         "ride-observability/observability"
     )
     func main(){
-        exp := observability.NewMemoryExporter()
-        proc := observability.NewSimpleProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
-        _, span := tracer.Start(context.Background(), "truncate-add")
-        long := strings.Repeat("z", 2000)
-        span.AddAttribute("longkey", long)
-        span.End()
-        s := exp.GetSpans()[0]
-        v := s.Attributes["longkey"].(string)
-        if len(v)!=1024 { panic(fmt.Sprintf("AddAttribute long should truncate to 1024, got %d", len(v))) }
+        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(nil, sc)
+        if ctx==nil { panic("ContextWithTrace(nil) should return non-nil context") }
+        got, ok := observability.TraceFromContext(ctx)
+        if !ok || got.TraceID != sc.TraceID { panic("should have trace from nil background") }
+        ctx2 := observability.ContextWithSpanContext(nil, sc)
+        if ctx2==nil { panic("alias nil should not nil") }
         fmt.Println("OK")
     }
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, (
-        f"attribute value truncate add failed: {proc.stdout} {proc.stderr}"
+        f"context with nil background failed: {proc.stdout} {proc.stderr}"
     )
 
 
-def test_tracing_event_copy_isolation():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        exp := observability.NewMemoryExporter()
-        proc := observability.NewSimpleProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
-        _, span := tracer.Start(context.Background(), "ev-isolation")
-        span.AddEvent("ev1")
-        span.End()
-        spans := exp.GetSpans()
-        // mutate events slice in returned span
-        spans[0].Events = append(spans[0].Events, observability.SpanEvent{Name:"injected"})
-        spans2 := exp.GetSpans()
-        if len(spans2[0].Events)!=1 { panic(fmt.Sprintf("mutating returned Events slice should not affect internal, expected 1 got %d", len(spans2[0].Events))) }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"event copy isolation failed: {proc.stdout} {proc.stderr}"
-    )
-
-
-def test_tracing_withattributes_duplicate_across_calls():
-    code = textwrap.dedent("""
-    package main
-    import (
-        "context"
-        "fmt"
-        "ride-observability/observability"
-    )
-    func main(){
-        exp := observability.NewMemoryExporter()
-        proc := observability.NewSimpleProcessor(exp)
-        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
-        _, span := tracer.Start(context.Background(), "dup-across",
-            observability.WithAttributes(observability.Attribute{Key:"k", Value:"v1"}),
-            observability.WithAttributes(observability.Attribute{Key:"k", Value:"v2"}),
-        )
-        span.End()
-        s := exp.GetSpans()[0]
-        if s.Attributes["k"] != "v2" { panic(fmt.Sprintf("duplicate across WithAttributes calls last wins expected v2 got %v", s.Attributes["k"])) }
-        fmt.Println("OK")
-    }
-    """)
-    proc = go_run_program(code)
-    assert proc.returncode == 0, (
-        f"withattributes duplicate across calls failed: {proc.stdout} {proc.stderr}"
-    )

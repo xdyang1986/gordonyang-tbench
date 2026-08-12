@@ -14,7 +14,12 @@ APP_DIR = "/app"
 
 def run(cmd, cwd=APP_DIR, timeout=30):
     env = os.environ.copy()
-    env["GOCACHE"] = "/tmp/codimango/gocache"
+    # Use shared cache for normal runs (fast), isolated cache for -race runs to avoid
+    # 'cannot reopen' corruption under heavy load with race detector
+    if cwd != APP_DIR and "-race" in cmd:
+        env["GOCACHE"] = os.path.join(cwd, "gocache")
+    else:
+        env["GOCACHE"] = "/tmp/codimango/gocache"
     env["GOPATH"] = "/tmp/codimango/gopath"
     env["GOFLAGS"] = "-mod=mod"
     env["GOTOOLCHAIN"] = "local"
