@@ -130,7 +130,10 @@ def checksum_valid(path=DATA_FILE):
         return False
     if "data" not in obj or "checksum" not in obj or not obj["checksum"]:
         return False
-    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
+    # Go uses SetEscapeHTML(false) and raw UTF-8, so must not escape unicode
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return obj["checksum"] == hashlib.md5(canonical.encode()).hexdigest()
 
 
@@ -2603,7 +2606,9 @@ def test_unicode_node_and_job_together():
     assert "🌍" in open(DATA_FILE, encoding="utf-8").read()
     assert "😀" in open(DATA_FILE, encoding="utf-8").read()
 
+
 # ---------- Further: 196->210 (still too easy) ----------
+
 
 def test_error_messages_expected_substrings():
     clean_data()
@@ -2627,14 +2632,17 @@ def test_concurrent_status_while_allocating():
     for i in range(20):
         run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
         run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+
     def alloc():
         for i in range(20):
             run_cli("allocate", f"job-{i:02d}", f"node-{i:02d}")
+
     def status_loop():
         for _ in range(30):
             r = run_cli("status")
             assert r.returncode == 0
             json.loads(r.stdout)
+
     t1 = threading.Thread(target=alloc)
     t2 = threading.Thread(target=status_loop)
     t1.start()
@@ -2721,9 +2729,11 @@ def test_status_resources_after_remove():
 
 def test_concurrent_add_job_many_times():
     clean_data()
+
     def add_many():
         for i in range(30):
             run_cli("add-job", f"job-conc-{i:03d}", "1", "256", "0")
+
     threads = [threading.Thread(target=add_many) for _ in range(5)]
     for t in threads:
         t.start()
@@ -2748,8 +2758,231 @@ def test_persistence_special_chars_after_rebuild():
     run_cli("add-job", "job<>&😀", "1", "256", "0")
     run_cli("allocate", "job<>&😀", "node<>&🌍")
     import subprocess as sp
-    sp.run(["go", "build", "-o", BIN, "."], cwd=APP, env=GO_ENV, capture_output=True, text=True, timeout=30)
+
+    sp.run(
+        ["go", "build", "-o", BIN, "."],
+        cwd=APP,
+        env=GO_ENV,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     node = json.loads(run_cli("get-node", "node<>&🌍").stdout)
     assert "job<>&😀" in node["jobs"]
     raw = open(DATA_FILE, encoding="utf-8").read()
     assert "<" in raw and "🌍" in raw and "😀" in raw
+
+
+# ---------- Further: 209->225 (still too easy) ----------
+
+
+def test_list_nodes_pagination_all_offsets():
+    clean_data()
+    for i in range(10):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+    for offset in range(10):
+        arr = json.loads(run_cli("list-nodes", "1", str(offset)).stdout)
+        assert len(arr) == 1 and arr[0]["id"] == f"node-{offset:02d}"
+
+
+def test_list_jobs_pagination_all_offsets():
+    clean_data()
+    run_cli("add-node", "node1", "20", "20000", "0")
+    for i in range(10):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    for offset in range(10):
+        arr = json.loads(run_cli("list-jobs", "1", str(offset)).stdout)
+        assert len(arr) == 1 and arr[0]["id"] == f"job-{offset:02d}"
+
+
+def test_concurrent_allocate_and_deallocate_same_jobs():
+    clean_data()
+    run_cli("add-node", "node1", "50", "50000", "0")
+    for i in range(20):
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+
+    def alloc_dealloc(i):
+        run_cli("allocate", f"job{i}", "node1")
+        run_cli("deallocate", f"job{i}")
+        run_cli("allocate", f"job{i}", "node1")
+
+    threads = [threading.Thread(target=alloc_dealloc, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert len(node["jobs"]) == 20
+
+
+def test_large_scale_1000_nodes_list_limit_offset():
+    clean_data()
+    for i in range(1000):
+        run_cli("add-node", f"node-{i:04d}", "4", "1024", "0")
+    t0 = time.time()
+    arr = json.loads(run_cli("list-nodes", "100", "500").stdout)
+    elapsed = time.time() - t0
+    assert len(arr) == 100
+    assert elapsed < 1.5
+
+
+def test_large_scale_1000_jobs_list_limit_offset():
+    clean_data()
+    run_cli("add-node", "node1", "2000", "2000000", "0")
+    for i in range(800):
+        run_cli("add-job", f"job-{i:04d}", "1", "256", "0")
+    t0 = time.time()
+    arr = json.loads(run_cli("list-jobs", "100", "400").stdout)
+    elapsed = time.time() - t0
+    assert len(arr) == 100
+    assert elapsed < 1.5
+
+
+def test_node_total_used_free_consistency():
+    clean_data()
+    run_cli("add-node", "node1", "8", "2048", "2")
+    for i in range(3):
+        run_cli("add-job", f"job{i}", "2", "512", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["total"]["cpu"] == node["used"]["cpu"] + node["free"]["cpu"]
+    assert node["total"]["memory"] == node["used"]["memory"] + node["free"]["memory"]
+    assert node["total"]["gpu"] == node["used"]["gpu"] + node["free"]["gpu"]
+
+
+def test_job_required_preserved_after_allocate_deallocate():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "1")
+    run_cli("add-job", "job1", "2", "512", "1")
+    run_cli("allocate", "job1", "node1")
+    job1 = json.loads(run_cli("get-job", "job1").stdout)
+    assert job1["required"]["cpu"] == 2 and job1["required"]["gpu"] == 1
+    run_cli("deallocate", "job1")
+    job2 = json.loads(run_cli("get-job", "job1").stdout)
+    assert job2["required"]["cpu"] == 2 and job2["required"]["gpu"] == 1
+
+
+def test_add_node_with_id_hyphen_underscore_dot_colon_at_edges():
+    clean_data()
+    for nid in ["-node", "_node", ".node", ":node", "node-", "node_", "node.", "node:"]:
+        r = run_cli("add-node", nid, "4", "1024", "0")
+        assert r.returncode in (0, 2)  # either allowed or rejected, but not crash
+        if r.returncode == 0:
+            assert json.loads(run_cli("get-node", nid).stdout)["id"] == nid
+
+
+def test_add_job_with_id_hyphen_underscore_dot_colon_at_edges():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for jid in ["-job", "_job", ".job", ":job", "job-", "job_", "job.", "job:"]:
+        r = run_cli("add-job", jid, "1", "256", "0")
+        assert r.returncode in (0, 2)
+        if r.returncode == 0:
+            assert json.loads(run_cli("get-job", jid).stdout)["id"] == jid
+
+
+def test_concurrent_add_node_with_special_chars():
+    clean_data()
+
+    def add_special(i):
+        run_cli("add-node", f"node<>&{i}", "4", "1024", "0")
+        run_cli("add-node", f"node-🌍{i}", "4", "1024", "0")
+
+    threads = [threading.Thread(target=add_special, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 20
+    raw = open(DATA_FILE, encoding="utf-8").read()
+    assert "<" in raw and "🌍" in raw
+    assert checksum_valid()
+
+
+def test_status_with_no_nodes_but_jobs():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("remove-node", "node1")
+    st = json.loads(run_cli("status").stdout)
+    # Node removed but job still exists pending
+    assert st["total_nodes"] == 0
+    assert st["total_jobs"] == 1
+    assert st["pending_jobs"] == 1
+    assert st["allocated_jobs"] == 0
+
+
+def test_allocate_with_exact_fit_cpu_memory_gpu_all():
+    clean_data()
+    run_cli("add-node", "nodeExact", "5", "1024", "1")
+    run_cli("add-job", "jobExact", "5", "1024", "1")
+    assert run_cli("allocate", "jobExact", "nodeExact").returncode == 0
+    node = json.loads(run_cli("get-node", "nodeExact").stdout)
+    assert (
+        node["free"]["cpu"] == 0
+        and node["free"]["memory"] == 0
+        and node["free"]["gpu"] == 0
+    )
+
+
+def test_list_nodes_with_limit_offset_as_empty_string_invalid():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    # Empty string for limit/offset should be invalid or treated as 0? Our impl treats missing as -1, empty string Atoi fails -> exit2
+    assert run_cli("list-nodes", "", "0").returncode == 2
+    assert run_cli("list-nodes", "0", "").returncode == 2
+
+
+def test_deallocate_after_remove_job_fails():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("remove-job", "job1")
+    assert run_cli("deallocate", "job1").returncode == 2
+
+
+def test_remove_node_after_remove_jobs_succeeds_and_empty():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    for i in range(3):
+        run_cli("add-job", f"job{i}", "1", "256", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    for i in range(3):
+        run_cli("remove-job", f"job{i}")
+    r = run_cli("remove-node", "node1")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+    assert json.loads(run_cli("list-nodes").stdout) == []
+
+
+def test_concurrent_schedule_and_allocate():
+    clean_data()
+    for i in range(10):
+        run_cli("add-node", f"node-{i:02d}", "20", "20480", "0")
+    for i in range(30):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+
+    def sched(i):
+        run_cli("schedule", f"job-{i:02d}")
+
+    def alloc(i):
+        run_cli("allocate", f"job-{i:02d}", f"node-{i % 10:02d}")
+
+    threads = []
+    for i in range(15):
+        threads.append(threading.Thread(target=sched, args=(i,)))
+    for i in range(15, 30):
+        threads.append(threading.Thread(target=alloc, args=(i,)))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    # With 20 CPU each, 10 nodes total 200 capacity, 30 jobs should all fit even with first-fit fragmentation
+    assert st["allocated_jobs"] == 30, f"expected 30 allocated, got {st}"
+    assert checksum_valid()
+    # No overcommit
+    for i in range(10):
+        n = json.loads(run_cli("get-node", f"node-{i:02d}").stdout)
+        assert n["used"]["cpu"] <= n["total"]["cpu"]
