@@ -1314,3 +1314,155 @@ def test_remove_then_add_same_id():
         assert json.loads(r.stdout) == ["z"]
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_scientific_notation_polygon():
+    """Scientific notation for lat/lng must be parsed (strconv.ParseFloat handles it)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # 1e0 == 1, 0e0 ==0
+        poly = "1e0,1e0;0e0,1e0;0e0,0e0;1e0,0e0"
+        r = run_cli(db, ["add", "sci", "--polygon", poly, "--name", "Sci"])
+        assert r.returncode == 0, f"sci notation should be allowed {r.stderr}"
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["sci"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_self_intersection_star():
+    """5-point star is self-intersecting and must be rejected."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Classic 5-point star (pentagram) self-intersects
+        star = "0,0;2,3;4,0;0,2;4,2"
+        r = run_cli(db, ["add", "star", "--polygon", star, "--name", "Star"])
+        assert r.returncode == 2, f"star self-intersect should be rejected {r.stderr}"
+        r = run_cli(db, ["list"])
+        assert json.loads(r.stdout) == []
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_duplicate_nonadjacent():
+    """Duplicate points not adjacent must be rejected."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # duplicate first and third
+        poly = "0,0;0,1;0,0;1,1;1,0"
+        r = run_cli(db, ["add", "dup", "--polygon", poly, "--name", "Dup"])
+        assert r.returncode == 2, f"nonadjacent duplicate should be rejected {r.stderr}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_id_sort_with_hyphen_underscore():
+    """IDs with hyphen and underscore must sort by ASCII: '-' < digits < '_'."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for id_ in ["a_1", "a-1", "a1"]:
+            r = run_cli(db, ["add", id_, "--polygon", "0,0;0,1;1,1;1,0", "--name", id_])
+            assert r.returncode == 0
+
+        r = run_cli(db, ["list"])
+        ids = [x["id"] for x in json.loads(r.stdout)]
+        assert ids == ["a-1", "a1", "a_1"], f"ASCII sort failed, got {ids}"
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["a-1", "a1", "a_1"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_fuzz_python_reference():
+    """Fuzz CLI lookup against Python reference implementation for random small convex polygons."""
+    import random
+    import math
+
+    eps = 1e-9
+
+    def point_on_segment(px, py, x1, y1, x2, y2):
+        cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+        if abs(cross) > eps:
+            return False
+        minx, maxx = (x1, x2) if x1 <= x2 else (x2, x1)
+        miny, maxy = (y1, y2) if y1 <= y2 else (y2, y1)
+        return (
+            px >= minx - eps
+            and px <= maxx + eps
+            and py >= miny - eps
+            and py <= maxy + eps
+        )
+
+    def point_in_polygon(lat, lng, poly):
+        # poly: list of (lat,lng)
+        px, py = lng, lat
+        n = len(poly)
+        # edge check
+        for i in range(n):
+            j = (i + 1) % n
+            x1, y1 = poly[i][1], poly[i][0]
+            x2, y2 = poly[j][1], poly[j][0]
+            if point_on_segment(px, py, x1, y1, x2, y2):
+                return True
+        inside = False
+        j = n - 1
+        for i in range(n):
+            xi, yi = poly[i][1], poly[i][0]
+            xj, yj = poly[j][1], poly[j][0]
+            if (yi > py) != (yj > py):
+                xinters = (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi
+                if px < xinters:
+                    inside = not inside
+            j = i
+        return inside
+
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # generate 15 random small squares
+        geofences = []
+        for i in range(15):
+            base_lat = random.uniform(0, 8)
+            base_lng = random.uniform(0, 8)
+            size = random.uniform(0.2, 0.6)
+            poly = [
+                (base_lat, base_lng),
+                (base_lat, base_lng + size),
+                (base_lat + size, base_lng + size),
+                (base_lat + size, base_lng),
+            ]
+            poly_str = ";".join(f"{lat},{lng}" for lat, lng in poly)
+            id_ = f"fuzz_{i:02d}"
+            r = run_cli(db, ["add", id_, "--polygon", poly_str, "--name", f"Fuzz{i}"])
+            assert r.returncode == 0, f"fuzz add {i} failed {r.stderr}"
+            geofences.append((id_, poly))
+
+        # test 30 random points
+        for _ in range(30):
+            lat = random.uniform(-1, 11)
+            lng = random.uniform(-1, 11)
+            r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
+            assert r.returncode == 0
+            got = json.loads(r.stdout)
+            # compute expected via python ref
+            expected = []
+            for gid, poly in geofences:
+                if point_in_polygon(lat, lng, poly):
+                    expected.append(gid)
+            expected.sort()
+            assert got == expected, (
+                f"fuzz mismatch at {lat},{lng}: got {got} expected {expected}"
+            )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
