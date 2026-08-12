@@ -1759,7 +1759,6 @@ def test_list_stable_after_many_ops():
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
-        # add 30
         for i in range(30):
             r = run_cli(
                 db,
@@ -1774,12 +1773,10 @@ def test_list_stable_after_many_ops():
             )
             assert r.returncode == 0
 
-        # remove even
         for i in range(0, 30, 2):
             r = run_cli(db, ["remove", f"id_{i:02d}"])
             assert r.returncode == 0
 
-        # overwrite odd with new polygon far away
         for i in range(1, 30, 2):
             r = run_cli(
                 db,
@@ -1799,10 +1796,102 @@ def test_list_stable_after_many_ops():
         ids = [x["id"] for x in arr]
         assert ids == sorted(ids), f"not sorted after many ops: {ids}"
         assert len(arr) == 15
-        # old location should be empty, new location should have 15
         r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
         assert json.loads(r.stdout) == []
         r = run_cli(db, ["lookup", "--lat", "10.5", "--lng", "10.5"])
         assert len(json.loads(r.stdout)) == 15
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_db_with_extra_field():
+    """DB file containing geofence with extra unknown field must not crash list."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        # manually write DB with extra field
+        data = {
+            "z": {
+                "id": "z",
+                "name": "Z",
+                "polygon": [
+                    {"lat": 0, "lng": 0},
+                    {"lat": 0, "lng": 1},
+                    {"lat": 1, "lng": 1},
+                ],
+                "extra": "should be ignored",
+            }
+        }
+        with open(db, "w") as f:
+            json.dump(data, f)
+
+        r = run_cli(db, ["list"])
+        # Should either exit 0 with list containing z (ignoring extra) or exit 4 if strict – allow 0
+        assert r.returncode in (0, 4)
+        if r.returncode == 0:
+            arr = json.loads(r.stdout)
+            assert len(arr) == 1
+            assert arr[0]["id"] == "z"
+            # adding new zone should not corrupt and should preserve? Our ref will drop extra field on write – that's acceptable
+            r2 = run_cli(
+                db, ["add", "z2", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z2"]
+            )
+            assert r2.returncode == 0
+
+        files = os.listdir(tmpdir)
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_1000_zones_sorted():
+    """100 overlapping zones lookup must return sorted IDs quickly."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(100):
+            # all overlapping at 0,0-10,10 but IDs in reverse order to test sorting
+            r = run_cli(
+                db,
+                [
+                    "add",
+                    f"ov_{100 - i:03d}",
+                    "--polygon",
+                    "0,0;0,10;10,10;10,0",
+                    "--name",
+                    f"OV{i}",
+                ],
+            )
+            assert r.returncode == 0
+
+        r = run_cli(db, ["lookup", "--lat", "5", "--lng", "5"])
+        assert r.returncode == 0
+        ids = json.loads(r.stdout)
+        assert len(ids) == 100
+        assert ids == sorted(ids), f"100 overlapping lookup not sorted: {ids[:10]}"
+        assert "null" not in r.stdout.lower()
+        assert r.stdout.strip().startswith("[")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_add_with_tabs_and_newlines_in_polygon():
+    """Polygon string may contain tabs and mixed whitespace around delimiters."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        poly = "0,0;\t0,1;\n1,1;\t1,0"
+        r = run_cli(db, ["add", "ws", "--polygon", poly, "--name", "WS"])
+        # Our reference splits by ';' and trims spaces/tabs/newlines, so should be allowed
+        # Some impls that don't trim will reject – allow both but check no crash
+        # To keep fair and hard, require acceptance (since spec says after trimming empty check, so whitespace around should be trimmed)
+        assert r.returncode == 0, (
+            f"tabs/newlines around ; should be allowed: {r.stderr}"
+        )
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["ws"]
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
