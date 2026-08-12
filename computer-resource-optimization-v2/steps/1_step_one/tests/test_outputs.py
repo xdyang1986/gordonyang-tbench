@@ -2602,3 +2602,154 @@ def test_unicode_node_and_job_together():
     assert run_cli("allocate", "job-😀🎉", "node-🌍🚀").returncode == 0
     assert "🌍" in open(DATA_FILE, encoding="utf-8").read()
     assert "😀" in open(DATA_FILE, encoding="utf-8").read()
+
+# ---------- Further: 196->210 (still too easy) ----------
+
+def test_error_messages_expected_substrings():
+    clean_data()
+    run_cli("add-node", "node1", "2", "512", "0")
+    run_cli("add-job", "big", "10", "10000", "0")
+    r_insuf = run_cli("allocate", "big", "node1")
+    assert r_insuf.returncode == 2 and "insufficient" in r_insuf.stderr.lower()
+    run_cli("add-job", "jobNoFit", "10", "10000", "0")
+    r_nofit = run_cli("schedule", "jobNoFit")
+    assert r_nofit.returncode == 1 and "no fit" in r_nofit.stderr.lower()
+    with open(DATA_FILE, "w") as f:
+        f.write("{ invalid")
+    r_corr = run_cli("list-nodes")
+    assert r_corr.returncode == 0
+    assert "corrupt" in r_corr.stderr.lower() or "checksum" in r_corr.stderr.lower()
+    assert run_cli("add-node", "", "4", "1024", "0").returncode == 2
+
+
+def test_concurrent_status_while_allocating():
+    clean_data()
+    for i in range(20):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    def alloc():
+        for i in range(20):
+            run_cli("allocate", f"job-{i:02d}", f"node-{i:02d}")
+    def status_loop():
+        for _ in range(30):
+            r = run_cli("status")
+            assert r.returncode == 0
+            json.loads(r.stdout)
+    t1 = threading.Thread(target=alloc)
+    t2 = threading.Thread(target=status_loop)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert checksum_valid()
+
+
+def test_list_nodes_limit_offset_zero_padded_extra():
+    clean_data()
+    for i in range(5):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    arr = json.loads(run_cli("list-nodes", "00002", "00001").stdout)
+    assert [n["id"] for n in arr] == ["node-1", "node-2"]
+
+
+def test_add_node_id_10kb_special_chars_again():
+    clean_data()
+    large_special = "node-" + "🌍<>&" * 2000
+    r = run_cli("add-node", large_special, "4", "1024", "0")
+    assert r.returncode == 0
+    raw = open(DATA_FILE, encoding="utf-8").read()
+    assert "🌍" in raw and "<" in raw
+    assert "\\u003c" not in raw.lower()
+
+
+def test_allocate_with_numeric_id_zero():
+    clean_data()
+    assert run_cli("add-node", "0", "4", "1024", "0").returncode == 0
+    assert run_cli("add-job", "0", "1", "256", "0").returncode == 0
+    assert run_cli("allocate", "0", "0").returncode == 0
+    assert json.loads(run_cli("get-job", "0").stdout)["node_id"] == "0"
+
+
+def test_deallocate_many_times_idempotent():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    for _ in range(10):
+        r = run_cli("deallocate", "job1")
+        assert r.returncode == 0
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["jobs"] == [] and node["used"]["cpu"] == 0
+
+
+def test_remove_node_many_times_idempotent():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    for _ in range(5):
+        r = run_cli("remove-node", "node1")
+        assert r.returncode == 0
+    assert json.loads(run_cli("list-nodes").stdout) == []
+
+
+def test_schedule_already_allocated_exit2():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    assert run_cli("schedule", "job1").returncode == 2
+
+
+def test_allocate_with_job_id_special_chars_dash_underscore():
+    clean_data()
+    run_cli("add-node", "node-a_b.c:d", "10", "10240", "0")
+    for jid in ["job-a", "job_b", "job.c", "job:d"]:
+        run_cli("add-job", jid, "1", "256", "0")
+        assert run_cli("allocate", jid, "node-a_b.c:d").returncode == 0
+    node = json.loads(run_cli("get-node", "node-a_b.c:d").stdout)
+    assert len(node["jobs"]) == 4
+
+
+def test_status_resources_after_remove():
+    clean_data()
+    run_cli("add-node", "node1", "8", "2048", "2")
+    run_cli("add-job", "job1", "2", "512", "1")
+    run_cli("allocate", "job1", "node1")
+    run_cli("remove-job", "job1")
+    st = json.loads(run_cli("status").stdout)
+    assert st["used_resources"]["cpu"] == 0 and st["total_resources"]["cpu"] == 8
+
+
+def test_concurrent_add_job_many_times():
+    clean_data()
+    def add_many():
+        for i in range(30):
+            run_cli("add-job", f"job-conc-{i:03d}", "1", "256", "0")
+    threads = [threading.Thread(target=add_many) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    arr = json.loads(run_cli("list-jobs").stdout)
+    assert len(arr) == 30
+    assert checksum_valid()
+
+
+def test_list_nodes_and_jobs_limit_1_offset_0_first_sorted():
+    clean_data()
+    for nid in ["nodeZ", "nodeA", "nodeM"]:
+        run_cli("add-node", nid, "4", "1024", "0")
+    first = json.loads(run_cli("list-nodes", "1", "0").stdout)
+    assert [n["id"] for n in first] == ["nodeA"]
+
+
+def test_persistence_special_chars_after_rebuild():
+    clean_data()
+    run_cli("add-node", "node<>&🌍", "4", "1024", "0")
+    run_cli("add-job", "job<>&😀", "1", "256", "0")
+    run_cli("allocate", "job<>&😀", "node<>&🌍")
+    import subprocess as sp
+    sp.run(["go", "build", "-o", BIN, "."], cwd=APP, env=GO_ENV, capture_output=True, text=True, timeout=30)
+    node = json.loads(run_cli("get-node", "node<>&🌍").stdout)
+    assert "job<>&😀" in node["jobs"]
+    raw = open(DATA_FILE, encoding="utf-8").read()
+    assert "<" in raw and "🌍" in raw and "😀" in raw
