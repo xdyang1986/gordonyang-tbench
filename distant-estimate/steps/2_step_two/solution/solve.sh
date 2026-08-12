@@ -163,17 +163,33 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
     var rawEntries []TrafficEntryRaw
     var generic map[string]json.RawMessage
     if err := json.Unmarshal(data, &generic); err == nil {
-        if _, ok := generic["traffic"]; ok {
-            var obj TrafficFileObj
-            if err := json.Unmarshal(data, &obj); err != nil { return nil,false }
-            rawEntries = obj.Traffic
-        } else {
+        rawTraffic, ok := generic["traffic"]
+        if !ok {
             return nil,false
+        }
+        // traffic key must be array, null is invalid (not empty)
+        trimmed := strings.TrimSpace(string(rawTraffic))
+        if trimmed == "null" {
+            return nil,false
+        }
+        var obj TrafficFileObj
+        if err := json.Unmarshal(data, &obj); err != nil { return nil,false }
+        rawEntries = obj.Traffic
+        // distinguish null vs empty array: if raw JSON was null already handled, but if obj.Traffic nil and raw was null, invalid already
+        // if traffic is present but null, obj.Traffic will be nil and raw was null, already rejected
+        // empty array [] unmarshals to empty non-nil slice or nil depending, treat nil as empty only when raw trimmed != "null"
+        if rawEntries == nil {
+            // check if raw was "null" already rejected, otherwise empty array [] is valid as empty
+            // json.Unmarshal [] into nil slice yields nil, but [] is valid empty
+            // So allow nil here only if original raw was array, which we know isn't null
+            rawEntries = []TrafficEntryRaw{}
         }
     } else {
         if err := json.Unmarshal(data, &rawEntries); err != nil { return nil,false }
+        if rawEntries == nil {
+            rawEntries = []TrafficEntryRaw{}
+        }
     }
-    if rawEntries == nil { rawEntries = []TrafficEntryRaw{} }
     factorMap := make(map[string]TrafficParsed)
     for _, te := range rawEntries {
         if strings.TrimSpace(te.From)==""||strings.TrimSpace(te.To)=="" { return nil,false }
