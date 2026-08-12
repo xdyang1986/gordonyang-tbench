@@ -2069,3 +2069,52 @@ def test_estimate_confidence_age_override_low_even_when_snapped(binary):
     assert data["snapped"] is True
     assert data["confidence"] == "low"
 
+def test_validate_pickup_priority_stale_beats_low_accuracy(binary):
+    # stale(2) beats low_accuracy(3): age>30k (stale) and accuracy 60>50
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "60", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", str(1000000 + 40000)], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_stale_beats_moving(binary):
+    # stale(2) beats moving(5): age>30k and speed 8
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5", "--speed", "8"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", str(1000000 + 40000)], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_moving(binary):
+    # low_accuracy(3) beats moving(5): accuracy 60 and speed 8
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "60", "--speed", "8"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000"], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_off_road_beats_road_mismatch(binary):
+    # off_road(4) beats road_mismatch(6): far road for vehicle, but pickup snapped to far road? Actually need vehicle not snapped, pickup snapped to different road? 
+    # Simpler: vehicle not snapped (off_road), pickup not relevant for road_mismatch because road_mismatch requires both snapped to different roads.
+    # For off_road to beat road_mismatch, need vehicle not snapped, but if vehicle not snapped, road_mismatch false. So need scenario where both true?
+    # Actually off_road true means vehicle not snapped. road_mismatch requires both vehicle and pickup snapped to different roads.
+    # So both cannot be true simultaneously. So test off_road beats too_far instead? We already have moving>too_far.
+    # Let's test off_road beats heading_mismatch: off_road true, heading_mismatch requires same road, so cannot both true.
+    # Instead test off_road beats too_far is redundant with moving>too_far, but we can test off_road beats too_far directly:
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5", "--speed", "0"], expect_code=0)
+    # pickup 200m away, so too_far true, and off_road true (road far), off_road priority 4 beats 8
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7767", "-122.4194", "--now", "1000000", "--roads", roads_path], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "off_road"
