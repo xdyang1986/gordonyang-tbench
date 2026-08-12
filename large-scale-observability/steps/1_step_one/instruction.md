@@ -165,10 +165,14 @@ Tracer behavior:
 - MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, Events slice, Events.Attributes, Events.Name must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set. Buckets in metrics Collect must also be deep copied similarly.
 - Span.Context() must return copy: mutating returned TraceContext must not affect span.
 - Exporter: Clear() must reset Count and Spans to empty and allow reuse (subsequent spans export correctly). GetCount() and Clear() must be concurrency-safe.
-- WithAttributes duplicate keys: last wins, duplicate does not increase count. Empty WithAttributes must not panic.
+- WithAttributes duplicate keys: last wins, duplicate does not increase count. Empty WithAttributes and With() with empty fields must not panic.
 - String truncation exact boundary: exactly 1024 chars stays 1024, 1025 → 1024.
 - ID generator: NewTraceID/NewSpanID called once per span; custom generator must be respected; nil generator fallback to default random.
-- WithProcessor(nil) must not panic and fallback to default.
+- WithProcessor(nil) must not panic and fallback to default. Last WithProcessor wins.
+- Flags: TraceContext.Flags should be 1 when Sampled true, 0 when false. Marshal must write :1 for sampled true, :0 for false, even when not sampled (still valid header if IDs valid).
+- Label order for reuse: same label set with different key order must reuse same instrument (order irrelevant for identity). Label value truncation 256 applies to Counter, Gauge, Histogram all.
+- Exporter slice mutation: appending to slice returned by GetSpans must not affect internal state.
+- Attribute limit after initial: after 128 distinct via WithAttributes, AddAttribute extra must be ignored (still 128).
 
 #### Context propagation
 
