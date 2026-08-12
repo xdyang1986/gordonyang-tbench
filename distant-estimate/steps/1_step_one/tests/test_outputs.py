@@ -776,3 +776,29 @@ def test_request_order_preserved_with_no_route():
         os.unlink(rp)
 
 
+def test_from_to_equals_syntax():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+    import json, tempfile, os, subprocess
+
+    def tmp(c):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        f.write(c)
+        f.close()
+        return f.name
+
+    def run(args):
+        BIN = "/app/router"
+        return subprocess.run(
+            [BIN] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
+        )
+
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph=" + gp, "--from=A", "--to=B"])
+        assert proc.returncode == 0, (
+            f"equals syntax should work, rc={proc.returncode} stderr={proc.stderr.decode()[:200]}"
+        )
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+    finally:
+        os.unlink(gp)

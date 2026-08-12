@@ -29,6 +29,7 @@ Flags:
 - `--help`, `-h`, `help` – prints help to stdout containing keywords: `graph`, `from`, `to`, `requests`, `help` and exits 0
 - Bare binary no args → help exit 0
 - Unknown flag or missing required args → exit 2, no stdout expected
+- **Equals syntax:** Flags must accept both `--flag value` and `--flag=value` forms (e.g., `--graph=path.json`, `--from=A`, `--to=B`, `--requests=req.json`). This is free for any flag-package implementation (Go `flag` package supports it automatically) and is tested by `test_from_to_equals_syntax`.
 
 ### Graph JSON Format (MUST) – HARDER
 
