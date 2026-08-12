@@ -1513,7 +1513,6 @@ def test_tracing_sampler_priority_via_tracer():
     func main(){
         exp := observability.NewMemoryExporter()
         batch := observability.NewBatchProcessor(exp, observability.WithQueueSize(100), observability.WithBatchSize(10))
-        // Ratio 0.0 normally drops all, but priority critical should keep
         sampler := observability.NewRatioSampler(0.0)
         tracer := observability.NewTracer("svc", observability.WithProcessor(batch), observability.WithSampler(sampler))
         _, s1 := tracer.Start(context.Background(), "normal", observability.WithAttributes(observability.Attribute{Key:"priority", Value:"normal"}))
@@ -1535,3 +1534,281 @@ def test_tracing_sampler_priority_via_tracer():
     )
 
 
+def test_batch_shutdown_with_timeout():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    type slowExp struct{}
+    func (s *slowExp) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        time.Sleep(300*time.Millisecond)
+        return nil
+    }
+    func main(){
+        exp := &slowExp{}
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(100), observability.WithBatchSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0;i<5;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s%d", i))
+            s.End()
+        }
+        ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+        defer cancel()
+        start := time.Now()
+        err := proc.Shutdown(ctx)
+        elapsed := time.Since(start)
+        if elapsed > 600*time.Millisecond { panic(fmt.Sprintf("Shutdown should respect ctx timeout, elapsed %v", elapsed)) }
+        fmt.Printf("Shutdown err %v elapsed %v\\n", err, elapsed)
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"shutdown with timeout failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_forceflush_empty_queue():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10))
+        if err:= proc.ForceFlush(context.Background()); err!=nil {
+            panic(fmt.Sprintf("ForceFlush empty should not error, got %v", err))
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"forceflush empty failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_queuelen_excludes_batch_and_never_exceeds():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10), observability.WithBatchSize(100), observability.WithBatchTimeout(5*time.Second))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0;i<20;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("ql-%d", i))
+            s.End()
+        }
+        time.Sleep(100*time.Millisecond)
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            ql := q.QueueLen()
+            if ql <0 || ql > 10 { panic(fmt.Sprintf("QueueLen must be 0..10 got %d", ql)) }
+        } else {
+            panic("QueueLen missing")
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"queuelen excludes batch failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_cardinality_mixed_types():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        prov.Counter("mixed").Inc()
+        g := prov.Gauge("mixed")
+        g.Set(1)
+        h := prov.Histogram("mixed")
+        h.Observe(1)
+        fams := prov.Collect()
+        var count int
+        for _, fam := range fams {
+            if fam.Name=="mixed" { count++ }
+        }
+        if count!=1 { panic(fmt.Sprintf("mixed types same name should be 1 family, got %d", count)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"mixed types failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_parent_aware_with_ratio_root_stats():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "crypto/rand"
+        "encoding/hex"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func randTraceID() string {
+        b := make([]byte, 16)
+        rand.Read(b)
+        return hex.EncodeToString(b)
+    }
+    func main(){
+        root := observability.NewRatioSampler(0.5)
+        pa := observability.NewParentAwareSampler(root)
+        n:=5000
+        kept:=0
+        for i:=0;i<n;i++{
+            tid := randTraceID()
+            parent := observability.TraceContext{TraceID:tid, SpanID:"0102030405060708", Sampled:true}
+            p := observability.SamplingRequest{TraceID:tid, HasParent:true, Parent:parent}
+            if pa.ShouldSample(p)==observability.DecisionKeep { kept++ }
+        }
+        ratio := float64(kept)/float64(n)
+        if ratio < 0.35 || ratio > 0.65 { panic(fmt.Sprintf("expected ~0.5 got %f", ratio)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"parent aware ratio stats failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_sampler_invalid_parent_traceid():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        sampler := observability.NewRatioSampler(1.0)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(sampler))
+        invalidParent := observability.TraceContext{TraceID:"invalid", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), invalidParent)
+        defer func(){
+            if r:=recover(); r!=nil { panic(fmt.Sprintf("should not panic on invalid parent: %v", r)) }
+        }()
+        _, span := tracer.Start(ctx, "invalid-parent")
+        span.End()
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"invalid parent traceid failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_exporter_error_continues():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    type errorExp struct{
+        mu sync.Mutex
+        count int
+        failFirst bool
+    }
+    func (e *errorExp) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        e.mu.Lock()
+        e.count++
+        shouldFail := e.failFirst && e.count==1
+        e.mu.Unlock()
+        if shouldFail { return fmt.Errorf("injected error") }
+        return nil
+    }
+    func main(){
+        exp := &errorExp{failFirst:true}
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(100), observability.WithBatchSize(5))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0;i<10;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("err-%d", i))
+            s.End()
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        if exp.count < 1 { panic("exporter should have been called") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"exporter error continues failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_5000_spans_no_deadlock():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(5000), observability.WithBatchSize(256))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        n:=5000
+        for i:=0;i<n;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i))
+            s.End()
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        spans := exp.GetSpans()
+        if len(spans)!=n { panic(fmt.Sprintf("expected %d got %d", n, len(spans))) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch 5000 spans failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_always_never_description_nonempty():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        a := observability.NewAlwaysSampler()
+        n := observability.NewNeverSampler()
+        if a.Description()=="" { panic("Always description empty") }
+        if n.Description()=="" { panic("Never description empty") }
+        if len(a.Description()) < 3 { panic("Always description too short") }
+        if len(n.Description()) < 3 { panic("Never description too short") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"description nonempty failed: {proc.stdout} {proc.stderr}"
+    )
