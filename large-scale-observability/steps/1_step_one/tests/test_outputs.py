@@ -2318,3 +2318,213 @@ def test_logger_level_default_info():
     )
 
 
+
+
+def test_exporter_events_attr_deep_copy():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "evdeep")
+        span.AddEvent("ev", observability.Attribute{Key:"k", Value:"v"})
+        span.End()
+        spans1 := exp.GetSpans()
+        if len(spans1[0].Events)==0 { panic("no events") }
+        if spans1[0].Events[0].Attributes==nil { panic("event attrs nil") }
+        spans1[0].Events[0].Attributes[0].Value = "hacked"
+        spans1[0].Events[0].Name = "hacked"
+        spans2 := exp.GetSpans()
+        if spans2[0].Events[0].Attributes[0].Value == "hacked" { panic("GetSpans must deep copy Events.Attributes") }
+        if spans2[0].Events[0].Name == "hacked" { panic("GetSpans must deep copy Events Name") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"exporter events attr deep copy failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_span_context_copy():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "ctxcopy")
+        sc1 := span.Context()
+        sc1.TraceID = "ffffffffffffffffffffffffffffffff"
+        sc2 := span.Context()
+        if sc2.TraceID == "ffffffffffffffffffffffffffffffff" { panic("Span.Context must return copy, not reference") }
+        span.End()
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"span context copy failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_metrics_collect_buckets_deep_copy():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        h := prov.Histogram("bucket_copy", observability.WithBuckets([]float64{1,5,10}))
+        h.Observe(2)
+        fams1 := prov.Collect()
+        var buckets []observability.HistogramBucket
+        for _, fam := range fams1 {
+            if fam.Name=="bucket_copy" { buckets = fam.Metrics[0].Buckets }
+        }
+        if len(buckets)==0 { panic("no buckets") }
+        buckets[0].Count = 9999
+        fams2 := prov.Collect()
+        for _, fam := range fams2 {
+            if fam.Name=="bucket_copy" {
+                if fam.Metrics[0].Buckets[0].Count == 9999 { panic("Collect must deep copy Buckets") }
+                fmt.Println("OK")
+                return
+            }
+        }
+        panic("not found second")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"collect buckets deep copy failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_marshal_validates_ids():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        invalid := observability.TraceContext{TraceID:"short", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), invalid)
+        carrier := map[string]string{}
+        observability.MarshalTrace(ctx, carrier)
+        if _, ok := carrier["x-ride-trace"]; ok {
+            panic("MarshalTrace should not write invalid TraceID")
+        }
+        invalid2 := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"short", Sampled:true}
+        ctx2 := observability.ContextWithTrace(context.Background(), invalid2)
+        carrier2 := map[string]string{}
+        observability.MarshalTrace(ctx2, carrier2)
+        if _, ok := carrier2["x-ride-trace"]; ok {
+            panic("MarshalTrace should not write invalid SpanID")
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"marshal validates ids failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_withprocessor_nil_fallback():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(nil), observability.WithProcessor(proc))
+        tracer2 := observability.NewTracer("svc", observability.WithProcessor(nil))
+        _, s := tracer2.Start(context.Background(), "nilproc")
+        s.End()
+        fmt.Println("OK")
+        _ = exp
+        _ = tracer
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"withprocessor nil fallback failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_id_generator_called_per_span():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    type countingGen struct{
+        mu sync.Mutex
+        traceCalls int
+        spanCalls int
+    }
+    func (g *countingGen) NewTraceID() string {
+        g.mu.Lock()
+        g.traceCalls++
+        n := g.traceCalls
+        g.mu.Unlock()
+        return fmt.Sprintf("%032x", n)
+    }
+    func (g *countingGen) NewSpanID() string {
+        g.mu.Lock()
+        g.spanCalls++
+        n := g.spanCalls
+        g.mu.Unlock()
+        return fmt.Sprintf("%016x", n)
+    }
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        gen := &countingGen{}
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithIDGenerator(gen))
+        for i:=0;i<5;i++{
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("s%d", i))
+            s.End()
+        }
+        if gen.traceCalls!=5 { panic(fmt.Sprintf("expected 5 traceID calls got %d", gen.traceCalls)) }
+        if gen.spanCalls!=5 { panic(fmt.Sprintf("expected 5 spanID calls got %d", gen.spanCalls)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"id generator called per span failed: {proc.stdout} {proc.stderr}"
+    )
+
+

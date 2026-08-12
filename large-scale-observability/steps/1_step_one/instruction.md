@@ -160,10 +160,15 @@ Tracer behavior:
   - Span Attributes: max 128 distinct keys per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.
   - Span Events: max 128 events per span. Drop excess beyond 128 (keep first 128). Timestamp set at AddEvent time.
   - Attribute value size: string >1024 truncated to exactly 1024 chars (keep first 1024).
-- `IsRecording()` true if Sampled true and not ended.
-- ParentID rules: root span's ParentID must be empty string, and FinishedSpan.ParentID must equal SpanContext.ParentID. Child span's ParentID must equal parent's SpanID and not empty.
-- MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, or Events must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set.
-- Exporter: Clear() and GetCount() must be concurrency-safe.
+- `IsRecording()` true if Sampled true and not ended. True before End, false after End.
+- ParentID rules: root span's ParentID must be empty string, and FinishedSpan.ParentID must equal SpanContext.ParentID. Child span's ParentID must equal parent's SpanID and not empty, and must match SpanContext.ParentID. 3-level chain (grandparent→parent→child) must preserve same TraceID and ParentID links.
+- MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, Events slice, Events.Attributes, Events.Name must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set. Buckets in metrics Collect must also be deep copied similarly.
+- Span.Context() must return copy: mutating returned TraceContext must not affect span.
+- Exporter: Clear() must reset Count and Spans to empty and allow reuse (subsequent spans export correctly). GetCount() and Clear() must be concurrency-safe.
+- WithAttributes duplicate keys: last wins, duplicate does not increase count. Empty WithAttributes must not panic.
+- String truncation exact boundary: exactly 1024 chars stays 1024, 1025 → 1024.
+- ID generator: NewTraceID/NewSpanID called once per span; custom generator must be respected; nil generator fallback to default random.
+- WithProcessor(nil) must not panic and fallback to default.
 
 #### Context propagation
 
