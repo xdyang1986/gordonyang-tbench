@@ -1388,6 +1388,7 @@ def test_lookup_fuzz_python_reference():
     import random
     import math
 
+    random.seed(12345)  # deterministic for CI
     eps = 1e-9
 
     def point_on_segment(px, py, x1, y1, x2, y2):
@@ -1404,10 +1405,8 @@ def test_lookup_fuzz_python_reference():
         )
 
     def point_in_polygon(lat, lng, poly):
-        # poly: list of (lat,lng)
         px, py = lng, lat
         n = len(poly)
-        # edge check
         for i in range(n):
             j = (i + 1) % n
             x1, y1 = poly[i][1], poly[i][0]
@@ -1430,7 +1429,6 @@ def test_lookup_fuzz_python_reference():
     db = os.path.join(tmpdir, "geof.json")
     try:
         run_cli(db, ["clear"])
-        # generate 15 random small squares
         geofences = []
         for i in range(15):
             base_lat = random.uniform(0, 8)
@@ -1448,14 +1446,12 @@ def test_lookup_fuzz_python_reference():
             assert r.returncode == 0, f"fuzz add {i} failed {r.stderr}"
             geofences.append((id_, poly))
 
-        # test 30 random points
         for _ in range(30):
             lat = random.uniform(-1, 11)
             lng = random.uniform(-1, 11)
             r = run_cli(db, ["lookup", "--lat", str(lat), "--lng", str(lng)])
             assert r.returncode == 0
             got = json.loads(r.stdout)
-            # compute expected via python ref
             expected = []
             for gid, poly in geofences:
                 if point_in_polygon(lat, lng, poly):
@@ -1464,5 +1460,73 @@ def test_lookup_fuzz_python_reference():
             assert got == expected, (
                 f"fuzz mismatch at {lat},{lng}: got {got} expected {expected}"
             )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_cli_relative_performance_5_vs_500():
+    """Relative performance for CLI: 5 vs 500 zones empty lookup should not grow linearly – requires index."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        # 5 zones
+        for i in range(5):
+            base_lat = (i // 5) * 2.0
+            base_lng = (i % 5) * 2.0
+            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
+            r = run_cli(
+                db, ["add", f"rel5_{i}", "--polygon", poly, "--name", f"R5 {i}"]
+            )
+            assert r.returncode == 0
+
+        def measure_avg(l):
+            # measure avg lookup time for empty point
+            start = time.time()
+            for _ in range(20):
+                run_cli(l, ["lookup", "--lat", "80", "--lng", "150"])
+            return (time.time() - start) / 20.0
+
+        avg5 = measure_avg(db)
+
+        # add up to 500
+        for i in range(5, 500):
+            base_lat = (i // 20) * 2.0
+            base_lng = (i % 20) * 2.0
+            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
+            r = run_cli(
+                db, ["add", f"rel5_{i}", "--polygon", poly, "--name", f"R5 {i}"]
+            )
+            assert r.returncode == 0
+
+        avg500 = measure_avg(db)
+        ratio = avg500 / (avg5 + 1e-6)
+        print(
+            f"CLI relative: 5-zone {avg5 * 1000:.2f}ms 500-zone {avg500 * 1000:.2f}ms ratio {ratio:.2f}x"
+        )
+        # With index, ratio should be small (e.g., <5x). Naive bbox-only would be ~100x (500/5)
+        assert avg500 <= avg5 * 5 + 0.05, (
+            f"500-zone empty too slow vs 5-zone ratio {ratio:.1f}x, need index"
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_colinear_points_on_edge_allowed():
+    """Colinear points along an edge (not duplicate) are allowed if area non-zero and no self-intersection."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Square with extra colinear point on top edge: 0,0->0,1->0,2? Actually colinear on edge 0,1 to 1,1 with point 0.5,1 on edge
+        poly = "0,0;0,1;0.5,1;1,1;1,0"
+        r = run_cli(db, ["add", "colinear_ok", "--polygon", poly, "--name", "Colinear"])
+        # Our reference allows colinear adjacent sharing vertex (0,1)-(0.5,1)-(1,1) all colinear on y=1
+        # This is not considered self-intersecting, just extra vertex on edge – should be allowed
+        assert r.returncode == 0, (
+            f"colinear points on edge should be allowed: {r.stderr}"
+        )
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert json.loads(r.stdout) == ["colinear_ok"]
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
