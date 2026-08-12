@@ -2020,7 +2020,6 @@ def test_cli_lookup_1000_zones():
     try:
         run_cli(db, ["clear"])
         for i in range(1000):
-            # tiny square at same area to make overlapping list large
             r = run_cli(
                 db,
                 [
@@ -2041,8 +2040,148 @@ def test_cli_lookup_1000_zones():
         ids = json.loads(r.stdout)
         assert len(ids) == 1000
         assert ids == sorted(ids)
-        # Should be reasonably fast even with 1000 (bbox prefilter still 1000, but 1000*4 edges ~4000 checks)
-        # Allow <1s to avoid flake
         assert elapsed < 1.0, f"1000 overlapping lookup too slow {elapsed}s"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_id_starting_with_hyphen_underscore():
+    """ID may start with hyphen or underscore – regex allows ^[A-Za-z0-9_-]{1,64}$ including start."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for id_ in ["-abc", "_abc", "-_a1", "_-b2", "a-b_c"]:
+            r = run_cli(db, ["add", id_, "--polygon", "0,0;0,1;1,1;1,0", "--name", id_])
+            assert r.returncode == 0, (
+                f"ID {id_!r} should be allowed per regex, got {r.returncode} {r.stderr}"
+            )
+
+        r = run_cli(db, ["list"])
+        ids = [x["id"] for x in json.loads(r.stdout)]
+        assert ids == sorted(ids)
+        # Invalid still rejected
+        r = run_cli(db, ["add", "a.b", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Bad"])
+        assert r.returncode == 2
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_polygon_with_plus_sign():
+    """Plus sign in lat/lng should be accepted – ParseFloat handles +."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        poly = "+0,+0;+0,+1;+1,+1;+1,+0"
+        r = run_cli(db, ["add", "plus", "--polygon", poly, "--name", "Plus"])
+        assert r.returncode == 0, f"plus sign should be allowed {r.stderr}"
+
+        r = run_cli(db, ["lookup", "--lat", "+0.5", "--lng", "+0.5"])
+        assert r.returncode == 0
+        assert json.loads(r.stdout) == ["plus"]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_db_path_with_spaces():
+    """DB path containing spaces must be handled (parent dir creation, atomic write)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "my dir with spaces", "geofences.json")
+    try:
+        r = run_cli(db, ["clear"])
+        assert r.returncode == 0, f"clear with spaces path should work {r.stderr}"
+        assert os.path.exists(db)
+
+        r = run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+        assert r.returncode == 0
+
+        r = run_cli(db, ["list"])
+        assert len(json.loads(r.stdout)) == 1
+
+        # No temp files in that dir
+        files = os.listdir(os.path.dirname(db))
+        assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_validation_fuzz_convex_vs_bowtie():
+    """Fuzz validation: random convex polygons accepted, bow-tie versions rejected."""
+    import random
+    import math
+
+    random.seed(999)
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        for i in range(20):
+            # convex random small square (should be valid)
+            base_lat = random.uniform(0, 5)
+            base_lng = random.uniform(0, 5)
+            sz = 0.5
+            poly_ok = f"{base_lat},{base_lng};{base_lat},{base_lng + sz};{base_lat + sz},{base_lng + sz};{base_lat + sz},{base_lng}"
+            r = run_cli(
+                db, ["add", f"ok_{i}", "--polygon", poly_ok, "--name", f"OK{i}"]
+            )
+            assert r.returncode == 0, f"convex {poly_ok} should be valid: {r.stderr}"
+
+            # bow-tie from same points in crossed order: 0,0;1,1;0,1;1,0 style – create from same square but crossed
+            # Use points of square in order 0,1,3,2 (cross)
+            pts = poly_ok.split(";")
+            # pts[0], pts[2], pts[1], pts[3] is bow-tie for square
+            bow = ";".join([pts[0], pts[2], pts[1], pts[3]])
+            r = run_cli(db, ["add", f"bad_{i}", "--polygon", bow, "--name", f"Bad{i}"])
+            assert r.returncode == 2, (
+                f"bow-tie {bow} should be rejected: got {r.returncode}"
+            )
+
+        r = run_cli(db, ["list"])
+        arr = json.loads(r.stdout)
+        assert len(arr) == 20, f"should have 20 valid, got {len(arr)}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_clear_after_clear_and_remove_after_clear():
+    """clear after clear and remove after clear must be handled and not leave tmp."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["clear"])
+        r = run_cli(db, ["list"])
+        assert json.loads(r.stdout) == []
+        assert r.stdout.strip() == "[]"
+
+        r = run_cli(db, ["remove", "nonexistent"])
+        assert r.returncode == 3
+
+        r = run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+        assert r.returncode == 0
+
+        run_cli(db, ["clear"])
+        r = run_cli(db, ["list"])
+        assert json.loads(r.stdout) == []
+
+        for root, dirs, files in os.walk(tmpdir):
+            assert not [f for f in files if ".tmp." in f]
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_lookup_with_negative_zero_and_plus():
+    """Lookup with -0, +0, +0.0 must be valid and considered same point."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        run_cli(db, ["add", "z", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Z"])
+
+        for lat, lng in [("-0", "0"), ("0", "-0"), ("+0", "+0"), ("+0.0", "-0.0")]:
+            r = run_cli(db, ["lookup", "--lat", lat, "--lng", lng])
+            assert r.returncode == 0, f"lookup {lat},{lng} should be allowed"
+            assert json.loads(r.stdout) == ["z"], f"{lat},{lng} should be inside"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
