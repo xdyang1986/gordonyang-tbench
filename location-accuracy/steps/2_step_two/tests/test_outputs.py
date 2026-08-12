@@ -2026,3 +2026,46 @@ def test_estimate_confidence_snapped_upgrade_low_to_medium(binary):
     assert data["snapped"] is True
     assert data["confidence"] == "medium"
 
+
+def test_validate_pickup_priority_low_accuracy_beats_off_road(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "60", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000", "--roads", roads_path], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_road_mismatch_beats_too_far(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {"id": "road_a", "points": [{"lat": 37.7749, "lng": -122.4194}, {"lat": 37.7749, "lng": -122.4094}]},
+        {"id": "road_b", "points": [{"lat": 37.7760, "lng": -122.4194}, {"lat": 37.7760, "lng": -122.4094}]}
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5", "--speed", "0", "--heading", "90"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7760", "-122.4144", "--now", "1000000", "--roads", roads_path], expect_code=1)
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "road_mismatch"
+
+
+def test_estimate_confidence_age_override_low_even_when_snapped(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "road_east", "points": [{"lat": 37.7749, "lng": -122.4194}, {"lat": 37.7749, "lng": -122.4094}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", str(1000000 + 35000), "--roads", roads_path], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["confidence"] == "low"
+
