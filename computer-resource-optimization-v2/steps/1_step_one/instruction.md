@@ -1,6 +1,6 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (180 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (196 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 180 tests (was 30 too easy, 49/66/80 still easy per feedback), now 108 with 150 new discriminators over original 30. Features: concurrent same ID race add-node same ID 20 ->1, add-job same ID 20 ->1, add-node 20 sorted, same node 20 preserve all 20, diff nodes 20, deallocate 20 -> used 0, list while allocating 10x30 valid JSON, 1000 nodes <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs [] not null (nil-slice pitfall), empty/whitespace empty store vs corrupt null/[]/invalid JSON -> backup .corrupt.<nanosec> integer suffix regex, missing/bad checksum corruption, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp/global.lock, pagination offset then limit order, first-fit not best-fit, lock retry 100ms, gpu insufficient, etc.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 196 tests (was 30 too easy, 49/66/80 still easy per feedback), now 108 with 166 new discriminators over original 30. Features: concurrent same ID race add-node same ID 20 ->1, add-job same ID 20 ->1, add-node 20 sorted, same node 20 preserve all 20, diff nodes 20, deallocate 20 -> used 0, list while allocating 10x30 valid JSON, 1000 nodes <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs [] not null (nil-slice pitfall), empty/whitespace empty store vs corrupt null/[]/invalid JSON -> backup .corrupt.<nanosec> integer suffix regex, missing/bad checksum corruption, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp/global.lock, pagination offset then limit order, first-fit not best-fit, lock retry 100ms, gpu insufficient, etc.
 
 Failing observations (naive misses enforced 96):
 - Empty "" whitespace "   \n\t" -> empty store [] not corrupt 4; files "null" "[]" -> corrupt backup integer suffix \.corrupt\.\d+$ warning list [] after. Missing checksum / bad checksum / data missing / data not object -> corrupt backup
@@ -91,7 +91,7 @@ On read: missing file → empty store {nodes:{}, jobs:{}}, empty file → empty 
 - schedule: first-fit sorted node IDs asc, first node that fits, if job already allocated exit2, if no fit exit1 stderr "no fit", prints JSON scheduled
 - status: returns counts and total/used resources
 
-### Integrity Coverage (180 tests Turn 1, 20 tests Turn 2 – extra hard)
+### Integrity Coverage (196 tests Turn 1, 20 tests Turn 2 – extra hard)
 - checksum strict, mismatch/missing/invalid JSON backup integer nanosec, stderr warnings
 - atomic all 20 same node, diff nodes all 20, concurrent add-node 20, file lock cleanup
 - stdlib only, advisory CreateTemp/Rename
