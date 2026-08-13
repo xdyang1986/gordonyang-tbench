@@ -3800,3 +3800,200 @@ def test_file_lock_retry_with_two_concurrent_holders():
     assert r.returncode == 0
     assert not os.path.exists(lock_path)
     assert json.loads(run_cli("list-nodes").stdout)[0]["id"] == "nodeRetryLock"
+
+# ---------- Further: 291->310 (still too easy, keep enhancing) ----------
+
+def test_list_nodes_with_limit_offset_with_spaces_and_zero_padded():
+    clean_data()
+    for i in range(5):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    # spaces and zero-padded should be valid after trim
+    r = run_cli("list-nodes", " 02 ", " 01 ")
+    assert r.returncode in (0, 2)
+    if r.returncode == 0:
+        assert len(json.loads(r.stdout)) == 2
+
+
+def test_add_node_id_with_10kb_mixed_and_allocate_many():
+    clean_data()
+    large_id = "node-" + "a-_b.c:d<>&🌍😀" * 800
+    r = run_cli("add-node", large_id, "10", "10240", "2")
+    assert r.returncode == 0
+    for i in range(5):
+        run_cli("add-job", f"job-{i}", "2", "512", "0")
+        assert run_cli("allocate", f"job-{i}", large_id).returncode == 0
+    assert checksum_valid()
+
+
+def test_add_job_id_with_10kb_mixed_and_allocate():
+    clean_data()
+    run_cli("add-node", "node1", "20", "20000", "2")
+    large_jid = "job-" + "b-_c.d:e<>&😀🌍" * 800
+    r = run_cli("add-job", large_jid, "2", "512", "1")
+    assert r.returncode == 0
+    assert run_cli("allocate", large_jid, "node1").returncode == 0
+    assert checksum_valid()
+
+
+def test_status_total_resources_exact_after_adding_30_nodes():
+    clean_data()
+    total_cpu = 0
+    total_mem = 0
+    total_gpu = 0
+    for i in range(30):
+        cpu = i + 1
+        mem = (i + 1) * 100
+        gpu = i % 3
+        run_cli("add-node", f"node-{i:02d}", str(cpu), str(mem), str(gpu))
+        total_cpu += cpu
+        total_mem += mem
+        total_gpu += gpu
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_resources"]["cpu"] == total_cpu
+    assert st["total_resources"]["memory"] == total_mem
+    assert st["total_resources"]["gpu"] == total_gpu
+
+
+def test_concurrent_add_node_with_id_containing_equals():
+    clean_data()
+    def add_eq(i):
+        run_cli("add-node", f"node=eq-{i}", "4", "1024", "0")
+    threads = [threading.Thread(target=add_eq, args=(i,)) for i in range(15)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 15
+    assert checksum_valid()
+
+
+def test_concurrent_add_job_with_id_containing_equals():
+    clean_data()
+    run_cli("add-node", "node1", "50", "50000", "0")
+    def add_eq(i):
+        run_cli("add-job", f"job=eq-{i}", "1", "256", "0")
+    threads = [threading.Thread(target=add_eq, args=(i,)) for i in range(15)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-jobs").stdout)) == 15
+
+
+def test_allocate_with_cpu_memory_exact_and_free_zero():
+    clean_data()
+    run_cli("add-node", "nodeExact", "3", "768", "0")
+    run_cli("add-job", "jobExact", "3", "768", "0")
+    assert run_cli("allocate", "jobExact", "nodeExact").returncode == 0
+    node = json.loads(run_cli("get-node", "nodeExact").stdout)
+    assert node["free"]["cpu"] == 0 and node["free"]["memory"] == 0
+
+
+def test_deallocate_and_remove_node_then_re_add():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("deallocate", "job1")
+    run_cli("remove-job", "job1")
+    run_cli("remove-node", "node1")
+    assert run_cli("add-node", "node1", "8", "2048", "1").returncode == 0
+    assert json.loads(run_cli("get-node", "node1").stdout)["total"]["cpu"] == 8
+
+
+def test_list_nodes_with_special_chars_sorted_and_limit():
+    clean_data()
+    ids = ["node<>&", "node-🌍", "nodeA", "nodeB", "node-a", "node_b"]
+    for nid in ids:
+        run_cli("add-node", nid, "4", "1024", "0")
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == len(ids)
+    assert [n["id"] for n in arr] == sorted([n["id"] for n in arr])
+    arr2 = json.loads(run_cli("list-nodes", "2", "1").stdout)
+    assert len(arr2) == 2
+
+
+def test_file_lock_cleaned_after_many_successful_ops():
+    clean_data()
+    for i in range(30):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+        run_cli("allocate", f"job-{i:02d}", f"node-{i:02d}")
+        run_cli("deallocate", f"job-{i:02d}")
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(f.endswith(".lock") for f in files)
+
+
+def test_checksum_valid_after_deallocate_and_remove():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    run_cli("deallocate", "job1")
+    run_cli("remove-job", "job1")
+    run_cli("remove-node", "node1")
+    assert checksum_valid()
+    assert json.loads(run_cli("list-nodes").stdout) == []
+
+
+def test_add_node_with_id_containing_percent_ampersand_valid():
+    clean_data()
+    for nid in ["node%percent", "node&and"]:
+        r = run_cli("add-node", nid, "4", "1024", "0")
+        assert r.returncode in (0, 2)
+        if r.returncode == 0:
+            assert json.loads(run_cli("get-node", nid).stdout)["id"] == nid
+
+
+def test_add_job_with_id_containing_percent_ampersand_valid():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for jid in ["job%percent", "job&and"]:
+        r = run_cli("add-job", jid, "1", "256", "0")
+        assert r.returncode in (0, 2)
+
+
+def test_concurrent_schedule_30_jobs():
+    clean_data()
+    for i in range(10):
+        run_cli("add-node", f"node-{i:02d}", "10", "10240", "0")
+    for i in range(30):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    def sched(i):
+        run_cli("schedule", f"job-{i:02d}")
+    threads = [threading.Thread(target=sched, args=(i,)) for i in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert json.loads(run_cli("status").stdout)["allocated_jobs"] == 30
+    assert checksum_valid()
+
+
+def test_node_free_equals_total_minus_used_after_many_ops():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "2")
+    for i in range(5):
+        run_cli("add-job", f"job{i}", "2", "1024", "0")
+        run_cli("allocate", f"job{i}", "node1")
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["free"]["cpu"] == node["total"]["cpu"] - node["used"]["cpu"]
+    assert node["free"]["memory"] == node["total"]["memory"] - node["used"]["memory"]
+    for i in range(5):
+        run_cli("deallocate", f"job{i}")
+    node2 = json.loads(run_cli("get-node", "node1").stdout)
+    assert node2["free"]["cpu"] == node2["total"]["cpu"]
+    assert node2["jobs"] == []
+
+
+def test_list_nodes_and_jobs_with_limit_offset_large_numbers():
+    clean_data()
+    for i in range(50):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    arr_n = json.loads(run_cli("list-nodes", "20", "10").stdout)
+    assert len(arr_n) == 20
+    assert arr_n[0]["id"] == "node-10"
+    arr_j = json.loads(run_cli("list-jobs", "20", "10").stdout)
+    assert len(arr_j) == 20
+    assert arr_j[0]["id"] == "job-10"
