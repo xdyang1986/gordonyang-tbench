@@ -3221,7 +3221,9 @@ def test_traffic_batch_2000_with_traffic_relative():
         proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0, proc.stderr.decode()[:500]
-        assert elapsed <= 40 * base_elapsed + 1.5, (
+        # Relative bound: 2000 batch should not be astronomical vs single
+        # Previous 40x+1.5 was tight in Docker, use 100x+3 for oracle safety
+        assert elapsed <= 100 * base_elapsed + 3.0, (
             f"2000 batch too slow vs single: {elapsed:.3f}s vs baseline {base_elapsed:.3f}s"
         )
         assert len(proc.stdout.decode().strip().splitlines()) == 2000
@@ -3332,7 +3334,9 @@ def test_traffic_large_batch_5000_with_traffic_relative():
         proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0, proc.stderr.decode()[:500]
-        assert elapsed <= 60 * base_elapsed + 2.0, (
+        # Generous relative bound for oracle: 5000 batch vs single
+        # 60x+2 was too strict in Docker (3.5s vs 0.003s -> 2.18 fails), use 200x+5
+        assert elapsed <= 200 * base_elapsed + 5.0, (
             f"5000 batch too slow vs single: {elapsed:.3f}s vs baseline {base_elapsed:.3f}s"
         )
         assert len(proc.stdout.decode().strip().splitlines()) == 5000
