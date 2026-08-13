@@ -133,11 +133,51 @@ def clean_all():
 
 
 def run_config(*args, config_path=CONFIG_PATH, timeout=15):
+    if not os.path.exists(BIN):
+        try:
+            import subprocess as _sp
+
+            _sp.run(
+                ["go", "build", "-o", BIN, "."],
+                cwd="/app",
+                env={
+                    **os.environ,
+                    "GOTOOLCHAIN": "local",
+                    "GOFLAGS": "-mod=mod",
+                    "GOCACHE": "/tmp/gocache",
+                    "GOPATH": "/tmp/gopath",
+                },
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception:
+            pass
     cmd = [BIN, "--config", config_path] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def run_single(*args, data_path="/app/data/cluster.json", timeout=15):
+    if not os.path.exists(BIN):
+        try:
+            import subprocess as _sp
+
+            _sp.run(
+                ["go", "build", "-o", BIN, "."],
+                cwd="/app",
+                env={
+                    **os.environ,
+                    "GOTOOLCHAIN": "local",
+                    "GOFLAGS": "-mod=mod",
+                    "GOCACHE": "/tmp/gocache",
+                    "GOPATH": "/tmp/gopath",
+                },
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception:
+            pass
     cmd = [BIN, "--data", data_path] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
