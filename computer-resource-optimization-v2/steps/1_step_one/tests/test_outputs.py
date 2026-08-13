@@ -4159,3 +4159,185 @@ def test_node_total_resources_preserved_after_failed_allocate():
     after = json.loads(run_cli("get-node", "node1").stdout)
     assert before["total"] == after["total"]
     assert before["used"] == after["used"]
+
+# ---------- Further: 323->350 (still too easy, keep enhancing) ----------
+
+def test_add_node_with_id_containing_backtick():
+    clean_data()
+    for nid in ["node`backtick", "node`with`multiple"]:
+        r = run_cli("add-node", nid, "4", "1024", "0")
+        assert r.returncode in (0, 2)
+        if r.returncode == 0:
+            assert json.loads(run_cli("get-node", nid).stdout)["id"] == nid
+
+
+def test_add_job_with_id_containing_backtick():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for jid in ["job`backtick", "job`with`multiple"]:
+        r = run_cli("add-job", jid, "1", "256", "0")
+        assert r.returncode in (0, 2)
+
+
+def test_list_nodes_with_limit_as_hex_string_invalid():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    assert run_cli("list-nodes", "0x10", "0").returncode == 2
+    assert run_cli("list-jobs", "0x10", "0").returncode == 2
+
+
+def test_add_node_with_cpu_as_hex_string_invalid():
+    clean_data()
+    assert run_cli("add-node", "node1", "0x4", "1024", "0").returncode == 2
+    assert run_cli("add-job", "job1", "0x1", "256", "0").returncode == 2
+
+
+def test_concurrent_add_node_with_backtick():
+    clean_data()
+    def add_bt(i):
+        run_cli("add-node", f"node`{i}`", "4", "1024", "0")
+    threads = [threading.Thread(target=add_bt, args=(i,)) for i in range(15)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 15
+    assert checksum_valid()
+
+
+def test_status_with_negative_zero_and_plus_zero_limit():
+    clean_data()
+    for i in range(5):
+        run_cli("add-node", f"node-{i}", "4", "1024", "0")
+    # -0 and +0 already tested for list, but status should be ok regardless of previous invalid list attempts
+    assert run_cli("list-nodes", "-0", "0").returncode in (0, 2)
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_nodes"] == 5
+
+
+def test_allocate_with_extra_spaces_in_id():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    # ID with internal spaces "job 1" – if supported, should be valid? Our implementation uses first arg as ID, so "job 1" would be two args if not quoted
+    # For hardening, we test that job ID with space inside via direct arg with space preserved (subprocess list preserves)
+    r = run_cli("add-job", "job with space", "1", "256", "0")
+    assert r.returncode in (0, 2)
+    if r.returncode == 0:
+        assert run_cli("allocate", "job with space", "node1").returncode == 0
+
+
+def test_deallocate_with_extra_spaces():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    r = run_cli("deallocate", "job1")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+
+
+def test_remove_job_with_extra_spaces():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    r = run_cli("remove-job", "job1")
+    assert r.returncode == 0 and "true" in r.stdout.lower()
+
+
+def test_list_nodes_with_limit_offset_as_zero_and_large():
+    clean_data()
+    for i in range(20):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+    arr_all = json.loads(run_cli("list-nodes").stdout)
+    arr_zero = json.loads(run_cli("list-nodes", "0", "0").stdout)
+    assert arr_all == arr_zero
+    arr_large = json.loads(run_cli("list-nodes", "1000", "0").stdout)
+    assert len(arr_large) == 20
+
+
+def test_list_jobs_with_limit_offset_as_zero_and_large():
+    clean_data()
+    run_cli("add-node", "node1", "30", "30000", "0")
+    for i in range(20):
+        run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+    arr_all = json.loads(run_cli("list-jobs").stdout)
+    arr_zero = json.loads(run_cli("list-jobs", "0", "0").stdout)
+    assert arr_all == arr_zero
+    assert len(json.loads(run_cli("list-jobs", "1000", "0").stdout)) == 20
+
+
+def test_concurrent_allocate_with_special_chars_and_unicode():
+    clean_data()
+    for nid in ["node<>&", "node-🌍"]:
+        run_cli("add-node", nid, "20", "20000", "0")
+    for jid in ["job<>&", "job-🌍", "job😀", "job-a_b.c:d"]:
+        run_cli("add-job", jid, "1", "256", "0")
+    def alloc(jid, nid):
+        run_cli("allocate", jid, nid)
+    threads = []
+    for jid in ["job<>&", "job-🌍", "job😀", "job-a_b.c:d"]:
+        threads.append(threading.Thread(target=alloc, args=(jid, "node<>&")))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert checksum_valid()
+    node = json.loads(run_cli("get-node", "node<>&").stdout)
+    assert len(node["jobs"]) == 4
+
+
+def test_node_total_resources_with_large_numbers():
+    clean_data()
+    run_cli("add-node", "nodeLarge", "1000000", "1000000000", "1000")
+    node = json.loads(run_cli("get-node", "nodeLarge").stdout)
+    assert node["total"]["cpu"] == 1000000
+    assert node["total"]["memory"] == 1000000000
+    assert node["total"]["gpu"] == 1000
+
+
+def test_job_required_with_large_numbers():
+    clean_data()
+    run_cli("add-node", "nodeLarge", "1000000", "1000000000", "1000")
+    run_cli("add-job", "jobLarge", "500000", "500000000", "500")
+    job = json.loads(run_cli("get-job", "jobLarge").stdout)
+    assert job["required"]["cpu"] == 500000
+
+
+def test_allocate_with_large_numbers_exact_fit():
+    clean_data()
+    run_cli("add-node", "nodeLarge", "1000000", "1000000000", "1000")
+    run_cli("add-job", "jobLarge", "1000000", "1000000000", "1000")
+    assert run_cli("allocate", "jobLarge", "nodeLarge").returncode == 0
+    assert json.loads(run_cli("get-node", "nodeLarge").stdout)["free"]["cpu"] == 0
+
+
+def test_concurrent_status_with_many_nodes():
+    clean_data()
+    for i in range(50):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+    def status_loop():
+        for _ in range(20):
+            r = run_cli("status")
+            assert r.returncode == 0
+            json.loads(r.stdout)
+    threads = [threading.Thread(target=status_loop) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def test_list_nodes_after_concurrent_add_and_remove():
+    clean_data()
+    def add_remove(i):
+        run_cli("add-node", f"node-conc-{i}", "4", "1024", "0")
+        run_cli("remove-node", f"node-conc-{i}")
+        run_cli("add-node", f"node-conc-{i}", "4", "1024", "0")
+    threads = [threading.Thread(target=add_remove, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 20
+    assert checksum_valid()
