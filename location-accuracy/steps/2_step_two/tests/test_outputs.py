@@ -2472,3 +2472,196 @@ def test_list_with_now_and_roads_combined(binary):
     ids = [x["vehicle_id"] for x in _json.loads(p.stdout.strip())]
     assert "veh1" in ids
 
+
+def test_estimate_confidence_low_when_accuracy_high_age_small_not_snapped(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "30", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    import json as _json
+    data = _json.loads(p.stdout.strip())
+    assert data["snapped"] is False
+    assert data["confidence"] == "low"
+
+
+def test_validate_pickup_ok_when_exactly_same_location(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000"], expect_code=0)
+    import json as _json
+    data = _json.loads(p.stdout.strip())
+    assert data["valid"] is True and data["reason"] == "ok"
+    assert data["distance_m"] == 0 or data["distance_m"] < 1.0
+
+
+def test_validate_pickup_priority_out_of_geofence_beats_low_accuracy(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [{"id": "pickup_sf", "polygon": [{"lat": 37.7, "lng": -122.5}, {"lat": 37.7, "lng": -122.3}, {"lat": 37.9, "lng": -122.3}, {"lat": 37.9, "lng": -122.5}]}]
+    import json as _json
+    with open(zones_path, "w") as f:
+        _json.dump(zones, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "60", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "0", "0", "--now", "1000000", "--zones", zones_path], expect_code=1)
+    assert _json.loads(p.stdout.strip())["reason"] == "out_of_geofence"
+
+
+def test_validate_pickup_priority_out_of_geofence_beats_off_road(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    zones = [{"id": "pickup_sf", "polygon": [{"lat": 37.7, "lng": -122.5}, {"lat": 37.7, "lng": -122.3}, {"lat": 37.9, "lng": -122.3}, {"lat": 37.9, "lng": -122.5}]}]
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    import json as _json
+    with open(zones_path, "w") as f:
+        _json.dump(zones, f)
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000000", "--accuracy", "5"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "0", "0", "--now", "1000000", "--zones", zones_path, "--roads", roads_path], expect_code=1)
+    assert _json.loads(p.stdout.strip())["reason"] == "out_of_geofence"
+
+
+def test_validate_pickup_priority_stale_beats_road_mismatch_heading_mismatch_chain(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {"id": "road_a", "points": [{"lat": 37.7749, "lng": -122.4194}, {"lat": 37.7749, "lng": -122.4094}]},
+        {"id": "road_b", "points": [{"lat": 37.7760, "lng": -122.4194}, {"lat": 37.7760, "lng": -122.4094}]}
+    ]
+    import json as _json
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["validate-pickup", "veh1", "37.7760", "-122.4144", "--now", str(1000000 + 50000), "--roads", roads_path], expect_code=1)
+    assert _json.loads(p.stdout.strip())["reason"] == "stale"
+
+
+def test_validate_dropoff_priority_stale_beats_moving(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5", "--speed", "8"], expect_code=0)
+    p = run_cli(binary, db, ["validate-dropoff", "veh1", "37.7749", "-122.4194", "--now", str(1000000 + 40000)], expect_code=1)
+    import json as _json
+    assert _json.loads(p.stdout.strip())["reason"] == "stale"
+
+
+def test_validate_dropoff_priority_low_accuracy_beats_moving(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "60", "--speed", "8"], expect_code=0)
+    p = run_cli(binary, db, ["validate-dropoff", "veh1", "37.7749", "-122.4194", "--now", "1000000"], expect_code=1)
+    import json as _json
+    assert _json.loads(p.stdout.strip())["reason"] == "low_accuracy"
+
+
+def test_estimate_accuracy_degradation_formula(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "10", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", str(1000000 + 20000)], expect_code=0)
+    import json as _json
+    data = _json.loads(p.stdout.strip())
+    # accuracy degrades +0.5*age_sec, age 20s => +10, so 20
+    assert abs(data["accuracy"] - 20) < 1.0
+
+
+def test_total_distance_with_road_snapped_still_counts(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "road_east", "points": [{"lat": 37.7749, "lng": -122.4194}, {"lat": 37.7749, "lng": -122.4094}]}]
+    import json as _json
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4094", "2000000", "--accuracy", "5"], expect_code=0)
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = _json.loads(p.stdout.strip())
+    assert data["total_distance_m"] > 100
+
+
+def test_near_with_heading_aware_roads_filter(binary):
+    import os
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "road_east", "points": [{"lat": 37.7749, "lng": -122.4194}, {"lat": 37.7749, "lng": -122.4094}]}]
+    import json as _json
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    # near --roads uses simple snap (not heading-aware), so both headings snap
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5", "--speed", "2", "--heading", "90"], expect_code=0)
+    run_cli(binary, db, ["update", "veh2", "37.7749", "-122.4144", "1000000", "--accuracy", "5", "--speed", "2", "--heading", "180"], expect_code=0)
+    p = run_cli(binary, db, ["near", "--lat", "37.7749", "--lng", "-122.4144", "--radius", "100", "--roads", roads_path], expect_code=0)
+    ids = [x["vehicle_id"] for x in _json.loads(p.stdout.strip())]
+    assert "veh1" in ids and "veh2" in ids
+    # estimate DOES use heading-aware: veh1 snapped, veh2 not
+    p_est1 = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000", "--roads", roads_path], expect_code=0)
+    assert _json.loads(p_est1.stdout.strip())["snapped"] is True
+    p_est2 = run_cli(binary, db, ["estimate", "veh2", "--now", "1000000", "--roads", roads_path], expect_code=0)
+    assert _json.loads(p_est2.stdout.strip())["snapped"] is False
+
+
+def test_outlier_persistence_across_get_verbose(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "38.0", "-123.0", "1000100", "--accuracy", "5"], expect_code=3)
+    p = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+    data = _json.loads(p.stdout.strip())
+    assert data["outlier_count"] == 1
+    assert data["lat"] == 37.7749
+
+
+def test_validate_pickup_with_both_pickup_and_dropoff_zones_separate(binary):
+    import os
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    import os
+    pickup_zones = [{"id": "pickup", "polygon": [{"lat": 37.7, "lng": -122.5}, {"lat": 37.7, "lng": -122.3}, {"lat": 37.9, "lng": -122.3}, {"lat": 37.9, "lng": -122.5}]}]
+    dropoff_zones = [{"id": "dropoff", "polygon": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}, {"lat": 10, "lng": 10}, {"lat": 10, "lng": 0}]}]
+    import json as _json, shutil
+    os.makedirs("/app/data", exist_ok=True)
+    # backup
+    import pathlib
+    pickup_path = "/app/data/pickup_zones.json"
+    dropoff_path = "/app/data/dropoff_zones.json"
+    bak_pick = bak_drop = None
+    if os.path.exists(pickup_path):
+        bak_pick = open(pickup_path).read()
+    if os.path.exists(dropoff_path):
+        bak_drop = open(dropoff_path).read()
+    try:
+        with open(pickup_path, "w") as f:
+            _json.dump(pickup_zones, f)
+        with open(dropoff_path, "w") as f:
+            _json.dump(dropoff_zones, f)
+        run_cli(binary, db, ["update", "veh1", "0.001", "0.001", "1000000", "--accuracy", "5"], expect_code=0)
+        # pickup at 0,0: vehicle at 0.001,0.001 distance ~157m >100 too_far, but pickup zone is SF, so out_of_geofence beats too_far
+        p1 = run_cli(binary, db, ["validate-pickup", "veh1", "0", "0", "--now", "1000000"], expect_code=1)
+        assert _json.loads(p1.stdout.strip())["reason"] == "out_of_geofence"
+        # dropoff at 0,0: distance ~157m >150? Actually 0.001 deg ~111m, so 157m >150 too_far, use 0.0005 deg ~78m for valid
+        p2 = run_cli(binary, db, ["validate-dropoff", "veh1", "0.0005", "0.0005", "--now", "1000000"], expect_code=0)
+        assert _json.loads(p2.stdout.strip())["valid"] is True
+    finally:
+        if bak_pick is not None:
+            open(pickup_path, "w").write(bak_pick)
+        else:
+            try:
+                os.remove(pickup_path)
+            except:
+                pass
+        if bak_drop is not None:
+            open(dropoff_path, "w").write(bak_drop)
+        else:
+            try:
+                os.remove(dropoff_path)
+            except:
+                pass
+
