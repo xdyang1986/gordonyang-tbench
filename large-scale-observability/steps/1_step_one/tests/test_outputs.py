@@ -2632,3 +2632,169 @@ def test_tracing_withattributes_duplicate_across_calls():
     assert proc.returncode == 0, (
         f"withattributes duplicate across calls failed: {proc.stdout} {proc.stderr}"
     )
+
+
+def test_tracing_marshal_nil_carrier():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        defer func(){
+            if r:=recover(); r!=nil { panic(fmt.Sprintf("MarshalTrace nil carrier should not panic, got %v", r)) }
+        }()
+        observability.MarshalTrace(context.Background(), nil)
+        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:true}
+        ctx := observability.ContextWithTrace(context.Background(), sc)
+        observability.Inject(ctx, nil)
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"marshal nil carrier failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_unmarshal_invalid():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        cases := []map[string]string{
+            nil,
+            {},
+            {"x-ride-trace":""},
+            {"x-ride-trace":"bad"},
+            {"x-ride-trace":"0102030405060708090a0b0c0d0e0f10:0102030405060708"},
+            {"x-ride-trace":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz:0102030405060708::1"},
+            {"x-ride-trace":"0102030405060708090a0b0c0d0e0f10:zzzzzzzzzzzzzzzz::1"},
+            {"x-ride-trace":"0102030405060708090a0b0c0d0e0f10:0102030405060708:zzzzzzzzzzzzzzzz:1"},
+        }
+        for i, c := range cases {
+            ctx := observability.UnmarshalTrace(c)
+            if _, ok := observability.TraceFromContext(ctx); ok {
+                panic(fmt.Sprintf("case %d should yield no trace for invalid carrier %v", i, c))
+            }
+            ctx2 := observability.Extract(c)
+            if _, ok := observability.SpanContextFromContext(ctx2); ok {
+                panic(fmt.Sprintf("Extract case %d should yield no trace", i))
+            }
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"unmarshal invalid failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_withattributes_nil():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, s1 := tracer.Start(context.Background(), "nilattrs", observability.WithAttributes())
+        s1.End()
+        _, s2 := tracer.Start(context.Background(), "nilattrs2")
+        s2.End()
+        if len(exp.GetSpans())!=2 { panic("should have 2") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"withattributes nil failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_metrics_counter_type_conflict():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        prov := observability.NewMetricsProvider()
+        c := prov.Counter("conflict_metric")
+        c.Inc()
+        g := prov.Gauge("conflict_metric")
+        g.Set(100)
+        h := prov.Histogram("conflict_metric")
+        h.Observe(5)
+        fams := prov.Collect()
+        var families int
+        var typ string
+        for _, fam := range fams {
+            if fam.Name=="conflict_metric" {
+                families++
+                typ = fam.Type
+            }
+        }
+        if families!=1 { panic(fmt.Sprintf("conflict metric same name should be 1 family, got %d", families)) }
+        if typ!="counter" { panic(fmt.Sprintf("first type counter should win, got %s", typ)) }
+        // value should be 1, not affected by gauge/histogram no-op
+        for _, fam := range fams {
+            if fam.Name=="conflict_metric" {
+                if fam.Metrics[0].Value != 1 { panic(fmt.Sprintf("counter value should be 1, got %f", fam.Metrics[0].Value)) }
+            }
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"counter type conflict failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+
+
+def test_tracing_flags_zero_when_not_sampled():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        sc := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", ParentID:"", Sampled:false}
+        ctx := observability.ContextWithTrace(context.Background(), sc)
+        carrier := map[string]string{}
+        observability.MarshalTrace(ctx, carrier)
+        v, ok := carrier["x-ride-trace"]
+        if !ok { panic("should marshal even when not sampled? Flags 0 but still valid") }
+        if v[len(v)-1] != '0' { panic(fmt.Sprintf("sampled false should have :0, got %s", v)) }
+        sc2 := observability.TraceContext{TraceID:"0102030405060708090a0b0c0d0e0f10", SpanID:"0102030405060708", Sampled:false}
+        if sc2.Flags != 0 { panic(fmt.Sprintf("Flags should be 0 when Sampled false, but struct may have Flag 0 - check Context() returns with Flags 0")) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"flags zero when not sampled failed: {proc.stdout} {proc.stderr}"
+    )
+
+
