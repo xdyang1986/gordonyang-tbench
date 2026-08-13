@@ -47,9 +47,9 @@ Flags:
 Rules:
 - `nodes` – required array of non-empty unique strings (node IDs). At least 1. **Whitespace-only strings** e.g., `"   "` or `""` are considered empty → invalid graph exit 2. Node IDs are case-sensitive: `"A"` and `"a"` are distinct, not duplicate. May contain letters, numbers, hyphen, underscore (e.g., `Node-A_1`). Unique check is exact string match.
 - `edges` – required array. Each edge has `from` (string), `to` (string), `distance` (number >0). Distance may be integer, **float**, or **scientific notation** >0 (e.g., 2.5, `1e3` =1000). `from` and `to` must exist in nodes, trimmed whitespace invalid (if from/to is empty or whitespace-only → invalid). `from` != `to` (no self loops). Extra unknown fields inside edge objects or top-level (e.g., `"extra"`) must be **ignored**, not cause invalid.
-- `--traffic` flag is **NOT supported** in Turn1 – if provided, exit 2 (unknown flag). Turn1 only supports --graph, --from/--to, --requests, --help.
+- `--traffic` flag is **NOT supported** in Turn1 – if provided, exit 2 (unknown flag). Turn1 only supports --graph, --from/--to, --requests, --help. **Note on multi-turn evolution:** Turn2 adds `--traffic` as valid flag, so flag sets are non-cumulative by design. `test_unknown_traffic_flag_in_step1_invalid` is Turn1-only and not expected to pass with Turn2 binary.
 - Graph is **undirected**: edge A-B can be traversed both ways with same distance. Duplicate edges between same unordered pair are allowed; keep smallest distance for routing.
-- Invalid graph: empty/duplicate nodes, empty/whitespace node ID, edge referencing non-existing node, distance <=0 or missing or not a number, self-loop, invalid JSON (trailing comma, etc.), unreadable file → exit 2, no stdout. Tests check negative, zero, self-loop, duplicate, empty, whitespace, non-numeric distance, missing fields, extra top-level ignored (should NOT be invalid).
+- Invalid graph: empty/duplicate nodes, empty/whitespace node ID, edge referencing non-existing node, distance <=0 or missing or not a number, self-loop, invalid JSON (trailing comma, comments `//`, BOM, etc.), unreadable file → exit 2, no stdout. Tests check negative, zero, self-loop, duplicate, empty, whitespace, non-numeric distance, missing fields, extra top-level ignored (should NOT be invalid).
 
 ### Requests JSON Format (Batch Mode) – HARDER
 
@@ -63,8 +63,11 @@ When `--requests` is used:
 ```
 
 - File must be JSON array. If not array or invalid JSON → exit 2 no stdout.
-- Each element: object containing `source`/`destination` **or** `from`/`to`. If both forms present, prefer `source`/`destination`. Values must be strings. If value not string → invalid exit 2. If string is empty or whitespace-only → treat as **no route** (not invalid) – output empty path -1, counts as no route, batch continues. This includes `""`, `"   "`. Extra unknown fields in request objects (e.g., `priority`) must be **ignored**.
-- Example batch with empty source is **no route**, not invalid: `{"source":"","destination":"B"}` → `{"source":"","destination":"B","path":[],"distance":-1}` exit 1 if any no route.
+- Each element: object containing `source`/`destination` **or** `from`/`to`. If both forms present, prefer `source`/`destination`.
+  - **Missing key vs empty string:** If `source`/`destination` (or `from`/`to`) keys are **missing entirely** (e.g., `{"source":"A"}` missing destination), that request is **invalid** → whole file invalid exit 2, no stdout. This is distinct from empty string: `{"source":"","destination":"B"}` with explicit empty string is **no route** (not invalid) → `path:[] distance:-1` exit 1 if any. You must distinguish absent vs empty: In Go, unmarshalling `{"source":"A"}` into `struct { Destination string }` yields `""` indistinguishable from explicit empty, so you must use `*string` or decode to `map` / `json.RawMessage` to detect presence.
+  - Values must be strings. If value not string → invalid exit 2.
+  - If string is present but empty or whitespace-only (`""`, `"   "` ) → treat as **no route** (not invalid) – output empty path -1, counts as no route, batch continues. Extra unknown fields in request objects (e.g., `priority`) must be **ignored**.
+- Example batch with empty source is **no route**, not invalid: `{"source":"","destination":"B"}` → `{"source":"","destination":"B","path":[],"distance":-1}` exit 1 if any no route. But `{"source":"A"}` missing destination → invalid exit 2.
 - Output order must match input order.
 
 ### Routing Algorithm – Distance-Based Shortest Path (MUST) – HARD
@@ -109,11 +112,9 @@ Distance output: integer if whole number, float otherwise – tests parse as num
 
 0 success/help, 1 no route but valid, 2 invalid
 
-### Constraints – HARD
+### Constraints – HARD (trimmed)
 
-- Go stdlib only, `go build -o router .`
-- Must handle: floats, extra unknown fields ignored (graph top-level, edge, requests), whitespace-only node IDs invalid (graph) but empty request source treated as no route, case-sensitive IDs, duplicate edges min, 3-way tie-break deterministic regardless of map iteration order (must sort), unknown flags exit2, file not found exit2
-- Help contains 5 keywords
-- Binary `/app/router`
-
-Examples as before.
+- Go stdlib only, `go build -o router .` Module `router`, go 1.22. `go.mod` must have no external `require`. `go list -f '{{join .Imports " "}}' .` must contain no dotted imports (only stdlib). This is tested by `test_stdlib_only`.
+- Must handle: floats, scientific notation, extra unknown fields ignored (graph top-level, edge, requests), whitespace-only node IDs invalid (graph) but empty/whitespace request source present treated as no route while **missing key is invalid** (must distinguish via *string or map), case-sensitive IDs, duplicate edges min, tie-break deterministic regardless of map iteration order (must sort neighbors), unknown flags exit2 (including `--flag=value` form), file not found exit2, equals syntax `--flag=value` alongside `--flag value`.
+- Flag sets evolve: Turn1 has no `--traffic`, Turn2 adds `--traffic` – non-cumulative by design.
+- Help contains 5 keywords, binary `/app/router`.

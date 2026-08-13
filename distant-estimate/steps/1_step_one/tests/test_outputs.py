@@ -22,6 +22,11 @@ def find_bin():
 
 BIN = find_bin()
 
+APP_DIR = "/app"
+GO_ENV = os.environ.copy()
+GO_ENV["GOCACHE"] = "/tmp/codimango/gocache"
+GO_ENV["GOPATH"] = "/tmp/codimango/gopath"
+
 
 def run(args, cwd="/tmp"):
     return subprocess.run(
@@ -2318,3 +2323,38 @@ def test_batch_5000_requests_relative_step1():
         os.unlink(gp)
         os.unlink(rp1)
         os.unlink(rp)
+
+
+def test_stdlib_only():
+    # TBR concern: stdlib-only / no-external-require MUST not tested - now tested
+    go_mod_path = os.path.join(APP_DIR, "go.mod")
+    assert os.path.exists(go_mod_path), "go.mod must exist in /app"
+    with open(go_mod_path) as f:
+        content = f.read()
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("require "):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                mod = parts[1]
+                first = mod.split("/")[0]
+                if "." in first:
+                    assert False, f"External dep in go.mod: {mod} - must be stdlib only"
+        if "github.com" in stripped or "golang.org/x" in stripped:
+            if not stripped.startswith("//") and "module " not in stripped:
+                if stripped.startswith("github.com") or stripped.startswith("golang.org"):
+                    assert False, f"External require in go.mod: {stripped}"
+
+    proc = subprocess.run(
+        ["go", "list", "-f", "{{join .Imports \" \"}}", "."],
+        cwd=APP_DIR,
+        env=GO_ENV,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=15,
+    )
+    assert proc.returncode == 0, f"go list failed: {proc.stderr.decode()[:300]}"
+    imports = proc.stdout.decode().strip().split()
+    for imp in imports:
+        first = imp.split("/")[0]
+        assert "." not in first, f"Non-stdlib import {imp} found via go list - must be stdlib only"
