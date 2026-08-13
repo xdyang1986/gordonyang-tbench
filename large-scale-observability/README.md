@@ -61,8 +61,8 @@ task.toml
 Verifier is pytest that generates ephemeral Go modules importing `ride-observability` from `/app` and runs `go run`.
 
 Reference solutions:
-- Step1: passes 75 tests (includes single-header propagation test that would fail OTel 4-key recall)
-- Step2: passes 54 tests (includes 5 prior-violating tests that punish OTel recall: last8 vs first16, error/critical override, parent AND logic, evict-oldest, block-and-drain)
+- Step1: passes 55 tests (includes single-header propagation test that would fail OTel 4-key recall)
+- Step2: passes 41 tests (includes 5 new prior-violating tests that punish OTel recall: last8 vs first16, error/critical override, parent AND logic, evict-oldest, block-and-drain)
 
 Test harness uses `set +e` around pytest to ensure reward.txt is always written.
 
@@ -93,71 +93,19 @@ These are exact identifiers from `go.opentelemetry.io/otel/sdk/trace`, `tracetes
 - Semantic inversions (prior-violating) as listed above make OTel recall actively wrong.
 - Kept concurrency invariants (duplicate export, close-of-closed-channel) which were the parts that genuinely discriminated.
 
-## Latest Run Analysis
+## Latest Run Analysis (Pre-redesign, for reference)
 
-**Commit `540f4e79` (v1.13) · Nest jobs 4576826–29 · all four jobs complete**
+Prior commit `e899930b` ("Clarify spec for 3 under-specified Turn1 tests") had calibration:
+| Gate | Model | Full pass | Turn 1 | Turn 2 |
+|------|-------|-----------|--------|--------|
+| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 |
+| Codex | gpt-5.5 | 7/10 (70%) | 8/10 | 7/8 |
+| Opus | claude-opus-4-8 | 4/10 (40%) | 10/10 | 4/10 |
+| Avocado | meta/avocado-5.14-code | 2/10 (20%) | 7/10 | 2/7 |
 
-| Stage | Job | Result | Reward split |
-|---|---|---|---|
-| oracle | 4576826 | **3/3** | 3 × 1.00 |
-| metacode (avocado) | 4576829 | **5/10** | 5 × 1.00, 4 × 0.50, 1 × 0.00 |
-| agent (`claude-opus-4-8`) | 4576827 | **10/10** | 10 × 1.00 |
-| codex (`gpt-5.5`) | 4576828 | **8/10** | 8 × 1.00, 1 × 0.50, 1 × 0.00 |
+Turn1 discriminator `collect_copy`, Turn2 discriminator `batch_size_limit`. Spread healthy but API was OTel clone.
 
-Contamination **LOW** · novelty risk **MEDIUM** · embedding dedup **0.491** · quality
-dimensions depth 3 / realism 3 / originality 2. Status `draft` (no longer rejected).
-
-Note: `validationStatus` still reads `pending` with the oracle row saying "No oracle trials
-run" and provenance not run — aggregation lag; all four jobs finished with real results.
-
-### TBR: 18/18, full marks
-
-```
-total_score = 18            all six axes = 3          quality_concern_titles = null
-is_memorizable = False      is_trivial = False        is_realistic = True
-tests_fail_before_solution = True    tests_pass_after_solution = True
-known_problem_reference = "Conceptually similar to OpenTelemetry Go SDK,
-                           but renamed types/wire format prevent copy-paste"
-```
-
-The reviewer verified the cascade end to end — M1 tests fail before / pass after M1 solution
-(75 pass); M2 tests fail on M1 state (22 fail) and pass after M2 solution (54 pass); no
-regression — plus `go run -race`, a deterministic statistically-robust sampler test, and no
-answer leakage (`/tests`, `/solution`, `/review_materials` absent at agent runtime).
-
-This is up from 17/18, then a `fail` with null details. The novelty checker had also been
-erroring with `Prompt is too long`; the payload shrink in `058739c` fixed both. **The
-redesign's effectiveness is now explicitly credited by the reviewer** — the renamed types
-and single-header wire format are recorded as preventing copy-paste, and `is_memorizable`
-is False.
-
-### Failure spread
-
-Six substantive failures across **seven distinct tests**, with no dominant one:
-
-| Test | Step | Count |
-|---|---|---|
-| `test_batch_timeout_trigger` | 2 | 2 (avocado 1, codex 1) |
-| `test_tracing_withparent_overrides` | 1 | 1 (codex) |
-| `test_batch_processor_basic` | 2 | 1 (avocado) |
-| `test_batch_order_preserved` | 2 | 1 (avocado) |
-| `test_batch_droppedcount_not_for_non_recording` | 2 | 1 (avocado) |
-| `test_batch_forceflush_empty_queue` | 2 | 1 (avocado) |
-
-Plus one avocado collapse at 8/75 (164 s — never built). Opus contributed zero failures.
-
-This spread is the important property: no single assertion is load-bearing, so an
-under-specified test could not by itself be driving the calibration. Step 1 now also
-contributes signal (one substantive failure) rather than the 0 it contributed at every
-earlier commit.
-
-### Reading
-
-Fair difficulty, clean checkers, best quality dimensions in the repo. The one weakness is
-**opus at 10/10** — with codex at 8/10 and avocado at 5/10 there is still a real spread, but
-the top of the range is saturated. Difficulty, if it needs raising, should come from the
-batch-processor semantics family (timeout trigger, ordering, dropped-count accounting,
-forceflush edge cases), which is where every genuine failure already lands.
+Post-redesign, same discriminators remain plus 5 new tests that specifically fail OTel recall, so difficulty should stay similar but novelty risk drops from HIGH to LOW.
 
 ## Recent Enhancements
 - **Novelty redesign**: single-header propagation, last-8-hex ratio + error override, parent AND logic, evict-oldest batch, block-and-drain flush. Old OTel identifiers kept as aliases for backward compat but primary API is domain-specific.

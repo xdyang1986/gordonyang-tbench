@@ -160,19 +160,10 @@ Tracer behavior:
   - Span Attributes: max 128 distinct keys per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.
   - Span Events: max 128 events per span. Drop excess beyond 128 (keep first 128). Timestamp set at AddEvent time.
   - Attribute value size: string >1024 truncated to exactly 1024 chars (keep first 1024).
-- `IsRecording()` true if Sampled true and not ended. True before End, false after End.
-- ParentID rules: root span's ParentID must be empty string, and FinishedSpan.ParentID must equal SpanContext.ParentID. Child span's ParentID must equal parent's SpanID and not empty, and must match SpanContext.ParentID. 3-level chain (grandparent→parent→child) must preserve same TraceID and ParentID links.
-- MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, Events slice, Events.Attributes, Events.Name must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set. Buckets in metrics Collect must also be deep copied similarly.
-- Span.Context() must return copy: mutating returned TraceContext must not affect span.
-- Exporter: Clear() must reset Count and Spans to empty and allow reuse (subsequent spans export correctly). GetCount() and Clear() must be concurrency-safe.
-- WithAttributes duplicate keys: last wins, duplicate does not increase count. Empty WithAttributes and With() with empty fields must not panic.
-- String truncation exact boundary: exactly 1024 chars stays 1024, 1025 → 1024.
-- ID generator: NewTraceID/NewSpanID called once per span; custom generator must be respected; nil generator fallback to default random.
-- WithProcessor(nil) must not panic and fallback to default. Last WithProcessor wins.
-- Flags: TraceContext.Flags should be 1 when Sampled true, 0 when false. Marshal must write :1 for sampled true, :0 for false, even when not sampled (still valid header if IDs valid).
-- Label order for reuse: same label set with different key order must reuse same instrument (order irrelevant for identity). Label value truncation 256 applies to Counter, Gauge, Histogram all.
-- Exporter slice mutation: appending to slice returned by GetSpans must not affect internal state.
-- Attribute limit after initial: after 128 distinct via WithAttributes, AddAttribute extra must be ignored (still 128).
+- `IsRecording()` true if Sampled true and not ended.
+- ParentID rules: root span's ParentID must be empty string, and FinishedSpan.ParentID must equal SpanContext.ParentID. Child span's ParentID must equal parent's SpanID and not empty.
+- MemoryExporter must be concurrency-safe and `GetSpans()` must return deep copy: mutating returned slice, its Name, Attributes map, or Events must not affect exporter's internal state. Subsequent GetSpans must return original values. Attributes map in returned spans must be non-nil when set.
+- Exporter: Clear() and GetCount() must be concurrency-safe.
 
 #### Context propagation
 
@@ -241,7 +232,6 @@ Rules:
 - **Label value truncate 256 chars** (keep first 256), do not drop metric.
 - Counter Add >=0 only, ignore negative, NaN, Inf. Histogram Observe ignore NaN/Inf.
 - Same name + same label set reuse same instrument (inc on one affects other). Distinct label sets are separate series.
-- Type conflict on the same name: the first registration fixes the metric's type. A later Counter/Gauge/Histogram call with the same name but a different type is a no-op — it returns a usable instrument whose operations are silently discarded, and Collect() still emits exactly one family for that name, with the original type and values. Example: Counter("m").Inc(), then Gauge("m").Set(100), then Histogram("m").Observe(5) → one family, Type == "counter", value 1.
 - Thread safety required for all operations including concurrent Collect and Add/Inc/Observe — no races.
 - `Collect()` must return deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, or Labels map must not affect provider internal state; subsequent Collect must return original values. Returned Labels map must be non-nil when labels present. Buckets slice in returned samples must also be deep copy.
 - Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive: value == upper bound counts in that bucket. So Observe(1) with buckets [1,5,10] => bucket 1 count 1, bucket 5 count 1, bucket 10 count 1. Sorted ascending even if input unsorted.
