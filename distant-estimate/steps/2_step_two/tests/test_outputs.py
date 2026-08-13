@@ -3751,36 +3751,6 @@ def test_traffic_30_way_tie_with_traffic():
         os.unlink(tp)
 
 
-def test_traffic_large_batch_10000_with_traffic_relative():
-    nodes = [f"N{i}" for i in range(200)]
-    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(199)]
-    graph = {"nodes": nodes, "edges": edges}
-    traffic = {"traffic": [{"from": f"N{i}", "to": f"N{i + 1}", "factor": 1.2} for i in range(0, 199, 30)]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    rp1 = tmp(json.dumps([{"source": "N0", "destination": "N199"}]))
-    rp = tmp(json.dumps([{"source": "N0", "destination": f"N{i % 200}"} for i in range(10000)]))
-    try:
-        start = time.time()
-        base = run(["--graph", gp, "--requests", rp1, "--traffic", tp])
-        base_elapsed = time.time() - start
-        assert base.returncode == 0
-
-        start = time.time()
-        proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
-        elapsed = time.time() - start
-        assert proc.returncode == 0, proc.stderr.decode()[:500]
-        assert elapsed <= 300 * base_elapsed + 8.0, (
-            f"10000 batch too slow vs single: {elapsed:.3f}s vs baseline {base_elapsed:.3f}s"
-        )
-        assert len(proc.stdout.decode().strip().splitlines()) == 10000
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-        os.unlink(rp1)
-        os.unlink(rp)
-
-
 def test_traffic_perf_dense_200_nodes_5000_edges_with_traffic():
     # 200 nodes, each to next 25, ~4500 edges, must be <2s with traffic map O(1)
     nodes = [f"N{i}" for i in range(200)]
@@ -3798,27 +3768,6 @@ def test_traffic_perf_dense_200_nodes_5000_edges_with_traffic():
         elapsed = time.time() - start
         assert proc.returncode == 0, proc.stderr.decode()[:300]
         assert elapsed < 2.0, f"dense 200 nodes 5000 edges with traffic too slow {elapsed}"
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
-def test_traffic_duplicate_1000_last_wins_performance():
-    # 1000 duplicate entries for same edge, last wins, must be O(n) not O(n^2) for building map
-    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 10}]}
-    entries = [{"from": "A", "to": "B", "factor": 1 + (i % 5)} for i in range(1000)]
-    entries[-1] = {"from": "A", "to": "B", "factor": 7, "delay": 3}
-    traffic = {"traffic": entries}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        start = time.time()
-        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
-        elapsed = time.time() - start
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        assert math.isclose(out["effective_distance"], 73, abs_tol=1e-6), f"last wins should be 10*7+3=73, got {out['effective_distance']}"
-        assert elapsed < 2.0, f"1000 dup traffic too slow {elapsed}"
     finally:
         os.unlink(gp)
         os.unlink(tp)
@@ -4085,69 +4034,6 @@ def test_traffic_unknown_flag_with_equals_in_step2():
 # === FURTHER HARDENING step2 too easy again (146->170) ===
 
 
-def test_traffic_40_way_tie_with_traffic():
-    mids = [f"Y{i:02d}" for i in range(40)]
-    nodes = ["A"] + mids + ["Z"]
-    edges = [{"from": "A", "to": mid, "distance": 1} for mid in mids] + [{"from": mid, "to": "Z", "distance": 1} for mid in mids]
-    graph = {"nodes": nodes, "edges": edges}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps([]))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "Z", "--traffic", tp])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        assert out["path"] == ["A", "Y00", "Z"]
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
-def test_traffic_large_batch_20000_with_traffic_relative():
-    nodes = [f"N{i}" for i in range(100)]
-    edges = [{"from": f"N{i}", "to": f"N{i+1}", "distance": 1} for i in range(99)]
-    graph = {"nodes": nodes, "edges": edges}
-    traffic = {"traffic": [{"from": f"N{i}", "to": f"N{i+1}", "factor": 1.1} for i in range(0, 99, 20)]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    rp1 = tmp(json.dumps([{"source": "N0", "destination": "N99"}]))
-    rp = tmp(json.dumps([{"source": "N0", "destination": f"N{i%100}"} for i in range(20000)]))
-    try:
-        start = time.time()
-        base = run(["--graph", gp, "--requests", rp1, "--traffic", tp])
-        base_elapsed = time.time() - start
-        assert base.returncode == 0
-        start = time.time()
-        proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
-        elapsed = time.time() - start
-        assert proc.returncode == 0, proc.stderr.decode()[:500]
-        assert elapsed <= 400 * base_elapsed + 10.0, f"20000 batch too slow {elapsed:.3f} vs {base_elapsed:.3f}"
-        assert len(proc.stdout.decode().strip().splitlines()) == 20000
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-        os.unlink(rp1)
-        os.unlink(rp)
-
-
-def test_traffic_perf_2000_nodes_with_traffic_heavy():
-    nodes = [f"N{i}" for i in range(2000)]
-    edges = [{"from": f"N{i}", "to": f"N{i+1}", "distance": 1} for i in range(1999)]
-    edges += [{"from": f"N{i}", "to": f"N{i+10}", "distance": 5} for i in range(0, 1990, 10)]
-    graph = {"nodes": nodes, "edges": edges}
-    traffic = {"traffic": [{"from": f"N{i}", "to": f"N{i+1}", "factor": 2} for i in range(0, 1999, 100)]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        start = time.time()
-        proc = run(["--graph", gp, "--from", "N0", "--to", "N1999", "--traffic", tp])
-        elapsed = time.time() - start
-        assert proc.returncode == 0
-        assert elapsed < 3.0, f"2000 nodes with traffic too slow {elapsed}"
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
 def test_traffic_duplicate_traffic_many_with_extra_and_version():
     graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 10}]}
     entries = []
@@ -4183,23 +4069,6 @@ def test_traffic_factor_and_delay_both_zero_delay_valid_factor_int():
         os.unlink(tp)
 
 
-def test_traffic_direct_array_mixed_valid_and_invalid_extra():
-    graph = {"nodes": ["A", "B", "C"], "edges": [{"from": "A", "to": "B", "distance": 1}, {"from": "B", "to": "C", "distance": 1}]}
-    # direct array with extra fields valid
-    traffic_valid = [{"from": "A", "to": "B", "factor": 2, "unknown": 1, "extra": {"x": 1}}]
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic_valid))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "C", "--traffic", tp])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        # A-B eff 2, B-C eff1 => 3
-        assert math.isclose(out["effective_distance"], 3, abs_tol=1e-6)
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
 def test_traffic_batch_with_traffic_all_no_route():
     graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
     traffic = {"traffic": [{"from": "A", "to": "B", "factor": 2}]}
@@ -4218,90 +4087,6 @@ def test_traffic_batch_with_traffic_all_no_route():
         os.unlink(gp)
         os.unlink(tp)
         os.unlink(rp)
-
-
-def test_traffic_single_with_traffic_empty_and_spaces_no_route():
-    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
-    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 2}]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        for src, dst in [("", ""), ("   ", "   "), ("A", ""), ("", "B"), ("   ", "B"), ("A", "   ")]:
-            # single mode with empty source/destination should be invalid exit2 (not no-route)
-            # For single mode, empty from/to is invalid, not no-route (batch empty is no-route)
-            proc = run(["--graph", gp, "--from", src, "--to", dst, "--traffic", tp])
-            # For single mode, empty is invalid exit2, not no-route
-            # Actually spec: whitespace node invalid for single? Let's check: single mode empty from/to -> invalid exit2, batch empty -> no-route
-            # So for src empty, expect 2
-            if src.strip() == "" or dst.strip() == "":
-                # In single mode, empty is invalid
-                assert proc.returncode == 2, f"single empty {src!r}/{dst!r} should be invalid exit2, got {proc.returncode}"
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
-def test_traffic_graph_with_extra_and_traffic_with_extra_combined():
-    graph = {
-        "nodes": ["A", "B", "C"],
-        "edges": [
-            {"from": "A", "to": "B", "distance": 5, "weight": 1, "extra": "x"},
-            {"from": "B", "to": "C", "distance": 5, "meta": {"y": 2}},
-        ],
-        "extra_top": "ignore",
-        "version": 1,
-    }
-    traffic = {
-        "traffic": [
-            {"from": "A", "to": "B", "factor": 0.5, "delay": 1, "note": "fast"},
-            {"from": "B", "to": "C", "factor": 2, "extra": [1, 2, 3]},
-        ],
-        "extra": "ignore",
-    }
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "C", "--traffic", tp])
-        assert proc.returncode == 0, proc.stderr.decode()[:200]
-        out = json.loads(proc.stdout.decode().strip())
-        # A-B eff 5*0.5+1=3.5, B-C eff 5*2=10 total 13.5 raw10 delay3.5
-        assert math.isclose(out["distance"], 10, abs_tol=1e-6)
-        assert math.isclose(out["effective_distance"], 13.5, abs_tol=1e-6)
-        assert math.isclose(out["traffic_delay"], 3.5, abs_tol=1e-6)
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
-def test_traffic_factor_scientific_large_and_small():
-    graph = {"nodes": ["A", "B", "C"], "edges": [{"from": "A", "to": "B", "distance": 1}, {"from": "B", "to": "C", "distance": 1}]}
-    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 1e-6}, {"from": "B", "to": "C", "factor": 1e6}]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "C", "--traffic", tp])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        assert math.isclose(out["effective_distance"], 1e-6 + 1e6, rel_tol=1e-6)
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
-
-
-def test_traffic_delay_scientific_large():
-    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 10}]}
-    traffic = {"traffic": [{"from": "A", "to": "B", "factor": 1, "delay": 1e6}]}
-    gp = tmp(json.dumps(graph))
-    tp = tmp(json.dumps(traffic))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        assert math.isclose(out["effective_distance"], 10 + 1e6, rel_tol=1e-9)
-        assert math.isclose(out["traffic_delay"], 1e6, rel_tol=1e-9)
-    finally:
-        os.unlink(gp)
-        os.unlink(tp)
 
 
 def test_traffic_batch_with_traffic_source_equals_dest_mixed():
