@@ -1967,3 +1967,354 @@ def test_large_graph_5000_nodes():
         assert elapsed < 4.0, f"too slow 5000 nodes {elapsed}"
     finally:
         os.unlink(gp)
+
+
+# === HARDENING step1 too easy, step2 good: add 20 more hard discriminators ===
+
+
+def test_20_way_tie_break():
+    mids = [f"M{i:02d}" for i in range(20)]
+    nodes = ["A"] + mids + ["Z"]
+    edges = []
+    for mid in mids:
+        edges.append({"from": "A", "to": mid, "distance": 5})
+        edges.append({"from": mid, "to": "Z", "distance": 5})
+    graph = {"nodes": nodes, "edges": edges}
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "Z"])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "M00", "Z"], (
+            f"20-way tie should pick M00, got {out['path']}"
+        )
+    finally:
+        os.unlink(gp)
+
+
+def test_large_batch_5000_requests_relative():
+    nodes = [f"N{i}" for i in range(200)]
+    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(199)]
+    graph = {"nodes": nodes, "edges": edges}
+    gp = tmp(json.dumps(graph))
+    rp1 = tmp(json.dumps([{"source": "N0", "destination": "N199"}]))
+    rp = tmp(
+        json.dumps(
+            [{"source": "N0", "destination": f"N{i % 200}"} for i in range(5000)]
+        )
+    )
+    try:
+        start = time.time()
+        base = run(["--graph", gp, "--requests", rp1])
+        base_elapsed = time.time() - start
+        assert base.returncode == 0
+
+        start = time.time()
+        proc = run(["--graph", gp, "--requests", rp])
+        elapsed = time.time() - start
+        assert proc.returncode == 0, proc.stderr.decode()[:500]
+        assert elapsed <= 200 * base_elapsed + 5.0, (
+            f"5000 batch too slow vs single: {elapsed:.3f}s vs baseline {base_elapsed:.3f}s"
+        )
+        assert len(proc.stdout.decode().strip().splitlines()) == 5000
+    finally:
+        os.unlink(gp)
+        os.unlink(rp1)
+        os.unlink(rp)
+
+
+def test_graph_with_comments_invalid():
+    # JSON with // comments invalid, must be exit 2
+    content = '{"nodes":["A","B"],"edges":[ // comment\n {"from":"A","to":"B","distance":1} ] }'
+    gp = tmp(content)
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2, (
+            f"// comment should be invalid, got {proc.returncode}"
+        )
+        assert proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_graph_with_trailing_comma_invalid():
+    cases = [
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":1},]}',
+        '{"nodes":["A","B",],"edges":[]}',
+    ]
+    for content in cases:
+        gp = tmp(content)
+        try:
+            proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+            assert proc.returncode == 2, (
+                f"trailing comma should be invalid, got {proc.returncode} for {content[:50]}"
+            )
+        finally:
+            os.unlink(gp)
+
+
+def test_flag_order_independence():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+    gp = tmp(json.dumps(graph))
+    try:
+        # from before graph
+        proc = run(["--from", "A", "--graph", gp, "--to", "B"])
+        assert proc.returncode == 0, (
+            f"flag order independence should work, rc={proc.returncode}"
+        )
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+
+        # requests before graph
+        rp = tmp(json.dumps([{"source": "A", "destination": "B"}]))
+        try:
+            proc2 = run(["--requests", rp, "--graph", gp])
+            assert proc2.returncode == 0
+        finally:
+            os.unlink(rp)
+
+        # equals and space mixed
+        proc3 = run(["--from=A", "--graph", gp, "--to=B"])
+        assert proc3.returncode == 0
+    finally:
+        os.unlink(gp)
+
+
+def test_help_with_extra_and_requests_flag():
+    # Help with extra flags should still be help exit 0
+    proc = run(
+        [
+            "--help",
+            "--graph",
+            "dummy",
+            "--from",
+            "A",
+            "--to",
+            "B",
+            "--requests",
+            "dummy",
+        ]
+    )
+    assert proc.returncode == 0
+    out = proc.stdout.decode().lower()
+    for kw in ["graph", "from", "to", "requests", "help"]:
+        assert kw in out
+
+    proc2 = run(["-h", "--graph", "dummy"])
+    assert proc2.returncode == 0
+    assert "graph" in proc2.stdout.decode().lower()
+
+
+def test_unknown_flag_equals_with_requests():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    try:
+        for flag in ["--unknown=val", "--foobar=xxx", "--graph=nonexist --unknown=1"]:
+            # single unknown with equals
+            if " " in flag:
+                parts = flag.split()
+                proc = run(parts)
+            else:
+                proc = run([flag, "--graph", gp, "--from", "A", "--to", "B"])
+            assert proc.returncode == 2, (
+                f"{flag} should be unknown -> 2, got {proc.returncode}"
+            )
+    finally:
+        os.unlink(gp)
+
+
+def test_batch_with_both_empty_and_spaces_no_route():
+    graph = {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+    gp = tmp(json.dumps(graph))
+    cases = [
+        [{"source": "", "destination": ""}],
+        [{"source": "   ", "destination": "   "}],
+        [{"source": "", "destination": "B"}],
+        [{"source": "A", "destination": ""}],
+        [{"source": "   ", "destination": "B"}],
+        [{"source": "A", "destination": "   "}],
+    ]
+    try:
+        for req in cases:
+            rp = tmp(json.dumps(req))
+            try:
+                proc = run(["--graph", gp, "--requests", rp])
+                assert proc.returncode == 1, (
+                    f"empty/whitespace should be no-route exit1, got {proc.returncode} for {req}"
+                )
+                out = json.loads(proc.stdout.decode().strip())
+                assert out["path"] == [] and out["distance"] == -1
+            finally:
+                os.unlink(rp)
+    finally:
+        os.unlink(gp)
+
+
+def test_graph_nodes_with_slash_and_dot():
+    graph = {
+        "nodes": ["a/b", "c.d", "e-f_g", "h"],
+        "edges": [
+            {"from": "a/b", "to": "c.d", "distance": 1},
+            {"from": "c.d", "to": "e-f_g", "distance": 1},
+            {"from": "e-f_g", "to": "h", "distance": 1},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "a/b", "--to", "h"])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["a/b", "c.d", "e-f_g", "h"]
+        assert out["distance"] == 3
+    finally:
+        os.unlink(gp)
+
+
+def test_empty_graph_file_whitespace_invalid():
+    gp = tmp("   \n\t  ")
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2, (
+            f"whitespace graph file should be invalid, got {proc.returncode}"
+        )
+        assert proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_large_distance_1e100_valid():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [{"from": "A", "to": "B", "distance": 1e100}],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["distance"], 1e100, rel_tol=1e-9)
+    finally:
+        os.unlink(gp)
+
+
+def test_float_negative_zero_distance_invalid():
+    # -0.0 is 0, invalid (distance must be >0)
+    for content in [
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":-0.0}]}',
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":-0}]}',
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":0}]}',
+    ]:
+        gp = tmp(content)
+        try:
+            proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+            assert proc.returncode == 2, (
+                f"-0 distance should be invalid, got {proc.returncode}"
+            )
+        finally:
+            os.unlink(gp)
+
+
+def test_case_sensitive_tie_break():
+    # A vs a distinct, lex order B < C but case-sensitive: uppercase < lowercase? ASCII B=66, a=97, so B < a
+    graph = {
+        "nodes": ["A", "B", "a", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 5},
+            {"from": "B", "to": "D", "distance": 5},
+            {"from": "A", "to": "a", "distance": 5},
+            {"from": "a", "to": "D", "distance": 5},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D"])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        # B (66) < a (97) so A-B-D wins
+        assert out["path"] == ["A", "B", "D"], (
+            f"case sensitive lex: expected B < a, got {out['path']}"
+        )
+    finally:
+        os.unlink(gp)
+
+
+def test_batch_with_unicode_and_special():
+    graph = {
+        "nodes": ["A", "B-1", "C_2", "D.e"],
+        "edges": [
+            {"from": "A", "to": "B-1", "distance": 1},
+            {"from": "B-1", "to": "C_2", "distance": 1},
+            {"from": "C_2", "to": "D.e", "distance": 1},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    rp = tmp(
+        json.dumps(
+            [
+                {"source": "A", "destination": "D.e"},
+                {"source": "B-1", "destination": "C_2"},
+            ]
+        )
+    )
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 0
+        lines = proc.stdout.decode().strip().splitlines()
+        assert len(lines) == 2
+        out = json.loads(lines[0])
+        assert out["path"] == ["A", "B-1", "C_2", "D.e"]
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+
+
+def test_perf_dense_500_nodes():
+    nodes = [f"N{i}" for i in range(200)]
+    edges = []
+    for i in range(200):
+        for j in range(i + 1, min(i + 10, 200)):
+            edges.append({"from": f"N{i}", "to": f"N{j}", "distance": float(j - i)})
+    graph = {"nodes": nodes, "edges": edges}
+    gp = tmp(json.dumps(graph))
+    try:
+        start = time.time()
+        proc = run(["--graph", gp, "--from", "N0", "--to", "N199"])
+        elapsed = time.time() - start
+        assert proc.returncode == 0
+        assert elapsed < 2.0, f"dense 200 nodes too slow {elapsed}"
+    finally:
+        os.unlink(gp)
+
+
+def test_batch_5000_requests_relative_step1():
+    nodes = [f"N{i}" for i in range(200)]
+    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(199)]
+    graph = {"nodes": nodes, "edges": edges}
+    gp = tmp(json.dumps(graph))
+    rp1 = tmp(json.dumps([{"source": "N0", "destination": "N199"}]))
+    rp = tmp(
+        json.dumps(
+            [{"source": "N0", "destination": f"N{i % 200}"} for i in range(5000)]
+        )
+    )
+    try:
+        start = time.time()
+        base = run(["--graph", gp, "--requests", rp1])
+        base_elapsed = time.time() - start
+        assert base.returncode == 0
+
+        start = time.time()
+        proc = run(["--graph", gp, "--requests", rp])
+        elapsed = time.time() - start
+        assert proc.returncode == 0
+        assert elapsed <= 200 * base_elapsed + 5.0, (
+            f"5000 batch too slow vs single: {elapsed:.3f}s vs baseline {base_elapsed:.3f}s"
+        )
+        assert len(proc.stdout.decode().strip().splitlines()) == 5000
+    finally:
+        os.unlink(gp)
+        os.unlink(rp1)
+        os.unlink(rp)
