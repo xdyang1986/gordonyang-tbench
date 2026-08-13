@@ -241,6 +241,7 @@ Rules:
 - **Label value truncate 256 chars** (keep first 256), do not drop metric.
 - Counter Add >=0 only, ignore negative, NaN, Inf. Histogram Observe ignore NaN/Inf.
 - Same name + same label set reuse same instrument (inc on one affects other). Distinct label sets are separate series.
+- Type conflict on the same name: the first registration fixes the metric's type. A later Counter/Gauge/Histogram call with the same name but a different type is a no-op — it returns a usable instrument whose operations are silently discarded, and Collect() still emits exactly one family for that name, with the original type and values. Example: Counter("m").Inc(), then Gauge("m").Set(100), then Histogram("m").Observe(5) → one family, Type == "counter", value 1.
 - Thread safety required for all operations including concurrent Collect and Add/Inc/Observe — no races.
 - `Collect()` must return deep copy — must not expose internal mutable maps: mutating returned slice, Metrics slice, or Labels map must not affect provider internal state; subsequent Collect must return original values. Returned Labels map must be non-nil when labels present. Buckets slice in returned samples must also be deep copy.
 - Histogram default buckets `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]`. Cumulative inclusive: value == upper bound counts in that bucket. So Observe(1) with buckets [1,5,10] => bucket 1 count 1, bucket 5 count 1, bucket 10 count 1. Sorted ascending even if input unsorted.
