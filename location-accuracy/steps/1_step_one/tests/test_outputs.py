@@ -1266,3 +1266,138 @@ def test_large_scale_list_with_zones_and_roads(binary):
     )
     arr = json.loads(p.stdout.strip())
     assert len(arr) == 200
+
+
+# --- Crash-consistency gate: corrupt backup with .corrupt.<nanosec> integer suffix, stale tmp handling, truncated file ---
+
+
+def test_corrupt_db_creates_backup_with_nanosec_suffix(binary):
+    import re
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    with open(db, "w") as f:
+        f.write("{invalid json")
+    orig_content = open(db).read()
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = os.listdir(tmp)
+    corrupt_files = [ff for ff in files if ".corrupt." in ff]
+    assert len(corrupt_files) >= 1, f"expected .corrupt backup, got {files}"
+    for fn in corrupt_files:
+        m = re.search(r"\.corrupt\.(\d+)$", fn)
+        assert m, f"corrupt suffix should be integer nanosec, got {fn}"
+        backup_content = open(os.path.join(tmp, fn)).read()
+        assert backup_content == orig_content or "invalid" in backup_content
+
+
+def test_corrupt_array_creates_backup_with_nanosec(binary):
+    import re
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    with open(db, "w") as f:
+        f.write("[]")
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = os.listdir(tmp)
+    corrupt_files = [ff for ff in files if ".corrupt." in ff]
+    assert len(corrupt_files) >= 1
+    assert any(re.search(r"\.corrupt\.(\d+)$", fn) for fn in corrupt_files)
+
+
+def test_corrupt_null_creates_backup(binary):
+    import re
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    with open(db, "w") as f:
+        f.write("null")
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = os.listdir(tmp)
+    corrupt_files = [ff for ff in files if ".corrupt." in ff]
+    assert len(corrupt_files) >= 1
+    assert any(re.search(r"\.corrupt\.(\d+)$", fn) for fn in corrupt_files)
+
+
+def test_truncated_file_corruption_path(binary):
+    import re
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # Truncated mid-object - valid JSON prefix cut
+    truncated = '{"veh1": {"vehicle_id": "veh1", "lat": 37.7749, "lng": -12'
+    with open(db, "w") as f:
+        f.write(truncated)
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = os.listdir(tmp)
+    assert any(".corrupt." in ff for ff in files), (
+        f"truncated should produce .corrupt backup, got {files}"
+    )
+    assert any(re.search(r"\.corrupt\.(\d+)$", fn) for fn in files if ".corrupt." in fn)
+
+
+def test_stale_tmp_file_ignored_and_cleaned(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # Pre-create stale tmp file
+    stale_tmp = os.path.join(tmp, "db.json.tmp.12345")
+    with open(stale_tmp, "w") as f:
+        f.write("garbage that should not be read as DB")
+    assert os.path.exists(stale_tmp)
+    # Next command should succeed, ignoring stale tmp
+    run_cli(
+        binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000"], expect_code=0
+    )
+    # After success, no tmp leftover and stale tmp should be cleaned (or at least not cause failure)
+    files = os.listdir(tmp)
+    # Our implementation cleans stale tmp files on save
+    assert not any(f.startswith("db.json.tmp.") for f in files), (
+        f"stale tmp not cleaned, files={files}"
+    )
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert data["vehicle_id"] == "veh1"
+
+
+def test_corrupt_backup_contains_original_content(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    original = '{"broken": } not valid'
+    with open(db, "w") as f:
+        f.write(original)
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = [f for f in os.listdir(tmp) if ".corrupt." in f]
+    assert files
+    found = False
+    for fn in files:
+        content = open(os.path.join(tmp, fn)).read()
+        if content == original:
+            found = True
+            break
+    assert found, "backup should contain original corrupt content"
+
+
+def test_atomic_write_cleans_all_tmp_and_no_corrupt_on_success(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    files = os.listdir(tmp)
+    assert not any(".tmp." in f for f in files), f"tmp leftover after success {files}"
+    # No corrupt file should exist on success
+    assert not any(".corrupt." in f for f in files), (
+        f"unexpected corrupt file on success {files}"
+    )
+
+
+def test_canonicalization_db_valid_json_sorted_or_loadable(binary):
+    # Ensure DB file after write is valid JSON object and loadable, not array or null, and contains checksum-like persistence
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.0", "-122.0", "1000"], expect_code=0)
+    raw = open(db).read()
+    obj = json.loads(raw)
+    assert isinstance(obj, dict)
+    assert "veh1" in obj
+    # Ensure no tmp or corrupt leftovers
+    files = os.listdir(tmp)
+    assert not any(".tmp." in f for f in files)
+    assert not any(".corrupt." in f for f in files)

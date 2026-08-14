@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Point struct {
@@ -586,6 +587,11 @@ func bearing(lat1, lng1, lat2, lng2 float64) float64 {
 	return br
 }
 
+func backupCorrupt(path string, raw []byte) {
+	backupPath := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+	_ = os.WriteFile(backupPath, raw, 0644)
+}
+
 func loadDB(path string) (map[string]Location, error) {
 	db := make(map[string]Location)
 	if path == "" {
@@ -609,19 +615,22 @@ func loadDB(path string) (map[string]Location, error) {
 	if trimmed == "" {
 		return db, nil
 	}
-	// Check if array (invalid)
+	if trimmed == "null" {
+		backupCorrupt(path, data)
+		return nil, fmt.Errorf("corrupt")
+	}
 	var raw json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
+		backupCorrupt(path, data)
 		return nil, fmt.Errorf("corrupt")
 	}
-	// Try to unmarshal as map
 	var m map[string]Location
 	if err := json.Unmarshal(data, &m); err != nil {
-		// Could be array or other
+		backupCorrupt(path, data)
 		return nil, fmt.Errorf("corrupt")
 	}
-	// Additional check: if JSON is array, above would fail, but also check if data starts with [
 	if len(trimmed) > 0 && trimmed[0] == '[' {
+		backupCorrupt(path, data)
 		return nil, fmt.Errorf("corrupt")
 	}
 	return m, nil
@@ -643,7 +652,21 @@ func saveDB(path string, db map[string]Location) error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// cleanup any stale tmp files from previous crashes
+	if files, err := os.ReadDir(dir); err == nil {
+		prefix := filepath.Base(path) + ".tmp."
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), prefix) {
+				stale := filepath.Join(dir, f.Name())
+				_ = os.Remove(stale)
+			}
+		}
+	}
+	return nil
 }
 
 func parseGlobalDBFlag(args []string) (dbPath string, remaining []string) {

@@ -1,18 +1,24 @@
-# Step 1: Vehicle Location Tracking Service – Extreme Hard
+# Step 1: Vehicle Location Tracking Service
 
 ## Scenario
-You are building the core location service for a ride-sharing platform at `/app`. It tracks real-time vehicle locations for dispatch, ETA, and rider display. Must be crash-consistent, persistent, handle out-of-order GPS pings, geofences (polygon with holes, circles, time windows, antimeridian crossing, edge-inside), road-snapping, batch atomic ops, analytics.
 
-Binary: `locationctl` built via `go build -o locationctl .` from `/app/src`, module `locationservice`. Stdlib only.
+You are building the core location service for a ride-sharing platform under `/app`. This service tracks real-time vehicle locations for dispatch, ETA calculation, and rider display. It must be crash-consistent and persistent, handle out-of-order GPS pings, support complex geofences, perform road-snapping, and provide batch atomic operations and analytics.
 
-## CLI
+Build a binary named `locationctl` with `go build -o locationctl .` from `/app/src`, module `locationservice`. You may use only Go standard library.
+
+## CLI Format
+
 ```
 locationctl --db <PATH> <command> [args] [flags]
 ```
-- `--db` path to JSON DB file. If missing start empty. Must create parent dirs. Writes atomic: temp `<db>.tmp.<pid>` in same dir then rename, fsync best effort, no leftover on success. No corrupt leave.
-- No command or `help`/`--help`/`-h` alone or first arg → print help containing strings `update,get,list,near,track,distance,delete,stats,batch,clear,geofence-check` and exit 0. Unknown command → exit 2.
 
-### Data Model
+- `--db` is the path to the JSON database file. If the file does not exist, start with an empty store. You must create parent directories if needed. Writes must be atomic: write to a temporary file named `<db>.tmp.<pid>` in the same directory, then rename. Use best-effort fsync. On success, no temporary files should remain.
+- If no command is given, or the first argument is `help`, `--help`, or `-h`, print help text that contains the strings `update,get,list,near,track,distance,delete,stats,batch,clear,geofence-check` and exit 0. An unknown command must exit 2.
+
+## Data Model
+
+Each location record looks like:
+
 ```json
 {
   "vehicle_id": "veh_123",
@@ -23,83 +29,129 @@ locationctl --db <PATH> <command> [args] [flags]
   "history": [{"lat":37.7748,"lng":-122.4193,"timestamp_ms":1710000000000,"accuracy":5,"speed":10,"heading":90}, ...]
 }
 ```
-- `vehicle_id`: `^[A-Za-z0-9_-]{1,64}$`, no spaces/empty, 1-64.
-- `lat` [-90,90], `lng` [-180,180], reject NaN/Inf/-Inf.
-- `timestamp_ms` int64 ≥0, must be integer string no float/hex.
-- `accuracy` ≥0 default 10, NaN/Inf invalid.
-- `speed` 0-50 m/s default 0, >50 invalid exit2, negative invalid.
-- `heading` [0,360) default 0, 360 exclusive.
-- `total_distance_m`: sum Haversine (R=6371000m) between successive accepted updates per vehicle, starts 0, persisted.
-- `history`: up to 10 last accepted locations sorted timestamp asc (oldest first, newest last includes current).
 
-DB file JSON map vehicle_id→Location. 0-byte or whitespace-only file → empty store. Non-empty unparsable or JSON not object (e.g. array) → stderr + exit 4.
+Validation rules:
 
-Stale/out-of-order: per vehicle keep latest by timestamp. If incoming timestamp ≤ stored timestamp → ignored: print `stale` to stdout, exit 0, no DB change.
+- `vehicle_id` must match `^[A-Za-z0-9_-]{1,64}$`. Empty, spaces, or longer than 64 characters are invalid.
+- `lat` must be in [-90, 90], `lng` in [-180, 180]. You must reject NaN, Inf, Infinity (case-insensitive).
+- `timestamp_ms` must be an int64 >= 0 and must be provided as an integer string. Reject floats like `1000.0`, scientific notation like `1e3`, or hex like `0x3e8`.
+- `accuracy` must be >= 0, default 10. NaN/Inf is invalid.
+- `speed` must be in [0, 50] m/s, default 0. Values above 50 are invalid and must exit 2. Negative is invalid.
+- `heading` must be in [0, 360), default 0. 360 is exclusive and invalid.
+- `total_distance_m` is the sum of Haversine distances (R=6371000m) between successive accepted updates for a vehicle. It starts at 0 and is persisted.
+- `history` stores up to 10 last accepted locations, sorted by timestamp ascending. The oldest entry comes first, the newest last, and it must include the current location as the last entry.
 
-### Zones – polygon with holes, circles, time, antimeridian
-File JSON array of zones, each either polygon-based OR circle-based:
+Database file format: JSON object mapping vehicle_id to Location. A 0-byte file or whitespace-only file should be treated as an empty store. A non-empty file that is unparsable, or whose JSON is not an object (for example an array `[]` or literal `null`), must be treated as corrupt: exit 4, and create a backup file named `<db>.corrupt.<nanosec>` where `<nanosec>` is an integer nanosecond timestamp. The backup must contain the original corrupt content.
+
+Stale and out-of-order handling: per vehicle, keep only the latest timestamp. If an incoming timestamp is less than or equal to the stored timestamp, ignore it: print `stale` to stdout, exit 0, and do not modify the database. Stale updates must not affect total_distance or history.
+
+Crash consistency:
+- Pre-existing stale files like `<db>.tmp.<pid>` must be ignored when loading the DB and must be cleaned up on the next successful write.
+- A truncated file (for example a valid JSON prefix cut mid-object) must take the corruption path: exit 4 and create a `.corrupt.<nanosec>` backup.
+
+## Zones – Polygons with Holes, Circles, Time Windows, Antimeridian
+
+Zones are stored in a JSON file as an array. Each zone is either polygon-based OR circle-based:
+
 ```json
 {"id":"zone_a","polygon":[{"lat":...,"lng":...},...],"holes":[[{...},...]],"active_from":1000,"active_to":2000}
 {"id":"circle_1","center":{"lat":...,"lng":...},"radius_m":500}
 ```
-- id non-empty.
-- polygon ≥3 valid points, holes optional each ≥3 valid.
-- circle center valid, radius_m >0 ≤1e6.
-- Both polygon+circle present → invalid zone file exit2.
-- active_from/to optional ≥0, if both require from≤to else invalid.
-- Point-in-polygon must be even-odd, x=lng y=lat, handle antimeridian by unwrapping longitudes to continuous (no 358° jump) so a rectangle 179→-179 is 2° wide, not 358°. Point on edge/vertex → inside. Circle via Haversine ≤radius. Holes mean inside outer but outside hole → outside.
-- For `update`: if `--zones <path>` provided use it else if default `/app/data/zones.json` exists use it. After filtering active zones at update timestamp (active if (from==absent or ts≥from) and (to==absent or ts≤to)), if active list non-empty, location must be inside at least one active zone else output must contain string `out_of_zone` (stdout preferred, stderr also accepted for fairness) and exit 3.
-- For `near`/`list`: `--zones` optional filter active zones (filtered by `--now` if provided else all).
-- For `geofence-check`: see below.
 
-### Roads & Snapping
-File mixed formats:
+Rules:
+- `id` must be non-empty.
+- Polygon must have at least 3 valid points. Holes are optional, but each hole must have at least 3 valid points.
+- Circle center must be a valid lat/lng, radius must satisfy 0 < radius <= 1e6.
+- Specifying both polygon and circle in the same zone is invalid and must cause exit 2 when that zones file is used.
+- `active_from` and `active_to` are optional and must be >=0. If both are present, `from` must be <= `to`, otherwise the file is invalid (exit 2).
+- Point-in-polygon must use even-odd rule with x=lng and y=lat. You must handle antimeridian crossing by unwrapping longitudes to a continuous range, so a rectangle from 179 to -179 is 2 degrees wide, not 358 degrees. A point on an edge or vertex is considered inside. Circle check uses Haversine distance: inside if distance <= radius (exact radius counts as inside). Holes mean a point inside the outer polygon but inside a hole is considered outside.
+
+Zone filtering:
+- For `update`: if `--zones <path>` is provided, use it. Otherwise, if the default file `/app/data/zones.json` exists, use it. After filtering active zones at the update timestamp (active if from is absent or ts >= from, and to is absent or ts <= to), if the active list is non-empty, the location must be inside at least one active zone. If not, output must contain `out_of_zone` (stdout preferred, stderr also accepted) and exit 3.
+- For `near` and `list`: `--zones` is optional. Active zones are filtered by `--now` if provided, otherwise all zones are considered.
+- For `geofence-check`: see command description.
+
+## Roads and Snapping
+
+Roads file has mixed formats:
+
 ```json
 [{"id":"road_1","points":[{"lat":...,"lng":...},...]},
  {"id":"seg","start":{"lat":...,"lng":...},"end":{"lat":...,"lng":...}}]
 ```
-- id non-empty, points ≥2 valid or start/end valid. Any invalid entry → exit2 when that roads file is used.
-- Snapping: equirectangular projection R=6371000, lat_ref=query lat, find closest point on any segment, distance ≤50m → snapped/on-road. Must check all segments of polyline, not just endpoints. Output snapped bool, road_id when snapped.
 
-`near --roads` / `list --roads`: only vehicles snapped within 50m.
+Rules:
+- `id` must be non-empty. Polyline `points` must have at least 2 valid points, or legacy `start/end` must both be valid. Any invalid entry must cause exit 2 when that roads file is used.
+- Snapping uses equirectangular projection with R=6371000 and `lat_ref` set to the query latitude. For each segment in each road, find the closest point clamped with t in [0,1]. Keep the best overall. If distance <=50m, the point is considered snapped and on-road. You must check all segments of a polyline and interior points, not just endpoints.
 
-### Commands
+For `near --roads` and `list --roads`, only vehicles snapped within 50m should be included.
 
-#### 1. update <vehicle_id> <lat> <lng> <timestamp_ms> [--accuracy <f> --speed <f> --heading <f> --zones <path>]
-Validate all fields per Data Model + NaN/Inf checks. Zones check as above (out_of_zone exit3). Stale check (stale stdout exit0). Compute Haversine distance to prior accepted location add to total_distance, maintain history 10 asc, atomic persist, print JSON of stored location without history but including total_distance_m.
+## Commands
 
-#### 2. get <vehicle_id> [--verbose]
-Base returns without history but with total_distance_m, verbose full with history. Not found exit3, invalid id exit2.
+### 1. update <vehicle_id> <lat> <lng> <timestamp_ms> [--accuracy <f> --speed <f> --heading <f> --zones <path>]
 
-#### 3. list [--since <ts> --until <ts> --limit <n> --offset <m> --zones <path> --roads <path> --now <ts>]
-Sorted vehicle_id asc, since/until inclusive, since≤until else exit2, zones active filtered by now if provided else all, roads snap filter, pagination offset then limit, limit 0→[], offset>len→[].
+Validate all fields per Data Model, including NaN/Inf checks. Perform zones check (out_of_zone exit 3) before stale check. On stale, print `stale` and exit 0. Otherwise compute Haversine distance to prior accepted location, add to total_distance, maintain history 10 sorted ascending, persist atomically, and print JSON of stored location without history but including total_distance_m.
 
-#### 4. near --lat <f> --lng <f> --radius <f> [--accuracy-max <f> --speed-min <f> --limit <n> --offset <m> --now <ts> --include-stale --zones <path> --roads <path>]
-lat/lng/radius validation radius [0,50000] else exit2, accuracy-max ≥0, speed-min 0-50. now age = now-ts, age<0→0, age>30000 stale excluded only when now provided unless include-stale. zones active filtered by now if provided, roads snap, distance Haversine ≤radius, sort distance asc then vehicle_id asc, pagination. Each result is base location plus `distance_m` (Haversine from query point).
+### 2. get <vehicle_id> [--verbose]
 
-#### 5. track <vehicle_id> --from <ts> --to <ts> [--limit <n> --offset <m>]
-History within [from,to] inclusive sorted asc paginated, both flags required, from≤to else exit2, not found exit3.
+Base mode returns location without history but with total_distance_m. With `--verbose`, return full record including history. Not found must exit 3, invalid id must exit 2.
 
-#### 6. distance <vehicle_id> → {"vehicle_id":...,"total_distance_m":...} exit0, not found exit3
+### 3. list [--since <ts> --until <ts> --limit <n> --offset <m> --zones <path> --roads <path> --now <ts>]
 
-#### 7. delete <vehicle_id> → `deleted` stdout exit0, invalid id exit2. If vehicle not found, still prints `deleted` exit0.
+Results are sorted by vehicle_id ascending. `since` and `until` are inclusive, and must satisfy since <= until otherwise exit 2. Zones filter uses active zones filtered by now if provided, otherwise all zones. Roads filter uses snapping. Pagination is offset then limit: first apply offset, then limit. Limit 0 means empty array [], offset beyond length means []. If a zones file is non-empty but no zones are active at the given now, the result should be [].
 
-#### 8. stats → {"live":#vehicles, "total_updates": total accepted count, "total_distance_m": sum, "avg_accuracy": avg}
+### 4. near --lat <f> --lng <f> --radius <f> [--accuracy-max <f> --speed-min <f> --limit <n> --offset <m> --now <ts> --include-stale --zones <path> --roads <path>]
 
-#### 9. batch – reads stdin tab-delimited, empty/whitespace lines ignored.
-- `update\tveh_id\tlat\tlng\ttimestamp[\taccuracy[\tspeed[\theading]]]` – variable 5-8 fields: 5 minimal defaults 10,0,0; 6-8 may have empty string meaning default; >8 or <5 → fail exit2.
+Validate lat/lng, radius in [0, 50000] else exit 2. `accuracy-max` must be >=0, `speed-min` in [0,50]. For staleness: `age = now - timestamp_ms`, if negative set to 0. If now is provided, vehicles with age > 30000 are stale and excluded, unless `--include-stale` is given. Zones active filtered by now if provided. Roads filter via snapping. Distance uses Haversine and must satisfy <= radius. Sort by distance ascending, then vehicle_id ascending. Pagination offset then limit. Each result includes base location plus `distance_m` (Haversine from query point).
+
+### 5. track <vehicle_id> --from <ts> --to <ts> [--limit <n> --offset <m>]
+
+Return history entries within [from,to] inclusive, sorted ascending and paginated. Both flags are required, from <= to else exit 2. Not found must exit 3.
+
+### 6. distance <vehicle_id>
+
+Returns `{"vehicle_id":...,"total_distance_m":...}` with exit 0, not found exit 3.
+
+### 7. delete <vehicle_id>
+
+Prints `deleted` to stdout and exits 0, even if vehicle does not exist. Invalid id must exit 2.
+
+### 8. stats
+
+Returns `{"live":#vehicles, "total_updates": total accepted count, "total_distance_m": sum, "avg_accuracy": avg}`.
+
+### 9. batch
+
+Reads stdin as tab-delimited lines. Empty or whitespace-only lines are ignored.
+
+Line formats:
+- `update\tveh_id\tlat\tlng\ttimestamp[\taccuracy[\tspeed[\theading]]]` with variable fields 5-8. Five fields is minimal with defaults 10,0,0. 6-8 fields may have empty string meaning default. More than 8 or fewer than 5 fields must fail with exit 2.
 - `delete\tveh_id` exactly 2 fields.
-- All-or-nothing: parse all lines first, validate all, zones check default zones.json if exists per op timestamp (before stale), if any out_of_zone → fail exit2 no change. Stale ops are skipped not failed but zone check still applies before stale.
-- Apply sequentially simulating state, single atomic write, print `batch_ok <applied>` where applied excludes stale.
 
-#### 10. clear → `cleared` exit0
+All-or-nothing atomicity: parse all lines first and validate all. Zones check uses default zones.json if exists per operation timestamp, and must be performed before stale check. If any operation would be out_of_zone, fail with exit 2 and leave DB unchanged, even if that operation is stale. Stale operations are skipped, not failed. After validation, apply sequentially to a simulated state, perform a single atomic write, and print `batch_ok <applied>` where applied excludes stale entries.
 
-#### 11. geofence-check <lat> <lng> [--zones <path>] [--now <ts>]
-Check inside any active zone (polygon with holes, circles, antimeridian, edge-inside). --zones optional else default /app/data/zones.json if exists else outside. --now optional active filtering. Output {"inside":bool,"zone_id":string} first matching by file order. Invalid args/zones → exit2.
+### 10. clear
 
-### Exit Codes 0 success/stale/deleted/cleared/batch_ok, 2 invalid arg/malformed/zones/roads invalid/batch fail, 3 not found/out_of_zone, 4 corrupt DB
+Prints `cleared` and exits 0.
 
-### Constraints
-Stdlib only, atomic writes, parent dirs, no tmp leftover, ID regex, zones holes circles time antimeridian edge inside, roads mixed, help contains commands, pagination offset then limit, batch variable, NaN/Inf reject, large scale 800+ vehicles perf <3s, history 10 asc, total_distance Haversine.
+### 11. geofence-check <lat> <lng> [--zones <path>] [--now <ts>]
 
-Tests cover all above extreme cases. Delivery under /app/src/.
+Check if point is inside any active zone (polygons with holes, circles, antimeridian, edge-inside). `--zones` optional, otherwise default `/app/data/zones.json` if exists, else outside. `--now` optionally filters active zones. Output `{"inside":bool,"zone_id":string}` where zone_id is first matching by file order. Invalid args or zones must exit 2.
+
+## Exit Codes
+
+- 0: success, or stale, deleted, cleared, batch_ok.
+- 2: invalid argument, malformed value, invalid zones/roads file, batch validation failure.
+- 3: not found, out_of_zone.
+- 4: corrupt DB (with `.corrupt.<nanosec>` backup creation).
+
+## Constraints
+
+- Only Go standard library.
+- Atomic writes via temp file and rename, no leftover tmp files, clean stale tmp files.
+- Parent directories must be created automatically.
+- ID regex, zones with holes/circles/time/antimeridian/edge-inside, roads mixed, pagination offset then limit, batch variable fields, NaN/Inf rejection, history 10 ascending with current as last, total_distance via Haversine.
+- Large scale: 800+ vehicles near query under 3 seconds.
+- Persistence must survive process restart, including corrupt backup handling with integer nanosec suffix.
+
+Delivery under `/app/src/`.

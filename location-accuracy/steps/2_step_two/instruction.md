@@ -1,106 +1,153 @@
-# Step 2: Improve Location Accuracy – Extreme Hard
+# Step 2: Improve Location Accuracy
 
 ## Context
-You finished Step1 (extreme: zones polygon holes circles time antimeridian, roads mixed polyline+segment, batch variable all-or-nothing, stale handling, history 10). `/app/src/` contains working `locationctl`.
 
-Production still sees noisy GPS: urban canyon jumps, teleport, heading flip, acceleration spike, accuracy spike, off-road, stale, wrong street, moving marked arrived.
+You have completed Step 1, which implemented a full vehicle location service with zones (polygon with holes, circles, time windows, antimeridian crossing, edge-inside), mixed roads (polyline and segment), batch atomic operations with variable fields, stale handling, and history tracking of the last 10 locations. The working binary is in `/app/src/` as `locationctl`.
 
-You must evolve same CLI, preserving Step1 compatibility including all validation, zones, roads, batch semantics. Add outlier filtering, low-accuracy filter, EMA smoothing, prediction, heading-aware road snapping, confidence, and validate-pickup/dropoff.
+Production still sees noisy GPS signals: urban canyon jumps, teleportation, heading flips, acceleration spikes, accuracy spikes, off-road positions, stale timestamps, wrong street assignments, and moving vehicles incorrectly marked as arrived.
 
-## Data Model
-Extend with `outlier_count`:
+Your task is to evolve the same CLI while preserving complete backward compatibility with Step 1, including all validation rules, zone handling, road handling, and batch semantics. You will add outlier filtering, low-accuracy filtering, EMA smoothing, position prediction, heading-aware road snapping, confidence scoring, and pickup/dropoff validation.
+
+## Data Model Extension
+
+Extend the location record with `outlier_count`:
+
 ```json
 {"vehicle_id":"veh_123","lat":...,"lng":...,"timestamp_ms":...,"accuracy":5,"speed":...,"heading":...,"total_distance_m":...,"history":[...10 asc including current...],"outlier_count":2}
 ```
-- history up to 10 accepted locations sorted asc includes current
-- outlier_count counts rejected outliers (persists even when rejected)
-- total_distance sum Haversine R=6371000 over accepted only
-- old DB without history/total_distance/outlier_count must auto-migrate (empty history, 0 distance, 0 outliers)
 
-## Enhanced Update Logic (prior-violating)
+- `history` must contain up to 10 accepted locations sorted by timestamp ascending, including the current location as the last entry.
+- `outlier_count` counts the number of rejected outliers for that vehicle. It must persist even when the location update is rejected.
+- `total_distance_m` is the sum of Haversine distances (R=6371000) over accepted updates only.
+- An old database file that lacks `history`, `total_distance_m`, or `outlier_count` must be auto-migrated: treat missing history as empty, missing distance as 0, and missing outlier_count as 0. Whitespace-only files are empty stores, while an array `[]` or literal `null` is corrupt with exit 4 and a backup file `<db>.corrupt.<nanosec>` containing the original content.
 
-#### A. Low Accuracy Filter (prior of zones)
-If `accuracy >100` → print `low_accuracy` (stdout, stderr accepted) exit 3, no DB change, outlier_count unchanged.
+Importantly, `outlier_count` must survive a process restart. It is persisted in the DB file, so after a process exits, a new process loading the same DB must still see the count via `get --verbose`. Tests will verify this across separate CLI invocations.
 
-#### B. Speed Cap
-speed >50 → invalid exit2 (same as step1)
+## Enhanced Update Logic
 
-#### C. Outlier Detection – 6 interacting conditions (this is the main discriminator, not a transcription exercise)
-Compute `dt=(new-old)/1000` sec, if ≤0 → stale case already handled. `distance` = Haversine(new,old), `implied = distance/dt`.
+The update pipeline now has additional checks that run before zone validation and history update. The order matters.
 
-If any condition below true → outlier: increment `outlier_count` for that vehicle (persist even though location not updated), print `outlier` (stdout, stderr accepted) exit 3, no location/total_distance/history change.
+### A. Low Accuracy Filter (runs before zones)
 
-Conditions (all must be implemented, thresholds matter – tests enforce them):
+If `accuracy > 100`, print `low_accuracy` (stdout preferred, stderr accepted for fairness) and exit 3. Do not change the database, and do not change `outlier_count`. This separation is load-bearing: low_accuracy rejections must not increment outlier_count.
 
-- **Teleport**: large jump in short time with good accuracy: dt<300 && distance>1000 && implied>50 && old.accuracy<50 && new.accuracy<50
-- **Heading flip**: both moving >10 m/s, angular diff >120°, but distance <500m → unrealistic flip
-- **Median deviation**: if history has ≥2 prior points, compute implied speeds of last up to 3 history transitions (history[i]→history[i+1]), median `med`. If |implied-med|>30 && implied>30 && distance>500 → outlier
-- **Acceleration spike**: |new.speed-old.speed|/dt >15 && distance<300 → impossible acceleration
-- **Accuracy spike**: new.accuracy>75 && new.accuracy > old.accuracy*2+30
-- **Speed vs implied mismatch**: implied>80 && new.speed<2 && distance>1000 && dt<60 → reports stopped but actually moved far
+### B. Speed Cap
 
-#### D. Zones – same as Step1 extreme (polygon holes circles time antimeridian edge-inside). Same out_of_zone handling: output contains `out_of_zone` stdout/stderr accepted exit3.
+Speed above 50 m/s is invalid and must exit 2, same as Step 1.
 
-#### E. History & Distance – same as Step1 but distance not added on outlier/low_accuracy/stale/out_of_zone.
+### C. Outlier Detection – Six Conditions
 
-### Roads – polyline + heading-aware snapping (no fallback is load-bearing)
+Compute `dt = (new_timestamp - old_timestamp) / 1000` seconds. If dt <= 0, the stale case has already been handled. Compute `distance` as Haversine between new and old locations, and `implied = distance / dt`.
 
-- Roads file mixed: each entry either `{"id":"...","points":[...≥2...]}` polyline or `{"id":"...","start":{...},"end":{...}}` legacy segment. Any invalid entry → exit2 when roads file is used.
-- For each road each segment points[i]→points[i+1], equirectangular with lat_ref = vehicle lat, R=6371000, find closest clamped t∈[0,1], hypot distance. Track best overall.
-- Bearing via initial bearing formula.
-- Heading-aware: when `headingAware=true` (used for estimate and validate when `--roads` provided and vehicle speed>1), candidate road filtered out if min(angularDiff(heading, roadBearing), angularDiff(heading, roadBearing+180)) >45. If all candidates filtered → no snap (must NOT fallback to non-heading-aware).
-- If best distance ≤50m → snapped true with lat/lng = snapped point, road_id, road_bearing, road_dist_m. Else not snapped.
+If any of the six conditions below is true, the update is an outlier: increment `outlier_count` for that vehicle and persist it even though the location is not updated, print `outlier` and exit 3, and do not modify location, total_distance, or history.
 
-### Commands (all Step1 must still work)
+All six conditions must be implemented, and thresholds matter:
 
-#### estimate <vehicle_id> [--now <ts> --roads <path>]
-- Not found → exit3, invalid roads → exit2
-- Now: if --now provided else time.Now().UnixMilli(). age = now - ts, if negative →0.
-- EMA smoothing: if history ≥2, take last up to 5 entries, weight `w = (1/(accuracy+1)) * exp(-age_i/10000)` where `age_i = now - history_i.timestamp_ms`. Weighted avg lat/lng = smoothed base.
-- Prediction: always accuracy degrades +0.5*age_sec (age_sec=age/1000). If age>0 && age≤30000 && speed>0 → predicted true: dist=speed*age_sec, delta_lat=dist*cos(heading_rad)/R*180/π, delta_lng=dist*sin(heading_rad)/(R*cos(lat_rad))*180/π, predicted lat/lng, original_lat/lng = smoothed before prediction. Else predicted false, original = smoothed.
-- Road snapping if --roads: heading-aware if speed>1 else normal. If snapped, final lat/lng = snapped point, original_lat/lng = smoothed base before prediction.
-- Confidence (degrades by many signals, upgraded by on-road):
-  high if (acc≤5 age≤5000) OR (acc≤10 age≤10000)
-  medium if acc≤25 age≤20000 else low
-  If snapped and road_dist≤10: medium+acc≤25 → high, low+acc≤40 age≤15000 → medium
-  outlier_count>2 high→medium, >5 → low regardless, age>30000 → low, accuracy>50 → low, if not snapped and acc>25 age>10000 and (acc>40 or age>15000) → low
-- Output JSON with vehicle_id lat lng timestamp_ms accuracy speed heading total_distance_m confidence age_ms snapped road_id road_bearing road_dist_m predicted original_lat original_lng
-- Exit0.
+1. **Teleport**: a large jump in short time with good accuracy: `dt < 300 && distance > 1000 && implied > 50 && old.accuracy < 50 && new.accuracy < 50`.
 
-#### validate-pickup <vehicle_id> <pickup_lat> <pickup_lng> [--now <ts> --roads <path> --zones <path>]
-- Estimate vehicle via same EMA/prediction/heading-aware snap logic as estimate.
-- Snap pickup to nearest road without heading-aware (to get pickup_road_id) if roads provided.
-- Zones: if --zones provided check pickup inside any active zone filtered by now if provided else all; else if default /app/data/pickup_zones.json exists and non-empty check inside it. If outside and active zones exist → valid false reason `out_of_geofence` exit1. Valid true reason must be exactly "ok" (specify literal) – fairness fix.
-- Check priority order (first matching reason wins, defines output reason):
-  1. out_of_geofence (if pickup outside active geofence and zones exist)
-  2. stale if estimate age>30000
-  3. low_accuracy if estimate accuracy>50
-  4. off_road if roads provided and vehicle not snapped
-  5. moving if vehicle speed≥5
-  6. road_mismatch if both vehicle and pickup snapped but road_ids differ
-  7. heading_mismatch if same road, vehicle speed>1, bearing vehicle→pickup angular diff >90 and distance>10
-  8. too_far if Haversine vehicle→pickup >100
-  9. else ok valid true
-- Output: {"valid":bool,"reason":string,"distance_m":..., "confidence":..., "age_ms":..., "accuracy":..., "snapped":..., "road_id":..., "pickup_road_id":..., "vehicle_lat":..., "vehicle_lng":...} plus `dropoff_road_id` alias containing same as pickup_road_id for dropoff command compatibility.
-- Exit 0 valid, 1 invalid, 3 not found, 2 invalid args/zone/road/lat/lng.
+2. **Heading Flip**: both old and new speeds > 10 m/s, angular difference between headings > 120 degrees, but distance < 500m. This is an unrealistic flip.
 
-#### validate-dropoff <vehicle_id> <dropoff_lat> <dropoff_lng> [--now <ts> --roads <path> --zones <path>]
-Same but lenient: moving ≥10 (instead of 5), too_far >150, zones default `/app/data/dropoff_zones.json`.
+3. **Median Deviation**: if history has at least 2 prior points, compute implied speeds for the last up to 3 transitions in history (history[i] -> history[i+1]). Take the median `med`. If `|implied - med| > 30 && implied > 30 && distance > 500`, treat as outlier.
 
-#### geofence-check, near, list, track, etc – same as Step1 extreme
+4. **Acceleration Spike**: `|new.speed - old.speed| / dt > 15 && distance < 300`. Impossible acceleration.
 
-### Road/Zone Data
-Environment creates /app/data/roads.json sample, zones files empty `[]` by default to avoid breaking. Loader must support holes, circles, time windows, antimeridian when provided.
+5. **Accuracy Spike**: `new.accuracy > 75 && new.accuracy > old.accuracy * 2 + 30`.
 
-### Exit Codes
-0 success/valid, 1 invalid pickup/dropoff, 2 invalid arg/malformed/zones/roads unreadable/batch fail, 3 not found/out_of_zone/low_accuracy/outlier, 4 corrupt DB
+6. **Speed vs Implied Mismatch**: `implied > 80 && new.speed < 2 && distance > 1000 && dt < 60`. Reports stopped but actually moved far.
 
-### Backward Compat & Large Scale
-- Old DB without history/total_distance/outlier_count readable, whitespace-only empty, array → corrupt 4.
-- All Step1 tests still pass.
-- Large scale 800+ vehicles, near/estimate <3s.
+If multiple conditions are true for the same update, it must still count as only one outlier increment.
 
-### Why hard?
-Spec no longer provides copy-paste pseudocode for every edge. You must infer from behavior: outlier 6 conditions interact with history and accuracy, heading-aware no-fallback, median deviation uses last 3 speeds, EMA exp decay weighting, prediction delta formulas, confidence upgrade/downgrade chain, road_mismatch vs off_road priority, pickup snap without heading vs vehicle snap with heading, batch all-or-nothing with zones before stale, total_distance only over accepted. Tests enforce byte-exact JSON and reason literals ("ok", "moving", "off_road", etc.) and contain out_of_zone in either stdout or stderr.
+`outlier_count` must not be incremented for low_accuracy or stale rejections — only for these six outlier conditions.
 
-Deliverable `/app/src/`.
+### D. Zones
+
+Same as Step 1 extreme (polygon with holes, circles, time windows, antimeridian unwrapping, edge/vertex inside). Same out_of_zone handling: output contains `out_of_zone` (stdout/stderr accepted) and exit 3.
+
+### E. History and Distance
+
+Same as Step 1, but total_distance must not be increased on outlier, low_accuracy, stale, or out_of_zone rejections.
+
+## Roads – Polyline plus Heading-Aware Snapping (No Fallback is Load-Bearing)
+
+Roads file has mixed formats: each entry is either `{"id":"...","points":[... at least 2 ...]}` as polyline, or `{"id":"...","start":{...},"end":{...}}` as legacy segment. Any invalid entry must cause exit 2 when that roads file is used.
+
+For each road and each segment `points[i] -> points[i+1]`, convert to equirectangular projection with latitude reference set to the vehicle latitude, R=6371000, find closest point clamped with t in [0,1], compute Euclidean distance in projected space. Track the best overall.
+
+Compute road bearing via initial bearing formula.
+
+Heading-aware filtering: when `headingAware` is true (used for `estimate` and `validate-pickup/dropoff` when `--roads` is provided and vehicle speed > 1), a candidate road is filtered out if `min(angularDiff(heading, roadBearing), angularDiff(heading, roadBearing+180)) > 45`. If all candidates are filtered out, the result is not snapped — you must NOT fallback to non-heading-aware snapping.
+
+If best distance <= 50m, snapped is true with lat/lng set to snapped point, plus road_id, road_bearing, road_dist_m. Otherwise not snapped.
+
+## Commands
+
+All Step 1 commands must continue to work.
+
+### estimate <vehicle_id> [--now <ts> --roads <path>]
+
+- Not found must exit 3, invalid roads file must exit 2.
+- `now` handling: if `--now` is provided use it, otherwise use current time `time.Now().UnixMilli()`. Compute `age = now - timestamp_ms`, if negative set to 0.
+- **EMA smoothing**: if history has at least 2 entries, take last up to 5 entries, weight each by `w = (1/(accuracy+1)) * exp(-age_i/10000)` where `age_i = now - history_i.timestamp_ms`. Weighted average lat/lng is the smoothed base position.
+- **Prediction**: accuracy always degrades by `+0.5 * age_sec` where `age_sec = age/1000`. If `age > 0 && age <= 30000 && speed > 0`, prediction is true: `dist = speed * age_sec`, `delta_lat = dist * cos(heading_rad) / R * 180 / pi`, `delta_lng = dist * sin(heading_rad) / (R * cos(lat_rad)) * 180 / pi`. Predicted lat/lng = smoothed + delta. Original lat/lng = smoothed before prediction. Otherwise predicted false, original = smoothed.
+- **Road snapping**: if `--roads` is given, use heading-aware snapping when speed > 1, otherwise normal snapping. If snapped, final lat/lng = snapped point, original lat/lng = smoothed base before prediction (or predicted if predicted).
+- **Confidence**: compute base confidence:
+  - high if `(acc <= 5 && age <= 5000)` OR `(acc <= 10 && age <= 10000)`
+  - medium if `acc <= 25 && age <= 20000`, otherwise low
+  - If snapped and road_dist <= 10: upgrade medium to high if acc <=25, upgrade low to medium if acc <=40 and age <=15000
+  - Demotion by outlier_count: if `outlier_count > 2`, high demotes to medium. If `outlier_count > 5`, final confidence is low regardless. Boundaries matter: exactly 3 outliers must demote high to medium, exactly 2 must stay high. Exactly 6 outliers must be low, exactly 5 must be medium (if other signals allow).
+  - If age > 30000, confidence is low.
+  - If accuracy > 50, confidence is low.
+  - If not snapped and acc > 25 and age > 10000 and (acc > 40 or age > 15000), confidence is low.
+
+Output JSON with fields: vehicle_id, lat, lng, timestamp_ms, accuracy, speed, heading, total_distance_m, confidence, age_ms, snapped, road_id, road_bearing, road_dist_m, predicted, original_lat, original_lng. Exit 0.
+
+### validate-pickup <vehicle_id> <pickup_lat> <pickup_lng> [--now <ts> --roads <path> --zones <path>]
+
+1. Estimate vehicle position via same EMA, prediction, and heading-aware snap logic as `estimate`.
+2. Snap pickup point to nearest road without heading-aware filtering (to get pickup_road_id) if roads provided.
+3. Zones: if `--zones` provided, check if pickup point is inside any active zone (active filtering by now if provided, else all). If zones file is not provided, check default `/app/data/pickup_zones.json` if it exists and is non-empty. If pickup is outside and active zones exist, valid false with reason `out_of_geofence` and exit 1. Reason `ok` must be exactly the literal string "ok" when valid.
+
+Priority order for validation (first matching reason wins):
+
+1. out_of_geofence (if pickup outside active geofence and zones exist)
+2. stale if estimate age > 30000
+3. low_accuracy if estimate accuracy > 50
+4. off_road if roads provided and vehicle not snapped
+5. moving if vehicle speed >=5
+6. road_mismatch if both vehicle and pickup snapped but road_ids differ
+7. heading_mismatch if same road, vehicle speed >1, bearing from vehicle to pickup has angular diff >90 and distance >10
+8. too_far if Haversine distance vehicle->pickup >100
+9. otherwise ok, valid true
+
+Output JSON: valid (bool), reason (string), distance_m, confidence, age_ms, accuracy, snapped, road_id, pickup_road_id, vehicle_lat, vehicle_lng, plus `dropoff_road_id` alias containing same value as pickup_road_id for compatibility with dropoff command. Exit 0 if valid, 1 if invalid, 3 if not found, 2 if invalid args/zones/roads/lat/lng.
+
+### validate-dropoff <vehicle_id> <dropoff_lat> <dropoff_lng> [--now <ts> --roads <path> --zones <path>]
+
+Same logic as pickup but more lenient: moving threshold >=10 (instead of 5), too_far >150 (instead of 100), and zones default file is `/app/data/dropoff_zones.json`.
+
+### geofence-check, near, list, track, etc.
+
+Same as Step 1 extreme behavior.
+
+## Persistence and Crash Consistency
+
+- Same atomic write pattern as Step 1: temp file `<db>.tmp.<pid>` + rename, no leftover, cleanup stale tmp files.
+- On corruption (invalid JSON, array, null, truncated file), create backup `<db>.corrupt.<nanosec>` with integer nanosec suffix, then exit 4.
+- Stale tmp files must be ignored on load and cleaned on next successful write.
+
+## Exit Codes
+
+- 0: success or valid pickup/dropoff.
+- 1: invalid pickup/dropoff (reason indicates why).
+- 2: invalid argument, malformed value, unreadable zones/roads file, batch failure.
+- 3: not found, out_of_zone, low_accuracy, outlier.
+- 4: corrupt DB (with `.corrupt.<nanosec>` backup).
+
+## Backward Compatibility and Performance
+
+- Old DB files without history, total_distance, or outlier_count must be readable and auto-migrated.
+- Whitespace-only files are empty stores, array and null are corrupt.
+- All Step 1 tests must still pass.
+- Large scale: 800+ vehicles, near and estimate queries under 3 seconds.
+
+Deliverable remains `/app/src/` with stdlib-only Go binary.
