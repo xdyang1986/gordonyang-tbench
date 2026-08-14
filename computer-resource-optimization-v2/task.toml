@@ -2,60 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/computer-resource-optimization-v2"
-description = "Hard multi-turn Go cluster management with real discriminators. Turn1 (schema_version = "1.1"
-
-[task]
-name = "codimango/computer-resource-optimization-v2"
-description = "Hard multi-turn Go cluster management with real discriminators. Turn1 (347 tests, extra-hard, was 30 too easy, 49/66/80/96 still easy) 78 new discriminators over original 30: empty/whitespace empty store vs null/[]/invalid -> corrupt backup .corrupt.<nanosec> integer suffix, missing/bad checksum corruption, jobs [] not null after add-node/deallocate/remove-job raw checks, idempotent add-job preserves allocation running not upsert, concurrent add-node 20 sorted + same ID 20 race ->1 node + add-job same ID 20 ->1 job + same node 20 preserve all 20 + diff nodes 20 + deallocate 20 + list while allocating 10x30, pagination offset then limit order offset1 limit2 ->1,2 invalid, large 800 nodes <1.5s O(n log n) + 500 jobs sorted, special chars job <>& raw SetEscapeHTML false no \\u003c, large ID 10KB dash underscore dot colon, empty ID spaces exit2 float resource 4.0 invalid, timestamp integer required reject 1000.0 1e3 0x3e8, status sum used/free, node jobs sorted, lock cleaned after failure, etc. Turn2 (72 tests, extra-hard, good to keep) adds sharding, best-fit tie-break cpu->mem->gpu->id lex vs first-fit, config missing->fallback invalid->exit2, distribution zeros global broadcast, pagination perf, TTL expiry, token-bucket multi-cycle per-node independent no-consume persistence corruption, snapshot/restore exact trap, ops-log skip invalid, optimize invariants."
-authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "cluster", "resource-management", "scheduling", "sharding", "optimization", "concurrency", "distributed-systems"]
-format = "terminal_bench_multi_turn"
-workstream = "swe_public_repo"
-
-[metadata]
-difficulty = "hard"
-category = "software-engineering"
-category_usecase = "resource_optimization"
-category_subdomain = "distributed_systems"
-tags = ["resource-optimization", "go", "cluster", "scheduling", "sharding", "concurrency", "presence", "rate-limiting"]
-author_name = "Gordon Yang"
-author_email = "gordonyang@meta.com"
-expert_time_estimate_min = 90.0
-junior_time_estimate_min = 180.0
-languages = ["go"]
-
-[environment]
-build_timeout_sec = 600.0
-cpus = 2
-memory_mb = 4096
-storage_mb = 10240
-gpus = 0
-allow_internet = true
-mcp_servers = []
-
-[[steps]]
-name = "1_step_one"
-dependencies = []
-min_reward = 1.0
-
-[steps.verifier]
-timeout_sec = 600.0
-
-[steps.agent]
-timeout_sec = 1200.0
-
-[[steps]]
-name = "2_step_two"
-dependencies = ["1_step_one"]
-min_reward = 1.0
-inherit_prior_session = true
-
-[steps.verifier]
-timeout_sec = 600.0
-
-[steps.agent]
-timeout_sec = 1200.0
-, extra-hard, was 30 too easy, 49/66/80/96 still easy) 78 new discriminators over original 30: empty/whitespace empty store vs null/[]/invalid -> corrupt backup .corrupt.<nanosec> integer suffix, missing/bad checksum corruption, jobs [] not null after add-node/deallocate/remove-job raw checks, idempotent add-job preserves allocation running not upsert, concurrent add-node 20 sorted + same ID 20 race ->1 node + add-job same ID 20 ->1 job + same node 20 preserve all 20 + diff nodes 20 + deallocate 20 + list while allocating 10x30, pagination offset then limit order offset1 limit2 ->1,2 invalid, large 800 nodes <1.5s O(n log n) + 500 jobs sorted, special chars job <>& raw SetEscapeHTML false no \\u003c, large ID 10KB dash underscore dot colon, empty ID spaces exit2 float resource 4.0 invalid, timestamp integer required reject 1000.0 1e3 0x3e8, status sum used/free, node jobs sorted, lock cleaned after failure, etc. Turn2 (72 tests, extra-hard, good to keep) adds sharding, best-fit tie-break cpu->mem->gpu->id lex vs first-fit, config missing->fallback invalid->exit2, distribution zeros global broadcast, pagination perf, TTL expiry, token-bucket multi-cycle per-node independent no-consume persistence corruption, snapshot/restore exact trap, ops-log skip invalid, optimize invariants."
+description = "Hard multi-turn Go cluster management with real discriminators. Turn1 347 tests extra-hard (was 30 too easy) with 78 new discriminators: empty/whitespace empty store vs null/[]/invalid -> corrupt backup .corrupt.<nanosec> integer suffix, missing/bad checksum corruption, jobs [] not null after add-node/deallocate/remove-job raw checks, idempotent add-job preserves allocation running not upsert, concurrent add-node 20 sorted + same ID 20 race ->1 node + add-job same ID 20 ->1 job + same node 20 preserve all 20 + diff nodes 20 + deallocate 20 + list while allocating 10x30, pagination offset then limit order offset1 limit2 ->1,2 invalid, large 800 nodes <1.5s O(n log n) + 500 jobs sorted, special chars job <>& raw SetEscapeHTML false no u003c, large ID 10KB dash underscore dot colon, empty ID spaces exit2 float resource 4.0 invalid, timestamp integer required reject 1000.0 1e3 0x3e8, status sum used/free, node jobs sorted, lock cleaned after failure, etc. Turn2 72 tests extra-hard adds sharding, best-fit tie-break cpu->mem->gpu->id lex vs first-fit, config missing->fallback invalid->exit2, distribution zeros global broadcast, pagination perf, TTL expiry, token-bucket multi-cycle per-node independent no-consume persistence corruption, snapshot/restore exact trap, ops-log skip invalid, optimize invariants."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "cluster", "resource-management", "scheduling", "sharding", "optimization", "concurrency", "distributed-systems"]
 format = "terminal_bench_multi_turn"
