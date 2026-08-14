@@ -153,8 +153,8 @@ Tracer behavior:
 - TraceID generation: if parent exists, reuse parent TraceID. Else generate new.
 - SpanID always new.
 - Store span in context internally (private key) storing a **copy** of TraceContext, not reference. Mutating original TraceContext after ContextWithTrace must not affect stored context. New context carries this span's TraceContext.
-- `Span.End()` computes EndTime, calls processor OnEnd. Idempotent, concurrency-safe.
-- `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe. `AddEvent` must copy its attributes slice; mutating original slice afterwards must not affect recorded event.
+- `Span.End()` computes EndTime, calls processor OnEnd. Idempotent, concurrency-safe. Concurrent calls to End() on same span must export exactly once (50 goroutines calling End() on same span → exporter receives exactly 1 span, no panic, clean under go run -race), requiring sync.Once or CAS, not just boolean check.
+- `AddAttribute`, `AddEvent`, `SetStatus` concurrency-safe. `AddEvent` must copy its attributes slice; mutating original slice afterwards must not affect recorded event. AddAttribute/AddEvent racing with End() must be atomic for the no-op check: add-after-end is defined as no-op, but under concurrency the check and End must be synchronized or race detector will catch write to already-exported slice. Export must snapshot the span: the FinishedSpan passed to OnEnd must be a stable copy (Attributes map and Events slice copied) so that concurrent AddAttribute does not mutate already-exported data; run under go_run_race_program.
 - WithAttributes duplicate keys: if same key appears multiple times in initial attributes or via AddAttribute, last write wins. Duplicate does not increase attribute count.
 - **Resource limits:**
   - Span Attributes: max 128 distinct keys per span. If more than 128 added (via WithAttributes or AddAttribute), ignore excess beyond 128. Truncate string attribute values >1024 to exactly 1024.

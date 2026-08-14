@@ -1961,7 +1961,6 @@ def test_tracing_parent_id_rules():
     assert proc.returncode == 0, f"parent id rules failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_isrecording_after_end():
     code = textwrap.dedent("""
     package main
@@ -2057,8 +2056,6 @@ def test_exporter_clear_then_reuse():
     )
 
 
-
-
 def test_tracing_parent_chain_three_levels():
     code = textwrap.dedent("""
     package main
@@ -2102,8 +2099,6 @@ def test_tracing_parent_chain_three_levels():
     )
 
 
-
-
 def test_tracing_attribute_map_non_nil():
     code = textwrap.dedent("""
     package main
@@ -2128,8 +2123,6 @@ def test_tracing_attribute_map_non_nil():
     assert proc.returncode == 0, (
         f"attribute map non-nil failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_tracing_event_timestamp_recent():
@@ -2164,8 +2157,6 @@ def test_tracing_event_timestamp_recent():
     assert proc.returncode == 0, (
         f"event timestamp recent failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_metrics_histogram_boundary_and_sum():
@@ -2203,8 +2194,6 @@ def test_metrics_histogram_boundary_and_sum():
     )
 
 
-
-
 def test_logger_json_fields():
     code = textwrap.dedent("""
     package main
@@ -2236,8 +2225,6 @@ def test_logger_json_fields():
     )
 
 
-
-
 def test_tracing_service_name_empty_fallback():
     code = textwrap.dedent("""
     package main
@@ -2261,8 +2248,6 @@ def test_tracing_service_name_empty_fallback():
     assert proc.returncode == 0, (
         f"service name empty fallback failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_tracing_id_generator_nil_fallback():
@@ -2290,8 +2275,6 @@ def test_tracing_id_generator_nil_fallback():
     )
 
 
-
-
 def test_logger_level_default_info():
     code = textwrap.dedent("""
     package main
@@ -2316,8 +2299,6 @@ def test_logger_level_default_info():
     assert proc.returncode == 0, (
         f"logger default level failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_exporter_getspans_slice_mutation():
@@ -2348,8 +2329,6 @@ def test_exporter_getspans_slice_mutation():
     )
 
 
-
-
 def test_logger_with_empty_fields():
     code = textwrap.dedent("""
     package main
@@ -2375,8 +2354,6 @@ def test_logger_with_empty_fields():
     assert proc.returncode == 0, (
         f"logger with empty fields failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_metrics_gauge_set_and_add():
@@ -2413,8 +2390,6 @@ def test_metrics_gauge_set_and_add():
     )
 
 
-
-
 def test_metrics_label_order_irrelevant_for_reuse():
     code = textwrap.dedent("""
     package main
@@ -2444,8 +2419,6 @@ def test_metrics_label_order_irrelevant_for_reuse():
     assert proc.returncode == 0, (
         f"label order irrelevant failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_metrics_label_truncate_for_gauge_and_histogram():
@@ -2483,8 +2456,6 @@ def test_metrics_label_truncate_for_gauge_and_histogram():
     )
 
 
-
-
 def test_tracing_add_attribute_after_limit_still_128():
     code = textwrap.dedent("""
     package main
@@ -2513,8 +2484,6 @@ def test_tracing_add_attribute_after_limit_still_128():
     assert proc.returncode == 0, (
         f"add attribute after limit failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_tracing_attribute_value_truncate_add():
@@ -2546,8 +2515,6 @@ def test_tracing_attribute_value_truncate_add():
     )
 
 
-
-
 def test_tracing_context_overwrites():
     code = textwrap.dedent("""
     package main
@@ -2571,8 +2538,6 @@ def test_tracing_context_overwrites():
     assert proc.returncode == 0, (
         f"context overwrites failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_tracing_event_copy_isolation():
@@ -2602,8 +2567,6 @@ def test_tracing_event_copy_isolation():
     assert proc.returncode == 0, (
         f"event copy isolation failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_tracing_withattributes_duplicate_across_calls():
@@ -2659,8 +2622,6 @@ def test_tracing_marshal_nil_carrier():
     )
 
 
-
-
 def test_tracing_unmarshal_invalid():
     code = textwrap.dedent("""
     package main
@@ -2698,8 +2659,6 @@ def test_tracing_unmarshal_invalid():
     )
 
 
-
-
 def test_tracing_withattributes_nil():
     code = textwrap.dedent("""
     package main
@@ -2724,8 +2683,6 @@ def test_tracing_withattributes_nil():
     assert proc.returncode == 0, (
         f"withattributes nil failed: {proc.stdout} {proc.stderr}"
     )
-
-
 
 
 def test_metrics_counter_type_conflict():
@@ -2769,8 +2726,6 @@ def test_metrics_counter_type_conflict():
     )
 
 
-
-
 def test_tracing_flags_zero_when_not_sampled():
     code = textwrap.dedent("""
     package main
@@ -2798,3 +2753,123 @@ def test_tracing_flags_zero_when_not_sampled():
     )
 
 
+def test_tracing_concurrent_end_exactly_once():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "concurrent-end-once")
+        var wg sync.WaitGroup
+        for i:=0;i<50;i++{
+            wg.Add(1)
+            go func(){
+                defer wg.Done()
+                span.End()
+            }()
+        }
+        wg.Wait()
+        spans := exp.GetSpans()
+        if len(spans)!=1 {
+            panic(fmt.Sprintf("Concurrent End() must export exactly once, got %d", len(spans)))
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_race_program(code, timeout=60)
+    assert proc.returncode == 0, (
+        f"concurrent End exactly once failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_export_snapshots_span():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "snapshot-test")
+        span.AddAttribute("k1", "v1")
+        var wg sync.WaitGroup
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            for i:=0;i<100;i++{
+                span.AddAttribute(fmt.Sprintf("k%d", i+2), i)
+            }
+        }()
+        span.End()
+        wg.Wait()
+        spans := exp.GetSpans()
+        if len(spans)!=1 { panic(fmt.Sprintf("expected 1 span got %d", len(spans))) }
+        // The exported span must be a snapshot - mutating after End must not affect it
+        // AddAttribute after End is defined as no-op, so subsequent GetSpans must still return original snapshot
+        // Also check that the exporter received a stable copy (no race)
+        s := spans[0]
+        if s.Attributes == nil { panic("Attributes nil") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_race_program(code, timeout=60)
+    assert proc.returncode == 0, (
+        f"export snapshots span failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_racing_add_after_end_noop_atomic():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "race-add-after-end")
+        var wg sync.WaitGroup
+        // 20 goroutines racing AddAttribute/AddEvent with End
+        for i:=0;i<20;i++{
+            wg.Add(1)
+            go func(idx int){
+                defer wg.Done()
+                span.AddAttribute(fmt.Sprintf("race-k%d", idx), idx)
+                span.AddEvent(fmt.Sprintf("race-ev-%d", idx))
+            }(i)
+        }
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            span.End()
+        }()
+        wg.Wait()
+        // After all, End should have been called and exporter should have exactly 1 span, no panic, no race
+        spans := exp.GetSpans()
+        if len(spans)!=1 { panic(fmt.Sprintf("expected 1 span after racing End and Add, got %d", len(spans))) }
+        // After End, further Add should be no-op and not affect exported count
+        span.AddAttribute("after", "should-not-appear")
+        if len(exp.GetSpans()) != 1 { panic("Add after End should be no-op") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_race_program(code, timeout=60)
+    assert proc.returncode == 0, (
+        f"racing add after end atomic failed: {proc.stdout} {proc.stderr}"
+    )
