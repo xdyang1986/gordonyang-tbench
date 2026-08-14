@@ -170,6 +170,37 @@ Tracer behavior — very hardened (read carefully, many subtle edge cases — th
 - Custom IDGenerator invalid: If IDGenerator returns non-hex or wrong length for TraceID/SpanID, span still created with those IDs (no validation at Start), but MarshalTrace must NOT write anything because validation fails (carrier unchanged). Must not panic. Tests: custom gen returns "invalid" TraceID → Unmarshal after Marshal should yield no trace, but span still exists with that invalid TraceID in exporter (since exporter doesn't validate).
 - Context propagation overwrite: MarshalTrace with carrier that already has `x-ride-trace` must overwrite with new value.
 
+
+- **Additional very hard edge cases (v4 - 170 tests):**
+  - `UnmarshalTrace` header key lookup case-insensitive (`x-ride-trace`, `X-Ride-Trace`, `X-RIDE-TRACE` all valid).
+  - `UnmarshalTrace` trims leading/trailing whitespace around entire header value.
+  - Uppercase hex allowed for TraceID/SpanID/ParentID (validation case-insensitive).
+  - Event attribute value truncation: string values >1024 truncated to 1024 for event attributes as well.
+  - `AddEvent` empty name ignored (no-op, not counted toward 128 event limit).
+  - Event attributes filtering: empty key ignored, nil/invalid type ignored, string truncation same as span attributes.
+  - `WithSpanKind` last wins when multiple options: `WithSpanKind(Client), WithSpanKind(Server)` => Server.
+  - `SetStatus` last wins before End: multiple calls before End keep last.
+  - Concurrent `AddAttribute`, `AddEvent`, `SetStatus`, `End` race-safe: 10/10/5 goroutines plus End once -> exactly 1 span exported, no race.
+  - `ContextWithTrace` overwrites previous trace in same context (second call wins).
+  - SpanContext copy on parent: child ParentID snapshot, not live reference, preserved after parent End.
+  - `MarshalTrace` preserves other unrelated carrier keys.
+  - Attr limit and event limit independent: 128 span attrs + 128 events both allowed (not shared budget).
+  - Counter `Add(-5)` negative noop (value unchanged), per spec Add >=0 only. Add(0) allowed.
+  - Collect buckets deep copy: mutating returned Buckets slice (Count, UpperBound) must not affect internal; next Collect returns original.
+  - Histogram observe negative allowed: e.g., buckets [0,10], Observe(-5) counts in bucket 0.
+  - Label truncation collision: values differing only after 256 chars map to same series after truncation -> reuse same instrument, value 2.
+  - Concurrent creation same labelset: 20 goroutines Counter same name+labels => 1 series, total 20.
+  - Provider Collect does NOT clear: second Collect without new data still returns data (not empty). Reuse after Collect must work.
+  - Gauge Add NaN/Inf ignored (like Set).
+  - Counter race Add and Collect concurrent safe under -race.
+  - Logger unknown level defaults to info, filtering works.
+  - Logger error level filters lower (info, warn filtered).
+  - Logger service field cannot be overridden by With field named "service" -> always real service name.
+  - Logger fields JSON types: int, bool, float marshaled correctly.
+  - Logger concurrent With and Log safe.
+  - FinishedSpan ParentID empty for root, StartTime <= EndTime.
+  - IDGenerator nil fallback to default valid IDs.
+
 #### Context propagation — hardened
 
 ```go

@@ -4379,25 +4379,32 @@ def test_tracing_extract_header_case_insensitive():
     code = textwrap.dedent("""
     package main
     import (
+        "context"
         "fmt"
         "ride-observability/observability"
     )
     func main(){
-        tc := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", TraceFlags: 1, TraceState: "", Remote: true}
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        ctx, span := tracer.Start(context.Background(), "root")
         carrier := map[string]string{}
-        observability.MarshalTrace(carrier, tc)
+        observability.MarshalTrace(ctx, carrier)
         // transform key to uppercase
         upper := map[string]string{}
         for k,v := range carrier {
             up := ""
-            for _, ch := range k { 
+            for _, ch := range k {
                 if ch >= 'a' && ch <= 'z' { up += string(ch-32) } else { up += string(ch) }
             }
             upper[up] = v
         }
-        got, ok := observability.UnmarshalTrace(upper)
+        ctx2 := observability.UnmarshalTrace(upper)
+        got, ok := observability.TraceFromContext(ctx2)
         if !ok { panic("UnmarshalTrace should be case-insensitive for header key") }
-        if got.TraceID != tc.TraceID { panic(fmt.Sprintf("traceID mismatch %s vs %s", got.TraceID, tc.TraceID)) }
+        orig, _ := observability.TraceFromContext(ctx)
+        if got.TraceID != orig.TraceID { panic(fmt.Sprintf("traceID mismatch %s vs %s", got.TraceID, orig.TraceID)) }
+        span.End()
         fmt.Println("OK")
     }
     """)
@@ -4413,9 +4420,10 @@ def test_tracing_extract_trims_whitespace():
         "ride-observability/observability"
     )
     func main(){
-        val := "  00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01  "
+        val := "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb::1  "
         carrier := map[string]string{"x-ride-trace": val}
-        tc, ok := observability.UnmarshalTrace(carrier)
+        ctx := observability.UnmarshalTrace(carrier)
+        tc, ok := observability.TraceFromContext(ctx)
         if !ok { panic("should trim whitespace") }
         if tc.TraceID != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" { panic(fmt.Sprintf("bad traceID %s", tc.TraceID)) }
         fmt.Println("OK")
@@ -4433,10 +4441,10 @@ def test_tracing_unmarshal_uppercase_hex_allowed():
         "ride-observability/observability"
     )
     func main(){
-        carrier := map[string]string{"x-ride-trace": "00-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBB-01"}
-        tc, ok := observability.UnmarshalTrace(carrier)
+        carrier := map[string]string{"x-ride-trace": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:BBBBBBBBBBBBBBBB::1"}
+        ctx := observability.UnmarshalTrace(carrier)
+        tc, ok := observability.TraceFromContext(ctx)
         if !ok { panic("uppercase hex should be allowed") }
-        // TraceID lowercased or preserved? We require normalized lower or same upper; check non-empty and length 32
         if len(tc.TraceID)!=32 { panic("traceID len should be 32") }
         fmt.Println("OK")
     }
@@ -4460,15 +4468,14 @@ def test_tracing_attribute_value_truncate_event():
         tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "trunc-event")
         long := strings.Repeat("y", 2000)
-        span.AddEvent("evt", map[string]interface{}{"k": long})
+        span.AddEvent("evt", observability.Attribute{Key:"k", Value: long})
         span.End()
         evts := exp.GetSpans()[0].Events
         if len(evts)!=1 { panic("event missing") }
-        v, ok := evts[0].Attributes["k"]
-        if !ok { panic("event attr missing") }
-        s, ok := v.(string)
+        v, ok := evts[0].Attributes[0].Value.(string)
         if !ok { panic("event attr not string") }
-        if len(s)>1024 { panic(fmt.Sprintf("event attr not truncated: %d", len(s))) }
+        _ = ok
+        if len(v)>1024 { panic(fmt.Sprintf("event attr not truncated: %d", len(v))) }
         fmt.Println("OK")
     }
     """)
@@ -4494,8 +4501,8 @@ def test_tracing_withspanKind_last_wins():
         )
         span.End()
         fs := exp.GetSpans()[0]
-        if fs.SpanKind != observability.SpanKindServer {
-            panic(fmt.Sprintf("last WithSpanKind should win, got %d", fs.SpanKind))
+        if fs.Kind != observability.SpanKindServer {
+            panic(fmt.Sprintf("last WithSpanKind should win, got %d", fs.Kind))
         }
         fmt.Println("OK")
     }
@@ -4517,12 +4524,12 @@ def test_tracing_setstatus_last_wins_before_end():
         proc := observability.NewSimpleProcessor(exp)
         tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "status-last-wins")
-        span.SetStatus(observability.Status{Code: observability.StatusError, Message: "first"})
-        span.SetStatus(observability.Status{Code: observability.StatusOK, Message: "second"})
+        span.SetStatus(observability.StatusError, "first")
+        span.SetStatus(observability.StatusOK, "second")
         span.End()
-        st := exp.GetSpans()[0].Status
-        if st.Code != observability.StatusOK { panic(fmt.Sprintf("last status should win, got %d", st.Code)) }
-        if st.Message != "second" { panic("message should be second") }
+        fs := exp.GetSpans()[0]
+        if fs.StatusCode != observability.StatusOK { panic(fmt.Sprintf("last status should win, got %d", fs.StatusCode)) }
+        if fs.StatusMessage != "second" { panic("message should be second") }
         fmt.Println("OK")
     }
     """)
@@ -4556,14 +4563,14 @@ def test_tracing_concurrent_addattr_addevent_setstatus_end():
             wg.Add(1)
             go func(idx int){
                 defer wg.Done()
-                span.AddEvent(fmt.Sprintf("e%d", idx), nil)
+                span.AddEvent(fmt.Sprintf("e%d", idx))
             }(i)
         }
         for i:=0; i<5; i++ {
             wg.Add(1)
             go func(){
                 defer wg.Done()
-                span.SetStatus(observability.Status{Code: observability.StatusError})
+                span.SetStatus(observability.StatusError, "err")
             }()
         }
         wg.Add(1)
@@ -4572,7 +4579,6 @@ def test_tracing_concurrent_addattr_addevent_setstatus_end():
             span.End()
         }()
         wg.Wait()
-        // second End should be idempotent
         span.End()
         spans := exp.GetSpans()
         if len(spans)!=1 { panic(fmt.Sprintf("expected 1 span, got %d", len(spans))) }
@@ -4597,7 +4603,8 @@ def test_tracing_context_withtrace_overwrites():
         ctx := context.Background()
         ctx = observability.ContextWithTrace(ctx, tc1)
         ctx = observability.ContextWithTrace(ctx, tc2)
-        got := observability.TraceFromContext(ctx)
+        got, ok := observability.TraceFromContext(ctx)
+        if !ok { panic("should have trace") }
         if got.TraceID != tc2.TraceID { panic(fmt.Sprintf("overwrite failed: %s vs %s", got.TraceID, tc2.TraceID)) }
         fmt.Println("OK")
     }
@@ -4619,15 +4626,12 @@ def test_tracing_span_context_copy_on_parent():
         proc := observability.NewSimpleProcessor(exp)
         tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         ctx, parent := tracer.Start(context.Background(), "parent")
-        // mutate parent's context map? Actually ensure child inherits snapshot, not live reference
-        // child after parent.End() still has its own IDs
         _, child := tracer.Start(ctx, "child")
         parentSC := parent.SpanContext()
         childSC := child.SpanContext()
         if childSC.TraceID != parentSC.TraceID { panic("child should inherit TraceID") }
         if childSC.SpanID == parentSC.SpanID { panic("child SpanID should differ") }
         if childSC.ParentID != parentSC.SpanID { panic("child ParentID should be parent SpanID") }
-        // after parent ends, childSC unchanged
         parent.End()
         if child.SpanContext().ParentID != parentSC.SpanID { panic("child ParentID changed after parent End") }
         child.End()
@@ -4642,15 +4646,20 @@ def test_tracing_marshal_preserves_other_keys():
     code = textwrap.dedent("""
     package main
     import (
+        "context"
         "fmt"
         "ride-observability/observability"
     )
     func main(){
-        tc := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", TraceFlags: 1}
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        ctx, span := tracer.Start(context.Background(), "root")
         carrier := map[string]string{"other": "keep", "x-ride-trace": "old"}
-        observability.MarshalTrace(carrier, tc)
+        observability.MarshalTrace(ctx, carrier)
         if carrier["other"]!="keep" { panic("other keys should be preserved") }
         if carrier["x-ride-trace"]=="" { panic("x-ride-trace should be set") }
+        span.End()
         fmt.Println("OK")
     }
     """)
@@ -4671,8 +4680,8 @@ def test_tracing_event_empty_name_ignored():
         proc := observability.NewSimpleProcessor(exp)
         tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
         _, span := tracer.Start(context.Background(), "event-empty-name")
-        span.AddEvent("", nil)
-        span.AddEvent("valid", nil)
+        span.AddEvent("")
+        span.AddEvent("valid")
         span.End()
         evts := exp.GetSpans()[0].Events
         if len(evts)!=1 { panic(fmt.Sprintf("empty event name should be ignored, expected 1 got %d", len(evts))) }
@@ -4701,7 +4710,7 @@ def test_tracing_attr_limit_and_event_limit_independent():
             span.AddAttribute(fmt.Sprintf("k%d", i), i)
         }
         for i:=0; i<200; i++ {
-            span.AddEvent(fmt.Sprintf("e%d", i), nil)
+            span.AddEvent(fmt.Sprintf("e%d", i))
         }
         span.End()
         fs := exp.GetSpans()[0]
@@ -4723,13 +4732,13 @@ def test_metrics_counter_negative_noop():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        c := p.Counter("counter-neg")
+        c := p.Counter("counter_neg")
         c.Inc()
         c.Add(-5)
         fams := p.Collect()
         var v float64
         for _, fam := range fams {
-            if fam.Name=="counter-neg" { v = fam.Metrics[0].Value }
+            if fam.Name=="counter_neg" { v = fam.Metrics[0].Value }
         }
         if v!=1 { panic(fmt.Sprintf("negative Add should be noop, expected 1 got %f", v)) }
         fmt.Println("OK")
@@ -4748,22 +4757,21 @@ def test_metrics_collect_buckets_deep_copy_modification_2():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        h := p.Histogram("hist-deep-copy2", observability.WithBuckets([]float64{1,2,3}))
+        h := p.Histogram("hist_deep_copy2", observability.WithBuckets([]float64{1,2,3}))
         h.Observe(1.5)
         fams1 := p.Collect()
-        // mutate returned buckets slice
-        if len(fams1)>0 && len(fams1[0].Metrics)>0 && len(fams1[0].Metrics[0].Histogram.Buckets)>0 {
-            fams1[0].Metrics[0].Histogram.Buckets[0].CumulativeCount = 999
-            fams1[0].Metrics[0].Histogram.Buckets[0].UpperBound = 999
+        if len(fams1)>0 && len(fams1[0].Metrics)>0 && len(fams1[0].Metrics[0].Buckets)>0 {
+            fams1[0].Metrics[0].Buckets[0].Count = 999
+            fams1[0].Metrics[0].Buckets[0].UpperBound = 999
         }
-        h2 := p.Histogram("hist-deep-copy2", observability.WithBuckets([]float64{1,2,3}))
+        h2 := p.Histogram("hist_deep_copy2", observability.WithBuckets([]float64{1,2,3}))
         h2.Observe(0.5)
         fams2 := p.Collect()
         var cnt uint64
         for _, fam := range fams2 {
-            if fam.Name=="hist-deep-copy2" {
-                for _, b := range fam.Metrics[0].Histogram.Buckets {
-                    if b.UpperBound==1 { cnt = b.CumulativeCount }
+            if fam.Name=="hist_deep_copy2" {
+                for _, b := range fam.Metrics[0].Buckets {
+                    if b.UpperBound==1 { cnt = b.Count }
                 }
             }
         }
@@ -4784,14 +4792,14 @@ def test_metrics_histogram_observe_negative_allowed():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        h := p.Histogram("hist-neg", observability.WithBuckets([]float64{0,10}))
+        h := p.Histogram("hist_neg", observability.WithBuckets([]float64{0,10}))
         h.Observe(-5)
         fams := p.Collect()
         var cnt uint64
         for _, fam := range fams {
-            if fam.Name=="hist-neg" {
-                for _, b := range fam.Metrics[0].Histogram.Buckets {
-                    if b.UpperBound==0 { cnt = b.CumulativeCount }
+            if fam.Name=="hist_neg" {
+                for _, b := range fam.Metrics[0].Buckets {
+                    if b.UpperBound==0 { cnt = b.Count }
                 }
             }
         }
@@ -4815,15 +4823,15 @@ def test_metrics_label_truncation_collision():
         p := observability.NewMetricsProvider()
         long1 := strings.Repeat("a", 256) + "1"
         long2 := strings.Repeat("a", 256) + "2"
-        c1 := p.Counter("collision-trunc", observability.WithLabels(map[string]string{"k": long1}))
+        c1 := p.Counter("collision_trunc", observability.WithLabels(map[string]string{"k": long1}))
         c1.Inc()
-        c2 := p.Counter("collision-trunc", observability.WithLabels(map[string]string{"k": long2}))
+        c2 := p.Counter("collision_trunc", observability.WithLabels(map[string]string{"k": long2}))
         c2.Inc()
         fams := p.Collect()
         var n int
         var val float64
         for _, fam := range fams {
-            if fam.Name=="collision-trunc" { n = len(fam.Metrics); val = fam.Metrics[0].Value }
+            if fam.Name=="collision_trunc" { n = len(fam.Metrics); val = fam.Metrics[0].Value }
         }
         if n!=1 { panic(fmt.Sprintf("truncated label values colliding should reuse same metric, expected 1 series got %d", n)) }
         if val!=2 { panic(fmt.Sprintf("expected value 2 after collision reuse, got %f", val)) }
@@ -4849,7 +4857,7 @@ def test_metrics_concurrent_create_same_labelset():
             wg.Add(1)
             go func(){
                 defer wg.Done()
-                c := p.Counter("conc-create-same", observability.WithLabels(map[string]string{"id": "same"}))
+                c := p.Counter("conc_create_same", observability.WithLabels(map[string]string{"id": "same"}))
                 c.Inc()
             }()
         }
@@ -4858,7 +4866,7 @@ def test_metrics_concurrent_create_same_labelset():
         var v float64
         var n int
         for _, fam := range fams {
-            if fam.Name=="conc-create-same" { n = len(fam.Metrics); v = fam.Metrics[0].Value }
+            if fam.Name=="conc_create_same" { n = len(fam.Metrics); v = fam.Metrics[0].Value }
         }
         if n!=1 { panic(fmt.Sprintf("should be 1 series got %d", n)) }
         if v!=20 { panic(fmt.Sprintf("expected 20 got %f", v)) }
@@ -4878,11 +4886,13 @@ def test_metrics_provider_collect_empty_after_clear():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        c := p.Counter("empty-after")
+        c := p.Counter("empty_after")
         c.Inc()
-        _ = p.Collect()
-        fams := p.Collect()
-        if len(fams)!=0 { panic(fmt.Sprintf("second collect without new data should be empty, got %d families", len(fams))) }
+        fams1 := p.Collect()
+        if len(fams1)==0 { panic("first collect should have data") }
+        fams2 := p.Collect()
+        // per spec Collect does NOT clear, second collect should still have data (reuse after Collect must work)
+        if len(fams2)==0 { panic("second collect should still have data since Collect does not clear") }
         fmt.Println("OK")
     }
     """)
@@ -4900,7 +4910,7 @@ def test_metrics_gauge_add_nan_inf_ignored():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        g := p.Gauge("gauge-nan-inf-add")
+        g := p.Gauge("gauge_nan_inf_add")
         g.Set(5)
         g.Add(math.NaN())
         g.Add(math.Inf(1))
@@ -4908,7 +4918,7 @@ def test_metrics_gauge_add_nan_inf_ignored():
         fams := p.Collect()
         var v float64
         for _, fam := range fams {
-            if fam.Name=="gauge-nan-inf-add" { v = fam.Metrics[0].Value }
+            if fam.Name=="gauge_nan_inf_add" { v = fam.Metrics[0].Value }
         }
         if v!=5 { panic(fmt.Sprintf("Add NaN/Inf should be ignored, expected 5 got %f", v)) }
         fmt.Println("OK")
@@ -4928,7 +4938,7 @@ def test_metrics_counter_race_add_and_collect():
     )
     func main(){
         p := observability.NewMetricsProvider()
-        c := p.Counter("race-add-collect")
+        c := p.Counter("race_add_collect")
         var wg sync.WaitGroup
         for i:=0; i<10; i++ {
             wg.Add(1)
@@ -5025,8 +5035,8 @@ def test_logger_service_cannot_be_overridden_by_with():
     func main(){
         buf := &bytes.Buffer{}
         logger := observability.NewLogger("real-service", observability.WithOutput(buf))
-        logger = logger.With("service", "fake-service")
-        logger.Info(context.Background(), "msg")
+        child := logger.With(observability.Field{Key:"service", Value:"fake-service"})
+        child.Info(context.Background(), "msg")
         var obj map[string]interface{}
         if err:= json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj); err!=nil { panic("not json") }
         if obj["service"]!="real-service" { panic(fmt.Sprintf("service field should always be real-service, got %v", obj["service"])) }
@@ -5050,8 +5060,8 @@ def test_logger_fields_json_types():
     func main(){
         buf := &bytes.Buffer{}
         logger := observability.NewLogger("svc", observability.WithOutput(buf))
-        logger = logger.With("int", 42, "bool", true, "float", 3.14)
-        logger.Info(context.Background(), "typed")
+        child := logger.With(observability.Field{Key:"int", Value:42}, observability.Field{Key:"bool", Value:true}, observability.Field{Key:"float", Value:3.14})
+        child.Info(context.Background(), "typed")
         var obj map[string]interface{}
         if err:= json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &obj); err!=nil { panic(err.Error()) }
         if obj["int"]!=float64(42) { panic(fmt.Sprintf("int field wrong: %v", obj["int"])) }
@@ -5081,7 +5091,7 @@ def test_logger_concurrent_with_and_log():
             wg.Add(1)
             go func(idx int){
                 defer wg.Done()
-                l := base.With("idx", idx)
+                l := base.With(observability.Field{Key:"idx", Value: idx})
                 l.Info(context.Background(), "concurrent")
             }(i)
         }
