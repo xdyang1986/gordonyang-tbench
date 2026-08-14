@@ -65,7 +65,21 @@ Same as Step 1 extreme (polygon with holes, circles, time windows, antimeridian 
 
 ### E. History and Distance
 
-Same as Step 1, but total_distance must not be increased on outlier, low_accuracy, stale, or out_of_zone rejections.
+Same as Step 1, but total_distance must not be increased on outlier, low_accuracy, stale, or out_of_zone rejections. This applies to both the direct `update` path and the `batch` path. History must not include rejected attempts either.
+
+### F. Batch – Enhanced for Step 2 (explicit)
+
+Batch inherits Step 1 atomicity (all-or-nothing, zones check before stale, applied excludes skipped). In Step 2, batch must also handle the new filters with same semantics as `update`:
+
+- Parse all lines first. Validate vehicle_id, lat, lng, timestamp, accuracy, speed, heading same as update.
+- Low accuracy filter runs **before** zones (same order as update pipeline: low_accuracy → zones → stale → outlier). If `accuracy > 100`, that operation is treated as rejected: skip location update, do not count as applied, do not add distance, do not include in history, `outlier_count` unchanged, batch continues.
+- Zones check: if default `/app/data/zones.json` exists, check each update op per its own timestamp (same as Step1 batch). If any would be out_of_zone, fail whole batch exit 2 with no DB change, even if that op would be stale/low_accuracy/outlier (zones check still applies before stale, per L92, and low_accuracy is before zones per pipeline A).
+- Stale check: if op ts <= stored timestamp, skip without counting as applied, no distance/history change.
+- Outlier detection: six conditions same as update. If outlier, increment `outlier_count` persistently for that vehicle, skip location update, do not count as applied, do not add distance/history, batch continues.
+- Delete ops: 2 fields exactly, remove if exists and count as applied.
+- After validation, apply sequentially to simulated state with single atomic write, print `batch_ok <applied>` where applied excludes stale, low_accuracy, and outlier rejections.
+
+Spec explicitly states: distance not added on outlier/low_accuracy/stale/out_of_zone for both direct update and batch paths.
 
 ## Roads – Polyline plus Heading-Aware Snapping (No Fallback is Load-Bearing)
 

@@ -66,10 +66,19 @@ Rules:
 - `active_from` and `active_to` are optional and must be >=0. If both are present, `from` must be <= `to`, otherwise the file is invalid (exit 2).
 - Point-in-polygon must use even-odd rule with x=lng and y=lat. You must handle antimeridian crossing by unwrapping longitudes to a continuous range, so a rectangle from 179 to -179 is 2 degrees wide, not 358 degrees. A point on an edge or vertex is considered inside. Circle check uses Haversine distance: inside if distance <= radius (exact radius counts as inside). Holes mean a point inside the outer polygon but inside a hole is considered outside.
 
-Zone filtering:
-- For `update`: if `--zones <path>` is provided, use it. Otherwise, if the default file `/app/data/zones.json` exists, use it. After filtering active zones at the update timestamp (active if from is absent or ts >= from, and to is absent or ts <= to), if the active list is non-empty, the location must be inside at least one active zone. If not, output must contain `out_of_zone` (stdout preferred, stderr also accepted) and exit 3.
-- For `near` and `list`: `--zones` is optional. Active zones are filtered by `--now` if provided, otherwise all zones are considered.
-- For `geofence-check`: see command description.
+Zone activation and filtering (this is the main seam with evidence):
+
+- A zone is active at timestamp `ts` if `(active_from absent OR ts >= active_from) AND (active_to absent OR ts <= active_to)`. Bounds are inclusive: `ts == active_from` and `ts == active_to` are both active. A zone with only `active_from` is active from that time onward; a zone with only `active_to` is active up to that time.
+
+- For `update`: if `--zones <path>` is provided, use it. Otherwise, if the default file `/app/data/zones.json` exists, use it. Filter active zones by the **update's own timestamp**, then if active list non-empty, location must be inside at least one active zone else `out_of_zone` exit 3.
+
+- For `list`, `near`, and `geofence-check`: `--zones` optional. Active zones are filtered by `--now` if provided, otherwise all zones are considered (no time filtering). This creates intentional divergence: `update` uses its own timestamp, while `list`/`near`/`geofence-check` use `--now`. Example: vehicle updated at ts=500 when zone active_from=1000 (so no active zones at update time, update succeeds even outside zone), then `list --zones <file> --now 1500` should return [] if vehicle is outside, because at now=1500 the zone is active and filters. Conversely, vehicle updated at ts=1500 inside zone, then `list --now 500` should include it because no active zones at now=500.
+
+- For `geofence-check`: same --now filtering as list/near, inclusive bounds.
+
+Zone filtering summary:
+- `update` → filter by update timestamp
+- `list`/`near`/`geofence-check` → filter by `--now` if given, else no time filter
 
 ## Roads and Snapping
 

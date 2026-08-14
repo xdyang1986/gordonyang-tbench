@@ -1741,6 +1741,316 @@ def test_zones_time_boundary_inclusive(binary):
     assert json.loads(p3.stdout.strip())["inside"] is False
 
 
+def test_zones_only_from_and_only_to_boundary(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # zone with only active_from
+    zones_from_path = os.path.join(tmp, "zones_from.json")
+    zones_from = [
+        {
+            "id": "only_from",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 1000,
+        }
+    ]
+    with open(zones_from_path, "w") as f:
+        json.dump(zones_from, f)
+    # at exactly from should be active
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5", "5", "1000", "--zones", zones_from_path],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "20", "20", "1000", "--zones", zones_from_path],
+        expect_code=3,
+    )
+    # before from should be inactive -> no zone check
+    run_cli(
+        binary,
+        db,
+        ["update", "veh3", "20", "20", "999", "--zones", zones_from_path],
+        expect_code=0,
+    )
+    # geofence-check only_from
+    p = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_from_path, "--now", "1000"],
+        expect_code=0,
+    )
+    assert json.loads(p.stdout.strip())["inside"] is True
+    p2 = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_from_path, "--now", "999"],
+        expect_code=0,
+    )
+    assert json.loads(p2.stdout.strip())["inside"] is False
+
+    # zone with only active_to
+    zones_to_path = os.path.join(tmp, "zones_to.json")
+    zones_to = [
+        {
+            "id": "only_to",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_to": 2000,
+        }
+    ]
+    with open(zones_to_path, "w") as f:
+        json.dump(zones_to, f)
+    # at exactly to should be active
+    run_cli(
+        binary,
+        db,
+        ["update", "veh4", "5", "5", "2000", "--zones", zones_to_path],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh5", "20", "20", "2000", "--zones", zones_to_path],
+        expect_code=3,
+    )
+    # after to should be inactive
+    run_cli(
+        binary,
+        db,
+        ["update", "veh6", "20", "20", "2001", "--zones", zones_to_path],
+        expect_code=0,
+    )
+    p3 = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_to_path, "--now", "2000"],
+        expect_code=0,
+    )
+    assert json.loads(p3.stdout.strip())["inside"] is True
+    p4 = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_to_path, "--now", "2001"],
+        expect_code=0,
+    )
+    assert json.loads(p4.stdout.strip())["inside"] is False
+
+
+def test_zones_time_boundary_same_zone_both_inclusive(binary):
+    # Single zone with both from and to, test ts exactly equal to from and to in same test flow
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "timed",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 1000,
+            "active_to": 2000,
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    # vehicle that will be tested at both boundaries sequentially
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5", "5", "1000", "--zones", zones_path],
+        expect_code=0,
+    )
+    # same vehicle at exactly to should still be inside (update ts increasing, but still inside zone)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5", "5", "2000", "--zones", zones_path],
+        expect_code=0,
+    )
+    # outside at exactly boundaries should fail both
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "20", "20", "1000", "--zones", zones_path],
+        expect_code=3,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "20", "20", "2000", "--zones", zones_path],
+        expect_code=3,
+    )
+    # geofence-check both boundaries same zone
+    p_from = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_path, "--now", "1000"],
+        expect_code=0,
+    )
+    assert json.loads(p_from.stdout.strip())["inside"] is True
+    assert json.loads(p_from.stdout.strip())["zone_id"] == "timed"
+    p_to = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_path, "--now", "2000"],
+        expect_code=0,
+    )
+    assert json.loads(p_to.stdout.strip())["inside"] is True
+
+
+def test_zones_now_vs_update_timestamp_divergence(binary):
+    # Divergence: update filters by its own ts, list/near filters by --now
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "timed",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 1000,
+            "active_to": 2000,
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    # Case 1: update at ts=500 when zone inactive -> succeeds even outside zone
+    # This is the divergence: update uses its own ts (500, no active zones), so outside allowed
+    run_cli(
+        binary,
+        db,
+        ["update", "veh_outside", "20", "20", "500", "--zones", zones_path],
+        expect_code=0,
+    )
+    # list with --now=1500 (active) should filter out because vehicle outside active zone at now=1500
+    p = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "1500"], expect_code=0
+    )
+    ids = [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    assert "veh_outside" not in ids, (
+        "list with --now inside active window should exclude vehicle outside zone even though update succeeded when inactive"
+    )
+    # list with --now=500 (inactive) per current spec returns [] when no active zones (empty filtered set means no vehicle passes)
+    p2 = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "500"], expect_code=0
+    )
+    ids2 = [x["vehicle_id"] for x in json.loads(p2.stdout.strip())]
+    # When no zones active at now, result is [] (spec: empty active set → no match)
+    assert ids2 == [], (
+        f"list with --now inactive and zones file non-empty returns [] per spec, got {ids2}"
+    )
+    # list WITHOUT --now uses all zones (no time filtering), so outside should be excluded
+    p2_all = run_cli(binary, db, ["list", "--zones", zones_path], expect_code=0)
+    ids2_all = [x["vehicle_id"] for x in json.loads(p2_all.stdout.strip())]
+    assert "veh_outside" not in ids2_all, (
+        "list without --now uses all zones (no time filter), so outside excluded"
+    )
+
+    # Case 2: vehicle inside zone updated at ts=1500 (active, inside -> ok)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh_inside", "5", "5", "1500", "--zones", zones_path],
+        expect_code=0,
+    )
+    # list with --now=1500 should include only inside
+    p4 = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "1500"], expect_code=0
+    )
+    ids4 = [x["vehicle_id"] for x in json.loads(p4.stdout.strip())]
+    assert "veh_inside" in ids4 and "veh_outside" not in ids4
+    # list with --now=500 returns [] per spec (no active zones)
+    p3 = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "500"], expect_code=0
+    )
+    assert json.loads(p3.stdout.strip()) == []
+
+    # Same divergence for near: update succeeded outside when inactive, but near with --now active excludes
+    p_near_active = run_cli(
+        binary,
+        db,
+        [
+            "near",
+            "--lat",
+            "5",
+            "--lng",
+            "5",
+            "--radius",
+            "50000",
+            "--zones",
+            zones_path,
+            "--now",
+            "1500",
+        ],
+        expect_code=0,
+    )
+    near_ids_active = [
+        x["vehicle_id"] for x in json.loads(p_near_active.stdout.strip())
+    ]
+    assert "veh_outside" not in near_ids_active
+    assert "veh_inside" in near_ids_active
+    # near with --now inactive returns [] per same logic
+    p_near_inactive = run_cli(
+        binary,
+        db,
+        [
+            "near",
+            "--lat",
+            "5",
+            "--lng",
+            "5",
+            "--radius",
+            "50000",
+            "--zones",
+            zones_path,
+            "--now",
+            "500",
+        ],
+        expect_code=0,
+    )
+    assert json.loads(p_near_inactive.stdout.strip()) == []
+
+    # geofence-check divergence also uses --now
+    p_gc_500 = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_path, "--now", "500"],
+        expect_code=0,
+    )
+    assert json.loads(p_gc_500.stdout.strip())["inside"] is False
+    p_gc_1500 = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_path, "--now", "1500"],
+        expect_code=0,
+    )
+    assert json.loads(p_gc_1500.stdout.strip())["inside"] is True
+    # geofence-check without --now uses all zones
+    p_gc_all = run_cli(
+        binary, db, ["geofence-check", "20", "20", "--zones", zones_path], expect_code=0
+    )
+    assert json.loads(p_gc_all.stdout.strip())["inside"] is False
+
+
 def test_list_pagination_offset_limit_exact_order(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
