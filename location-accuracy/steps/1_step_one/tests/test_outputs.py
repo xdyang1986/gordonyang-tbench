@@ -1361,3 +1361,92 @@ def test_list_offset_then_limit_order(binary):
     arr = json.loads(p.stdout.strip())
     assert [x["vehicle_id"] for x in arr] == ["veh_1", "veh_2"]
 
+
+def test_batch_zones_check_before_stale(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones = [
+        {
+            "id": "z1",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+        }
+    ]
+    default_path = "/app/data/zones.json"
+    backup = None
+    if os.path.exists(default_path):
+        with open(default_path) as f:
+            backup = f.read()
+    os.makedirs(os.path.dirname(default_path), exist_ok=True)
+    with open(default_path, "w") as f:
+        json.dump(zones, f)
+    try:
+        run_cli(binary, db, ["update", "veh1", "5", "5", "2000"], expect_code=0)
+        batch_input = "update\tveh1\t20\t20\t1000\n"
+        run_cli(binary, db, ["batch"], input_data=batch_input, expect_code=2)
+        p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+        data = json.loads(p.stdout.strip())
+        assert data["lat"] == 5 and data["lng"] == 5
+    finally:
+        if backup is not None:
+            with open(default_path, "w") as f:
+                f.write(backup)
+        else:
+            try:
+                os.remove(default_path)
+            except:
+                pass
+
+
+def test_geofence_check_file_order_first_match(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {"id": "first", "polygon": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}, {"lat": 10, "lng": 10}, {"lat": 10, "lng": 0}]},
+        {"id": "second", "polygon": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}, {"lat": 10, "lng": 10}, {"lat": 10, "lng": 0}]},
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    p = run_cli(binary, db, ["geofence-check", "5", "5", "--zones", zones_path], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert data["inside"] is True and data["zone_id"] == "first"
+
+
+def test_roads_snapping_interior_not_endpoint(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh_on", "0.0001", "0.5", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh_off", "10", "10", "1000"], expect_code=0)
+    p = run_cli(binary, db, ["list", "--roads", roads_path], expect_code=0)
+    ids = [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    assert "veh_on" in ids, "interior snapping failed – likely checking only endpoints"
+    assert "veh_off" not in ids
+    p2 = run_cli(binary, db, ["near", "--lat", "0", "--lng", "0.5", "--radius", "100", "--roads", roads_path], expect_code=0)
+    ids2 = [x["vehicle_id"] for x in json.loads(p2.stdout.strip())]
+    assert "veh_on" in ids2
+
+
+def test_total_distance_interleaved_stale_no_increment(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "0.001", "0", "1500"], expect_code=0)
+    p_stale = run_cli(binary, db, ["update", "veh1", "0", "0", "1200"], expect_code=0)
+    assert "stale" in p_stale.stdout.lower()
+    run_cli(binary, db, ["update", "veh1", "0.002", "0", "3000"], expect_code=0)
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    d1 = haversine(0, 0, 0.001, 0)
+    d2 = haversine(0.001, 0, 0.002, 0)
+    expected = d1 + d2
+    assert abs(data["total_distance_m"] - expected) < 1.0
+
