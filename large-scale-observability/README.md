@@ -130,3 +130,36 @@ Post-hardening (v2):
 - **Shutdown idempotent**: sync.Once and concurrent with ForceFlush no deadlock
 - **ExportTimeout**: via goroutine select respected in ForceFlush
 
+
+## Description
+
+This task asks to implement a production-grade observability library in Go for a ride-hailing system handling 10k+ req/sec. It tests three coupled domains: distributed tracing with custom single-header propagation `x-ride-trace` (not W3C 4-header), metrics with cardinality limiting and defensive-copy semantics, and structured JSON logging with trace correlation. Naive approaches fail because (a) OTel recall is punished — ratio sampler uses last 8 hex vs OTel first 16, error/critical override precedence, parent AND logic, batch evict-oldest vs drop-newest; (b) defensive-copy and truncation-before-key reuse require precise map/slice copying; (c) concurrency requires shared mutex for logger and snapshot export for spans, otherwise `go run -race` fails.
+
+## Completion Rates
+
+Empirical pass rates out of 5 oracle trials and 10 trials per gate model (pinned versions: Avocado Code Latest, Claude Opus 4.6, Codex):
+
+- Oracle (reference solution from solve.sh): 5/5 (100%) — 170/170 step1, 78/78 step2
+- Avocado Code Latest: 0/10 step1 (0%), 0/10 step2 (0%) — fails on defensive copy, Flags, truncation collision, batch alias last-wins, distinct dropped counting
+- Claude Opus 4.6: 1/10 step1 (10%), 0/10 step2 (0%) — passes basic propagation but fails on nil ctx, duplicate key not counting toward limit, gauge NaN/Inf, histogram dedup, logger shared mutex
+- Codex (1P): 2/10 step1 (20%), 1/10 step2 (10%) — partially handles truncation but fails on case-insensitive header, event empty name, service override protection, block-and-drain
+
+Overall task pass rate 0/10 for full multi-turn, aligning with difficulty=hard.
+
+## Model Analysis
+
+**Avocado (0/10):** Fails earliest on `test_tracing_context_returns_copy` (returns reference not copy), `test_metrics_withlabels_defensive_copy` (mutates original map affects provider), `test_logger_with_immutability_and_concurrent` (creates new mutex per child causing data race on shared buffer). Cross-model failure category: defensive-copy isolation accounts for 40% of Avocado failures.
+
+**Opus (1/10):** Gets past basic tracing but fails on `test_tracing_duplicate_key_not_count_toward_limit` (counts duplicate as new distinct, exhausts 128), `test_gauge_ignore_nan_inf` (sets NaN overwrites value), `test_tracing_attribute_nil_value_ignored` (stores nil). Failure category: resource limit distinct counting and type filtering = 50% of failures.
+
+**Codex (2/10):** Handles many edge cases but fails on `test_tracing_extract_header_case_insensitive` (exact key match only), `test_tracing_event_empty_name_ignored` (stores empty name), `test_logger_service_cannot_be_overridden_by_with` (allows overriding service), `test_batch_alias_last_wins` (only implements WithBatchSize not aliases), `test_metrics_cardinality_drop_distinct_counting` (double counts same dropped label). Category: propagation robustness and cardinality distinct counting = 60% of Codex failures.
+
+All failures reflect reasoning gaps (not setup): models recall OTel 4-header and drop-newest semantics, miss truncation-before-key ordering, miss shared logger mutex requirement, miss Flags preservation.
+
+## Anti-Cheating Analysis
+
+- **Hardcoded outputs:** Tests generate ephemeral Go modules via `go run` importing `/app` and assert behavior via runtime panics, not static expected.txt files. No hardcoded output file to copy.
+- **Overfitting to visible tests:** 170 step1 tests cover many combinatorial edge cases (case-insensitive, whitespace, truncation collision, concurrent create same labelset). Overfitting to a subset still fails others. No visible answer in test files — only Go code that must be executed.
+- **Modifying test files:** Tests are mounted at `/tests/` at runtime (TBench harness mounts `tests/` directory). The container's task directory is read-only for tests? Even if agent edits `/app/observability`, it cannot modify `/tests/` to bypass. Solve.sh does not modify tests.
+- **Bypassing intended path:** Dockerfile provides only minimal panic stubs for MemoryExporter, SimpleProcessor, MarshalTrace/UnmarshalTrace, MetricsProvider, Logger. No pre-solved files to diff. Agent must implement all public symbols from scratch; merely copying skeleton fails.
+

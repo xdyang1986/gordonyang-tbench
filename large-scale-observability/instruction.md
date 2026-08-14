@@ -23,3 +23,16 @@ Your code lives in `/app` (module `ride-observability`). Implement in `/app/obse
 - `go vet ./...` and `go build ./...` must pass
 
 Proceed to Step 1 — follow `steps/1_step_one/instruction.md` first, then Step 2 inherits your Step1 files.
+
+## References and Prior Art (GitHub Links — for novelty context)
+
+This task's prior version was a near-verbatim clone of OpenTelemetry Go SDK, which models could solve by recall. The hardened version intentionally inverts semantics to punish recall:
+
+- OpenTelemetry Go SDK (original clone source): https://github.com/open-telemetry/opentelemetry-go
+- OpenTelemetry Go Contrib (propagation helpers): https://github.com/open-telemetry/opentelemetry-go-contrib
+- W3C Trace Context spec (contrast with our custom single-header x-ride-trace): https://github.com/w3c/trace-context
+- Go standard library context (used for ContextWithTrace): https://github.com/golang/go/tree/master/src/context
+- Prometheus client model (metrics naming inspiration, but our regex is stricter): https://github.com/prometheus/client_model
+
+Our custom propagation `x-ride-trace: traceID:spanID:parentID:sampled` intentionally differs from W3C `traceparent: 00-traceID-spanID-flags` and from OTel's four-header legacy. RatioSampler uses last 8 hex chars uint32/2^32 vs OTel's first 16 hex uint64/2^64. See `steps/1_step_one/instruction.md` for exact spec.
+
