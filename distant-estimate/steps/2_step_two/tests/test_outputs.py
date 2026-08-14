@@ -3402,3 +3402,45 @@ def test_traffic_delay_accumulates_per_edge():
         os.unlink(gp)
         os.unlink(tp)
 
+
+
+def test_traffic_batch_same_source_amortized():
+    # Step2 has no perf pressure, but runs same batch path as step1 with traffic layered (strictly more expensive)
+    # Same-source batch can be amortized: one Dijkstra per distinct source answers all
+    # Per-request implementation costs ~200x for same source
+    # This targets untouched surface in step2, aims to pull opus off 9/10
+    nodes = [f"N{i}" for i in range(500)]
+    edges = [{"from": f"N{i}", "to": f"N{i+1}", "distance": 1} for i in range(499)]
+    edges += [{"from": f"N{i}", "to": f"N{i+10}", "distance": 5} for i in range(0, 490, 10)]
+    graph = {"nodes": nodes, "edges": edges}
+    traffic = {"traffic": [{"from": f"N{i}", "to": f"N{i+1}", "factor": 1.5, "delay": 1} for i in range(499)]}
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    # 200 requests all from N0 (same source)
+    same_reqs = [{"source": "N0", "destination": f"N{i}"} for i in range(1, 201)]
+    # 200 requests with 200 distinct sources
+    multi_reqs = [{"source": f"N{i}", "destination": f"N{(i*7) % 500}"} for i in range(200)]
+    rp_same = tmp(json.dumps(same_reqs))
+    rp_multi = tmp(json.dumps(multi_reqs))
+    try:
+        start = time.time()
+        proc_same = run(["--graph", gp, "--requests", rp_same, "--traffic", tp])
+        t_same = time.time() - start
+        assert proc_same.returncode == 0, proc_same.stderr.decode()[:500]
+
+        start = time.time()
+        proc_multi = run(["--graph", gp, "--requests", rp_multi, "--traffic", tp])
+        t_multi = time.time() - start
+        assert proc_multi.returncode == 0, proc_multi.stderr.decode()[:500]
+
+        # Same source should be significantly faster than multi-source if amortized
+        # Host-independent relative bound: same-source <=35% of multi-source
+        assert t_same <= 0.35 * t_multi, (
+            f"same-source batch should amortize: t_same={t_same:.3f}s vs t_multi={t_multi:.3f}s, "
+            f"expected t_same <=0.35*t_multi. Per-request implementation costs ~200x."
+        )
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rp_same)
+        os.unlink(rp_multi)

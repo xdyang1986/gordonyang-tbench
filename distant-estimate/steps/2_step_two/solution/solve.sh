@@ -28,15 +28,6 @@ type Edge struct {
     To       string  `json:"to"`
     Distance float64 `json:"distance"`
 }
-type TrafficEntryRaw struct {
-    From   string   `json:"from"`
-    To     string   `json:"to"`
-    Factor *float64 `json:"factor"`
-    Delay  *float64 `json:"delay"`
-}
-type TrafficFileObj struct {
-    Traffic []TrafficEntryRaw `json:"traffic"`
-}
 type SingleOut struct {
     Path     []string `json:"path"`
     Distance float64  `json:"distance"`
@@ -60,6 +51,15 @@ type BatchOutTraffic struct {
     Distance          float64  `json:"distance"`
     EffectiveDistance float64  `json:"effective_distance"`
     TrafficDelay      float64  `json:"traffic_delay"`
+}
+type TrafficEntryRaw struct {
+    From   string   `json:"from"`
+    To     string   `json:"to"`
+    Factor *float64 `json:"factor"`
+    Delay  *float64 `json:"delay"`
+}
+type TrafficFileObj struct {
+    Traffic []TrafficEntryRaw `json:"traffic"`
 }
 
 func printHelp() {
@@ -137,7 +137,6 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if e.From==e.To { return nil,nil,false }
         if !nodeSet[e.From]||!nodeSet[e.To] { return nil,nil,false }
         if e.Distance<=0 || math.IsNaN(e.Distance) || math.IsInf(e.Distance,0) { return nil,nil,false }
-        // UNDIRECTED balanced
         if existing, ok := adj[e.From][e.To]; ok {
             if e.Distance < existing {
                 adj[e.From][e.To]=e.Distance
@@ -167,7 +166,6 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
         if !ok {
             return nil,false
         }
-        // traffic key must be array, null is invalid (not empty)
         trimmed := strings.TrimSpace(string(rawTraffic))
         if trimmed == "null" {
             return nil,false
@@ -175,13 +173,7 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
         var obj TrafficFileObj
         if err := json.Unmarshal(data, &obj); err != nil { return nil,false }
         rawEntries = obj.Traffic
-        // distinguish null vs empty array: if raw JSON was null already handled, but if obj.Traffic nil and raw was null, invalid already
-        // if traffic is present but null, obj.Traffic will be nil and raw was null, already rejected
-        // empty array [] unmarshals to empty non-nil slice or nil depending, treat nil as empty only when raw trimmed != "null"
         if rawEntries == nil {
-            // check if raw was "null" already rejected, otherwise empty array [] is valid as empty
-            // json.Unmarshal [] into nil slice yields nil, but [] is valid empty
-            // So allow nil here only if original raw was array, which we know isn't null
             rawEntries = []TrafficEntryRaw{}
         }
     } else {
@@ -205,7 +197,7 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
         if _, ok := adj[te.From][te.To]; !ok { return nil,false }
         a,b := te.From, te.To
         if a > b { a,b = b,a }
-        key := a+"|"+b // UNDIRECTED key for balanced difficulty
+        key := a+"|"+b
         factorMap[key]=TrafficParsed{Factor:*te.Factor, Delay:delay}
     }
     return factorMap, true
@@ -275,6 +267,60 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
     return bestPath[dest], bestRaw[dest], bestEff[dest], true
 }
 
+type allRes struct {
+    bestRaw  map[string]float64
+    bestEff  map[string]float64
+    bestPath map[string][]string
+    has      map[string]bool
+}
+
+func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]TrafficParsed, source string, nodeSet map[string]bool) allRes {
+    const eps=1e-9
+    bestRaw := make(map[string]float64)
+    bestEff := make(map[string]float64)
+    bestPath := make(map[string][]string)
+    has := make(map[string]bool)
+    for n:=range nodeSet { bestRaw[n]=math.Inf(1); bestEff[n]=math.Inf(1) }
+    if !nodeSet[source] {
+        return allRes{bestRaw, bestEff, bestPath, has}
+    }
+    bestRaw[source]=0; bestEff[source]=0; bestPath[source]=[]string{source}; has[source]=true
+    pq:=&PriorityQueue{}
+    heap.Init(pq)
+    heap.Push(pq, &Item{node:source, eff:0, raw:0, path:[]string{source}})
+    for pq.Len()>0 {
+        it:=heap.Pop(pq).(*Item)
+        u:=it.node
+        if it.eff > bestEff[u]+eps { continue }
+        if math.Abs(it.eff-bestEff[u])<=eps && comparePaths(it.path, bestPath[u])>0 { continue }
+        neigh:=make([]string,0,len(adj[u]))
+        for v:=range adj[u] { neigh=append(neigh,v) }
+        sort.Strings(neigh)
+        for _, v:=range neigh {
+            rawEdge := adj[u][v]
+            _, effEdge := getEffective(u,v,rawEdge,factorMap)
+            newEff := it.eff+effEdge
+            newRaw := it.raw+rawEdge
+            newPath := append(append([]string{}, it.path...), v)
+            if newEff+eps < bestEff[v] {
+                bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath; has[v]=true
+                heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
+            } else if math.Abs(newEff-bestEff[v])<=eps {
+                if newRaw+eps < bestRaw[v] {
+                    bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
+                    heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
+                } else if math.Abs(newRaw-bestRaw[v])<=eps {
+                    if comparePaths(newPath, bestPath[v])<0 {
+                        bestEff[v]=newEff; bestRaw[v]=newRaw; bestPath[v]=newPath
+                        heap.Push(pq, &Item{node:v, eff:newEff, raw:newRaw, path:newPath})
+                    }
+                }
+            }
+        }
+    }
+    return allRes{bestRaw, bestEff, bestPath, has}
+}
+
 func main() {
     if len(os.Args)==1 { printHelp(); os.Exit(0) }
     if len(os.Args)>=2 && os.Args[1]=="help" { printHelp(); os.Exit(0) }
@@ -329,6 +375,7 @@ func main() {
         }
         if !valid { os.Exit(2) }
         anyNoRoute:=false
+        cache := make(map[string]allRes)
         for _, p:=range pairs {
             if strings.TrimSpace(p.src)==""||strings.TrimSpace(p.dst)=="" {
                 anyNoRoute=true
@@ -343,8 +390,25 @@ func main() {
                 }
                 continue
             }
-            path,rawD,effD,found:=dijkstra(adj,factorMap,p.src,p.dst,nodeSet)
-            if !found {
+            if !nodeSet[p.src] || !nodeSet[p.dst] {
+                anyNoRoute=true
+                if usingTraffic {
+                    out:=BatchOutTraffic{Source:p.src, Destination:p.dst, Path:[]string{}, Distance:-1, EffectiveDistance:-1, TrafficDelay:-1}
+                    b,_:=json.Marshal(out)
+                    fmt.Println(string(b))
+                } else {
+                    out:=BatchOut{Source:p.src, Destination:p.dst, Path:[]string{}, Distance:-1}
+                    b,_:=json.Marshal(out)
+                    fmt.Println(string(b))
+                }
+                continue
+            }
+            ar, ok := cache[p.src]
+            if !ok {
+                ar = dijkstraAll(adj, factorMap, p.src, nodeSet)
+                cache[p.src]=ar
+            }
+            if !ar.has[p.dst] {
                 anyNoRoute=true
                 if usingTraffic {
                     out:=BatchOutTraffic{Source:p.src, Destination:p.dst, Path:[]string{}, Distance:-1, EffectiveDistance:-1, TrafficDelay:-1}
@@ -357,11 +421,11 @@ func main() {
                 }
             } else {
                 if usingTraffic {
-                    out:=BatchOutTraffic{Source:p.src, Destination:p.dst, Path:path, Distance:rawD, EffectiveDistance:effD, TrafficDelay:effD-rawD}
+                    out:=BatchOutTraffic{Source:p.src, Destination:p.dst, Path:ar.bestPath[p.dst], Distance:ar.bestRaw[p.dst], EffectiveDistance:ar.bestEff[p.dst], TrafficDelay:ar.bestEff[p.dst]-ar.bestRaw[p.dst]}
                     b,_:=json.Marshal(out)
                     fmt.Println(string(b))
                 } else {
-                    out:=BatchOut{Source:p.src, Destination:p.dst, Path:path, Distance:rawD}
+                    out:=BatchOut{Source:p.src, Destination:p.dst, Path:ar.bestPath[p.dst], Distance:ar.bestRaw[p.dst]}
                     b,_:=json.Marshal(out)
                     fmt.Println(string(b))
                 }
@@ -398,4 +462,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step2 undirected balanced factor+delay + raw tie"
+cd /app && go build -o router . && echo "Build ok step2 amortized same-source"
