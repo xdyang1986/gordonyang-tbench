@@ -1,19 +1,32 @@
-# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (258 tests)
+# Turn 1: Computer Cluster Management System Core (Go) – Extra Hard (347 tests)
 
-We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. This turn is extra hard: 258 tests (was 30 too easy, 49/66/80 still easy per feedback), now 108 with 310 new discriminators over original 30. Features: concurrent same ID race add-node same ID 20 ->1, add-job same ID 20 ->1, add-node 20 sorted, same node 20 preserve all 20, diff nodes 20, deallocate 20 -> used 0, list while allocating 10x30 valid JSON, 1000 nodes <1.5s, checksum strict MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c, special chars <>& no escape, Unicode emoji, idempotent no-op preserved not upsert, jobs [] not null (nil-slice pitfall), empty/whitespace empty store vs corrupt null/[]/invalid JSON -> backup .corrupt.<nanosec> integer suffix regex, missing/bad checksum corruption, atomic CreateTemp+Rename + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp/global.lock, pagination offset then limit order, first-fit not best-fit, lock retry 100ms, gpu insufficient, etc.
+We need a production-grade computer cluster management system in Go that manages compute nodes and jobs with resource allocation. Build core functionality with durable persistence and integrity. The turn is extra hard with many real discriminators.
 
-Failing observations (naive misses enforced 96):
-- Empty "" whitespace "   \n\t" -> empty store [] not corrupt 4; files "null" "[]" -> corrupt backup integer suffix \.corrupt\.\d+$ warning list [] after. Missing checksum / bad checksum / data missing / data not object -> corrupt backup
-- Jobs [] not null: nil slice marshals null -> bug, after add-node/deallocate/remove-job/remove-all must be [] not null raw '"jobs":[]', no \u003c raw "<" and emoji preserved
-- Idempotent no-op: re-add node/job diff resources preserves old and allocation running not upsert; same ID concurrent 20 threads -> 1 node/job not 20 sorted lock cleaned checksum valid
-- Concurrent add-node 20 diff IDs preserve all 20 sorted, add-job same ID race, same node 20 alloc preserve all 20 used cpu 20 correct no overcommit valid JSON during via O_EXCL, diff nodes 20 status allocated 20, deallocate 20 -> used 0 jobs [], list while allocating 10x30 valid JSON no crash, remove-node while allocating fails/ok not crash, list 100 times 10 threads no crash
-- Pagination offset then limit: offset1 limit2 -> 1,2 not 0,1; invalid negative abc -> exit2; limit0 vs omit both all, offset beyond [] both nodes/jobs; list nodes/jobs sorted asc
-- First-fit not best-fit: sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins Step1, Step2 best-fit nodeB wins), fragmented A free2 B free1 C free4 job2 CPU2 -> first-fit picks A not C
-- Timestamp integer required: cpu/mem/gpu must be int not float "4.0" -> exit2; empty ID with spaces "   " -> exit2
-- Status total/used sum, used/free correct after allocate/deallocate, remove-job deallocates first preserves node free=total, remove false not exist, deallocate false when not allocated vs exit2 nonexist, allocate diff node exit2 same node idempotent no duplicate jobs sorted asc, node jobs sorted after many, insufficient memory/gpu/cpu all insufficient
-- File lock cleaned after success and after failure insufficient, no .lock leftover, no .tmp leftover, checksum valid after each op contains CreateTemp Rename SetEscapeHTML stdlib only no dotted imports, lock retry: manually create lock file then thread removes after 100ms command should retry and succeed
-- Large scale 800 nodes list <1.5s O(n log n) limit100 offset100 <1.5s 500 jobs sorted, large ID 10KB dash underscore dot colon valid, special chars <>& job and node, unicode job, etc.
-- Schedule fragmented, empty jobs after remove all 5 jobs -> [] not null, status pending vs allocated, zero gpu valid neg invalid, etc.
+This task now has 347 tests. It covers concurrent races, atomic persistence, checksum integrity, idempotent no-ops, and pagination correctness.
+
+Core requirements: first-fit scheduling sorted by ID, atomic writes via CreateTemp same dir + Rename, file lock O_CREATE|O_EXCL retry 5ms 2000 tries with cleanup, wrapper checksum MD5 canonical JSON, empty file handling, corruption handling with .corrupt.<nanosec> backup integer suffix, jobs field [] not null, special chars <>& raw, Unicode emoji, large IDs 10KB.
+
+Failing observations (naive misses):
+- Empty "" and whitespace "   \n\t" must be empty store [] not corrupt (exit4). Files "null" and "[]" must be treated as corrupt with backup and warning.
+- Jobs field empty MUST be [] not null: Go nil slice marshals as null, bug after add-node, deallocate, remove-job.
+- Idempotent no-op: re-adding existing node/job with different resources must preserve old resources and allocation, not upsert.
+- Concurrent: add-node 20, same node 20 alloc preserve all 20, diff nodes 20, deallocate 20, list while allocating, etc.
+- Pagination offset then limit order: offset 1 limit 2 → nodes 1,2 not 0,1. Invalid limit/offset → exit2.
+- First-fit vs best-fit: sorted IDs asc first that fits wins even if wasteful.
+- Invalid resources float string "4.0" → exit2, empty ID with spaces "   " → exit2.
+- Status total/used sum and used/free correct.
+- File lock cleaned after success and failure, no .lock or .tmp leftover, checksum valid after each op, raw file contains "<" for special chars and raw UTF-8 emoji.
+- Large scale 800 nodes list <1.5s, large IDs 10KB.
+
+Canonicalization (MUST - spec bug fixed):
+- File format `{"data":{"nodes":{...},"jobs":{...}}, "checksum": md5 canonical}` where canonical = json.dumps(data, sort_keys=True, separators=(',',':'), ensure_ascii=False). Raw UTF-8 must be preserved for emoji.
+- Go must use SetEscapeHTML(false) for checksum and file write. Raw file must contain "<" for special chars and raw emoji.
+- Special handling for U+2028/U+2029: Go's encoder escapes these even with SetEscapeHTML(false), Python with ensure_ascii=False does not. Correct implementation must handle this to match checksum.
+
+Stale artifacts (MUST):
+- Pre-existing stale <data>.tmp.<pid> must be ignored (not read as DB) and cleaned up.
+- Pre-existing stale <data>.lock must be handled via 5ms×2000 retry, never leaving corrupt DB.
+- Truncated file (valid JSON prefix cut mid-object) must take corruption path with .corrupt.<nanosec> backup, not crash.
 
 
 
@@ -60,7 +73,7 @@ Schedule JSON: `{"job_id":"job1","node_id":"node1","scheduled":true}`
 
 ### Persistence with Integrity – Explicit File Format (MUST - Extra Hard)
 
-File at `--data` must use wrapper `{"data":{"nodes":{...},"jobs":{...}}, "checksum": md5 canonical}` canonical = `json.dumps(data, sort_keys=True, separators=(',',':'))` no HTML escaping – Go must use `SetEscapeHTML(false)` for checksum and file write. Raw file must contain "<" for special chars and emoji.
+File at `--data` must use wrapper `{"data":{"nodes":{...},"jobs":{...}}, "checksum": md5 canonical}` canonical = `json.dumps(data, sort_keys=True, separators=(',',':'), ensure_ascii=False)` no HTML escaping – Go must use `SetEscapeHTML(false)` for checksum and file write. Raw file must contain "<" for special chars and raw UTF-8 emoji (no \uXXXX escaping). Go's encoder escapes U+2028/U+2029 even with SetEscapeHTML(false); Python with ensure_ascii=False does not, so implementation must special-case these to match checksum.
 
 Structure of data:
 - nodes: map nodeID -> {id, total:{cpu,memory,gpu}, used:{cpu,memory,gpu}, jobs:[sorted]}
@@ -91,7 +104,7 @@ On read: missing file → empty store {nodes:{}, jobs:{}}, empty file → empty 
 - schedule: first-fit sorted node IDs asc, first node that fits, if job already allocated exit2, if no fit exit1 stderr "no fit", prints JSON scheduled
 - status: returns counts and total/used resources
 
-### Integrity Coverage (258 tests Turn 1, 20 tests Turn 2 – extra hard)
+### Integrity Coverage (347 tests Turn 1, 20 tests Turn 2 – extra hard)
 - checksum strict, mismatch/missing/invalid JSON backup integer nanosec, stderr warnings
 - atomic all 20 same node, diff nodes all 20, concurrent add-node 20, file lock cleanup
 - stdlib only, advisory CreateTemp/Rename

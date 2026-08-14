@@ -1,31 +1,61 @@
 # Computer Resource Optimization – Multi-Turn Go Task
 
-This is a **two-turn** Terminal-Bench task implementing a computer cluster management system in Go with resource allocation, integrity, and large-scale efficiency.
+This is a two-turn Terminal-Bench task implementing a computer cluster management system in Go with resource allocation, integrity, and large-scale efficiency.
 
-## Overview
+## Turn 1: Core Cluster Management (347 tests, extra-hard)
 
-- **Turn 1 (1_step_one, 258 tests, extra-hard, was 30 too easy, 49/66/80/96 still easy):** Single-file `/app/data/cluster.json` wrapper checksum MD5 canonical sort_keys separators + SetEscapeHTML false raw "<" not \u003c. Atomic CreateTemp+Rename same dir + file lock O_CREATE|O_EXCL retry 5ms 2000 tries cleanup no tmp no global.lock. Checksum strict missing/bad/invalid JSON including null/[] -> backup .corrupt.<nanosec> integer suffix regex \.corrupt\.\d+$ warning corrupt/checksum recreate empty. Empty "" whitespace "   \n\t" -> empty store not corrupt. Jobs [] not null after add-node/deallocate/remove-job/remove-all raw '"jobs":[]' no null. Idempotent no-op preserves old resources/allocation running not upsert, same ID concurrent 20 race ->1 node/job, add-node 20 sorted, same node 20 preserve all 20 used 20 valid JSON during, diff nodes 20 preserve all 20, deallocate 20 -> used 0 jobs [], list while allocating 10x30 valid JSON no crash, list 100 times 10 threads no crash. Pagination offset then limit order offset1 limit2 ->1,2 not 0,1 invalid negative abc ->exit2 limit0 vs omit both all offset beyond []. Perf 800 nodes list <1.5s O(n log n) limit100 offset100 <1.5s 500 jobs sorted, special chars <>& raw job and node, Unicode emoji 🌍🚀😀, large ID 10KB dash underscore dot colon valid, empty ID spaces "   " ->exit2 float resource "4.0" invalid, timestamp integer required reject 1000.0 1e3 0x3e8, status total/used sum used/free after allocate/deallocate, node jobs sorted asc, remove false not exist, deallocate false vs exit2 nonexist, allocate diff node exit2 same node idempotent no duplicate, insufficient memory/gpu/cpu, lock retry 100ms manual lock file then thread removes after 100ms should retry succeed, file lock cleaned after success/failure insufficient, etc. 310 new discriminators over original 30 (30->120).
+Build core cluster manager at `/app/` (module `cluster-manager`) with single-file persistence `/app/data/cluster.json`.
 
-- **Turn 2 (2_step_two, 70 tests, extra-hard, good to keep, inherits Turn1):** Weighted sharding MD5 big-endian int(md5)%totalWeight, global: -1 broadcast comma-separated sorted, empty-string "" valid MD5, distribution includes zeros, config missing->fallback invalid->exit2 no stdout empty shards [] invalid, list-nodes/jobs pagination sorted asc limit0 all offset beyond [] invalid->exit2 perf 200 <2s, schedule best-fit cpu->mem->gpu->id lex vs first-fit (nodeA 10 CPU wins Step1 vs nodeB 4 CPU wins Step2), token-bucket per-node float refill elapsed*rate burst persistence wrapper checksum atomic per-node independent no-consume on insufficient no side effects corruption reset multi-cycle 2 succ fail sleep1.2 succ fail sleep1.2 succ refill 1.6s, presence TTL heartbeat last_seen nano wrapper requires node exists else exit2 online bool vs TTL list-healthy sorted TTL expiry 2s->3s offline multi-node unknown offline0, snapshot/restore dir/file exact post-mutation gone trap, ops-log skip invalid warning order preserved, optimize fragmentation_after <= before OR used_nodes<=before moves>=0 total_nodes unchanged preserve jobs no overcommit.
+**Persistence format (MUST):** Wrapper `{"data":{"nodes":{...},"jobs":{...}}, "checksum": md5 canonical}` where canonical = `json.dumps(data, sort_keys=True, separators=(',',':'), ensure_ascii=False)`. Raw UTF-8 must be preserved for emoji. Go must use `SetEscapeHTML(false)`. Special handling required for U+2028/U+2029: Go escapes these even with SetEscapeHTML(false), Python with ensure_ascii=False does not, so implementation must handle this to match checksum.
+
+**Atomicity and locking (MUST):** On write, atomic via `CreateTemp` same dir + `Rename` plus file lock `<data>.lock` `O_CREATE|O_EXCL` retry 5ms 2000 tries with cleanup after each command. No `<data>.tmp.*` or `<data>.lock` leftover. Pre-existing stale tmp and lock files must be ignored and cleaned. Truncated file must take corruption path with `.corrupt.<nanosec>` backup, not crash.
+
+**Execution-based integrity checks (not source-scan):** No grep for CreateTemp/Rename/SetEscapeHTML. Verified via behavior: no tmp leftover after writes, lock cleaned after success and after failure (insufficient, invalid), raw file contains unescaped "<" for special chars `<>&` and raw UTF-8 emoji, checksum matches canonical with ensure_ascii=False and U+2028/U+2029 handling.
+
+**Core functionality:** add-node idempotent no-op preserves old resources (not upsert), remove-node true/false fails exit2 if has allocated jobs, list-nodes pagination sorted asc limit0 all offset beyond [] invalid→exit2, get-node, add-job idempotent preserves allocation, remove-job deallocates first then node jobs [] not null, list-jobs same pagination, get-job, allocate insufficient→exit2 stderr insufficient already allocated different node→exit2 same node idempotent, deallocate true/false, schedule first-fit sorted IDs asc first that fits even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU → nodeA wins for Step1), no fit→exit1 no fit no stdout, status total/used resources sum.
+
+**Hard discriminators (real failures observed, not enumerated rules):**
+- Canonicalization: ID containing `<>&` and emoji same key – raw `<` and raw UTF-8 simultaneously, keys with U+2028/U+2029 escaped by Go but not Python, mixed scripts byte vs codepoint ordering (UTF-8 preserves codepoint order but Go escapes line/para separators).
+- Stale artifacts: pre-create `<data>.tmp.<pid>` must be ignored and cleaned, pre-create `<data>.lock` must be retried 5ms×2000 never leaving corrupt DB, truncated file must backup .corrupt.<nanosec>.
+- Exact-state concurrency: 20 concurrent CLI processes interleaved add-node+allocate overlapping IDs, then assert exact used/free arithmetic plus valid checksum and no overcommit.
+- Empty file "" and whitespace "   \n\t" → empty store not corrupt, files "null"/"[]" → corrupt backup warning, missing/bad checksum → backup, jobs field [] not null (nil-slice pitfall), idempotent preserves, concurrent add-node 20 sorted, same node 20 preserve all 20, diff nodes 20, large 800 nodes <1.5s O(n log n), etc.
+
+See `steps/1_step_one/instruction.md` for full spec.
+
+## Turn 2: Large-Scale Efficient (72 tests, extra-hard)
+
+Extends Turn1 via `inherit_prior_session`. Adds weighted sharding, best-fit, presence TTL, token-bucket, snapshot/restore, ops-log, optimize. Flags: --data default /app/data/cluster.json, --config default /app/config.json. Config rule: missing file→fallback single-file, exists valid→sharded, exists invalid (missing shard_count, empty shards, bad JSON, dupe id, empty path, weight≤0, negative)→exit2 no stdout. Config format: shard_count>0 required, shards [{id,path,weight}] unique non-negative, path non-empty, weight>0 else exit2, unknown fields ignored.
+
+**Sharding:** Weighted hash MD5 big-endian `int(md5(key.encode()).hexdigest(),16)%totalWeight` iterate sorted by id subtracting weight, global:→-1 broadcast to all shards, get-shard-id/path empty-string "" valid hashed via MD5, get-shard-path global returns comma-separated sorted list, distribution map shard_id→count includes zeros.
+
+**Best-fit (now):** Minimal waste scoring (free_cpu-req_cpu)→(free_mem-req_mem)→(free_gpu-req_gpu)→smallest ID lex deterministic. This flips from Turn1 first-fit and is core discriminator.
+
+**Rate limiting per-node token bucket:** rate_limit {allocations_per_second,burst} default 5/10 tokens float refill elapsed*rate consume1 else exit1 rate limit no side effects per-node independent persistence wrapper checksum atomic no-consume on insufficient corruption reset multi-cycle refill after 1.6s/1.2s and burst exact.
+
+**Presence TTL:** heartbeat updates last_seen nano presence.json wrapper requires node exists else exit2, get-node-health/get-presence online bool vs TTL, list-healthy/list-online sorted healthy within TTL, expiry 2s→3s offline, multiple nodes, unknown offline 0, corruption and refresh extends online.
+
+**Other:** snapshot/restore dir and file modes restore exactly, presence and rate_limit restored, ops-log prints array skipping invalid warning order preserved, must use bufio.Scanner big buffer 10*1024*1024 to handle 100KB+ lines, with second discriminator ops-log single 200KB line and rate-limit persistence surviving corrupt-then-recreate cycle (de-monocultured so neither test is load-bearing). Optimize consolidates fragmentation_after <= before OR used_nodes<=before moves>=0 total_nodes unchanged preserve jobs no overcommit.
+
+See `steps/2_step_two/instruction.md` for full spec.
 
 ## Build
 
 `go build -o ./cluster-manager .` in `/app/`, module `cluster-manager`, stdlib only.
 
-## Pagination Contract
+## Pagination Contract (MUST)
 
-`list-nodes <limit> <offset>` sorted asc limit0 all offset beyond [] Same for list-jobs.
+`list-nodes <limit> <offset>` — sorted by id asc; limit=0 returns all; offset beyond the end returns []. Same for `list-jobs`.
 
-## Empty Array Invariant
+## Empty Array Invariant (MUST)
 
-Node jobs empty MUST be [] not null (nil-slice). After add-node, deallocate, remove-job must be [] not null.
+Node jobs field empty MUST serialize as [] not null.
 
-## First-Fit vs Best-Fit
+## First-Fit vs Best-Fit (MUST)
 
-- Step1: first-fit sorted IDs asc first that fits wins even if wasteful (nodeA 10 CPU id smaller vs nodeB 4 CPU both fit 2 CPU -> nodeA wins)
-- Step2: best-fit cpu->mem->gpu->id lex (nodeB wins)
+- Step1: first-fit sorted IDs asc first that fits wins even if wasteful
+- Step2: best-fit cpu→mem→gpu→id lex
 
 ## Latest Validation
 
-- Step1: 258/258 PASS extra-hard (was 30/49/66/80/96/108 still easy per feedback), 90 new discriminators: integer timestamp float resource, whitespace/null/[] corrupt vs empty store, [] not null, idempotent same ID race 20, concurrent add-node 20 sorted, same node 20 preserve all, diff nodes 20, deallocate 20, list while allocating, pagination offset then limit, invalid limit/offset, large 800 <1.5s O(n log n), special chars job, large ID 10KB dash underscore dot colon, empty ID spaces, status sum, used/free correct, node jobs sorted, lock cleaned after failure, lock retry 100ms, gpu insufficient, concurrent remove while allocating, etc.
-- Step2: 70/70 PASS good to keep (best-fit tie-break mem/gpu/id lex, token-bucket multi-cycle refill 1.6s/1.2s per-node independent no-consume persistence corruption, optimize invariants, presence TTL expiry multi-node unknown offline, config validation, snapshot restore exact trap)
+- Step1: 347/347 PASS extra-hard with canonicalization divergences (<>&+emoji same key, U+2028/U+2029, mixed scripts), stale tmp/lock artifacts, truncated file, exact-state concurrency 20 interleaved add-node+allocate overlapping IDs, plus 300+ other discriminators
+- Step2: 72/72 PASS extra-hard with ops-log 200KB line and rate-limit corrupt-then-recreate de-monocultured, plus best-fit tie-break, token-bucket cycles, presence TTL, snapshot/restore exact, etc.

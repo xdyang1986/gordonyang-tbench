@@ -1315,3 +1315,67 @@ def test_snapshot_restore_dir_with_many_nodes():
         run_config("add-node", f"node-{i}", "4", "1024", "0")
     run_config("restore", "/tmp/backup")
     assert len(json.loads(run_config("list-nodes").stdout)) == 20
+
+# ---------- De-monoculture blockers per review: ops-log 200KB line and rate-limit corrupt-then-recreate ----------
+
+def test_ops_log_single_200kb_line_big_buffer():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 10000, "burst": 10000}
+    write_config(cfg)
+    # Create a single 200KB line in ops.log – exercises 10*1024*1024 bufio.Scanner buffer directly
+    # Spec says must use bufio.Scanner with big buffer 10*1024*1024 to handle 100KB+ lines
+    ops_path = cfg["ops_log"]
+    os.makedirs(os.path.dirname(ops_path), exist_ok=True)
+    huge_payload = "x" * (200 * 1024)  # 200KB
+    entry = json.dumps({"op": "allocate", "job_id": "jobHuge", "node_id": "node1", "payload": huge_payload})
+    with open(ops_path, "w") as f:
+        f.write(entry + "\n")
+    r = run_config("ops-log")
+    assert r.returncode == 0, f"ops-log should handle 200KB line with big buffer, got {r.returncode} {r.stderr}"
+    arr = json.loads(r.stdout)
+    assert len(arr) == 1, f"should return 1 entry for 200KB line, got {len(arr)}"
+    assert arr[0]["job_id"] == "jobHuge"
+    # Also test that invalid line skipping still works with huge line present
+    with open(ops_path, "a") as f:
+        f.write("invalid line\n")
+        f.write(json.dumps({"op": "add-node", "node_id": "node2"}) + "\n")
+    r2 = run_config("ops-log")
+    assert r2.returncode == 0
+    arr2 = json.loads(r2.stdout)
+    assert len(arr2) == 2, f"should skip invalid and return 2, got {len(arr2)}"
+    assert "corrupt" in r2.stderr.lower() or "skip" in r2.stderr.lower() or "warning" in r2.stderr.lower()
+
+
+def test_rate_limit_persistence_survives_corrupt_then_recreate():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 2}
+    write_config(cfg)
+    run_config("add-node", "node1", "10", "10240", "0")
+    run_config("add-job", "job0", "1", "256", "0")
+    assert run_config("allocate", "job0", "node1").returncode == 0
+    # Now rate_limit_path contains bucket with 1 token left
+    # Corrupt it
+    rl_path = cfg["rate_limit_path"]
+    assert os.path.exists(rl_path)
+    with open(rl_path, "w") as f:
+        f.write("{ corrupt")
+    # First allocate after corruption should eventually succeed after reset (might be rate limited if tokens 0?)
+    # Actually corruption resets bucket to burst=2, so should succeed
+    run_config("add-job", "job1", "1", "256", "0")
+    assert run_config("allocate", "job1", "node1").returncode == 0
+    # Second allocate should succeed (burst2, one used)
+    run_config("add-job", "job2", "1", "256", "0")
+    assert run_config("allocate", "job2", "node1").returncode == 0
+    # Third should be rate limited
+    run_config("add-job", "job3", "1", "256", "0")
+    r = run_config("allocate", "job3", "node1")
+    assert r.returncode == 1 and "rate limit" in r.stderr.lower()
+    # Verify file valid after corrupt-then-recreate cycle
+    assert os.path.exists(rl_path)
+    # Corrupt again and test persistence after recreate
+    with open(rl_path, "w") as f:
+        f.write("invalid again")
+    run_config("add-job", "job4", "1", "256", "0")
+    assert run_config("allocate", "job4", "node1").returncode == 0

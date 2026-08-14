@@ -143,11 +143,19 @@ def checksum_valid(path=DATA_FILE):
         return False
     if "data" not in obj or "checksum" not in obj or not obj["checksum"]:
         return False
-    # Go uses SetEscapeHTML(false) and raw UTF-8, so must not escape unicode
+    # Go uses SetEscapeHTML(false) and raw UTF-8, so must not escape unicode, but Go still escapes U+2028/U+2029
     canonical = json.dumps(
         obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    return obj["checksum"] == hashlib.md5(canonical.encode()).hexdigest()
+    # Go escapes U+2028/U+2029 even with SetEscapeHTML(false); handle both
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
+        "\u2029", "\\u2029"
+    )
+    checksum = obj["checksum"]
+    return checksum in (
+        hashlib.md5(canonical.encode()).hexdigest(),
+        hashlib.md5(canonical_escaped.encode()).hexdigest(),
+    )
 
 
 def test_help_contains_keywords():
@@ -351,18 +359,31 @@ def test_checksum_and_atomic():
     run_cli("add-node", "node1", "4", "1024", "1")
     assert checksum_valid()
     assert '"checksum"' in read_wrapper_raw()
-    found = {"CreateTemp": False, "Rename": False, "SetEscapeHTML": False}
-    for root, _, files in os.walk(APP):
-        for f in files:
-            if f.endswith(".go"):
-                try:
-                    c = open(os.path.join(root, f)).read()
-                    for k in found:
-                        if k in c:
-                            found[k] = True
-                except:
-                    pass
-    assert all(found.values())
+    # Execution-based checks for atomic write (not source-scan):
+    # - No tmp file leftover in data dir after write
+    # - Lock file cleaned after success
+    # - Raw file contains "<" unescaped if special chars used (tested separately)
+    # - Checksum matches canonical with ensure_ascii=False
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files), f"tmp leftover {files}"
+    assert not os.path.exists(LOCK_FILE)
+    # Verify raw file uses raw UTF-8 and contains checksum
+    raw = read_wrapper_raw()
+    obj = json.loads(raw)
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    # Handle U+2028/U+2029 special escaping that Go does even with SetEscapeHTML(false)
+    # Go escapes \u2028 and \u2029, Python with ensure_ascii=False does not, so we need to
+    # normalize by escaping them for checksum comparison if present
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
+        "\u2029", "\\u2029"
+    )
+    computed = hashlib.md5(canonical.encode()).hexdigest()
+    computed_escaped = hashlib.md5(canonical_escaped.encode()).hexdigest()
+    assert obj["checksum"] in (computed, computed_escaped), (
+        f"checksum mismatch: file {obj['checksum']} vs {computed} or {computed_escaped}"
+    )
 
 
 def test_corruption_handling():
@@ -3801,7 +3822,9 @@ def test_file_lock_retry_with_two_concurrent_holders():
     assert not os.path.exists(lock_path)
     assert json.loads(run_cli("list-nodes").stdout)[0]["id"] == "nodeRetryLock"
 
+
 # ---------- Further: 291->310 (still too easy, keep enhancing) ----------
+
 
 def test_list_nodes_with_limit_offset_with_spaces_and_zero_padded():
     clean_data()
@@ -3856,8 +3879,10 @@ def test_status_total_resources_exact_after_adding_30_nodes():
 
 def test_concurrent_add_node_with_id_containing_equals():
     clean_data()
+
     def add_eq(i):
         run_cli("add-node", f"node=eq-{i}", "4", "1024", "0")
+
     threads = [threading.Thread(target=add_eq, args=(i,)) for i in range(15)]
     for t in threads:
         t.start()
@@ -3870,8 +3895,10 @@ def test_concurrent_add_node_with_id_containing_equals():
 def test_concurrent_add_job_with_id_containing_equals():
     clean_data()
     run_cli("add-node", "node1", "50", "50000", "0")
+
     def add_eq(i):
         run_cli("add-job", f"job=eq-{i}", "1", "256", "0")
+
     threads = [threading.Thread(target=add_eq, args=(i,)) for i in range(15)]
     for t in threads:
         t.start()
@@ -3959,8 +3986,10 @@ def test_concurrent_schedule_30_jobs():
         run_cli("add-node", f"node-{i:02d}", "10", "10240", "0")
     for i in range(30):
         run_cli("add-job", f"job-{i:02d}", "1", "256", "0")
+
     def sched(i):
         run_cli("schedule", f"job-{i:02d}")
+
     threads = [threading.Thread(target=sched, args=(i,)) for i in range(30)]
     for t in threads:
         t.start()
@@ -3998,7 +4027,9 @@ def test_list_nodes_and_jobs_with_limit_offset_large_numbers():
     assert len(arr_j) == 20
     assert arr_j[0]["id"] == "job-10"
 
+
 # ---------- Further: 307->325 (still too easy, keep enhancing) ----------
+
 
 def test_add_node_with_id_containing_brackets():
     clean_data()
@@ -4038,8 +4069,10 @@ def test_list_jobs_with_limit_as_plus_sign():
 
 def test_concurrent_add_node_with_brackets():
     clean_data()
+
     def add_bracket(i):
         run_cli("add-node", f"node[{i}]", "4", "1024", "0")
+
     threads = [threading.Thread(target=add_bracket, args=(i,)) for i in range(15)]
     for t in threads:
         t.start()
@@ -4086,10 +4119,12 @@ def test_concurrent_deallocate_and_allocate_same_node_different_jobs():
     for i in range(20):
         run_cli("add-job", f"job{i}", "1", "256", "0")
         run_cli("allocate", f"job{i}", "node1")
+
     def dealloc_alloc(i):
         run_cli("deallocate", f"job{i}")
         run_cli("add-job", f"job_new{i}", "1", "256", "0")
         run_cli("allocate", f"job_new{i}", "node1")
+
     threads = [threading.Thread(target=dealloc_alloc, args=(i,)) for i in range(10)]
     for t in threads:
         t.start()
@@ -4138,11 +4173,13 @@ def test_concurrent_status_many_times():
     clean_data()
     for i in range(20):
         run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+
     def status_many():
         for _ in range(30):
             r = run_cli("status")
             assert r.returncode == 0
             json.loads(r.stdout)
+
     threads = [threading.Thread(target=status_many) for _ in range(10)]
     for t in threads:
         t.start()
@@ -4160,7 +4197,9 @@ def test_node_total_resources_preserved_after_failed_allocate():
     assert before["total"] == after["total"]
     assert before["used"] == after["used"]
 
+
 # ---------- Further: 323->350 (still too easy, keep enhancing) ----------
+
 
 def test_add_node_with_id_containing_backtick():
     clean_data()
@@ -4194,8 +4233,10 @@ def test_add_node_with_cpu_as_hex_string_invalid():
 
 def test_concurrent_add_node_with_backtick():
     clean_data()
+
     def add_bt(i):
         run_cli("add-node", f"node`{i}`", "4", "1024", "0")
+
     threads = [threading.Thread(target=add_bt, args=(i,)) for i in range(15)]
     for t in threads:
         t.start()
@@ -4272,8 +4313,10 @@ def test_concurrent_allocate_with_special_chars_and_unicode():
         run_cli("add-node", nid, "20", "20000", "0")
     for jid in ["job<>&", "job-🌍", "job😀", "job-a_b.c:d"]:
         run_cli("add-job", jid, "1", "256", "0")
+
     def alloc(jid, nid):
         run_cli("allocate", jid, nid)
+
     threads = []
     for jid in ["job<>&", "job-🌍", "job😀", "job-a_b.c:d"]:
         threads.append(threading.Thread(target=alloc, args=(jid, "node<>&")))
@@ -4315,11 +4358,13 @@ def test_concurrent_status_with_many_nodes():
     clean_data()
     for i in range(50):
         run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+
     def status_loop():
         for _ in range(20):
             r = run_cli("status")
             assert r.returncode == 0
             json.loads(r.stdout)
+
     threads = [threading.Thread(target=status_loop) for _ in range(10)]
     for t in threads:
         t.start()
@@ -4329,10 +4374,12 @@ def test_concurrent_status_with_many_nodes():
 
 def test_list_nodes_after_concurrent_add_and_remove():
     clean_data()
+
     def add_remove(i):
         run_cli("add-node", f"node-conc-{i}", "4", "1024", "0")
         run_cli("remove-node", f"node-conc-{i}")
         run_cli("add-node", f"node-conc-{i}", "4", "1024", "0")
+
     threads = [threading.Thread(target=add_remove, args=(i,)) for i in range(20)]
     for t in threads:
         t.start()
@@ -4341,3 +4388,172 @@ def test_list_nodes_after_concurrent_add_and_remove():
     arr = json.loads(run_cli("list-nodes").stdout)
     assert len(arr) == 20
     assert checksum_valid()
+
+# ---------- New canonicalization divergence tests per review (only family that ever caught anything is 10KB-ID+unicode+special-chars) ----------
+
+def test_canonicalization_id_with_lt_gt_amp_and_emoji_same_key():
+    clean_data()
+    # ID containing <, >, & and emoji in same key — raw < in file and raw UTF-8 in checksum simultaneously
+    nid = "node<>&🌍🚀😀"
+    run_cli("add-node", nid, "4", "1024", "1")
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    # raw < must be present (SetEscapeHTML false) and raw emoji must be present (ensure_ascii=False)
+    assert "<" in raw, "raw < must be present, SetEscapeHTML(false) required"
+    assert ">" in raw and "&" in raw
+    assert "🌍" in raw and "🚀" in raw and "😀" in raw, "raw emoji must be preserved"
+    assert "\\u003c" not in raw.lower() and "\\u003e" not in raw.lower() and "\\u0026" not in raw.lower()
+    # checksum must match canonical with ensure_ascii=False and raw UTF-8
+    obj = json.loads(raw)
+    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    # Go escapes U+2028/U+2029 even with SetEscapeHTML(false), but not for this ID, so direct
+    computed = hashlib.md5(canonical.encode()).hexdigest()
+    assert obj["checksum"] == computed, f"checksum mismatch for <>&+emoji ID: {obj['checksum']} vs {computed}"
+    assert checksum_valid()
+
+
+def test_canonicalization_keys_with_u2028_u2029():
+    clean_data()
+    # Keys containing U+2028 / U+2029. Go's encoder escapes these even with SetEscapeHTML(false); Python with ensure_ascii=False does not.
+    # Correct implementation must special-case it to match checksum
+    # U+2028 = \u2028, U+2029 = \u2029
+    nid = f"node\u2028with\u2029separator"
+    run_cli("add-node", nid, "4", "1024", "0")
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    # Go will escape U+2028/U+2029 as \u2028 and \u2029 even with SetEscapeHTML(false)
+    # So raw file should contain escaped form OR raw char? Actually Go escapes them, so file should contain \u2028
+    # Our verifier must accept both raw and escaped checksum computation
+    obj = json.loads(raw)
+    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    checksum = obj["checksum"]
+    assert checksum in (
+        hashlib.md5(canonical.encode()).hexdigest(),
+        hashlib.md5(canonical_escaped.encode()).hexdigest(),
+    ), f"U+2028/U+2029 checksum handling required: {checksum} not in computed"
+    assert checksum_valid()
+
+
+def test_canonicalization_mixed_scripts_byte_vs_codepoint_ordering():
+    clean_data()
+    # Key ordering with mixed scripts: sort_keys=True orders by Unicode code point; Go's sort.Strings orders by byte.
+    # Pick IDs where those differ and assert checksum matches.
+    # Example: IDs with different UTF-8 byte lengths where code point order != byte order
+    # For simplicity, use IDs that differ in first byte vs code point: "a", "é" (é code point 233, byte order differs)
+    # In Go, sorting byte-wise: "a" (0x61) < "é" (0xC3 0xA9) because 0x61 < 0xC3
+    # In Python, sort_keys by code point: "a" (97) < "é" (233) same order actually same? Need better example where byte order differs from code point order
+    # Use characters where code point order is opposite of byte order: e.g., "\u00E9" (é) code point 233 byte C3 A9, and "\u0101" (ā) code point 257 byte C4 81
+    # Code point order: é (233) < ā (257), byte order: C3 < C4, same order again. Need where code point order differs from byte order due to different UTF-8 lengths?
+    # Actually for all code points, UTF-8 byte order preserves code point order (UTF-8 is code point order preserving). So sort.Strings byte order == code point order for valid UTF-8.
+    # So this third bullet may be moot, but we still test that checksum matches for mixed scripts IDs
+    ids = ["node-a", "node-é", "node-ā", "node-🌍", "node-😀"]
+    for nid in ids:
+        run_cli("add-node", nid, "4", "1024", "0")
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    assert checksum_valid()
+    obj = json.loads(raw)
+    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    assert obj["checksum"] in (
+        hashlib.md5(canonical.encode()).hexdigest(),
+        hashlib.md5(canonical_escaped.encode()).hexdigest(),
+    )
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == len(ids)
+    assert [n["id"] for n in arr] == sorted([n["id"] for n in arr])
+
+
+def test_stale_tmp_file_ignored_and_cleaned():
+    clean_data()
+    # Pre-create stale <data>.tmp.<pid> before a command → must be ignored and cleaned up
+    tmp_dir = os.path.dirname(DATA_FILE)
+    os.makedirs(tmp_dir, exist_ok=True)
+    stale_tmp = os.path.join(tmp_dir, "cluster.json.tmp.12345")
+    with open(stale_tmp, "w") as f:
+        f.write('{"stale": true}')
+    assert os.path.exists(stale_tmp)
+    run_cli("add-node", "node1", "4", "1024", "0")
+    # Stale tmp should be ignored (not read as DB) and cleaned up (or at least not cause failure)
+    # Our impl should not read tmp file as DB, and may clean up stale tmp files
+    # Check that list-nodes returns our node, not stale content
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 1 and arr[0]["id"] == "node1"
+    # If implementation cleans up, tmp should be gone; if not, at least not cause corruption
+    # We assert that after command, no tmp file that would be mistaken as DB remains that breaks next command
+    assert checksum_valid()
+    # Clean up our stale if still exists
+    try:
+        os.remove(stale_tmp)
+    except:
+        pass
+
+
+def test_stale_lock_retry_and_no_corrupt():
+    clean_data()
+    lock_path = DATA_FILE + ".lock"
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+    try:
+        os.remove(lock_path)
+    except:
+        pass
+    with open(lock_path, "w") as f:
+        f.write("stale lock")
+    def remove_stale_lock():
+        time.sleep(0.15)
+        try:
+            os.remove(lock_path)
+        except:
+            pass
+    t = threading.Thread(target=remove_stale_lock)
+    t.start()
+    r = run_cli("add-node", "nodeAfterStaleLock", "4", "1024", "0")
+    t.join()
+    # Must either acquire after retry or fail cleanly, never leaving corrupt DB
+    assert r.returncode == 0, f"should acquire after stale lock removed, got {r.returncode} {r.stderr}"
+    assert not os.path.exists(lock_path)
+    assert checksum_valid()
+    assert len(json.loads(run_cli("list-nodes").stdout)) == 1
+
+
+def test_truncated_file_corruption_path():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    # Truncate valid JSON prefix cut mid-object
+    truncated = raw[:50]  # cut mid-object
+    with open(DATA_FILE, "w") as f:
+        f.write(truncated)
+    r = run_cli("list-nodes")
+    # Must take corruption path with .corrupt.<nanosec> backup, not crash
+    assert r.returncode == 0
+    assert json.loads(r.stdout) == []
+    assert any(".corrupt." in fn for fn in os.listdir(os.path.dirname(DATA_FILE)))
+    assert checksum_valid()
+
+
+def test_exact_state_concurrency_interleaved_add_node_allocate_overlapping():
+    clean_data()
+    # 20 concurrent CLI processes doing interleaved add-node + allocate on overlapping IDs, then assert exact used/free arithmetic plus valid checksum
+    def worker(i):
+        # Overlapping IDs: node-0..4 and job-0..9 overlapping across workers
+        nid = f"node-{i%5}"
+        jid = f"job-{i%10}"
+        run_cli("add-node", nid, "20", "20480", "2")
+        run_cli("add-job", jid, "1", "256", "0")
+        run_cli("allocate", jid, nid)
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    # 5 nodes, 10 jobs, each job 1 CPU, each node up to 20 CPU, so all 10 jobs should be allocated, but overlapping add-node same ID should preserve first
+    assert st["total_nodes"] == 5
+    assert st["total_jobs"] == 10
+    assert st["allocated_jobs"] == 10
+    assert checksum_valid()
+    for i in range(5):
+        n = json.loads(run_cli("get-node", f"node-{i}").stdout)
+        assert n["used"]["cpu"] == len(n["jobs"])
+        assert n["used"]["cpu"] <= n["total"]["cpu"]
+        assert n["free"]["cpu"] == n["total"]["cpu"] - n["used"]["cpu"]
+    assert not os.path.exists(LOCK_FILE)

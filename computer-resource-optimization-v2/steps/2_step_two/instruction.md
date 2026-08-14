@@ -1,4 +1,4 @@
-# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (70 tests)
+# Turn 2: Large-Scale Efficient Cluster Management (Go) – Extra Hard (72 tests)
 
 Turn1 implemented core cluster management with single-file persistence, first-fit scheduling, integrity, atomic writes, corruption handling, concurrent safety.
 
