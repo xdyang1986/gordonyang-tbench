@@ -58,7 +58,7 @@ Conditions (all must be implemented, thresholds matter – tests enforce them):
 - Now: if --now provided else time.Now().UnixMilli(). age = now - ts, if negative →0.
 - EMA smoothing: if history ≥2, take last up to 5 entries, weight `w = (1/(accuracy+1)) * exp(-age_i/10000)` where `age_i = now - history_i.timestamp_ms`. Weighted avg lat/lng = smoothed base.
 - Prediction: always accuracy degrades +0.5*age_sec (age_sec=age/1000). If age>0 && age≤30000 && speed>0 → predicted true: dist=speed*age_sec, delta_lat=dist*cos(heading_rad)/R*180/π, delta_lng=dist*sin(heading_rad)/(R*cos(lat_rad))*180/π, predicted lat/lng, original_lat/lng = smoothed before prediction. Else predicted false, original = smoothed.
-- Road snapping if --roads: heading-aware if speed>1 else normal. If snapped, original = pre-snap smoothed? Actually spec: if snapped, estimate lat/lng = snapped, original_lat/lng = smoothed before snap? Wait: original is smoothed before prediction, but if snapped then? Keep reference logic: original_lat/lng = smoothed before prediction, but after prediction if snapped, est becomes snapped point, original stays pre-snap? Tests check snapped true and lat close to road. We'll state: if snapped, final lat/lng = snapped point.
+- Road snapping if --roads: heading-aware if speed>1 else normal. If snapped, final lat/lng = snapped point, original_lat/lng = smoothed base before prediction.
 - Confidence (degrades by many signals, upgraded by on-road):
   high if (acc≤5 age≤5000) OR (acc≤10 age≤10000)
   medium if acc≤25 age≤20000 else low

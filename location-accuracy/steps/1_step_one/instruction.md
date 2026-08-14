@@ -82,7 +82,7 @@ History within [from,to] inclusive sorted asc paginated, both flags required, fr
 
 #### 6. distance <vehicle_id> → {"vehicle_id":...,"total_distance_m":...} exit0, not found exit3
 
-#### 7. delete <vehicle_id> → `deleted` stdout exit0, not found → not_found exit0? Actually spec: delete returns `deleted` exit0, invalid id exit2, not found? Previous says exit0 with not_found? In tests: delete existing → deleted, get after → not found 3. So delete not found should be? Keep: invalid id exit2, else `deleted` exit0 even if not found? Check tests: they assert deleted. We'll state: delete → `deleted` exit0, invalid id exit2.
+#### 7. delete <vehicle_id> → `deleted` stdout exit0, invalid id exit2. If vehicle not found, still prints `deleted` exit0.
 
 #### 8. stats → {"live":#vehicles, "total_updates": total accepted count, "total_distance_m": sum, "avg_accuracy": avg}
 

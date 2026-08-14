@@ -2665,3 +2665,61 @@ def test_validate_pickup_with_both_pickup_and_dropoff_zones_separate(binary):
                 os.remove(dropoff_path)
             except:
                 pass
+def test_outlier_double_trigger_teleport_and_speed_mismatch_counts_one(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "10", "--speed", "0"], expect_code=0)
+    p = run_cli(binary, db, ["update", "veh1", "38.0", "-123.0", "1050000", "--accuracy", "10", "--speed", "0"], expect_code=3)
+    assert "outlier" in p.stdout.lower()
+    p_get = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+    data = _json.loads(p_get.stdout.strip())
+    assert data["outlier_count"] == 1, f"should be exactly 1 even though 2 conditions true, got {data['outlier_count']}"
+    run_cli(binary, db, ["update", "veh1", "37.7750", "-122.4194", "1100000", "--accuracy", "10", "--speed", "30", "--heading", "0"], expect_code=0)
+    p2 = run_cli(binary, db, ["update", "veh1", "37.7751", "-122.4194", "1101000", "--accuracy", "80", "--speed", "12", "--heading", "180"], expect_code=3)
+    p_get2 = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    data2 = _json.loads(p_get2.stdout.strip())
+    assert data2["outlier_count"] == 2
+
+
+def test_outlier_double_trigger_heading_flip_and_accel_spike_counts_one(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "10", "--speed", "30", "--heading", "0"], expect_code=0)
+    p = run_cli(binary, db, ["update", "veh1", "37.7750", "-122.4194", "1001000", "--accuracy", "10", "--speed", "12", "--heading", "180"], expect_code=3)
+    assert "outlier" in p.stdout.lower()
+    p_get = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+    data = _json.loads(p_get.stdout.strip())
+    assert data["outlier_count"] == 1
+
+
+def test_outlier_double_trigger_heading_flip_and_accuracy_spike_counts_one(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "10", "--speed", "30", "--heading", "0"], expect_code=0)
+    p = run_cli(binary, db, ["update", "veh1", "37.7750", "-122.4194", "1001000", "--accuracy", "80", "--speed", "12", "--heading", "180"], expect_code=3)
+    p_get = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+    data = _json.loads(p_get.stdout.strip())
+    assert data["outlier_count"] == 1
+
+
+def test_outlier_count_drives_confidence_demotion_chain(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000000", "--accuracy", "5", "--speed", "0"], expect_code=0)
+    for i in range(3):
+        run_cli(binary, db, ["update", "veh1", f"{38.0 + i*0.1}", f"{-123.0 - i*0.1}", str(1000100 + i*100), "--accuracy", "5"], expect_code=3)
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    import json as _json
+    data = _json.loads(p.stdout.strip())
+    assert data["confidence"] == "medium"
+    for i in range(3, 6):
+        run_cli(binary, db, ["update", "veh1", f"{38.0 + i*0.1}", f"{-123.0 - i*0.1}", str(1000100 + i*100), "--accuracy", "5"], expect_code=3)
+    p2 = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    data2 = _json.loads(p2.stdout.strip())
+    assert data2["confidence"] == "low"
+    p_get = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    data_get = _json.loads(p_get.stdout.strip())
+    assert data_get["outlier_count"] == 6
