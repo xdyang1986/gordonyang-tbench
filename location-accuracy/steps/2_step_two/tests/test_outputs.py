@@ -2624,6 +2624,7 @@ def test_validate_pickup_with_both_pickup_and_dropoff_zones_separate(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
     import os
+    import os
     pickup_zones = [{"id": "pickup", "polygon": [{"lat": 37.7, "lng": -122.5}, {"lat": 37.7, "lng": -122.3}, {"lat": 37.9, "lng": -122.3}, {"lat": 37.9, "lng": -122.5}]}]
     dropoff_zones = [{"id": "dropoff", "polygon": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}, {"lat": 10, "lng": 10}, {"lat": 10, "lng": 0}]}]
     import json as _json, shutil
@@ -2664,4 +2665,3 @@ def test_validate_pickup_with_both_pickup_and_dropoff_zones_separate(binary):
                 os.remove(dropoff_path)
             except:
                 pass
-
