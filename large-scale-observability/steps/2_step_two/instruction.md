@@ -119,6 +119,7 @@ Spec:
 - Backpressure: normally non-blocking enqueue (with evict-oldest). Calling goroutines must not be blocked for more than a few milliseconds in normal mode.
 - `Shutdown(ctx)` must: stop accepting new spans, flush remaining queue (export all pending batches respecting BatchSize), wait for in-flight exports, respect ctx timeout, return nil or ctx error. After Shutdown, OnEnd should drop (no-op) and not panic.
 - `ForceFlush(ctx)` blocks until all currently queued spans are exported or ctx timeout. Must export incomplete batches as well, not wait for BatchSize to fill. During ForceFlush, OnEnd must block (not evict/drop) until queue has space or ctx timeout. DroppedCount must not increase during ForceFlush even if queue was full before flush.
+- If Shutdown is called concurrently with ForceFlush, Shutdown takes precedence: after Shutdown completes, further ForceFlush must return nil and not panic or deadlock, even if ForceFlush was blocked waiting for queue space. If ForceFlush was blocked and Shutdown closes the processor, ForceFlush must unblock and return nil or context error.
 - Required methods:
   ```go
   func (b *BatchProcessor) DroppedCount() int

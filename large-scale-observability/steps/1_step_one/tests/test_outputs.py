@@ -569,7 +569,7 @@ def test_tracing_concurrent():
         fmt.Println("OK")
     }
     """)
-    proc = go_run_program(code)
+    proc = go_run_race_program(code, timeout=60)
     assert proc.returncode == 0, (
         f"concurrent tracing failed: {proc.stdout} {proc.stderr}"
     )
@@ -606,7 +606,7 @@ def test_tracing_concurrent_addattr():
         fmt.Println("OK")
     }
     """)
-    proc = go_run_program(code)
+    proc = go_run_race_program(code, timeout=60)
     assert proc.returncode == 0, (
         f"concurrent addattr failed: {proc.stdout} {proc.stderr}"
     )
@@ -842,7 +842,7 @@ def test_metrics_concurrency():
         fmt.Println("OK")
     }
     """)
-    proc = go_run_program(code)
+    proc = go_run_race_program(code, timeout=60)
     assert proc.returncode == 0, (
         f"metrics concurrency failed: {proc.stdout} {proc.stderr}"
     )
@@ -1344,7 +1344,7 @@ def test_logger_concurrent():
         fmt.Println("OK")
     }
     """)
-    proc = go_run_program(code)
+    proc = go_run_race_program(code, timeout=60)
     assert proc.returncode == 0, (
         f"logger concurrent failed: {proc.stdout} {proc.stderr}"
     )
