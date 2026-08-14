@@ -1993,8 +1993,75 @@ func main() {
 				}
 				continue
 			}
+			// low_accuracy filter in batch - skip without incrementing outlier_count
+			if op.Accuracy > 100 {
+				continue
+			}
 			if existing, ok := db[op.VehicleID]; ok {
 				if op.Ts <= existing.TimestampMs {
+					continue
+				}
+				// outlier detection for batch
+				dtSec := float64(op.Ts-existing.TimestampMs) / 1000.0
+				isOutlier := false
+				if dtSec > 0 {
+					distChk := haversine(existing.Lat, existing.Lng, op.Lat, op.Lng)
+					impliedChk := distChk / dtSec
+					if dtSec < 300 && distChk > 1000 && impliedChk > 50 && existing.Accuracy < 50 && op.Accuracy < 50 {
+						isOutlier = true
+					}
+					if !isOutlier && existing.Speed > 10 && op.Speed > 10 && angularDiff(existing.Heading, op.Heading) > 120 && distChk < 500 {
+						isOutlier = true
+					}
+					if !isOutlier && len(existing.History) >= 2 {
+						var speeds []float64
+						h := existing.History
+						sort.Slice(h, func(i, j int) bool { return h[i].TimestampMs < h[j].TimestampMs })
+						n := len(h)
+						for i := n - 2; i >= 0 && len(speeds) < 3; i-- {
+							if h[i+1].TimestampMs > h[i].TimestampMs {
+								d := haversine(h[i].Lat, h[i].Lng, h[i+1].Lat, h[i+1].Lng)
+								dt := float64(h[i+1].TimestampMs-h[i].TimestampMs) / 1000.0
+								if dt > 0 {
+									speeds = append(speeds, d/dt)
+								}
+							}
+						}
+						if len(speeds) > 0 {
+							sorted := append([]float64{}, speeds...)
+							sort.Float64s(sorted)
+							var med float64
+							mid := len(sorted) / 2
+							if len(sorted)%2 == 0 {
+								med = (sorted[mid-1] + sorted[mid]) / 2
+							} else {
+								med = sorted[mid]
+							}
+							if math.Abs(impliedChk-med) > 30 && impliedChk > 30 && distChk > 500 {
+								isOutlier = true
+							}
+						}
+					}
+					if !isOutlier {
+						acc := math.Abs(op.Speed-existing.Speed) / dtSec
+						if acc > 15 && distChk < 300 {
+							isOutlier = true
+						}
+					}
+					if !isOutlier {
+						if op.Accuracy > 75 && op.Accuracy > existing.Accuracy*2+30 {
+							isOutlier = true
+						}
+					}
+					if !isOutlier {
+						if impliedChk > 80 && op.Speed < 2 && distChk > 1000 && dtSec < 60 {
+							isOutlier = true
+						}
+					}
+				}
+				if isOutlier {
+					existing.OutlierCount++
+					db[op.VehicleID] = existing
 					continue
 				}
 				dist := haversine(existing.Lat, existing.Lng, op.Lat, op.Lng)
