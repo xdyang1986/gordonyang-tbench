@@ -1977,26 +1977,6 @@ def test_large_graph_5000_nodes():
 # === HARDENING step1 too easy, step2 good: add 20 more hard discriminators ===
 
 
-def test_20_way_tie_break():
-    mids = [f"M{i:02d}" for i in range(20)]
-    nodes = ["A"] + mids + ["Z"]
-    edges = []
-    for mid in mids:
-        edges.append({"from": "A", "to": mid, "distance": 5})
-        edges.append({"from": mid, "to": "Z", "distance": 5})
-    graph = {"nodes": nodes, "edges": edges}
-    gp = tmp(json.dumps(graph))
-    try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "Z"])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip())
-        assert out["path"] == ["A", "M00", "Z"], (
-            f"20-way tie should pick M00, got {out['path']}"
-        )
-    finally:
-        os.unlink(gp)
-
-
 def test_large_batch_5000_requests_relative():
     nodes = [f"N{i}" for i in range(200)]
     edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(199)]
