@@ -2,24 +2,24 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/distant-estimate"
-description = "Multi-turn Go router: Turn1 implements distance-based shortest path selection via Dijkstra with lexicographically smallest tie-break, single and batch modes, exit codes 0/1/2. Turn2 extends it with traffic-aware routing where each edge has a traffic_factor multiplying effective cost, selects best path by minimal effective distance, outputs raw distance + effective distance + traffic_delay, validates traffic file and enforces factor >0."
+description = "Multi-turn Go router GIGA HARD – routing contract focused: Turn1 raw-distance routing minimizing cumulative road length with tie-break cascade (raw equal within 1e-9 → lex smallest route ASCII case-sensitive), undirected min duplicate including reverse, strict JSON validation (nodes strings-only, edges objects-only, leading/trailing spaces exact distinct, BOM/trailing comma/comment must not crash, scientific 1e+3/1E+3 plus valid), help precedence, flag equals and order independence, missing key vs empty distinct (RawMessage null check), non-existing location no-route vs invalid, strict output fields exactly path/distance. Turn2 extends with traffic-aware effective routing where effective = raw*factor+delay (strict not (raw+delay)*factor), traffic_delay = effective-raw, factor>0 delay>=0, duplicate last-wins including delay reset, default factor 1.0, wrapper strict null vs empty, direct array, BOM/trailing comma for traffic, leading/trailing spaces exact invalid, 3-level cascade effective->raw->lex, same-source amortization, delay-only reroute, strict 4/6 output fields. Binary /app/router go build -o router . stdlib only."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "routing", "dijkstra", "shortest-path", "traffic-aware", "graph", "cli", "lexicographic-tie-break", "multi-turn"]
 format = "terminal_bench_multi_turn"
 workstream = "swe_public_repo"
 
 [metadata]
-difficulty = "hard"
+difficulty = "very hard"
 category = "software-engineering"
 category_usecase = "compute_result"
 category_subdomain = "networking"
 reward_type = "binary"
 languages = ["go"]
-tags = ["go", "routing", "dijkstra", "graph", "traffic", "cli"]
+tags = ["go", "routing", "effective-distance", "traffic-factor", "traffic-delay", "tie-break-cascade", "road-network", "logistics"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
-expert_time_estimate_min = 60.0
-junior_time_estimate_min = 120.0
+expert_time_estimate_min = 120.0
+junior_time_estimate_min = 240.0
 
 [environment]
 build_timeout_sec = 600.0
