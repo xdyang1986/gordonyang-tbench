@@ -59,13 +59,19 @@ Same as Turn1: nodes strings-only, legs objects-only, whitespace-only invalid, d
 
 `{"source":"A"}` missing dest → invalid exit2 vs `{"source":"","destination":"B"}` empty → no-route exit1. Use RawMessage == "null" to distinguish. Same for traffic null vs empty.
 
-## Performance – effective
+## Performance – effective (GIGA HARD)
 
-1000 locations line with traffic <3s, **5000 line <5.5s**; 100 batch traffic relative <=25*base+1, 2000 batch traffic <7.5s, 500 distinct sources, dense <1s, same-source amortization <=35% multi-source. Catches O(n²) and per-request re-parse.
+1000 locations line with traffic <3s, **5000 line <5.5s, 10000 line <8s**; 100 batch traffic relative <=25*base+1, **2000 batch <7.5s, 5000 batch <12s**; dense 100 locations 5000 edges <2s, same-source amortization **same 500 ≤25% multi 500 distinct** (cache per origin). Catches O(n²), per-request re-parse, non-amortized.
+
+Tie pressure: **10-way effective tie** B..K each 5+5 must pick B lex smallest; secondary raw tie with delay; deeper diamond effective equal.
+
+## Output strictness – routing contract
+
+Single no traffic exactly 2 keys, with traffic exactly 4 keys (`path,distance,effective_distance,traffic_delay`) – number not string, no extra. Batch no traffic 4 keys, with traffic 6 keys, echo exact source/dest, order preserved. No-route all -1.
 
 ## Constraints
 
-Stdlib only, `go build -o router .`, binary `/app/router`, help 6 keywords, 3-level cascade effective→raw→lex, tolerance 1e-9 tie 1e-6 output, flag evolves.
+Stdlib only, `go build -o router .`, binary `/app/router`, help 6 keywords, help with extra flags still contains traffic, flag `--traffic=path` equals syntax, effective formula must be `raw*factor+delay` not `(raw+delay)*factor` – checked via multi-edge sum, delay reset on duplicate last-wins (second without delay → delay 0), 3-level cascade effective→raw→lex, tolerance 1e-9 tie 1e-6 output, flag evolves. Traffic wrapper null vs empty distinct: `{"traffic":null}` invalid vs `[]` and `{"traffic":[]}` valid empty; factor/delay null/string/bool/array invalid; from/to whitespace or leading/trailing spaces exact invalid; edge not in road network invalid; direct array invalid elements.
 
 ## Examples
 
