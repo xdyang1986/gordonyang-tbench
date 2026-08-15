@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 mkdir -p /app
+rm -f /app/traffic.go /app/main.go.m1* /app/base_router.go /app/m1.go
 cat > /app/go.mod <<'EOF'
 module router
 go 1.22
