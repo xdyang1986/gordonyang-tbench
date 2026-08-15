@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 71 tests, extreme-hard)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 63 tests, extreme-hard)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -16,7 +16,7 @@ Core features:
 - **Roads**: mixed polyline `points` >=2 and legacy `start/end`, invalid entry exit 2 when used. Snapping uses equirectangular projection with lat_ref = query lat, checks all segments with clamped t in [0,1], distance <=50m snapped. Must check interior points not just endpoints.
 - **Commands**: update prints without history but with total_distance, get --verbose full, list sorted id asc with since/until inclusive and zones/roads filters and pagination offset then limit (limit 0 -> [], offset>len -> []), near with lat/lng/radius [0,50000] plus accuracy-max, speed-min, now with age>30000 stale exclusion only when now provided unless --include-stale, distance <=radius sorted distance asc then vehicle_id asc, track --from --to paginated, delete prints deleted even if not found, stats live/total_updates/total_distance/avg_accuracy, batch tab-delimited variable 5-8 fields empty means default, >8/<5 fail exit2, all-or-nothing atomic with zones check before stale, stale skipped, prints batch_ok <applied>, clear, geofence-check returns first matching zone by file order.
 
-### Step 2: Improve Location Accuracy (2_step_two, 126 tests, extreme-hard, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 79 tests, extreme-hard, inherit_prior_session true)
 
 Backward compatible with Step 1, adds:
 
@@ -49,29 +49,29 @@ Backward compatible with Step 1, adds:
 
 Built from `steps/*/solution/solve.sh` at `/app/src` go 1.22 GOTOOLCHAIN=local.
 
-- **Step1: 71/71 PASS (13s)** – eased from 84 too hard:
+- **Step1: 63/63 PASS (13s)** – eased from 84 too hard (no agent could pass):
   - Base validation, total_distance, history 10, stale handling, integer timestamp, NaN/Inf, ID regex, batch atomic with zones before stale, near include-stale, zones active vs inactive, geofence, roads interior vs endpoint and all segments.
-  - **Crash-consistency gate (saturated)**: corrupt backup `.corrupt.<nanosec>` integer suffix for invalid JSON, array, null, truncated; backup contains original; stale tmp ignored and cleaned; atomic no tmp leftover.
-  - **Time-window seam (the only seam that ever fired)**: inclusive bounds ts==from and ts==to both active in same test, zones with only from and only to at boundary, divergence --now vs update timestamp: update uses its own ts, list/near/geofence-check use --now, so vehicle outside accepted at ts=500 when inactive, but list --now=1500 excludes it.
+  - Removed saturated crash-consistency backup gate (8 tests requiring .corrupt.<nanosec> creation) – too hard, caused 0% pass.
+  - **Time-window seam (the only seam that ever fired)**: inclusive bounds ts==from and ts==to both active in same test (same zone), zones with only from and only to at boundary, divergence --now vs update timestamp: update uses its own ts, list/near/geofence-check use --now.
 
-- **Step2: 126/126 PASS (7s)** – eased from 138 too hard:
-  - All Step1 compat still passes (71 tests).
-  - Outlier six conditions, low_accuracy, speed cap, roads closest among segments and heading-aware no fallback (no fallback), EMA exp decay, prediction delta, confidence chain with outlier_count and snapped upgrade, validate-pickup/dropoff priority.
-  - **Outlier_count family (strengthened, the only working discriminator)**: persistence across restart (DB reload, get --verbose), boundaries exactly 3 (>2→medium) and 6 (>5→low) with off-by-one checks 2 still high, 5 medium not low, non-increment for low_accuracy and stale, separation mixed, double-trigger counts as one.
-  - **Batch handling clarified**: spec now explicitly states batch handles low_accuracy (skip, no distance, outlier_count unchanged) and outlier (increment count, skip location) with zones before stale still applies. Removes unstated-rule gate that was gating opus entirely (test_low_accuracy_in_batch removed).
-  - Removed 12 hardest extra tests: prediction exact delta, EMA weighting, confidence no upgrade when road_dist>10, exhaustive priority chain, multiple corrupt backups, etc.
+- **Step2: 79/79 PASS (6s)** – eased from 126/138 too hard (0% pass):
+  - All Step1 compat still passes (63 tests).
+  - Core: outlier six conditions, low_accuracy, speed cap, roads closest among segments and heading-aware no fallback, EMA smoothing, geofence, estimate confidence degradation by outlier_count, basic validate-pickup/dropoff.
+  - **Outlier_count family kept**: persistence across restart (DB reload, get --verbose), boundaries exactly 3 (>2→medium) and 6 (>5→low) with off-by-one 2 still high/5 medium not low, non-increment for low_accuracy/stale, separation mixed, double-trigger counts one, demotion chain.
+  - Removed 47 hardest priority-chain and confidence upgrade tests that were gating all models: all `priority` tests, prediction exact delta, EMA weighting, confidence upgrades, multiple corrupt backups, low_accuracy batch gate (was gating opus entirely, now explicitly stated in spec but removed to ease).
+  - Batch handling clarified in spec for fairness.
 
 ## Agent Failure Analysis
 
-Step1 was too easy (59 tests → 0% fail). First hardening to 67 added crash-consistency backup and stale tmp handling. Second hardening to 81 added many obscure boundaries (vehicle_id length, speed 50.0001, timestamp float, deep dirs, multiple backups, etc.) → too hard. Trimmed to 71: keep core crash-consistency (8 tests) plus time-window seam which is the only pair that ever fired (geofence_check_time_based + zones_time_boundary_inclusive). Extended time-window exactly: inclusive both bounds in same test, only-from and only-to zones at boundary, divergence --now vs update timestamp (update uses its own ts, list/near use --now). Don't add more crash-consistency (saturated).
+Step1 was too easy at 59 (0% fail, no discrimination). Hardened to 67 with crash-consistency backup gate, then to 81/84 with obscure boundaries → too hard (0% pass, saturated crash-consistency). Eased to 63: removed 8 crash backup tests (requiring .corrupt.<nanosec> creation) which gated all agents, kept time-window seam which is the only pair that ever fired (geofence_check_time_based + zones_time_boundary_inclusive). Extended time-window exactly: inclusive both bounds in same test, only-from and only-to zones at boundary, divergence --now vs update timestamp.
 
-Step2 was only outlier_count working. Extended to 126 with restart persistence, boundaries 3 (>2→medium) and 6 (>5→low), non-increment for low_accuracy/stale. Second extension to 138 added many hard extras (prediction exact delta, EMA weighting, exhaustive priority chain, multiple backups) → too hard, plus test_low_accuracy_in_batch was gating opus entirely as unstated-rule gate. Eased to 126 by removing 12 hardest extra tests including prediction exact delta, EMA weighting, confidence road_dist>10, exhaustive chain, multiple backups, and the low_accuracy batch gate. Spec clarified for batch: low_accuracy and outlier handling explicitly stated for batch path (low_accuracy skip, outlier increment count, distance not added, zones before stale), so no longer unstated.
+Step2 was only outlier_count working at 66. Extended to 126 with restart persistence, boundaries 3 (>2→medium) and 6 (>5→low), non-increment for low_accuracy/stale → still too easy? Then to 138 with many hard extras (prediction exact delta, EMA weighting, exhaustive priority chain, multiple backups, low_accuracy batch) → too hard (0% pass), plus test_low_accuracy_in_batch was gating opus entirely as unstated-rule gate. Eased to 79 by removing 47 hardest priority-chain and confidence upgrade tests, keeping outlier_count family (persistence, boundaries, non-increment) as main discriminator, plus core estimate and basic pickup/dropoff. Batch handling clarified in spec to be explicit, so no longer unstated.
 
 ## Structure
 
 - `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample (polyline + mixed segment sf_market seg_old), empty zones [] default
-- `steps/1_step_one/` – tracking with crash-consistency + time-window boundaries (inclusive, only-from/only-to, now vs update divergence), 71 tests
-- `steps/2_step_two/` – accuracy with outlier_count family (persistence, boundaries 3/6, non-increment), batch clarified, 126 tests
+- `steps/1_step_one/` – tracking with time-window boundaries (inclusive, only-from/only-to, now vs update divergence) – crash backup removed to ease, 63 tests
+- `steps/2_step_two/` – accuracy with outlier_count family (persistence, boundaries 3/6, non-increment) – heavy priority chain removed to ease, 79 tests
 
 ## Run Locally
 
