@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 81 tests, extreme-hard)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 71 tests, extreme-hard)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -16,7 +16,7 @@ Core features:
 - **Roads**: mixed polyline `points` >=2 and legacy `start/end`, invalid entry exit 2 when used. Snapping uses equirectangular projection with lat_ref = query lat, checks all segments with clamped t in [0,1], distance <=50m snapped. Must check interior points not just endpoints.
 - **Commands**: update prints without history but with total_distance, get --verbose full, list sorted id asc with since/until inclusive and zones/roads filters and pagination offset then limit (limit 0 -> [], offset>len -> []), near with lat/lng/radius [0,50000] plus accuracy-max, speed-min, now with age>30000 stale exclusion only when now provided unless --include-stale, distance <=radius sorted distance asc then vehicle_id asc, track --from --to paginated, delete prints deleted even if not found, stats live/total_updates/total_distance/avg_accuracy, batch tab-delimited variable 5-8 fields empty means default, >8/<5 fail exit2, all-or-nothing atomic with zones check before stale, stale skipped, prints batch_ok <applied>, clear, geofence-check returns first matching zone by file order.
 
-### Step 2: Improve Location Accuracy (2_step_two, 138 tests, extreme-hard, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 126 tests, extreme-hard, inherit_prior_session true)
 
 Backward compatible with Step 1, adds:
 
@@ -49,30 +49,29 @@ Backward compatible with Step 1, adds:
 
 Built from `steps/*/solution/solve.sh` at `/app/src` go 1.22 GOTOOLCHAIN=local.
 
-- **Step1: 81/81 PASS (16s)**:
-  - Base validation, total_distance tracking, history 10, stale handling, integer timestamp, NaN/Inf, ID regex, batch atomic with zones before stale, near include-stale and accuracy-max+speed-min combined, list offset then limit order, zones active vs inactive, geofence file order, roads interior vs endpoint and all segments, total_distance stale handling.
-  - **Crash-consistency gate**: corrupt backup creation with .corrupt.<nanosec> integer suffix for invalid JSON, array, null, truncated file. Backup contains original content, multiple backups distinct nanosec. Stale tmp file ignored and cleaned. Atomic write no tmp leftover and no corrupt on success.
-  - **Additional hardening (14 new)**: vehicle_id length boundaries 1/64/65, speed 50 boundary, heading 360 exclusive, timestamp integer rejection (1000.0, 1e3, 0x3e8), total_distance not increment on out_of_zone, batch mixed update+delete same vehicle order, batch empty field defaults all combos (5-8 fields, empty meaning default, >8 fail), near radius 0 boundary exact, geofence circle exact radius inside/outside, zones time inclusive boundaries (from/to inclusive), list pagination offset-then-limit exact order, history last==current after stale, deeply nested parent dirs creation, multiple corrupt backups distinct, batch zones check before stale still fails when stale op out_of_zone.
+- **Step1: 71/71 PASS (13s)** – eased from 84 too hard:
+  - Base validation, total_distance, history 10, stale handling, integer timestamp, NaN/Inf, ID regex, batch atomic with zones before stale, near include-stale, zones active vs inactive, geofence, roads interior vs endpoint and all segments.
+  - **Crash-consistency gate (saturated)**: corrupt backup `.corrupt.<nanosec>` integer suffix for invalid JSON, array, null, truncated; backup contains original; stale tmp ignored and cleaned; atomic no tmp leftover.
+  - **Time-window seam (the only seam that ever fired)**: inclusive bounds ts==from and ts==to both active in same test, zones with only from and only to at boundary, divergence --now vs update timestamp: update uses its own ts, list/near/geofence-check use --now, so vehicle outside accepted at ts=500 when inactive, but list --now=1500 excludes it.
 
-- **Step2: 138/138 PASS (8s)**:
-  - All Step1 compat still passes (81 tests).
-  - Outlier six conditions, low_accuracy, speed cap, roads polyline closest among segments and heading-aware no fallback, EMA exponential decay, prediction, confidence degradation chain, validate-pickup/dropoff reason literals and priority chains, batch with zones (now also handles low_accuracy and outlier in batch), old DB migration, large scale near/estimate <3s.
-  - **Outlier_count family**:
-    - Persistence across restart, demotion boundaries 2/3/5/6, non-increment for low_accuracy/stale, double-trigger counts as one, history/distance not include outlier.
-  - **Crash-consistency** verified.
-  - **Additional hardening (12 new)**: stale dt==0 not outlier, total_distance/history not increment on outlier and low_accuracy, EMA weighted smoothing with accuracy decay (good accuracy weights more), prediction exact delta (north/east 100m), confidence no upgrade when road_dist>10, heading-aware no fallback comprehensive (close road filtered, farther matching wins), exhaustive pickup priority chain (out_of_geofence beats all), old DB migration with missing outlier_count, confidence low when age>30000 even if snapped high accuracy, low_accuracy in batch not increment distance, multiple corrupt backups distinct.
+- **Step2: 126/126 PASS (7s)** – eased from 138 too hard:
+  - All Step1 compat still passes (71 tests).
+  - Outlier six conditions, low_accuracy, speed cap, roads closest among segments and heading-aware no fallback (no fallback), EMA exp decay, prediction delta, confidence chain with outlier_count and snapped upgrade, validate-pickup/dropoff priority.
+  - **Outlier_count family (strengthened, the only working discriminator)**: persistence across restart (DB reload, get --verbose), boundaries exactly 3 (>2→medium) and 6 (>5→low) with off-by-one checks 2 still high, 5 medium not low, non-increment for low_accuracy and stale, separation mixed, double-trigger counts as one.
+  - **Batch handling clarified**: spec now explicitly states batch handles low_accuracy (skip, no distance, outlier_count unchanged) and outlier (increment count, skip location) with zones before stale still applies. Removes unstated-rule gate that was gating opus entirely (test_low_accuracy_in_batch removed).
+  - Removed 12 hardest extra tests: prediction exact delta, EMA weighting, confidence no upgrade when road_dist>10, exhaustive priority chain, multiple corrupt backups, etc.
 
 ## Agent Failure Analysis
 
-Step1 was too easy (59 tests → 0% fail). First hardening to 67 tests added crash-consistency (.corrupt.<nanosec> backup, stale tmp ignored). Second hardening to 81 adds: vehicle_id length 64 boundary, speed 50.0001 invalid, heading 360 invalid, timestamp float/scientific/hex rejection, total_distance not increment on out_of_zone, batch mixed update+delete order, batch empty field defaults (5-8 fields), near radius 0 exact, circle exact radius inside, time inclusive boundaries, offset-then-limit order, history last==current after stale, deeply nested parent dirs, multiple corrupt backups distinct nanosec, batch zones before stale still fails. These catch naive file writes, missing atomic rename, missing backup, endpoint-only road snapping, limit-then-offset, and inclusive time bugs.
+Step1 was too easy (59 tests → 0% fail). First hardening to 67 added crash-consistency backup and stale tmp handling. Second hardening to 81 added many obscure boundaries (vehicle_id length, speed 50.0001, timestamp float, deep dirs, multiple backups, etc.) → too hard. Trimmed to 71: keep core crash-consistency (8 tests) plus time-window seam which is the only pair that ever fired (geofence_check_time_based + zones_time_boundary_inclusive). Extended time-window exactly: inclusive both bounds in same test, only-from and only-to zones at boundary, divergence --now vs update timestamp (update uses its own ts, list/near use --now). Don't add more crash-consistency (saturated).
 
-Step2 was only outlier_count working. First extension to 126 added restart persistence, exact boundaries 3 (>2→medium) and 6 (>5→low), non-increment for low_accuracy/stale, separation mixed. Second extension to 138 adds: dt==0 stale not outlier, distance/history not increment on outlier/low_accuracy, EMA weighting accuracy decay, prediction delta exact (100m north/east), confidence no upgrade when road_dist>10, heading-aware no fallback comprehensive (closest filtered, farther wins), exhaustive pickup priority chain, old DB migration, confidence low even if snapped when age>30000, batch handling of low_accuracy/outlier, multiple corrupt backups. These catch off-by-one threshold errors, batch not handling low_accuracy, heading-aware fallback bugs, and EMA miscalculations.
+Step2 was only outlier_count working. Extended to 126 with restart persistence, boundaries 3 (>2→medium) and 6 (>5→low), non-increment for low_accuracy/stale. Second extension to 138 added many hard extras (prediction exact delta, EMA weighting, exhaustive priority chain, multiple backups) → too hard, plus test_low_accuracy_in_batch was gating opus entirely as unstated-rule gate. Eased to 126 by removing 12 hardest extra tests including prediction exact delta, EMA weighting, confidence road_dist>10, exhaustive chain, multiple backups, and the low_accuracy batch gate. Spec clarified for batch: low_accuracy and outlier handling explicitly stated for batch path (low_accuracy skip, outlier increment count, distance not added, zones before stale), so no longer unstated.
 
 ## Structure
 
 - `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample (polyline + mixed segment sf_market seg_old), empty zones [] default
-- `steps/1_step_one/` – tracking with crash-consistency + 14 extra hardening, 81 tests
-- `steps/2_step_two/` – accuracy with outlier_count family + 12 extra hardening, 138 tests
+- `steps/1_step_one/` – tracking with crash-consistency + time-window boundaries (inclusive, only-from/only-to, now vs update divergence), 71 tests
+- `steps/2_step_two/` – accuracy with outlier_count family (persistence, boundaries 3/6, non-increment), batch clarified, 126 tests
 
 ## Run Locally
 
