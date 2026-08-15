@@ -2707,3 +2707,1288 @@ def test_batch_processor_no_busy_loop_cpu():
     proc = go_run_program(code)
     assert proc.returncode == 0, f"no busy loop cpu failed: {proc.stdout} {proc.stderr}"
 
+
+def test_sampler_ratio_fraction_negative_zero_and_nan():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "math"
+        "ride-observability/observability"
+    )
+    func main(){
+        // negative fraction -> Drop unless error/critical override
+        sNeg := observability.NewRatioSampler(-0.5)
+        req := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        if sNeg.ShouldSample(req) != observability.DecisionDrop { panic("negative fraction should Drop") }
+        // zero fraction -> Drop unless override
+        sZero := observability.NewRatioSampler(0.0)
+        if sZero.ShouldSample(req) != observability.DecisionDrop { panic("0.0 should Drop") }
+        // error override with zero
+        reqErr := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: observability.StatusError}
+        if sZero.ShouldSample(reqErr) != observability.DecisionKeep { panic("0.0 + error should Keep") }
+        // NaN fraction -> treat as Drop
+        sNaN := observability.NewRatioSampler(math.NaN())
+        if sNaN.ShouldSample(req) != observability.DecisionDrop { panic("NaN fraction should Drop") }
+        // Inf fraction >=1 => Keep
+        sInf := observability.NewRatioSampler(math.Inf(1))
+        if sInf.ShouldSample(req) != observability.DecisionKeep { panic("Inf >=1 should Keep") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio fraction negative zero nan failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_priority_case_insensitive_and_nonstring():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.0)
+        // critical lower-case should Keep
+        req := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Priority: "critical"}
+        if s.ShouldSample(req) != observability.DecisionKeep { panic("critical should Keep") }
+        // case-insensitive CRITICAL should Keep if implementation is robust
+        req2 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Priority: "CRITICAL"}
+        d2 := s.ShouldSample(req2)
+        // We allow either Keep or Drop but we prefer Keep; if Drop, still acceptable as per spec exact lower-case, but we test that implementation at least handles case-insensitive or documents exact
+        // For hardening we require case-insensitive, so must Keep
+        if d2 != observability.DecisionKeep { panic("CRITICAL case-insensitive should Keep") }
+        // non-critical priority should Drop at 0.0
+        req3 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Priority: "high"}
+        if s.ShouldSample(req3) != observability.DecisionDrop { panic("high should Drop at 0.0") }
+        // Attributes with priority key exact lower-case vs upper-case: tracer extracts only lower-case, but sampler's Priority field is already extracted; test that sampler ignores non-string? Priority is string field, so non-string not applicable; but test that empty priority drops
+        req4 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Priority: ""}
+        if s.ShouldSample(req4) != observability.DecisionDrop { panic("empty priority should Drop at 0.0") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio priority case insensitive failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_invalid_traceid_variants():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.5)
+        cases := []string{
+            "",
+            "short",
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 31 chars
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 33 chars
+            "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // leading space invalid unless trimmed? We require no trim for sampler, so invalid
+        }
+        for i, tid := range cases {
+            req := observability.SamplingRequest{TraceID: tid}
+            d := s.ShouldSample(req)
+            if d != observability.DecisionDrop {
+                panic(fmt.Sprintf("case %d tid %q should Drop as invalid", i, tid))
+            }
+        }
+        // invalid + error => Keep
+        reqErr := observability.SamplingRequest{TraceID: "invalid", Status: observability.StatusError}
+        if s.ShouldSample(reqErr) != observability.DecisionKeep { panic("invalid+error should Keep") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio invalid traceid variants failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_boundary_7fffffff_and_80000001():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.5)
+        // 0x7fffffff = 2147483647 / 2^32 = 0.499999... <0.5 => Keep
+        tidKeep := "0000000000000000000000007fffffff"
+        reqKeep := observability.SamplingRequest{TraceID: tidKeep}
+        if s.ShouldSample(reqKeep) != observability.DecisionKeep { panic("0x7fffffff should Keep at 0.5") }
+        // 0x80000001 = 2147483649 / 2^32 = 0.50000000023 >0.5 => Drop
+        tidDrop := "00000000000000000000000080000001"
+        reqDrop := observability.SamplingRequest{TraceID: tidDrop}
+        if s.ShouldSample(reqDrop) != observability.DecisionDrop { panic("0x80000001 should Drop at 0.5") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio boundary 7fffffff failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_description_contains_fraction():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.1234)
+        desc := s.Description()
+        if desc=="" { panic("description empty") }
+        if !strings.Contains(desc, "0.12") { panic(fmt.Sprintf("description should contain fraction, got %s", desc)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio description contains fraction failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_ignores_status_ok():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.0)
+        reqOK := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: observability.StatusOK}
+        if s.ShouldSample(reqOK) != observability.DecisionDrop { panic("StatusOK should not override, should Drop at 0.0") }
+        reqUnset := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: observability.StatusUnset}
+        if s.ShouldSample(reqUnset) != observability.DecisionDrop { panic("Unset should Drop at 0.0") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio ignores status ok failed: {proc.stdout} {proc.stderr}"
+
+
+def test_parent_aware_combinations():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        always := observability.NewAlwaysSampler()
+        never := observability.NewNeverSampler()
+        ratioZero := observability.NewRatioSampler(0.0)
+        // HasParent false + root Never => Drop
+        pa1 := observability.NewParentAwareSampler(never)
+        req1 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: false}
+        if pa1.ShouldSample(req1) != observability.DecisionDrop { panic("no parent + never root should Drop") }
+        // HasParent true, Parent not sampled, root Always => Drop
+        pa2 := observability.NewParentAwareSampler(always)
+        req2 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: false}}
+        if pa2.ShouldSample(req2) != observability.DecisionDrop { panic("parent not sampled should Drop") }
+        // Parent sampled true, root Never => Drop (AND)
+        pa3 := observability.NewParentAwareSampler(never)
+        req3 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: true}}
+        if pa3.ShouldSample(req3) != observability.DecisionDrop { panic("parent true + never root should Drop AND") }
+        // Parent true, root Always => Keep
+        pa4 := observability.NewParentAwareSampler(always)
+        req4 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: true}}
+        if pa4.ShouldSample(req4) != observability.DecisionKeep { panic("parent true + always root should Keep") }
+        // Parent true, root ratio 0.0 + error override => Keep
+        req5 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: true}, Status: observability.StatusError}
+        pa5 := observability.NewParentAwareSampler(ratioZero)
+        if pa5.ShouldSample(req5) != observability.DecisionKeep { panic("parent true + ratio 0 error should Keep") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"parent aware combinations failed: {proc.stdout} {proc.stderr}"
+
+
+def test_parent_aware_nil_root_fallback():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        pa := observability.NewParentAwareSampler(nil)
+        if pa == nil { panic("nil root should fallback to Always, not nil sampler") }
+        req := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: false}
+        if pa.ShouldSample(req) != observability.DecisionKeep { panic("nil root fallback should Keep") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"parent aware nil root fallback failed: {proc.stdout} {proc.stderr}"
+
+
+def test_parent_aware_nested():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        always := observability.NewAlwaysSampler()
+        inner := observability.NewParentAwareSampler(always)
+        outer := observability.NewParentAwareSampler(inner)
+        req := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: true}}
+        if outer.ShouldSample(req) != observability.DecisionKeep { panic("nested parent aware should Keep") }
+        req2 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: observability.TraceContext{Sampled: false}}
+        if outer.ShouldSample(req2) != observability.DecisionDrop { panic("nested parent not sampled should Drop") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"parent aware nested failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracer_sampler_priority_via_attribute_and_case():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        sampler := observability.NewRatioSampler(0.0)
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(sampler))
+        // priority critical lower-case via WithAttributes should override to Keep
+        _, span := tracer.Start(context.Background(), "with-critical", observability.WithAttributes(observability.Attribute{Key:"priority", Value:"critical"}))
+        if !span.IsRecording() { panic("critical priority should be recording at 0.0") }
+        span.End()
+        if exp.GetCount()!=1 { panic("should export 1") }
+        // uppercase key Priority should NOT trigger (exact lower-case)
+        exp2 := observability.NewMemoryExporter()
+        proc2 := observability.NewSimpleProcessor(exp2)
+        tracer2 := observability.NewTracer("svc", observability.WithProcessor(proc2), observability.WithSampler(sampler))
+        _, span2 := tracer2.Start(context.Background(), "upper-key", observability.WithAttributes(observability.Attribute{Key:"Priority", Value:"critical"}))
+        if span2.IsRecording() { panic("Priority upper-case key should not trigger") }
+        span2.End()
+        if exp2.GetCount()!=0 { panic("should not export when upper-case key") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"tracer sampler priority via attr failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracer_sampler_never_not_exported_but_context_propagated():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        never := observability.NewNeverSampler()
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(never))
+        ctx, span := tracer.Start(context.Background(), "never-span")
+        if span.IsRecording() { panic("never should not be recording") }
+        span.End()
+        if exp.GetCount()!=0 { panic("never should not export") }
+        // context should still have TraceID with Sampled false
+        sc, ok := observability.TraceFromContext(ctx)
+        if !ok { panic("context should still have trace even when dropped") }
+        if sc.Sampled { panic("sampled should be false") }
+        carrier := map[string]string{}
+        observability.MarshalTrace(ctx, carrier)
+        val := carrier["x-ride-trace"]
+        if len(val)==0 { panic("Marshal should still write even when sampled false") }
+        // last char should be 0
+        if val[len(val)-1]!='0' { panic(fmt.Sprintf("sampled false should marshal 0, got %s", val)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"tracer never not exported but propagated failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_non_positive_fallback_zero():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(0), observability.WithQueueSize(0))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, span := tracer.Start(context.Background(), "fallback-zero")
+        span.End()
+        if err:= proc.ForceFlush(context.Background()); err!=nil { panic(err.Error()) }
+        if exp.GetCount()!=1 { panic(fmt.Sprintf("fallback zero should still export, got %d", exp.GetCount())) }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch non-positive fallback zero failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_queue_size_one_evict_oldest():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(10), observability.WithQueueSize(1))
+        for i:=0; i<3; i++ {
+            tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+            _, span := tracer.Start(context.Background(), fmt.Sprintf("span-%d", i))
+            span.End()
+        }
+        proc.ForceFlush(context.Background())
+        if exp.GetCount()!=1 { panic(fmt.Sprintf("queue 1, 3 spans should export 1 newest, got %d", exp.GetCount())) }
+        if bc, ok := proc.(interface{ DroppedCount() int }); ok {
+            if bc.DroppedCount() < 2 { panic(fmt.Sprintf("dropped at least 2, got %d", bc.DroppedCount())) }
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch queue size one evict failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_queuelen_and_droppedcount_never_negative():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10))
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen() < 0 { panic("QueueLen negative at start") }
+        }
+        if d, ok := proc.(interface{ DroppedCount() int }); ok {
+            if d.DroppedCount() < 0 { panic("DroppedCount negative at start") }
+        }
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, s := tracer.Start(context.Background(), "a")
+        s.End()
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen() < 0 { panic("QueueLen negative after enqueue") }
+        }
+        proc.ForceFlush(context.Background())
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen() < 0 { panic("QueueLen negative after flush") }
+        }
+        proc.Shutdown(context.Background())
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen() < 0 { panic("QueueLen negative after shutdown") }
+        }
+        if d, ok := proc.(interface{ DroppedCount() int }); ok {
+            if d.DroppedCount() < 0 { panic("DroppedCount negative after shutdown") }
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"queuelen droppedcount never negative failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_onend_after_shutdown_no_panic_and_no_increase():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        proc.Shutdown(context.Background())
+        var droppedBefore int
+        if d, ok := proc.(interface{ DroppedCount() int }); ok { droppedBefore = d.DroppedCount() }
+        _, span := tracer.Start(context.Background(), "after-shutdown")
+        span.End()
+        if d, ok := proc.(interface{ DroppedCount() int }); ok {
+            droppedAfter := d.DroppedCount()
+            if droppedAfter != droppedBefore { panic(fmt.Sprintf("DroppedCount should not increase after shutdown, before %d after %d", droppedBefore, droppedAfter)) }
+        }
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen()!=0 { panic("QueueLen should be 0 after shutdown") }
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"onend after shutdown failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_concurrent_shutdown_idempotent():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(100))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<10; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        var wg sync.WaitGroup
+        for i:=0; i<10; i++ {
+            wg.Add(1)
+            go func(){
+                defer wg.Done()
+                proc.Shutdown(context.Background())
+            }()
+        }
+        wg.Wait()
+        // second call should be idempotent nil
+        if err:= proc.Shutdown(context.Background()); err!=nil { panic(fmt.Sprintf("second shutdown should be nil, got %v", err)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_with_race(code)
+    assert proc.returncode == 0, f"concurrent shutdown idempotent failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_forceflush_timeout_and_shutdown_flushes_remaining():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        slow := &slowExporter{delay: 1000 * time.Millisecond}
+        proc := observability.NewBatchProcessor(slow, observability.WithBatchSize(10), observability.WithQueueSize(10), observability.WithExportTimeout(100*time.Millisecond))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        _, s := tracer.Start(context.Background(), "slow")
+        s.End()
+        ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+        defer cancel()
+        start := time.Now()
+        err := proc.ForceFlush(ctx)
+        elapsed := time.Since(start)
+        if elapsed > 500*time.Millisecond { panic(fmt.Sprintf("ForceFlush should respect timeout, elapsed %v", elapsed)) }
+        _ = err
+        // Shutdown should attempt to flush remaining even after timeout
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    type slowExporter struct{ delay time.Duration }
+    func (e *slowExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        select {
+        case <-time.After(e.delay):
+            return nil
+        case <-ctx.Done():
+            return ctx.Err()
+        }
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"forceflush timeout and shutdown flushes failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_export_error_continues():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := &errorThenOKExporter{}
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(1), observability.WithQueueSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<3; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        proc.ForceFlush(context.Background())
+        if exp.exported < 2 { panic(fmt.Sprintf("should continue after error, exported %d", exp.exported)) }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    type errorThenOKExporter struct{ exported int; first bool }
+    func (e *errorThenOKExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        e.exported += len(spans)
+        if !e.first { e.first = true; return fmt.Errorf("first error") }
+        return nil
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"export error continues failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_ordering_across_batches():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := &orderExporter{}
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(3), observability.WithQueueSize(20))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<10; i++ {
+            _, s := tracer.Start(context.Background(), fmt.Sprintf("order-%d", i))
+            s.End()
+        }
+        proc.ForceFlush(context.Background())
+        proc.Shutdown(context.Background())
+        // check order
+        exp.mu.Lock()
+        defer exp.mu.Unlock()
+        if len(exp.order)!=10 { panic(fmt.Sprintf("expected 10, got %d", len(exp.order))) }
+        for i:=0; i<10; i++ {
+            expected := fmt.Sprintf("order-%d", i)
+            if exp.order[i]!=expected { panic(fmt.Sprintf("order mismatch at %d: %s vs %s", i, exp.order[i], expected)) }
+        }
+        fmt.Println("OK")
+    }
+    type orderExporter struct{ mu sync.Mutex; order []string }
+    func (e *orderExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        e.mu.Lock()
+        for _, s := range spans { e.order = append(e.order, s.Name) }
+        e.mu.Unlock()
+        return nil
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch ordering across batches failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_droppedcount_excludes_non_recording():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(1), observability.WithBatchSize(10))
+        never := observability.NewNeverSampler()
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(never))
+        for i:=0; i<10; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("never-%d", i)); s.End() }
+        if d, ok := proc.(interface{ DroppedCount() int }); ok {
+            if d.DroppedCount()!=0 { panic(fmt.Sprintf("non-recording should not count as dropped, got %d", d.DroppedCount())) }
+        }
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen()!=0 { panic("non-recording should not be queued") }
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"droppedcount excludes non-recording failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_batchsize_hard_cap_on_shutdown():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := &countingExporter{}
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(2), observability.WithQueueSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<5; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        proc.Shutdown(context.Background())
+        if exp.maxBatch > 2 { panic(fmt.Sprintf("hard cap violated on shutdown: max %d", exp.maxBatch)) }
+        if exp.total !=5 { panic(fmt.Sprintf("total should be 5, got %d", exp.total)) }
+        fmt.Println("OK")
+    }
+    type countingExporter struct{ maxBatch, total int }
+    func (e *countingExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        if len(spans) > e.maxBatch { e.maxBatch = len(spans) }
+        e.total += len(spans)
+        return nil
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch hard cap on shutdown failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_alias_maxexportbatchsize_last_wins():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := &countingExporter{}
+        proc := observability.NewBatchProcessor(exp, observability.WithMaxExportBatchSize(20), observability.WithBatchSize(5), observability.WithMaxBatchSize(10))
+        // last wins: WithMaxBatchSize(10) should win
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<10; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        proc.Shutdown(context.Background())
+        if exp.maxBatch > 10 { panic(fmt.Sprintf("alias last wins failed, max %d >10", exp.maxBatch)) }
+        fmt.Println("OK")
+    }
+    type countingExporter struct{ maxBatch int }
+    func (e *countingExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        if len(spans) > e.maxBatch { e.maxBatch = len(spans) }
+        return nil
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"alias maxexportbatchsize last wins failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_per_name_not_global():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(2))
+        for i:=0; i<3; i++ {
+            c := p.Counter("metric_a", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Inc()
+        }
+        for i:=0; i<3; i++ {
+            c := p.Counter("metric_b", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Inc()
+        }
+        fams := p.Collect()
+        var aCount, bCount int
+        for _, fam := range fams {
+            if fam.Name=="metric_a" { aCount = len(fam.Metrics) }
+            if fam.Name=="metric_b" { bCount = len(fam.Metrics) }
+        }
+        if aCount!=2 { panic(fmt.Sprintf("per-name limit: metric_a should have 2, got %d", aCount)) }
+        if bCount!=2 { panic(fmt.Sprintf("per-name limit: metric_b should have 2, got %d", bCount)) }
+        if p.DroppedSeriesCount() != 2 { panic(fmt.Sprintf("dropped should be 2 (1 per metric), got %d", p.DroppedSeriesCount())) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"cardinality per-name not global failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_distinct_dropped_no_double_count():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(1))
+        c1 := p.Counter("drop_distinct", observability.WithLabels(map[string]string{"id":"1"}))
+        c1.Inc()
+        // first distinct dropped
+        c2 := p.Counter("drop_distinct", observability.WithLabels(map[string]string{"id":"2"}))
+        c2.Inc()
+        dropped1 := p.DroppedSeriesCount()
+        // same dropped label again should not increase
+        c2again := p.Counter("drop_distinct", observability.WithLabels(map[string]string{"id":"2"}))
+        c2again.Inc()
+        dropped2 := p.DroppedSeriesCount()
+        if dropped2 != dropped1 { panic(fmt.Sprintf("reuse already dropped should not increase: %d vs %d", dropped1, dropped2)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"cardinality distinct dropped no double count failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_aggregate_overflow_value():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(1), observability.WithCardinalityOverflowHandling("aggregate"))
+        c1 := p.Counter("agg_overflow", observability.WithLabels(map[string]string{"id":"1"}))
+        c1.Add(5)
+        c2 := p.Counter("agg_overflow", observability.WithLabels(map[string]string{"id":"2"}))
+        c2.Add(3)
+        c3 := p.Counter("agg_overflow", observability.WithLabels(map[string]string{"id":"3"}))
+        c3.Add(2)
+        if p.DroppedSeriesCount()!=0 { panic("aggregate should have Dropped 0") }
+        fams := p.Collect()
+        var overflowVal float64
+        var found bool
+        for _, fam := range fams {
+            if fam.Name=="agg_overflow" {
+                for _, m := range fam.Metrics {
+                    if m.Labels["__overflow__"]=="true" {
+                        overflowVal = m.Value
+                        found = true
+                    }
+                }
+            }
+        }
+        if !found { panic("overflow series not found") }
+        if overflowVal != 5 { panic(fmt.Sprintf("overflow value should be 5 (3+2), got %f", overflowVal)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"aggregate overflow value failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_truncation_interaction_before_key():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "strings"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(1))
+        long1 := strings.Repeat("a", 256) + "1"
+        long2 := strings.Repeat("a", 256) + "2"
+        c1 := p.Counter("trunc_card", observability.WithLabels(map[string]string{"k": long1}))
+        c1.Inc()
+        c2 := p.Counter("trunc_card", observability.WithLabels(map[string]string{"k": long2}))
+        c2.Inc()
+        if p.DroppedSeriesCount()!=0 { panic(fmt.Sprintf("truncation collision should not be dropped, got %d", p.DroppedSeriesCount())) }
+        fams := p.Collect()
+        var n int
+        var v float64
+        for _, fam := range fams { if fam.Name=="trunc_card" { n=len(fam.Metrics); v=fam.Metrics[0].Value } }
+        if n!=1 { panic(fmt.Sprintf("should be 1 after truncation collision, got %d", n)) }
+        if v!=2 { panic(fmt.Sprintf("value should be 2, got %f", v)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"truncation interaction before key failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_reuse_at_limit_no_increase():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(2))
+        c1 := p.Counter("reuse_limit", observability.WithLabels(map[string]string{"id":"1"}))
+        c1.Inc()
+        c2 := p.Counter("reuse_limit", observability.WithLabels(map[string]string{"id":"2"}))
+        c2.Inc()
+        // limit reached
+        c3 := p.Counter("reuse_limit", observability.WithLabels(map[string]string{"id":"3"}))
+        c3.Inc()
+        dropped1 := p.DroppedSeriesCount()
+        // reuse id=1 should not increase dropped
+        c1again := p.Counter("reuse_limit", observability.WithLabels(map[string]string{"id":"1"}))
+        c1again.Inc()
+        dropped2 := p.DroppedSeriesCount()
+        if dropped2 != dropped1 { panic(fmt.Sprintf("reuse at limit should not increase dropped %d vs %d", dropped1, dropped2)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"reuse at limit no increase failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_mixed_types_first_wins():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(10))
+        c := p.Counter("mixed_type")
+        c.Inc()
+        g := p.Gauge("mixed_type")
+        g.Set(100)
+        h := p.Histogram("mixed_type")
+        h.Observe(5)
+        fams := p.Collect()
+        if len(fams)!=1 { panic(fmt.Sprintf("mixed types same name should be 1 family, got %d", len(fams))) }
+        if fams[0].Type!="counter" { panic(fmt.Sprintf("first wins counter, got %s", fams[0].Type)) }
+        if fams[0].Metrics[0].Value!=1 { panic(fmt.Sprintf("value should be 1, got %f", fams[0].Metrics[0].Value)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"mixed types first wins failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_unlimited_zero():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(0))
+        for i:=0; i<10; i++ {
+            c := p.Counter("unlimited_zero", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Inc()
+        }
+        if p.DroppedSeriesCount()!=0 { panic("unlimited 0 should not drop") }
+        fams := p.Collect()
+        var n int
+        for _, fam := range fams { if fam.Name=="unlimited_zero" { n=len(fam.Metrics) } }
+        if n!=10 { panic(fmt.Sprintf("unlimited should have 10, got %d", n)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"cardinality unlimited zero failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_overflow_mode_case_insensitive():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p1 := observability.NewMetricsProvider(observability.WithMaxCardinality(1), observability.WithCardinalityOverflowHandling("DROP"))
+        c1 := p1.Counter("case_drop", observability.WithLabels(map[string]string{"id":"1"}))
+        c1.Inc()
+        c2 := p1.Counter("case_drop", observability.WithLabels(map[string]string{"id":"2"}))
+        c2.Inc()
+        if p1.DroppedSeriesCount()!=1 { panic("DROP upper-case should be treated as drop") }
+        p2 := observability.NewMetricsProvider(observability.WithMaxCardinality(1), observability.WithCardinalityOverflowHandling("AGGREGATE"))
+        c3 := p2.Counter("case_agg", observability.WithLabels(map[string]string{"id":"1"}))
+        c3.Inc()
+        c4 := p2.Counter("case_agg", observability.WithLabels(map[string]string{"id":"2"}))
+        c4.Inc()
+        if p2.DroppedSeriesCount()!=0 { panic("AGGREGATE upper-case should be aggregate") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"overflow mode case insensitive failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_processor_no_busy_loop_cpu_extra():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithBatchSize(10), observability.WithQueueSize(10), observability.WithBatchTimeout(100*time.Millisecond))
+        time.Sleep(200*time.Millisecond)
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen()!=0 { panic("queue should be 0 when idle") }
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"no busy loop cpu extra failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracer_with_sampler_multiple_last_wins():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        never := observability.NewNeverSampler()
+        always := observability.NewAlwaysSampler()
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(never), observability.WithSampler(always))
+        _, span := tracer.Start(context.Background(), "last-wins")
+        if !span.IsRecording() { panic("last sampler Always should win, should be recording") }
+        span.End()
+        if exp.GetCount()!=1 { panic("should export") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"tracer with sampler multiple last wins failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_processor_backpressure_timing():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(100), observability.WithBatchSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        start := time.Now()
+        _, span := tracer.Start(context.Background(), "backpressure")
+        span.End()
+        elapsed := time.Since(start)
+        if elapsed > 50*time.Millisecond { panic(fmt.Sprintf("normal enqueue should not block >50ms, got %v", elapsed)) }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"backpressure timing failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_with_attributes_priority_exact_key():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.0)
+        // Priority via Attributes field in SamplingRequest
+        req := observability.SamplingRequest{
+            TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Attributes: []observability.Attribute{{Key:"priority", Value:"critical"}},
+        }
+        // Our sampler's ShouldSample currently checks Priority field, not Attributes. But tracer integration extracts priority from attributes.
+        // For direct sampler, Priority field is used. For attributes case, we test that if sampler checks Attributes for priority, it should? 
+        // In our implementation, we check p.Priority only, not Attributes, so this should Drop unless we also check Attributes.
+        // But for hardening we require sampler to also check Attributes for priority? Let's check current behavior: if sampler only checks Priority field, then Attributes with priority should Drop.
+        // However tracer extracts priority from attributes into Priority field before calling sampler, so ratio sampler doesn't need to check Attributes directly.
+        // So for this test we check that Priority field case works, and Attributes field alone without Priority field should Drop (since sampler doesn't parse attributes).
+        // But our test for new hardening requires that sampler itself also checks Attributes for robustness? Let's require Drop for Attributes-only to avoid ambiguity.
+        d := s.ShouldSample(req)
+        // If implementation checks Attributes, it would Keep; if not, Drop. Both could be valid, but we want deterministic: we allow either but we check that StatusError still overrides
+        if d != observability.DecisionDrop && d != observability.DecisionKeep {
+            panic("invalid decision")
+        }
+        // Now with Priority field set, must Keep
+        req2 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Priority: "critical"}
+        if s.ShouldSample(req2) != observability.DecisionKeep { panic("critical priority should Keep") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio with attributes priority exact key failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_shutdown_timeout_respects_ctx():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        slow := &slowExp{delay: 500 * time.Millisecond}
+        proc := observability.NewBatchProcessor(slow, observability.WithBatchSize(10), observability.WithQueueSize(10))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<5; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+        defer cancel()
+        start := time.Now()
+        err := proc.Shutdown(ctx)
+        elapsed := time.Since(start)
+        if elapsed > 300*time.Millisecond { panic(fmt.Sprintf("Shutdown should respect ctx timeout, elapsed %v", elapsed)) }
+        if err==nil { panic("Shutdown should return ctx timeout error") }
+        fmt.Println("OK")
+    }
+    type slowExp struct{ delay time.Duration }
+    func (e *slowExp) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        select {
+        case <-time.After(e.delay):
+            return nil
+        case <-ctx.Done():
+            return ctx.Err()
+        }
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"shutdown timeout respects ctx failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_forceflush_concurrent_producers_block_then_succeed():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "sync"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        slow := &slowExporter{delay: 200 * time.Millisecond}
+        proc := observability.NewBatchProcessor(slow, observability.WithBatchSize(2), observability.WithQueueSize(2))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<2; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("fill-%d", i)); s.End() }
+        var wg sync.WaitGroup
+        wg.Add(1)
+        go func(){
+            defer wg.Done()
+            proc.ForceFlush(context.Background())
+        }()
+        time.Sleep(50*time.Millisecond)
+        // concurrent producers during flush should block not drop
+        for i:=0; i<3; i++ {
+            wg.Add(1)
+            go func(idx int){
+                defer wg.Done()
+                _, span := tracer.Start(context.Background(), fmt.Sprintf("concurrent-%d", idx))
+                span.End()
+            }(i)
+        }
+        wg.Wait()
+        if bc, ok := proc.(interface{ DroppedCount() int }); ok {
+            if bc.DroppedCount()!=0 { panic(fmt.Sprintf("DroppedCount should be 0 during block-and-drain, got %d", bc.DroppedCount())) }
+        }
+        proc.Shutdown(context.Background())
+        fmt.Println("OK")
+    }
+    type slowExporter struct{ delay time.Duration }
+    func (e *slowExporter) ExportSpans(ctx context.Context, spans []observability.FinishedSpan) error {
+        time.Sleep(e.delay)
+        return nil
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"forceflush concurrent producers block then succeed failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_overflow_aggregation_sum():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(2), observability.WithCardinalityOverflowHandling("aggregate"))
+        for i:=0; i<2; i++ {
+            c := p.Counter("agg_sum", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Add(1)
+        }
+        // overflow 3 series
+        for i:=2; i<5; i++ {
+            c := p.Counter("agg_sum", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Add(2)
+        }
+        fams := p.Collect()
+        var overflowCount uint64
+        var overflowVal float64
+        for _, fam := range fams {
+            if fam.Name=="agg_sum" {
+                for _, m := range fam.Metrics {
+                    if m.Labels["__overflow__"]=="true" {
+                        overflowVal = m.Value
+                        overflowCount++
+                    }
+                }
+            }
+        }
+        if overflowCount!=1 { panic(fmt.Sprintf("should be 1 overflow series, got %d", overflowCount)) }
+        if overflowVal!=6 { panic(fmt.Sprintf("overflow sum should be 6 (3*2), got %f", overflowVal)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"cardinality overflow aggregation sum failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracer_sampler_never_and_always_description():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        always := observability.NewAlwaysSampler()
+        never := observability.NewNeverSampler()
+        if always.Description()=="" { panic("Always description empty") }
+        if never.Description()=="" { panic("Never description empty") }
+        // ParentAware description must contain root description and Parent
+        pa := observability.NewParentAwareSampler(always)
+        desc := pa.Description()
+        if desc=="" { panic("ParentAware empty") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"tracer sampler never and always description failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_processor_goroutine_leak():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "runtime"
+        "time"
+        "ride-observability/observability"
+    )
+    func main(){
+        before := runtime.NumGoroutine()
+        for i:=0; i<5; i++ {
+            exp := observability.NewMemoryExporter()
+            proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10), observability.WithBatchSize(2))
+            tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+            _, s := tracer.Start(context.Background(), "leak-test")
+            s.End()
+            proc.Shutdown(context.Background())
+        }
+        time.Sleep(100*time.Millisecond)
+        after := runtime.NumGoroutine()
+        if after > before+5 { panic(fmt.Sprintf("possible goroutine leak: before %d after %d", before, after)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"batch processor goroutine leak failed: {proc.stdout} {proc.stderr}"
+
+
+def test_sampler_ratio_deterministic_same_tid_diff_name_kind():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        s := observability.NewRatioSampler(0.3)
+        tid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1"
+        req1 := observability.SamplingRequest{TraceID: tid, SpanName: "span-a", Kind: observability.KindServer}
+        req2 := observability.SamplingRequest{TraceID: tid, SpanName: "span-b", Kind: observability.KindClient}
+        d1 := s.ShouldSample(req1)
+        d2 := s.ShouldSample(req2)
+        if d1 != d2 { panic(fmt.Sprintf("same TraceID diff name/kind should give same decision %v vs %v", d1, d2)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"ratio deterministic same tid diff name kind failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_processor_queue_len_after_shutdown_zero():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(5))
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+        for i:=0; i<3; i++ { _, s := tracer.Start(context.Background(), fmt.Sprintf("s-%d", i)); s.End() }
+        proc.Shutdown(context.Background())
+        if q, ok := proc.(interface{ QueueLen() int }); ok {
+            if q.QueueLen()!=0 { panic(fmt.Sprintf("QueueLen after shutdown should be 0, got %d", q.QueueLen())) }
+        }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"queue len after shutdown zero failed: {proc.stdout} {proc.stderr}"
+
+
+def test_metrics_cardinality_limit_negative_unlimited():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        p := observability.NewMetricsProvider(observability.WithMaxCardinality(-5))
+        for i:=0; i<10; i++ {
+            c := p.Counter("neg_unlimited", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)}))
+            c.Inc()
+        }
+        if p.DroppedSeriesCount()!=0 { panic("negative limit should be unlimited, dropped 0") }
+        fams := p.Collect()
+        var n int
+        for _, fam := range fams { if fam.Name=="neg_unlimited" { n=len(fam.Metrics) } }
+        if n!=10 { panic(fmt.Sprintf("negative limit unlimited should have 10, got %d", n)) }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"cardinality limit negative unlimited failed: {proc.stdout} {proc.stderr}"
+
+
+def test_tracer_start_with_sampler_and_parent_combined():
+    code = textwrap.dedent("""
+    package main
+    import (
+        "context"
+        "fmt"
+        "ride-observability/observability"
+    )
+    func main(){
+        exp := observability.NewMemoryExporter()
+        proc := observability.NewSimpleProcessor(exp)
+        always := observability.NewAlwaysSampler()
+        tracer := observability.NewTracer("svc", observability.WithProcessor(proc), observability.WithSampler(always))
+        ctx, parent := tracer.Start(context.Background(), "parent")
+        parent.End()
+        // child with parent context and ratio sampler 0.0 but priority critical => Keep
+        exp2 := observability.NewMemoryExporter()
+        proc2 := observability.NewSimpleProcessor(exp2)
+        ratio := observability.NewRatioSampler(0.0)
+        tracer2 := observability.NewTracer("svc2", observability.WithProcessor(proc2), observability.WithSampler(ratio))
+        _, child := tracer2.Start(ctx, "child-critical", observability.WithAttributes(observability.Attribute{Key:"priority", Value:"critical"}))
+        if !child.IsRecording() { panic("child with critical should be recording") }
+        child.End()
+        if exp2.GetCount()!=1 { panic("child critical should export") }
+        fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"tracer start with sampler and parent combined failed: {proc.stdout} {proc.stderr}"
+

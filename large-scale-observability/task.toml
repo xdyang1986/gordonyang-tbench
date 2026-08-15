@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/large-scale-observability"
-description = "Multi-turn Go observability VERY HARD v4: Step1 170 tests core tracing single-header x-ride-trace 4 parts Flags ParentID nil handling defensive copies duplicate handling empty key nil value invalid type truncation 1024 event limits exporter deep copy End idempotent concurrency; metrics defensive copies truncate 256 reuse sorted labels Gauge NaN Inf Counter negative provider isolation; logging JSON atomic With shared mutex level filtering service field. Step2 78 tests RatioSampler last-8-hex error critical override boundary ParentAware AND BatchProcessor alias last-wins evict-oldest block-and-drain shutdown idempotent QueueLen DroppedCount distinct cardinality truncation interaction."
+description = "Multi-turn Go observability VERY HARD v4: Step1 204 tests core tracing single-header x-ride-trace 4 parts Flags ParentID nil handling defensive copies duplicate handling empty key nil value invalid type truncation 1024 event limits exporter deep copy End idempotent concurrency; metrics defensive copies truncate 256 reuse sorted labels Gauge NaN Inf Counter negative provider isolation; logging JSON atomic With shared mutex level filtering service field. Step2 120 tests RatioSampler last-8-hex error critical override boundary ParentAware AND BatchProcessor alias last-wins evict-oldest block-and-drain shutdown idempotent QueueLen DroppedCount distinct cardinality truncation interaction."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "observability", "tracing", "metrics", "logging", "sampling", "batch", "scalability"]
 format = "terminal_bench_multi_turn"

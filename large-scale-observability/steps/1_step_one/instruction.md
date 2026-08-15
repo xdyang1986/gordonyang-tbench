@@ -322,3 +322,5 @@ func NewLogger(serviceName string, opts ...LoggerOption) Logger
 Binary pass/fail based on all sub-tests.
 
 Implement step1 fully; do not yet implement samplers/batch/cardinality — those step2.
+
+- **Additional v5 edge cases (204 tests):** empty ParentID format 4 parts, invalid sampled handling, spaces around colons trimmed, defensive copy of TraceContext, TraceFromContext returns copy, WithAttributes nil no panic, overwrite after limit, exporter deep copy name, provider isolation multiple, logger With() no args, empty key ignored, timestamp monotonic, Counter Inc after Collect (Collect does NOT clear), histogram unsorted sort, duplicate dedup, Count/Sum accurate, Gauge Inc/Dec after Set, SpanContext alias same, Inject/Extract preserve sampled, labels order irrelevant sorted keys, uint type attributes allowed.
