@@ -539,6 +539,15 @@ func hasHelpArg(args []string) bool {
     return false
 }
 
+func isFlagPresent(name string) bool {
+    for _, a := range os.Args[1:] {
+        if a == "--"+name || strings.HasPrefix(a, "--"+name+"=") {
+            return true
+        }
+    }
+    return false
+}
+
 func main() {
     if len(os.Args) == 1 || hasHelpArg(os.Args[1:]) {
         printHelp()
@@ -565,6 +574,12 @@ func main() {
         os.Exit(0)
     }
     if graphPath == "" {
+        os.Exit(2)
+    }
+    if isFlagPresent("traffic") && trafficPath == "" {
+        os.Exit(2)
+    }
+    if isFlagPresent("requests") && requestsPath == "" {
         os.Exit(2)
     }
     if fromNode == "" {
