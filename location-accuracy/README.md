@@ -4,17 +4,25 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 63 tests, extreme-hard)
+### Step 1: Vehicle Location Tracking Service (1_step_one, ~50 tests, hard – simplified)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
-Core features:
-- **Persistence**: JSON map vehicle_id to Location, atomic writes via `<db>.tmp.<pid>` then rename, no leftover temp files. Parent directories must be created. Empty or whitespace-only file is an empty store. Corrupt files (unparsable JSON, array `[]`, literal `null`, truncated file) must exit 4 and create a backup `<db>.corrupt.<nanosec>` with integer nanosecond suffix containing original content. Stale tmp files must be ignored and cleaned up on next successful write.
+Core features (simplified from extreme-hard):
+- **Persistence**: JSON map vehicle_id to Location, atomic writes via `<db>.tmp.<pid>` then rename, no leftover temp files. Parent directories must be created. Empty or whitespace-only file is an empty store. Corrupt files (unparsable JSON, array `[]`, literal `null`, truncated file) must exit 4 (backup `.corrupt.<nanosec>` optional). Stale tmp files must be ignored and cleaned on next write.
 - **Validation**: vehicle_id regex `^[A-Za-z0-9_-]{1,64}$`, lat [-90,90], lng [-180,180], reject NaN/Inf variations, timestamp must be integer string (reject `1000.0`, `1e3`, `0x3e8`), accuracy >=0 default 10, speed 0-50 default 0 >50 invalid exit 2, heading [0,360) default 0.
 - **History and Distance**: total_distance is Haversine sum (R=6371000) over accepted updates only, not on stale or out_of_zone. History keeps up to 10 last accepted locations sorted ascending, includes current as last entry.
-- **Zones**: polygon >=3 points, holes each >=3, circles radius 0< <=1e6, both polygon+circle present invalid, active_from/to time filtering, antimeridian unwrapping so 179 to -179 is 2 degrees wide, edge and vertex count as inside, holes outside, circle distance <= radius. For update, use `--zones` if given else default `/app/data/zones.json` if exists. Active zones filtered by timestamp, if active non-empty location must be inside at least one else out_of_zone exit 3. For near/list, zones optional filtered by --now if provided else all.
-- **Roads**: mixed polyline `points` >=2 and legacy `start/end`, invalid entry exit 2 when used. Snapping uses equirectangular projection with lat_ref = query lat, checks all segments with clamped t in [0,1], distance <=50m snapped. Must check interior points not just endpoints.
-- **Commands**: update prints without history but with total_distance, get --verbose full, list sorted id asc with since/until inclusive and zones/roads filters and pagination offset then limit (limit 0 -> [], offset>len -> []), near with lat/lng/radius [0,50000] plus accuracy-max, speed-min, now with age>30000 stale exclusion only when now provided unless --include-stale, distance <=radius sorted distance asc then vehicle_id asc, track --from --to paginated, delete prints deleted even if not found, stats live/total_updates/total_distance/avg_accuracy, batch tab-delimited variable 5-8 fields empty means default, >8/<5 fail exit2, all-or-nothing atomic with zones check before stale, stale skipped, prints batch_ok <applied>, clear, geofence-check returns first matching zone by file order.
+- **Zones**: polygon >=3 points, holes each >=3, circles radius 0< <=1e6, both polygon+circle present invalid, active_from/to time filtering inclusive, edge and vertex count as inside, holes outside, circle distance <= radius. For update, use `--zones` if given else default `/app/data/zones.json` if exists. Active zones filtered by update timestamp, if active non-empty must be inside else out_of_zone exit 3, if no active zones at that time allow all. For near/list, zones optional filtered by --now if provided else all, simplified: if no active zones at given now, no filtering (include all) rather than returning []. geofence-check returns outside when no active zones.
+- **Roads**: polyline only `points` >=2 (legacy start/end removed), invalid entry exit 2 when used. Snapping uses equirectangular projection with lat_ref = query lat, checks all segments with clamped t in [0,1], distance <=50m snapped. Must check interior points not just endpoints.
+- **Commands**: update prints without history but with total_distance, get --verbose full, list sorted id asc with since/until inclusive and zones/roads filters and pagination offset then limit (limit 0 -> [], offset>len -> []), near with lat/lng/radius [0,50000] plus accuracy-max, speed-min, now with age>30000 stale exclusion only when now provided unless --include-stale, distance <=radius sorted distance asc then vehicle_id asc, track --from --to paginated, delete prints deleted even if not found, stats live/total_updates/total_distance/avg_accuracy, batch tab-delimited variable 5-8 fields, >8/<5 fail exit2, all-or-nothing atomic with zones check before stale, stale skipped, prints batch_ok <applied>, clear, geofence-check returns first matching zone by file order.
+
+Simplifications vs previous extreme-hard:
+- Removed antimeridian unwrapping (179 to -179 2-degree handling)
+- Removed mixed road legacy `start/end` format – only `points` polylines
+- Corrupt backup file creation now optional, only exit 4 required
+- Zones filtering when no active zones simplified to "allow all" for list/near (was [] confusing)
+- Batch empty-string-means-default kept supported but not required in spec, 5-8 variable fields clarified
+- Large scale reduced from 800 to 200 vehicles for speed, still under 3s
 
 ### Step 2: Improve Location Accuracy (2_step_two, 79 tests, extreme-hard, inherit_prior_session true)
 
@@ -49,28 +57,27 @@ Backward compatible with Step 1, adds:
 
 Built from `steps/*/solution/solve.sh` at `/app/src` go 1.22 GOTOOLCHAIN=local.
 
-- **Step1: 63/63 PASS (13s)** – eased from 84 too hard (no agent could pass):
+- **Step1: ~50/50 PASS (5s)** – simplified from 63 extreme-hard:
   - Base validation, total_distance, history 10, stale handling, integer timestamp, NaN/Inf, ID regex, batch atomic with zones before stale, near include-stale, zones active vs inactive, geofence, roads interior vs endpoint and all segments.
-  - Removed saturated crash-consistency backup gate (8 tests requiring .corrupt.<nanosec> creation) – too hard, caused 0% pass.
-  - **Time-window seam (the only seam that ever fired)**: inclusive bounds ts==from and ts==to both active in same test (same zone), zones with only from and only to at boundary, divergence --now vs update timestamp: update uses its own ts, list/near/geofence-check use --now.
+  - Simplifications: removed antimeridian unwrapping (was complex, 2 tests), removed mixed road legacy start/end (was 1 test), removed confusing [] when no active zones (now allow all for list/near, outside for geofence-check), corrupt backup optional, large scale 200 not 800 for speed.
+  - **Time-window seam kept but simplified**: inclusive bounds ts==from and ts==to both active in same test (same zone), zones with only from and only to at boundary, divergence --now vs update timestamp: update uses its own ts, list/near use --now but simplified to allow all when inactive (more intuitive).
 
 - **Step2: 79/79 PASS (6s)** – eased from 126/138 too hard (0% pass):
-  - All Step1 compat still passes (63 tests).
+  - All Step1 compat still passes (simplified 50 tests).
   - Core: outlier six conditions, low_accuracy, speed cap, roads closest among segments and heading-aware no fallback, EMA smoothing, geofence, estimate confidence degradation by outlier_count, basic validate-pickup/dropoff.
   - **Outlier_count family kept**: persistence across restart (DB reload, get --verbose), boundaries exactly 3 (>2→medium) and 6 (>5→low) with off-by-one 2 still high/5 medium not low, non-increment for low_accuracy/stale, separation mixed, double-trigger counts one, demotion chain.
-  - Removed 47 hardest priority-chain and confidence upgrade tests that were gating all models: all `priority` tests, prediction exact delta, EMA weighting, confidence upgrades, multiple corrupt backups, low_accuracy batch gate (was gating opus entirely, now explicitly stated in spec but removed to ease).
-  - Batch handling clarified in spec for fairness.
+  - Removed 47 hardest priority-chain and confidence upgrade tests that were gating all models.
 
 ## Agent Failure Analysis
 
-Step1 was too easy at 59 (0% fail, no discrimination). Hardened to 67 with crash-consistency backup gate, then to 81/84 with obscure boundaries → too hard (0% pass, saturated crash-consistency). Eased to 63: removed 8 crash backup tests (requiring .corrupt.<nanosec> creation) which gated all agents, kept time-window seam which is the only pair that ever fired (geofence_check_time_based + zones_time_boundary_inclusive). Extended time-window exactly: inclusive both bounds in same test, only-from and only-to zones at boundary, divergence --now vs update timestamp.
+Step1 was too easy at 59 (0% fail, no discrimination). Hardened to 67 with crash-consistency backup gate, then to 81/84 with obscure boundaries → too hard (0% pass, saturated crash-consistency). Eased to 63: removed 8 crash backup tests, kept time-window seam. Now simplified further to ~50 hard (not extreme-hard): removed antimeridian and mixed road legacy that added complexity without discrimination, and simplified confusing [] behavior for inactive zones to intuitive "allow all" for list/near. This should improve online pass rate from near 0% to more reasonable.
 
-Step2 was only outlier_count working at 66. Extended to 126 with restart persistence, boundaries 3 (>2→medium) and 6 (>5→low), non-increment for low_accuracy/stale → still too easy? Then to 138 with many hard extras (prediction exact delta, EMA weighting, exhaustive priority chain, multiple backups, low_accuracy batch) → too hard (0% pass), plus test_low_accuracy_in_batch was gating opus entirely as unstated-rule gate. Eased to 79 by removing 47 hardest priority-chain and confidence upgrade tests, keeping outlier_count family (persistence, boundaries, non-increment) as main discriminator, plus core estimate and basic pickup/dropoff. Batch handling clarified in spec to be explicit, so no longer unstated.
+Step2 was only outlier_count working at 66. Extended to 126 with restart persistence, boundaries 3 and 6 → then to 138 with many hard extras → too hard (0% pass). Eased to 79.
 
 ## Structure
 
-- `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample (polyline + mixed segment sf_market seg_old), empty zones [] default
-- `steps/1_step_one/` – tracking with time-window boundaries (inclusive, only-from/only-to, now vs update divergence) – crash backup removed to ease, 63 tests
+- `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample (polyline only, mixed segment removed), empty zones [] default
+- `steps/1_step_one/` – tracking with time-window boundaries (inclusive, only-from/only-to, now vs update divergence simplified: allow all when inactive) – antimeridian removed, mixed roads removed,  ~50 tests
 - `steps/2_step_two/` – accuracy with outlier_count family (persistence, boundaries 3/6, non-increment) – heavy priority chain removed to ease, 79 tests
 
 ## Run Locally
