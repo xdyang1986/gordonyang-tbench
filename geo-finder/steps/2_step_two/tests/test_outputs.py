@@ -233,36 +233,60 @@ def test_gomod_stdlib_and_lru_own():
             if "/" in mod and "." in mod.split("/")[0]:
                 assert False, f"go.mod has external require {mod}"
 
-    # Check .go files for external imports
+    # Check .go files for external imports – only look at actual import declarations
     for root, _dirs, files in os.walk(APP):
         for fname in files:
             if not fname.endswith(".go"):
                 continue
             path = os.path.join(root, fname)
             try:
-                text = open(path, encoding="utf-8", errors="ignore").read()
+                lines = (
+                    open(path, encoding="utf-8", errors="ignore").read().splitlines()
+                )
             except:
                 continue
-            single_imports = _re.findall(r'"([^"]+)"', text)
-            for imp in single_imports:
-                if "." in imp and "/" in imp:
-                    # external
-                    # allow if it's not lru but any external is forbidden
-                    assert False, (
-                        f"{path} imports external package {imp!r} – stdlib only"
-                    )
-                # LRU must be own: disallow import of any lru package even if stdlib? Check for lru in import name
-                if "lru" in imp.lower() and ("." in imp or "/" in imp):
-                    # If import path contains lru and is external or even stdlib contrib, we want own impl
-                    # Stdlib does not have lru, so any lru import is external or disallowed
-                    # Allow only if the file is the LRU file itself? But importing own package is okay if it's local.
-                    # If import contains '.' then external, already caught. If it is "container/lru" (hypothetical) still disallowed as not stdlib?
-                    # Simpler: fail on any import containing lru (case-insensitive) that is not a local package (no dot)
-                    # Since stdlib has no lru, any lru import should fail
-                    if "lru" in imp.lower():
-                        assert False, (
-                            f"{path} imports lru package {imp!r} – LRU must be own implementation"
-                        )
+            in_block = False
+            for line in lines:
+                stripped = line.strip()
+                if not in_block and stripped.startswith("import ("):
+                    in_block = True
+                    quotes = _re.findall(r'"([^"]+)"', line)
+                    for imp in quotes:
+                        if "." in imp and "/" in imp:
+                            assert False, (
+                                f"{path} imports external package {imp!r} – stdlib only"
+                            )
+                        if "lru" in imp.lower():
+                            # any import containing lru is disallowed – LRU must be own impl, stdlib has no lru
+                            assert False, (
+                                f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                            )
+                    continue
+                if in_block:
+                    quotes = _re.findall(r'"([^"]+)"', line)
+                    for imp in quotes:
+                        if "." in imp and "/" in imp:
+                            assert False, (
+                                f"{path} imports external package {imp!r} – stdlib only"
+                            )
+                        if "lru" in imp.lower():
+                            assert False, (
+                                f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                            )
+                    if ")" in stripped:
+                        in_block = False
+                else:
+                    if stripped.startswith("import "):
+                        quotes = _re.findall(r'"([^"]+)"', line)
+                        for imp in quotes:
+                            if "." in imp and "/" in imp:
+                                assert False, (
+                                    f"{path} imports external package {imp!r} – stdlib only"
+                                )
+                            if "lru" in imp.lower():
+                                assert False, (
+                                    f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                                )
 
     # Also check that an LRU implementation exists – look for a type or struct containing LRU logic
     # We don't enforce structure, but at least ensure no external lru usage

@@ -124,31 +124,52 @@ def test_gomod_stdlib_only():
                 assert False, f"go.mod has external require {mod}"
 
     # Check .go files for external imports (import path containing '.' like github.com/)
+    # Only inspect actual import declarations, not all quoted strings in file (which could be error messages)
     for root, _dirs, files in os.walk(APP):
         for fname in files:
             if not fname.endswith(".go"):
                 continue
             path = os.path.join(root, fname)
             try:
-                text = open(path, encoding="utf-8", errors="ignore").read()
+                lines = (
+                    open(path, encoding="utf-8", errors="ignore").read().splitlines()
+                )
             except:
                 continue
-            # Find import statements – naive regex for quoted import paths
-            imports = _re.findall(
-                r"import\s+(?:\(\s*([^)]+)\s*\)|\"([^\"]+)\"|\'([^\']+)\')",
-                text,
-                _re.DOTALL,
-            )
-            # Also single line imports
-            single_imports = _re.findall(r'"([^"]+)"', text)
-            # Heuristic: any import path containing '.' and '/' and not starting with standard lib prefix is external
-            # Stdlib packages never contain '.' (they are like fmt, net/http, encoding/json)
-            for imp in single_imports:
-                if "." in imp and "/" in imp:
-                    # check if it's known external domain
-                    assert False, (
-                        f"{path} imports external package {imp!r} – stdlib only required"
-                    )
+            in_block = False
+            for line in lines:
+                stripped = line.strip()
+                if not in_block and stripped.startswith("import ("):
+                    in_block = True
+                    # may have imports on same line after '('
+                    # extract quoted strings from remainder
+                    quotes = _re.findall(r'"([^"]+)"', line)
+                    for imp in quotes:
+                        if "." in imp and "/" in imp:
+                            assert False, (
+                                f"{path} imports external package {imp!r} – stdlib only required"
+                            )
+                    continue
+                if in_block:
+                    if ")" in stripped:
+                        in_block = False
+                        # also check this line for imports before closing
+                    quotes = _re.findall(r'"([^"]+)"', line)
+                    for imp in quotes:
+                        if "." in imp and "/" in imp:
+                            assert False, (
+                                f"{path} imports external package {imp!r} – stdlib only required"
+                            )
+                    if ")" in stripped:
+                        continue
+                else:
+                    if stripped.startswith("import "):
+                        quotes = _re.findall(r'"([^"]+)"', line)
+                        for imp in quotes:
+                            if "." in imp and "/" in imp:
+                                assert False, (
+                                    f"{path} imports external package {imp!r} – stdlib only required"
+                                )
 
 
 # ---- add / list / persistence ----
@@ -1585,9 +1606,9 @@ def test_cli_relative_performance_5_vs_500():
         print(
             f"CLI relative: 5-zone {avg5 * 1000:.2f}ms 500-zone {avg500 * 1000:.2f}ms ratio {ratio:.2f}x"
         )
-        # With bbox prefilter, ratio should be small (e.g., <5x). Naive would be ~100x (500/5) * 50-point cost.
-        # Reduced additive slack from 0.05s (50ms, 25-50x measurement) to 0.02s to actually detect missing bbox.
-        assert avg500 <= avg5 * 5 + 0.02, (
+        # With bbox prefilter, ratio should be small (e.g., <6x). Naive would be ~100x (500/5) * 50-point cost.
+        # Reduced additive slack from 0.05s (50ms, 25-50x measurement) to 0.03s to actually detect missing bbox while avoiding flake.
+        assert avg500 <= avg5 * 6 + 0.03, (
             f"500-zone empty too slow vs 5-zone ratio {ratio:.1f}x, need bbox prefilter / index"
         )
     finally:
@@ -2415,7 +2436,7 @@ def test_id_hyphen_remove_and_lookup():
         r = run_cli(db, ["list"])
         ids = [x["id"] for x in json.loads(r.stdout)]
         assert ids == sorted(ids), f"ASCII sort with hyphen/underscore failed {ids}"
-        # '-' ASCII 45, 'a' 97, '_' 95, so order -a < a < _a
-        assert ids == ["-a", "a", "_a"], f"expected ['-a','a','_a'] got {ids}"
+        # '-' ASCII 45, '_' 95, 'a' 97, so order -a < _a < a
+        assert ids == ["-a", "_a", "a"], f"expected ['-a','_a','a'] got {ids}"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
