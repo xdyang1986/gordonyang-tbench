@@ -853,8 +853,12 @@ def _create_many_geofences(db, count=100, points_per=4):
     import math as _math
 
     for i in range(count):
-        base_lat = (i // 10) * 2.0
-        base_lng = (i % 10) * 2.0
+        # Keep lat/lng within valid range even for 500 zones.
+        # Original (i//10)*2 exceeds 90 at i>=450. Use safe wrapped grid.
+        lat_idx = (i // 20) % 18  # 0..17 => -80..56
+        lng_idx = i % 20
+        base_lat = lat_idx * 8.0 - 80.0
+        base_lng = lng_idx * 17.0 - 170.0
         if points_per == 4:
             poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
         else:
@@ -864,12 +868,15 @@ def _create_many_geofences(db, count=100, points_per=4):
                 ang = 2 * _math.pi * j / points_per
                 lat = base_lat + 0.4 + 0.3 * _math.sin(ang)
                 lng = base_lng + 0.4 + 0.3 * _math.cos(ang)
+                # clamp to valid range just in case
+                lat = max(-89.9, min(89.9, lat))
+                lng = max(-179.9, min(179.9, lng))
                 pts.append(f"{lat},{lng}")
             poly = ";".join(pts)
         r = run_cli(
             db, ["add", f"zone_{i:04d}", "--polygon", poly, "--name", f"Zone {i}"]
         )
-        assert r.returncode == 0, f"add zone {i} failed {r.stderr}"
+        assert r.returncode == 0, f"add zone {i} failed {r.stderr} poly={poly[:100]}"
 
 
 def _measure_avg_latency(port, lat, lng, repeats=20, timeout=2):
