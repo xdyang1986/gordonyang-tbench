@@ -50,13 +50,8 @@ type Location struct {
 }
 
 type Zone struct {
-	ID         string   `json:"id"`
-	Polygon    []Point  `json:"polygon,omitempty"`
-	Holes      [][]Point `json:"holes,omitempty"`
-	Center     *Point   `json:"center,omitempty"`
-	RadiusM    *float64 `json:"radius_m,omitempty"`
-	ActiveFrom *int64   `json:"active_from,omitempty"`
-	ActiveTo   *int64   `json:"active_to,omitempty"`
+	ID      string  `json:"id"`
+	Polygon []Point `json:"polygon,omitempty"`
 }
 
 type RoadEntry struct {
@@ -81,7 +76,7 @@ func isInvalidFloat(f float64) bool {
 	return math.IsNaN(f) || math.IsInf(f, 0)
 }
 
-func parseFloatArg(s, name string) (float64, bool) {
+func parseFloatArg(s string) (float64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
@@ -100,7 +95,7 @@ func parseFloatArg(s, name string) (float64, bool) {
 	return f, true
 }
 
-func parseIntArg(s, name string) (int64, bool) {
+func parseIntArg(s string) (int64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
@@ -124,7 +119,6 @@ func haversine(lat1, lng1, lat2, lng2 float64) float64 {
 }
 
 func pointOnSegment(lat, lng float64, a, b Point) bool {
-	// check colinear and within bbox, tolerance 1e-9
 	dx := b.Lng - a.Lng
 	dy := b.Lat - a.Lat
 	dxp := lng - a.Lng
@@ -155,7 +149,7 @@ func pointOnSegment(lat, lng float64, a, b Point) bool {
 	return true
 }
 
-func pointInPolygonSingle(lat, lng float64, poly []Point) bool {
+func pointInPolygon(lat, lng float64, poly []Point) bool {
 	if len(poly) < 3 {
 		return false
 	}
@@ -185,26 +179,11 @@ func pointInPolygonSingle(lat, lng float64, poly []Point) bool {
 	return inside
 }
 
-func pointInPolygonWithHoles(lat, lng float64, poly []Point, holes [][]Point) bool {
-	if !pointInPolygonSingle(lat, lng, poly) {
-		return false
-	}
-	for _, hole := range holes {
-		if pointInPolygonSingle(lat, lng, hole) {
-			return false
-		}
-	}
-	return true
-}
-
 func validatePoint(p Point) bool {
 	if isInvalidFloat(p.Lat) || isInvalidFloat(p.Lng) {
 		return false
 	}
-	if p.Lat < -90 || p.Lat > 90 {
-		return false
-	}
-	if p.Lng < -180 || p.Lng > 180 {
+	if p.Lat < -90 || p.Lat > 90 || p.Lng < -180 || p.Lng > 180 {
 		return false
 	}
 	return true
@@ -221,6 +200,11 @@ func loadZones(path string) ([]Zone, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return []Zone{}, nil
 	}
+	// Check for disallowed keys to keep spec simple: if file contains holes, center, radius_m, active_from/to, treat as invalid for step1
+	low := strings.ToLower(string(data))
+	if strings.Contains(low, "\"holes\"") || strings.Contains(low, "\"center\"") || strings.Contains(low, "\"radius_m\"") || strings.Contains(low, "\"active_from\"") || strings.Contains(low, "\"active_to\"") {
+		return nil, fmt.Errorf("step1 zones must be polygon only, no holes/circles/time")
+	}
 	var zones []Zone
 	if err := json.Unmarshal(data, &zones); err != nil {
 		return nil, fmt.Errorf("invalid zones json: %w", err)
@@ -229,121 +213,25 @@ func loadZones(path string) ([]Zone, error) {
 		if strings.TrimSpace(z.ID) == "" {
 			return nil, fmt.Errorf("zone id empty")
 		}
-		hasPoly := len(z.Polygon) > 0
-		hasCircle := z.Center != nil || z.RadiusM != nil
-		if hasPoly && hasCircle {
-			return nil, fmt.Errorf("zone %s has both polygon and circle", z.ID)
+		if len(z.Polygon) < 3 {
+			return nil, fmt.Errorf("zone %s polygon <3", z.ID)
 		}
-		if !hasPoly && !hasCircle {
-			return nil, fmt.Errorf("zone %s has neither polygon nor circle", z.ID)
-		}
-		if hasPoly {
-			if len(z.Polygon) < 3 {
-				return nil, fmt.Errorf("zone %s polygon <3", z.ID)
-			}
-			for _, pt := range z.Polygon {
-				if !validatePoint(pt) {
-					return nil, fmt.Errorf("zone %s invalid point", z.ID)
-				}
-			}
-			for hi, hole := range z.Holes {
-				if len(hole) < 3 {
-					return nil, fmt.Errorf("zone %s hole %d <3", z.ID, hi)
-				}
-				for _, pt := range hole {
-					if !validatePoint(pt) {
-						return nil, fmt.Errorf("zone %s hole %d invalid", z.ID, hi)
-					}
-				}
-			}
-		}
-		if hasCircle {
-			if z.Center == nil || z.RadiusM == nil {
-				return nil, fmt.Errorf("zone %s circle missing center or radius", z.ID)
-			}
-			if !validatePoint(*z.Center) {
-				return nil, fmt.Errorf("zone %s center invalid", z.ID)
-			}
-			if isInvalidFloat(*z.RadiusM) || *z.RadiusM <= 0 || *z.RadiusM > 1000000 {
-				return nil, fmt.Errorf("zone %s radius invalid", z.ID)
-			}
-		}
-		if z.ActiveFrom != nil && z.ActiveTo != nil {
-			if *z.ActiveFrom > *z.ActiveTo {
-				return nil, fmt.Errorf("zone %s active_from > active_to", z.ID)
-			}
-			if *z.ActiveFrom < 0 || *z.ActiveTo < 0 {
-				return nil, fmt.Errorf("zone %s active negative", z.ID)
-			}
-		} else {
-			if z.ActiveFrom != nil && *z.ActiveFrom < 0 {
-				return nil, fmt.Errorf("zone %s active_from negative", z.ID)
-			}
-			if z.ActiveTo != nil && *z.ActiveTo < 0 {
-				return nil, fmt.Errorf("zone %s active_to negative", z.ID)
+		for _, pt := range z.Polygon {
+			if !validatePoint(pt) {
+				return nil, fmt.Errorf("zone %s invalid point", z.ID)
 			}
 		}
 	}
 	return zones, nil
 }
 
-func isZoneActiveAt(z Zone, ts int64) bool {
-	if z.ActiveFrom != nil && ts < *z.ActiveFrom {
-		return false
-	}
-	if z.ActiveTo != nil && ts > *z.ActiveTo {
-		return false
-	}
-	return true
-}
-
-func filterActiveZones(zones []Zone, ts int64, useTimeFilter bool) []Zone {
-	if !useTimeFilter {
-		return zones
-	}
-	var out []Zone
+func isInsideAnyZone(lat, lng float64, zones []Zone) (bool, string) {
 	for _, z := range zones {
-		if isZoneActiveAt(z, ts) {
-			out = append(out, z)
-		}
-	}
-	return out
-}
-
-func isInsideZone(lat, lng float64, z Zone) bool {
-	if len(z.Polygon) > 0 {
-		return pointInPolygonWithHoles(lat, lng, z.Polygon, z.Holes)
-	}
-	if z.Center != nil && z.RadiusM != nil {
-		d := haversine(lat, lng, z.Center.Lat, z.Center.Lng)
-		return d <= *z.RadiusM+1e-6
-	}
-	return false
-}
-
-func isInsideAnyZoneList(lat, lng float64, zones []Zone) (bool, string) {
-	for _, z := range zones {
-		if isInsideZone(lat, lng, z) {
+		if pointInPolygon(lat, lng, z.Polygon) {
 			return true, z.ID
 		}
 	}
 	return false, ""
-}
-
-func isInsideAnyZoneForUpdate(lat, lng float64, zones []Zone, ts int64) (bool, string) {
-	active := filterActiveZones(zones, ts, true)
-	if len(active) == 0 {
-		return true, ""
-	}
-	return isInsideAnyZoneList(lat, lng, active)
-}
-
-func isInsideAnyZoneForFiltering(lat, lng float64, zones []Zone, ts int64, useTimeFilter bool) (bool, string) {
-	active := filterActiveZones(zones, ts, useTimeFilter)
-	if len(active) == 0 {
-		return true, ""
-	}
-	return isInsideAnyZoneList(lat, lng, active)
 }
 
 func loadRoads(path string) ([]RoadEntry, error) {
@@ -424,11 +312,8 @@ func closestPointOnSegment(px, py, x1, y1, x2, y2 float64) (cx, cy, dist, t floa
 
 type SnapResult struct {
 	Snapped bool
-	Lat     float64
-	Lng     float64
 	RoadID  string
 	DistM   float64
-	Bearing float64
 }
 
 func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
@@ -439,12 +324,8 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 	px, py := latLngToXY(lat, lng, latRef)
 	bestDist := math.MaxFloat64
 	var best SnapResult
-	best.Snapped = false
 	for _, road := range roads {
 		pts := road.Points
-		if len(pts) < 2 {
-			continue
-		}
 		for i := 0; i < len(pts)-1; i++ {
 			p1 := pts[i]
 			p2 := pts[i+1]
@@ -453,9 +334,9 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 			cx, cy, dist, _ := closestPointOnSegment(px, py, x1, y1, x2, y2)
 			if dist < bestDist {
 				bestDist = dist
-				cLat, cLng := xyToLatLng(cx, cy, latRef)
-				br := bearing(p1.Lat, p1.Lng, p2.Lat, p2.Lng)
-				best = SnapResult{Snapped: true, Lat: cLat, Lng: cLng, RoadID: road.ID, DistM: dist, Bearing: br}
+				best = SnapResult{Snapped: true, RoadID: road.ID, DistM: dist}
+				_ = cx
+				_ = cy
 			}
 		}
 	}
@@ -463,17 +344,6 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 		return best
 	}
 	return SnapResult{Snapped: false}
-}
-
-func bearing(lat1, lng1, lat2, lng2 float64) float64 {
-	phi1 := lat1 * math.Pi / 180
-	phi2 := lat2 * math.Pi / 180
-	dlambda := (lng2 - lng1) * math.Pi / 180
-	x := math.Sin(dlambda) * math.Cos(phi2)
-	y := math.Cos(phi1)*math.Sin(phi2) - math.Sin(phi1)*math.Cos(phi2)*math.Cos(dlambda)
-	br := math.Atan2(x, y) * 180 / math.Pi
-	br = math.Mod(br+360, 360)
-	return br
 }
 
 func backupCorrupt(path string, raw []byte) {
@@ -549,8 +419,7 @@ func saveDB(path string, db map[string]Location) error {
 		prefix := filepath.Base(path) + ".tmp."
 		for _, f := range files {
 			if strings.HasPrefix(f.Name(), prefix) {
-				stale := filepath.Join(dir, f.Name())
-				_ = os.Remove(stale)
+				_ = os.Remove(filepath.Join(dir, f.Name()))
 			}
 		}
 	}
@@ -558,8 +427,6 @@ func saveDB(path string, db map[string]Location) error {
 }
 
 func parseGlobalDBFlag(args []string) (dbPath string, remaining []string) {
-	dbPath = ""
-	remaining = []string{}
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--db" {
 			if i+1 < len(args) {
@@ -575,109 +442,6 @@ func parseGlobalDBFlag(args []string) (dbPath string, remaining []string) {
 		}
 	}
 	return
-}
-
-type UpdateArgs struct {
-	VehicleID string
-	Lat       float64
-	Lng       float64
-	Timestamp int64
-	Accuracy  float64
-	Speed     float64
-	Heading   float64
-	ZonesPath string
-}
-
-func parseUpdateArgs(cmdArgs []string) UpdateArgs {
-	if len(cmdArgs) < 4 {
-		exitPrint(2, "update requires <vehicle_id> <lat> <lng> <timestamp_ms>", true)
-	}
-	ua := UpdateArgs{}
-	ua.VehicleID = cmdArgs[0]
-	if !vehicleIDRegex.MatchString(ua.VehicleID) {
-		exitPrint(2, "invalid vehicle_id", true)
-	}
-	f, ok := parseFloatArg(cmdArgs[1], "lat")
-	if !ok || f < -90 || f > 90 {
-		exitPrint(2, "invalid lat", true)
-	}
-	ua.Lat = f
-	f, ok = parseFloatArg(cmdArgs[2], "lng")
-	if !ok || f < -180 || f > 180 {
-		exitPrint(2, "invalid lng", true)
-	}
-	ua.Lng = f
-	ts, ok := parseIntArg(cmdArgs[3], "timestamp")
-	if !ok || ts < 0 {
-		exitPrint(2, "invalid timestamp", true)
-	}
-	ua.Timestamp = ts
-	ua.Accuracy = 10.0
-	ua.Speed = 0.0
-	ua.Heading = 0.0
-	for i := 4; i < len(cmdArgs); i++ {
-		arg := cmdArgs[i]
-		if arg == "--accuracy" {
-			if i+1 >= len(cmdArgs) {
-				exitPrint(2, "missing --accuracy value", true)
-			}
-			v, ok := parseFloatArg(cmdArgs[i+1], "accuracy")
-			if !ok || v < 0 {
-				exitPrint(2, "invalid accuracy", true)
-			}
-			ua.Accuracy = v
-			i++
-		} else if strings.HasPrefix(arg, "--accuracy=") {
-			v, ok := parseFloatArg(arg[len("--accuracy="):], "accuracy")
-			if !ok || v < 0 {
-				exitPrint(2, "invalid accuracy", true)
-			}
-			ua.Accuracy = v
-		} else if arg == "--speed" {
-			if i+1 >= len(cmdArgs) {
-				exitPrint(2, "missing --speed value", true)
-			}
-			v, ok := parseFloatArg(cmdArgs[i+1], "speed")
-			if !ok || v < 0 || v > 50 {
-				exitPrint(2, "invalid speed", true)
-			}
-			ua.Speed = v
-			i++
-		} else if strings.HasPrefix(arg, "--speed=") {
-			v, ok := parseFloatArg(arg[len("--speed="):], "speed")
-			if !ok || v < 0 || v > 50 {
-				exitPrint(2, "invalid speed", true)
-			}
-			ua.Speed = v
-		} else if arg == "--heading" {
-			if i+1 >= len(cmdArgs) {
-				exitPrint(2, "missing --heading value", true)
-			}
-			v, ok := parseFloatArg(cmdArgs[i+1], "heading")
-			if !ok || v < 0 || v >= 360 {
-				exitPrint(2, "invalid heading", true)
-			}
-			ua.Heading = v
-			i++
-		} else if strings.HasPrefix(arg, "--heading=") {
-			v, ok := parseFloatArg(arg[len("--heading="):], "heading")
-			if !ok || v < 0 || v >= 360 {
-				exitPrint(2, "invalid heading", true)
-			}
-			ua.Heading = v
-		} else if arg == "--zones" {
-			if i+1 >= len(cmdArgs) {
-				exitPrint(2, "missing --zones value", true)
-			}
-			ua.ZonesPath = cmdArgs[i+1]
-			i++
-		} else if strings.HasPrefix(arg, "--zones=") {
-			ua.ZonesPath = arg[len("--zones="):]
-		} else {
-			exitPrint(2, fmt.Sprintf("unknown flag %s", arg), true)
-		}
-	}
-	return ua
 }
 
 func printHelp() {
@@ -707,12 +471,95 @@ func main() {
 
 	switch cmd {
 	case "update":
-		ua := parseUpdateArgs(cmdArgs)
+		if len(cmdArgs) < 4 {
+			exitPrint(2, "update requires <vehicle_id> <lat> <lng> <timestamp_ms>", true)
+		}
+		vid := cmdArgs[0]
+		if !vehicleIDRegex.MatchString(vid) {
+			exitPrint(2, "invalid vehicle_id", true)
+		}
+		lat, ok := parseFloatArg(cmdArgs[1])
+		if !ok || lat < -90 || lat > 90 {
+			exitPrint(2, "invalid lat", true)
+		}
+		lng, ok := parseFloatArg(cmdArgs[2])
+		if !ok || lng < -180 || lng > 180 {
+			exitPrint(2, "invalid lng", true)
+		}
+		ts, ok := parseIntArg(cmdArgs[3])
+		if !ok || ts < 0 {
+			exitPrint(2, "invalid timestamp", true)
+		}
+		acc := 10.0
+		spd := 0.0
+		hdg := 0.0
+		zonesPath := ""
+		for i := 4; i < len(cmdArgs); i++ {
+			a := cmdArgs[i]
+			if a == "--accuracy" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --accuracy value", true)
+				}
+				v, ok := parseFloatArg(cmdArgs[i+1])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid accuracy", true)
+				}
+				acc = v
+				i++
+			} else if strings.HasPrefix(a, "--accuracy=") {
+				v, ok := parseFloatArg(a[len("--accuracy="):])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid accuracy", true)
+				}
+				acc = v
+			} else if a == "--speed" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --speed value", true)
+				}
+				v, ok := parseFloatArg(cmdArgs[i+1])
+				if !ok || v < 0 || v > 50 {
+					exitPrint(2, "invalid speed", true)
+				}
+				spd = v
+				i++
+			} else if strings.HasPrefix(a, "--speed=") {
+				v, ok := parseFloatArg(a[len("--speed="):])
+				if !ok || v < 0 || v > 50 {
+					exitPrint(2, "invalid speed", true)
+				}
+				spd = v
+			} else if a == "--heading" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --heading value", true)
+				}
+				v, ok := parseFloatArg(cmdArgs[i+1])
+				if !ok || v < 0 || v >= 360 {
+					exitPrint(2, "invalid heading", true)
+				}
+				hdg = v
+				i++
+			} else if strings.HasPrefix(a, "--heading=") {
+				v, ok := parseFloatArg(a[len("--heading="):])
+				if !ok || v < 0 || v >= 360 {
+					exitPrint(2, "invalid heading", true)
+				}
+				hdg = v
+			} else if a == "--zones" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --zones value", true)
+				}
+				zonesPath = cmdArgs[i+1]
+				i++
+			} else if strings.HasPrefix(a, "--zones=") {
+				zonesPath = a[len("--zones="):]
+			} else {
+				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
+			}
+		}
 		db, err := loadDB(dbPath)
 		if err != nil {
 			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
 		}
-		zonesPath := ua.ZonesPath
 		if zonesPath == "" {
 			if _, err := os.Stat("/app/data/zones.json"); err == nil {
 				zonesPath = "/app/data/zones.json"
@@ -727,65 +574,37 @@ func main() {
 			zones = z
 		}
 		if len(zones) > 0 {
-			ok, _ := isInsideAnyZoneForUpdate(ua.Lat, ua.Lng, zones, ua.Timestamp)
+			ok, _ := isInsideAnyZone(lat, lng, zones)
 			if !ok {
 				fmt.Println("out_of_zone")
 				os.Exit(3)
 			}
 		}
-		if existing, ok := db[ua.VehicleID]; ok {
-			if ua.Timestamp <= existing.TimestampMs {
+		if existing, ok := db[vid]; ok {
+			if ts <= existing.TimestampMs {
 				fmt.Println("stale")
 				os.Exit(0)
 			}
-			dist := haversine(existing.Lat, existing.Lng, ua.Lat, ua.Lng)
-			history := existing.History
-			sort.Slice(history, func(i, j int) bool { return history[i].TimestampMs < history[j].TimestampMs })
-			newEntry := HistoryEntry{Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp, Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading}
-			history = append(history, newEntry)
-			if len(history) > 10 {
-				history = history[len(history)-10:]
+			dist := haversine(existing.Lat, existing.Lng, lat, lng)
+			hist := existing.History
+			sort.Slice(hist, func(i, j int) bool { return hist[i].TimestampMs < hist[j].TimestampMs })
+			hist = append(hist, HistoryEntry{Lat: lat, Lng: lng, TimestampMs: ts, Accuracy: acc, Speed: spd, Heading: hdg})
+			if len(hist) > 10 {
+				hist = hist[len(hist)-10:]
 			}
-			sort.Slice(history, func(i, j int) bool { return history[i].TimestampMs < history[j].TimestampMs })
-			loc := Location{
-				VehicleID: ua.VehicleID, Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp,
-				Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading,
-				TotalDistanceM: existing.TotalDistanceM + dist,
-				History: history,
-			}
-			db[ua.VehicleID] = loc
-			if err := saveDB(dbPath, db); err != nil {
-				exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
-			}
-			out := map[string]interface{}{
-				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
-				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
-			}
-			b, _ := json.Marshal(out)
-			fmt.Println(string(b))
-			os.Exit(0)
+			sort.Slice(hist, func(i, j int) bool { return hist[i].TimestampMs < hist[j].TimestampMs })
+			db[vid] = Location{VehicleID: vid, Lat: lat, Lng: lng, TimestampMs: ts, Accuracy: acc, Speed: spd, Heading: hdg, TotalDistanceM: existing.TotalDistanceM + dist, History: hist}
 		} else {
-			hist := []HistoryEntry{{Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp, Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading}}
-			loc := Location{
-				VehicleID: ua.VehicleID, Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp,
-				Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading,
-				TotalDistanceM: 0,
-				History: hist,
-			}
-			db[ua.VehicleID] = loc
-			if err := saveDB(dbPath, db); err != nil {
-				exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
-			}
-			out := map[string]interface{}{
-				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
-				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
-			}
-			b, _ := json.Marshal(out)
-			fmt.Println(string(b))
-			os.Exit(0)
+			hist := []HistoryEntry{{Lat: lat, Lng: lng, TimestampMs: ts, Accuracy: acc, Speed: spd, Heading: hdg}}
+			db[vid] = Location{VehicleID: vid, Lat: lat, Lng: lng, TimestampMs: ts, Accuracy: acc, Speed: spd, Heading: hdg, TotalDistanceM: 0, History: hist}
 		}
+		if err := saveDB(dbPath, db); err != nil {
+			exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
+		}
+		loc := db[vid]
+		out := map[string]interface{}{"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs, "accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading, "total_distance_m": loc.TotalDistanceM}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
 
 	case "get":
 		if len(cmdArgs) < 1 {
@@ -815,24 +634,18 @@ func main() {
 			b, _ := json.Marshal(loc)
 			fmt.Println(string(b))
 		} else {
-			out := map[string]interface{}{
-				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
-				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
-			}
+			out := map[string]interface{}{"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs, "accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading, "total_distance_m": loc.TotalDistanceM}
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
 		}
-		os.Exit(0)
 
 	case "list":
 		var since, until *int64
 		limit := -1
-		offset := 0
 		hasLimit := false
+		offset := 0
 		zonesPath := ""
 		roadsPath := ""
-		var nowTs *int64
 		i := 0
 		for i < len(cmdArgs) {
 			a := cmdArgs[i]
@@ -840,14 +653,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --since value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "since")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid since", true)
 				}
 				since = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--since=") {
-				v, ok := parseIntArg(a[len("--since="):], "since")
+				v, ok := parseIntArg(a[len("--since="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid since", true)
 				}
@@ -857,14 +670,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --until value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "until")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid until", true)
 				}
 				until = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--until=") {
-				v, ok := parseIntArg(a[len("--until="):], "until")
+				v, ok := parseIntArg(a[len("--until="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid until", true)
 				}
@@ -874,7 +687,7 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --limit value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "limit")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -882,7 +695,7 @@ func main() {
 				hasLimit = true
 				i += 2
 			} else if strings.HasPrefix(a, "--limit=") {
-				v, ok := parseIntArg(a[len("--limit="):], "limit")
+				v, ok := parseIntArg(a[len("--limit="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -893,14 +706,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --offset value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "offset")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
 				offset = int(v)
 				i += 2
 			} else if strings.HasPrefix(a, "--offset=") {
-				v, ok := parseIntArg(a[len("--offset="):], "offset")
+				v, ok := parseIntArg(a[len("--offset="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
@@ -924,23 +737,14 @@ func main() {
 			} else if strings.HasPrefix(a, "--roads=") {
 				roadsPath = a[len("--roads="):]
 				i++
-			} else if a == "--now" {
-				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --now value", true)
+			} else if strings.HasPrefix(a, "--now") {
+				// Step1 simplified: accept --now but ignore for zones (kept for compat with stale tests that don't use now)
+				// Consume value if --now <val> or --now=<val>
+				if a == "--now" {
+					i += 2
+				} else {
+					i++
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "now")
-				if !ok || v < 0 {
-					exitPrint(2, "invalid now", true)
-				}
-				nowTs = &v
-				i += 2
-			} else if strings.HasPrefix(a, "--now=") {
-				v, ok := parseIntArg(a[len("--now="):], "now")
-				if !ok || v < 0 {
-					exitPrint(2, "invalid now", true)
-				}
-				nowTs = &v
-				i++
 			} else {
 				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
 			}
@@ -977,12 +781,7 @@ func main() {
 				continue
 			}
 			if zonesPath != "" && len(zones) > 0 {
-				useTime := nowTs != nil
-				var ts int64 = 0
-				if nowTs != nil {
-					ts = *nowTs
-				}
-				ok, _ := isInsideAnyZoneForFiltering(loc.Lat, loc.Lng, zones, ts, useTime)
+				ok, _ := isInsideAnyZone(loc.Lat, loc.Lng, zones)
 				if !ok {
 					continue
 				}
@@ -1020,14 +819,13 @@ func main() {
 		}
 		var out []outLoc
 		for _, l := range list {
-			out = append(out, outLoc{VehicleID: l.VehicleID, Lat: l.Lat, Lng: l.Lng, TimestampMs: l.TimestampMs, Accuracy: l.Accuracy, Speed: l.Speed, Heading: l.Heading, TotalDistanceM: l.TotalDistanceM})
+			out = append(out, outLoc{l.VehicleID, l.Lat, l.Lng, l.TimestampMs, l.Accuracy, l.Speed, l.Heading, l.TotalDistanceM})
 		}
 		if out == nil {
 			out = []outLoc{}
 		}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	case "near":
 		var latQ, lngQ, radius float64
@@ -1048,7 +846,7 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --lat", true)
 				}
-				v, ok := parseFloatArg(cmdArgs[i+1], "lat")
+				v, ok := parseFloatArg(cmdArgs[i+1])
 				if !ok {
 					exitPrint(2, "invalid lat", true)
 				}
@@ -1056,7 +854,7 @@ func main() {
 				hasLat = true
 				i += 2
 			} else if strings.HasPrefix(a, "--lat=") {
-				v, ok := parseFloatArg(a[len("--lat="):], "lat")
+				v, ok := parseFloatArg(a[len("--lat="):])
 				if !ok {
 					exitPrint(2, "invalid lat", true)
 				}
@@ -1067,7 +865,7 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --lng", true)
 				}
-				v, ok := parseFloatArg(cmdArgs[i+1], "lng")
+				v, ok := parseFloatArg(cmdArgs[i+1])
 				if !ok {
 					exitPrint(2, "invalid lng", true)
 				}
@@ -1075,7 +873,7 @@ func main() {
 				hasLng = true
 				i += 2
 			} else if strings.HasPrefix(a, "--lng=") {
-				v, ok := parseFloatArg(a[len("--lng="):], "lng")
+				v, ok := parseFloatArg(a[len("--lng="):])
 				if !ok {
 					exitPrint(2, "invalid lng", true)
 				}
@@ -1086,7 +884,7 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --radius", true)
 				}
-				v, ok := parseFloatArg(cmdArgs[i+1], "radius")
+				v, ok := parseFloatArg(cmdArgs[i+1])
 				if !ok {
 					exitPrint(2, "invalid radius", true)
 				}
@@ -1094,7 +892,7 @@ func main() {
 				hasRadius = true
 				i += 2
 			} else if strings.HasPrefix(a, "--radius=") {
-				v, ok := parseFloatArg(a[len("--radius="):], "radius")
+				v, ok := parseFloatArg(a[len("--radius="):])
 				if !ok {
 					exitPrint(2, "invalid radius", true)
 				}
@@ -1105,14 +903,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --accuracy-max", true)
 				}
-				v, ok := parseFloatArg(cmdArgs[i+1], "accuracy-max")
+				v, ok := parseFloatArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid accuracy-max", true)
 				}
 				accMax = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--accuracy-max=") {
-				v, ok := parseFloatArg(a[len("--accuracy-max="):], "accuracy-max")
+				v, ok := parseFloatArg(a[len("--accuracy-max="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid accuracy-max", true)
 				}
@@ -1122,14 +920,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --speed-min", true)
 				}
-				v, ok := parseFloatArg(cmdArgs[i+1], "speed-min")
+				v, ok := parseFloatArg(cmdArgs[i+1])
 				if !ok || v < 0 || v > 50 {
 					exitPrint(2, "invalid speed-min", true)
 				}
 				speedMin = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--speed-min=") {
-				v, ok := parseFloatArg(a[len("--speed-min="):], "speed-min")
+				v, ok := parseFloatArg(a[len("--speed-min="):])
 				if !ok || v < 0 || v > 50 {
 					exitPrint(2, "invalid speed-min", true)
 				}
@@ -1137,9 +935,9 @@ func main() {
 				i++
 			} else if a == "--limit" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --limit", true)
+					exitPrint(2, "missing --limit value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "limit")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -1147,7 +945,7 @@ func main() {
 				hasLimit = true
 				i += 2
 			} else if strings.HasPrefix(a, "--limit=") {
-				v, ok := parseIntArg(a[len("--limit="):], "limit")
+				v, ok := parseIntArg(a[len("--limit="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -1156,16 +954,16 @@ func main() {
 				i++
 			} else if a == "--offset" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --offset", true)
+					exitPrint(2, "missing --offset value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "offset")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
 				offset = int(v)
 				i += 2
 			} else if strings.HasPrefix(a, "--offset=") {
-				v, ok := parseIntArg(a[len("--offset="):], "offset")
+				v, ok := parseIntArg(a[len("--offset="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
@@ -1173,16 +971,16 @@ func main() {
 				i++
 			} else if a == "--now" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --now", true)
+					exitPrint(2, "missing --now value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "now")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid now", true)
 				}
 				nowTs = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--now=") {
-				v, ok := parseIntArg(a[len("--now="):], "now")
+				v, ok := parseIntArg(a[len("--now="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid now", true)
 				}
@@ -1193,7 +991,7 @@ func main() {
 				i++
 			} else if a == "--zones" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --zones", true)
+					exitPrint(2, "missing --zones value", true)
 				}
 				zonesPath = cmdArgs[i+1]
 				i += 2
@@ -1202,7 +1000,7 @@ func main() {
 				i++
 			} else if a == "--roads" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --roads", true)
+					exitPrint(2, "missing --roads value", true)
 				}
 				roadsPath = cmdArgs[i+1]
 				i += 2
@@ -1216,11 +1014,8 @@ func main() {
 		if !hasLat || !hasLng || !hasRadius {
 			exitPrint(2, "near requires --lat --lng --radius", true)
 		}
-		if latQ < -90 || latQ > 90 || lngQ < -180 || lngQ > 180 {
-			exitPrint(2, "invalid lat/lng", true)
-		}
-		if radius < 0 || radius > 50000 {
-			exitPrint(2, "invalid radius", true)
+		if latQ < -90 || latQ > 90 || lngQ < -180 || lngQ > 180 || radius < 0 || radius > 50000 {
+			exitPrint(2, "invalid lat/lng/radius", true)
 		}
 		db, err := loadDB(dbPath)
 		if err != nil {
@@ -1264,12 +1059,7 @@ func main() {
 				}
 			}
 			if zonesPath != "" && len(zones) > 0 {
-				useTime := nowTs != nil
-				var ts int64 = 0
-				if nowTs != nil {
-					ts = *nowTs
-				}
-				ok, _ := isInsideAnyZoneForFiltering(loc.Lat, loc.Lng, zones, ts, useTime)
+				ok, _ := isInsideAnyZone(loc.Lat, loc.Lng, zones)
 				if !ok {
 					continue
 				}
@@ -1317,7 +1107,6 @@ func main() {
 		}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	case "track":
 		if len(cmdArgs) < 3 {
@@ -1338,14 +1127,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --from", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "from")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid from", true)
 				}
 				from = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--from=") {
-				v, ok := parseIntArg(a[len("--from="):], "from")
+				v, ok := parseIntArg(a[len("--from="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid from", true)
 				}
@@ -1355,14 +1144,14 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --to", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "to")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid to", true)
 				}
 				to = &v
 				i += 2
 			} else if strings.HasPrefix(a, "--to=") {
-				v, ok := parseIntArg(a[len("--to="):], "to")
+				v, ok := parseIntArg(a[len("--to="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid to", true)
 				}
@@ -1372,7 +1161,7 @@ func main() {
 				if i+1 >= len(cmdArgs) {
 					exitPrint(2, "missing --limit", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "limit")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -1380,7 +1169,7 @@ func main() {
 				hasLimit = true
 				i += 2
 			} else if strings.HasPrefix(a, "--limit=") {
-				v, ok := parseIntArg(a[len("--limit="):], "limit")
+				v, ok := parseIntArg(a[len("--limit="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid limit", true)
 				}
@@ -1389,16 +1178,16 @@ func main() {
 				i++
 			} else if a == "--offset" {
 				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --offset", true)
+					exitPrint(2, "missing --offset value", true)
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "offset")
+				v, ok := parseIntArg(cmdArgs[i+1])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
 				offset = int(v)
 				i += 2
 			} else if strings.HasPrefix(a, "--offset=") {
-				v, ok := parseIntArg(a[len("--offset="):], "offset")
+				v, ok := parseIntArg(a[len("--offset="):])
 				if !ok || v < 0 {
 					exitPrint(2, "invalid offset", true)
 				}
@@ -1447,7 +1236,6 @@ func main() {
 		}
 		b, _ := json.Marshal(filtered)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	case "distance":
 		if len(cmdArgs) < 1 {
@@ -1468,7 +1256,6 @@ func main() {
 		out := map[string]interface{}{"vehicle_id": loc.VehicleID, "total_distance_m": loc.TotalDistanceM}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	case "delete":
 		if len(cmdArgs) < 1 {
@@ -1487,7 +1274,6 @@ func main() {
 			exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
 		}
 		fmt.Println("deleted")
-		os.Exit(0)
 
 	case "stats":
 		db, err := loadDB(dbPath)
@@ -1509,12 +1295,9 @@ func main() {
 		if live > 0 {
 			avgAcc = totalAcc / float64(live)
 		}
-		out := map[string]interface{}{
-			"live": live, "total_updates": totalUpdates, "total_distance_m": totalDist, "avg_accuracy": avgAcc,
-		}
+		out := map[string]interface{}{"live": live, "total_updates": totalUpdates, "total_distance_m": totalDist, "avg_accuracy": avgAcc}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	case "batch":
 		db, err := loadDB(dbPath)
@@ -1531,10 +1314,6 @@ func main() {
 			acc  float64
 			spd  float64
 			hdg  float64
-			hasAcc bool
-			hasSpd bool
-			hasHdg bool
-			line string
 		}
 		var ops []batchOp
 		for scanner.Scan() {
@@ -1555,9 +1334,9 @@ func main() {
 				if !vehicleIDRegex.MatchString(vid) {
 					exitPrint(2, fmt.Sprintf("invalid vehicle_id %s", vid), true)
 				}
-				lat, ok1 := parseFloatArg(parts[2], "lat")
-				lng, ok2 := parseFloatArg(parts[3], "lng")
-				ts, ok3 := parseIntArg(parts[4], "timestamp")
+				lat, ok1 := parseFloatArg(parts[2])
+				lng, ok2 := parseFloatArg(parts[3])
+				ts, ok3 := parseIntArg(parts[4])
 				if !ok1 || lat < -90 || lat > 90 {
 					exitPrint(2, fmt.Sprintf("invalid lat %s", parts[2]), true)
 				}
@@ -1570,41 +1349,37 @@ func main() {
 				acc := 10.0
 				spd := 0.0
 				hdg := 0.0
-				hasAcc, hasSpd, hasHdg := false, false, false
 				if len(parts) >= 6 {
 					s := strings.TrimSpace(parts[5])
 					if s != "" {
-						v, ok := parseFloatArg(s, "accuracy")
+						v, ok := parseFloatArg(s)
 						if !ok || v < 0 {
 							exitPrint(2, fmt.Sprintf("invalid accuracy %s", s), true)
 						}
 						acc = v
-						hasAcc = true
 					}
 				}
 				if len(parts) >= 7 {
 					s := strings.TrimSpace(parts[6])
 					if s != "" {
-						v, ok := parseFloatArg(s, "speed")
+						v, ok := parseFloatArg(s)
 						if !ok || v < 0 || v > 50 {
 							exitPrint(2, fmt.Sprintf("invalid speed %s", s), true)
 						}
 						spd = v
-						hasSpd = true
 					}
 				}
 				if len(parts) >= 8 {
 					s := strings.TrimSpace(parts[7])
 					if s != "" {
-						v, ok := parseFloatArg(s, "heading")
+						v, ok := parseFloatArg(s)
 						if !ok || v < 0 || v >= 360 {
 							exitPrint(2, fmt.Sprintf("invalid heading %s", s), true)
 						}
 						hdg = v
-						hasHdg = true
 					}
 				}
-				ops = append(ops, batchOp{kind: "update", vid: vid, lat: lat, lng: lng, ts: ts, acc: acc, spd: spd, hdg: hdg, hasAcc: hasAcc, hasSpd: hasSpd, hasHdg: hasHdg, line: line})
+				ops = append(ops, batchOp{kind: "update", vid: vid, lat: lat, lng: lng, ts: ts, acc: acc, spd: spd, hdg: hdg})
 			case "delete":
 				if len(parts) != 2 {
 					exitPrint(2, fmt.Sprintf("invalid delete field count %d", len(parts)), true)
@@ -1613,12 +1388,11 @@ func main() {
 				if !vehicleIDRegex.MatchString(vid) {
 					exitPrint(2, fmt.Sprintf("invalid vehicle_id %s", vid), true)
 				}
-				ops = append(ops, batchOp{kind: "delete", vid: vid, line: line})
+				ops = append(ops, batchOp{kind: "delete", vid: vid})
 			default:
 				exitPrint(2, fmt.Sprintf("unknown batch kind %s", parts[0]), true)
 			}
 		}
-		// zones check before stale
 		var zones []Zone
 		if _, err := os.Stat("/app/data/zones.json"); err == nil {
 			z, err := loadZones("/app/data/zones.json")
@@ -1629,13 +1403,12 @@ func main() {
 		}
 		for _, op := range ops {
 			if op.kind == "update" && len(zones) > 0 {
-				ok, _ := isInsideAnyZoneForUpdate(op.lat, op.lng, zones, op.ts)
+				ok, _ := isInsideAnyZone(op.lat, op.lng, zones)
 				if !ok {
 					exitPrint(2, "out_of_zone in batch", true)
 				}
 			}
 		}
-		// apply to copy
 		dbCopy := make(map[string]Location)
 		for k, v := range db {
 			dbCopy[k] = v
@@ -1654,29 +1427,16 @@ func main() {
 				dist := haversine(existing.Lat, existing.Lng, op.lat, op.lng)
 				hist := existing.History
 				sort.Slice(hist, func(i, j int) bool { return hist[i].TimestampMs < hist[j].TimestampMs })
-				newEntry := HistoryEntry{Lat: op.lat, Lng: op.lng, TimestampMs: op.ts, Accuracy: op.acc, Speed: op.spd, Heading: op.hdg}
-				hist = append(hist, newEntry)
+				hist = append(hist, HistoryEntry{Lat: op.lat, Lng: op.lng, TimestampMs: op.ts, Accuracy: op.acc, Speed: op.spd, Heading: op.hdg})
 				if len(hist) > 10 {
 					hist = hist[len(hist)-10:]
 				}
 				sort.Slice(hist, func(i, j int) bool { return hist[i].TimestampMs < hist[j].TimestampMs })
-				loc := Location{
-					VehicleID: op.vid, Lat: op.lat, Lng: op.lng, TimestampMs: op.ts,
-					Accuracy: op.acc, Speed: op.spd, Heading: op.hdg,
-					TotalDistanceM: existing.TotalDistanceM + dist,
-					History: hist,
-				}
-				dbCopy[op.vid] = loc
+				dbCopy[op.vid] = Location{VehicleID: op.vid, Lat: op.lat, Lng: op.lng, TimestampMs: op.ts, Accuracy: op.acc, Speed: op.spd, Heading: op.hdg, TotalDistanceM: existing.TotalDistanceM + dist, History: hist}
 				applied++
 			} else {
 				hist := []HistoryEntry{{Lat: op.lat, Lng: op.lng, TimestampMs: op.ts, Accuracy: op.acc, Speed: op.spd, Heading: op.hdg}}
-				loc := Location{
-					VehicleID: op.vid, Lat: op.lat, Lng: op.lng, TimestampMs: op.ts,
-					Accuracy: op.acc, Speed: op.spd, Heading: op.hdg,
-					TotalDistanceM: 0,
-					History: hist,
-				}
-				dbCopy[op.vid] = loc
+				dbCopy[op.vid] = Location{VehicleID: op.vid, Lat: op.lat, Lng: op.lng, TimestampMs: op.ts, Accuracy: op.acc, Speed: op.spd, Heading: op.hdg, TotalDistanceM: 0, History: hist}
 				applied++
 			}
 		}
@@ -1684,7 +1444,6 @@ func main() {
 			exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
 		}
 		fmt.Printf("batch_ok %d\n", applied)
-		os.Exit(0)
 
 	case "clear":
 		db := make(map[string]Location)
@@ -1692,14 +1451,13 @@ func main() {
 			exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
 		}
 		fmt.Println("cleared")
-		os.Exit(0)
 
 	case "geofence-check":
 		if len(cmdArgs) < 2 {
 			exitPrint(2, "geofence-check requires <lat> <lng>", true)
 		}
-		latF, ok1 := parseFloatArg(cmdArgs[0], "lat")
-		lngF, ok2 := parseFloatArg(cmdArgs[1], "lng")
+		latF, ok1 := parseFloatArg(cmdArgs[0])
+		lngF, ok2 := parseFloatArg(cmdArgs[1])
 		if !ok1 || latF < -90 || latF > 90 {
 			exitPrint(2, "invalid lat", true)
 		}
@@ -1707,7 +1465,6 @@ func main() {
 			exitPrint(2, "invalid lng", true)
 		}
 		zonesPath := ""
-		var nowTs *int64
 		i := 2
 		for i < len(cmdArgs) {
 			a := cmdArgs[i]
@@ -1720,23 +1477,12 @@ func main() {
 			} else if strings.HasPrefix(a, "--zones=") {
 				zonesPath = a[len("--zones="):]
 				i++
-			} else if a == "--now" {
-				if i+1 >= len(cmdArgs) {
-					exitPrint(2, "missing --now value", true)
+			} else if strings.HasPrefix(a, "--now") {
+				if a == "--now" {
+					i += 2
+				} else {
+					i++
 				}
-				v, ok := parseIntArg(cmdArgs[i+1], "now")
-				if !ok || v < 0 {
-					exitPrint(2, "invalid now", true)
-				}
-				nowTs = &v
-				i += 2
-			} else if strings.HasPrefix(a, "--now=") {
-				v, ok := parseIntArg(a[len("--now="):], "now")
-				if !ok || v < 0 {
-					exitPrint(2, "invalid now", true)
-				}
-				nowTs = &v
-				i++
 			} else {
 				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
 			}
@@ -1758,37 +1504,19 @@ func main() {
 			out := map[string]interface{}{"inside": false, "zone_id": ""}
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
-			os.Exit(0)
+			return
 		}
-		useTime := nowTs != nil
-		var ts int64 = 0
-		if nowTs != nil {
-			ts = *nowTs
-		}
-		active := filterActiveZones(zones, ts, useTime)
-		if len(active) == 0 {
-			out := map[string]interface{}{"inside": false, "zone_id": ""}
-			b, _ := json.Marshal(out)
-			fmt.Println(string(b))
-			os.Exit(0)
-		}
-		// For simplified spec, when no active zones, we treat as no filtering? But geofence-check without active should be outside.
-		// To keep intuitive: if no active zones at given now, outside. However list/near should allow all (simplified).
-		// We'll keep geofence-check: if no active zones, outside (return false) – this matches intuitive geofence.
-		// But for update/list/near we already simplified to allow all.
-		// For geofence-check, check active list directly.
-		for _, z := range active {
-			if isInsideZone(latF, lngF, z) {
+		for _, z := range zones {
+			if pointInPolygon(latF, lngF, z.Polygon) {
 				out := map[string]interface{}{"inside": true, "zone_id": z.ID}
 				b, _ := json.Marshal(out)
 				fmt.Println(string(b))
-				os.Exit(0)
+				return
 			}
 		}
 		out := map[string]interface{}{"inside": false, "zone_id": ""}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
-		os.Exit(0)
 
 	default:
 		exitPrint(2, fmt.Sprintf("unknown command %s", cmd), true)
