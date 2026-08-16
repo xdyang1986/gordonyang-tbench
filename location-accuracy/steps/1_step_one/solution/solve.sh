@@ -50,8 +50,13 @@ type Location struct {
 }
 
 type Zone struct {
-	ID      string  `json:"id"`
-	Polygon []Point `json:"polygon,omitempty"`
+	ID         string     `json:"id"`
+	Polygon    []Point    `json:"polygon,omitempty"`
+	Holes      [][]Point  `json:"holes,omitempty"`
+	Center     *Point     `json:"center,omitempty"`
+	RadiusM    *float64   `json:"radius_m,omitempty"`
+	ActiveFrom *int64     `json:"active_from,omitempty"`
+	ActiveTo   *int64     `json:"active_to,omitempty"`
 }
 
 type RoadEntry struct {
@@ -149,7 +154,7 @@ func pointOnSegment(lat, lng float64, a, b Point) bool {
 	return true
 }
 
-func pointInPolygon(lat, lng float64, poly []Point) bool {
+func pointInPolygonSingle(lat, lng float64, poly []Point) bool {
 	if len(poly) < 3 {
 		return false
 	}
@@ -179,6 +184,18 @@ func pointInPolygon(lat, lng float64, poly []Point) bool {
 	return inside
 }
 
+func pointInPolygonWithHoles(lat, lng float64, poly []Point, holes [][]Point) bool {
+	if !pointInPolygonSingle(lat, lng, poly) {
+		return false
+	}
+	for _, hole := range holes {
+		if pointInPolygonSingle(lat, lng, hole) {
+			return false
+		}
+	}
+	return true
+}
+
 func validatePoint(p Point) bool {
 	if isInvalidFloat(p.Lat) || isInvalidFloat(p.Lng) {
 		return false
@@ -200,11 +217,6 @@ func loadZones(path string) ([]Zone, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return []Zone{}, nil
 	}
-	// Check for disallowed keys to keep spec simple: if file contains holes, center, radius_m, active_from/to, treat as invalid for step1
-	low := strings.ToLower(string(data))
-	if strings.Contains(low, "\"holes\"") || strings.Contains(low, "\"center\"") || strings.Contains(low, "\"radius_m\"") || strings.Contains(low, "\"active_from\"") || strings.Contains(low, "\"active_to\"") {
-		return nil, fmt.Errorf("step1 zones must be polygon only, no holes/circles/time")
-	}
 	var zones []Zone
 	if err := json.Unmarshal(data, &zones); err != nil {
 		return nil, fmt.Errorf("invalid zones json: %w", err)
@@ -213,25 +225,121 @@ func loadZones(path string) ([]Zone, error) {
 		if strings.TrimSpace(z.ID) == "" {
 			return nil, fmt.Errorf("zone id empty")
 		}
-		if len(z.Polygon) < 3 {
-			return nil, fmt.Errorf("zone %s polygon <3", z.ID)
+		hasPoly := len(z.Polygon) > 0
+		hasCircle := z.Center != nil || z.RadiusM != nil
+		if hasPoly && hasCircle {
+			return nil, fmt.Errorf("zone %s has both polygon and circle", z.ID)
 		}
-		for _, pt := range z.Polygon {
-			if !validatePoint(pt) {
-				return nil, fmt.Errorf("zone %s invalid point", z.ID)
+		if !hasPoly && !hasCircle {
+			return nil, fmt.Errorf("zone %s has neither", z.ID)
+		}
+		if hasPoly {
+			if len(z.Polygon) < 3 {
+				return nil, fmt.Errorf("zone %s polygon <3", z.ID)
+			}
+			for _, pt := range z.Polygon {
+				if !validatePoint(pt) {
+					return nil, fmt.Errorf("zone %s invalid point", z.ID)
+				}
+			}
+			for hi, hole := range z.Holes {
+				if len(hole) < 3 {
+					return nil, fmt.Errorf("zone %s hole %d <3", z.ID, hi)
+				}
+				for _, pt := range hole {
+					if !validatePoint(pt) {
+						return nil, fmt.Errorf("zone %s hole %d invalid", z.ID, hi)
+					}
+				}
+			}
+		}
+		if hasCircle {
+			if z.Center == nil || z.RadiusM == nil {
+				return nil, fmt.Errorf("zone %s circle missing center or radius", z.ID)
+			}
+			if !validatePoint(*z.Center) {
+				return nil, fmt.Errorf("zone %s center invalid", z.ID)
+			}
+			if isInvalidFloat(*z.RadiusM) || *z.RadiusM <= 0 || *z.RadiusM > 1000000 {
+				return nil, fmt.Errorf("zone %s radius invalid", z.ID)
+			}
+		}
+		if z.ActiveFrom != nil && z.ActiveTo != nil {
+			if *z.ActiveFrom > *z.ActiveTo {
+				return nil, fmt.Errorf("zone %s from > to", z.ID)
+			}
+			if *z.ActiveFrom < 0 || *z.ActiveTo < 0 {
+				return nil, fmt.Errorf("zone %s active negative", z.ID)
+			}
+		} else {
+			if z.ActiveFrom != nil && *z.ActiveFrom < 0 {
+				return nil, fmt.Errorf("zone %s active_from negative", z.ID)
+			}
+			if z.ActiveTo != nil && *z.ActiveTo < 0 {
+				return nil, fmt.Errorf("zone %s active_to negative", z.ID)
 			}
 		}
 	}
 	return zones, nil
 }
 
-func isInsideAnyZone(lat, lng float64, zones []Zone) (bool, string) {
+func isZoneActiveAt(z Zone, ts int64) bool {
+	if z.ActiveFrom != nil && ts < *z.ActiveFrom {
+		return false
+	}
+	if z.ActiveTo != nil && ts > *z.ActiveTo {
+		return false
+	}
+	return true
+}
+
+func filterActiveZones(zones []Zone, ts int64, useTimeFilter bool) []Zone {
+	if !useTimeFilter {
+		return zones
+	}
+	var out []Zone
 	for _, z := range zones {
-		if pointInPolygon(lat, lng, z.Polygon) {
+		if isZoneActiveAt(z, ts) {
+			out = append(out, z)
+		}
+	}
+	return out
+}
+
+func isInsideZone(lat, lng float64, z Zone) bool {
+	if len(z.Polygon) > 0 {
+		return pointInPolygonWithHoles(lat, lng, z.Polygon, z.Holes)
+	}
+	if z.Center != nil && z.RadiusM != nil {
+		d := haversine(lat, lng, z.Center.Lat, z.Center.Lng)
+		return d <= *z.RadiusM+1e-6
+	}
+	return false
+}
+
+func isInsideAnyZoneList(lat, lng float64, zones []Zone) (bool, string) {
+	for _, z := range zones {
+		if isInsideZone(lat, lng, z) {
 			return true, z.ID
 		}
 	}
 	return false, ""
+}
+
+func isInsideAnyZoneForUpdate(lat, lng float64, zones []Zone, ts int64) (bool, string) {
+	active := filterActiveZones(zones, ts, true)
+	if len(active) == 0 {
+		return true, ""
+	}
+	return isInsideAnyZoneList(lat, lng, active)
+}
+
+func isInsideAnyZoneForFiltering(lat, lng float64, zones []Zone, ts int64, useTimeFilter bool) (bool, string) {
+	active := filterActiveZones(zones, ts, useTimeFilter)
+	if len(active) == 0 {
+		return true, ""
+	}
+	return isInsideAnyZoneList(lat, lng, active)
 }
 
 func loadRoads(path string) ([]RoadEntry, error) {
@@ -331,12 +439,10 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 			p2 := pts[i+1]
 			x1, y1 := latLngToXY(p1.Lat, p1.Lng, latRef)
 			x2, y2 := latLngToXY(p2.Lat, p2.Lng, latRef)
-			cx, cy, dist, _ := closestPointOnSegment(px, py, x1, y1, x2, y2)
+			_, _, dist, _ := closestPointOnSegment(px, py, x1, y1, x2, y2)
 			if dist < bestDist {
 				bestDist = dist
 				best = SnapResult{Snapped: true, RoadID: road.ID, DistM: dist}
-				_ = cx
-				_ = cy
 			}
 		}
 	}
@@ -574,7 +680,7 @@ func main() {
 			zones = z
 		}
 		if len(zones) > 0 {
-			ok, _ := isInsideAnyZone(lat, lng, zones)
+			ok, _ := isInsideAnyZoneForUpdate(lat, lng, zones, ts)
 			if !ok {
 				fmt.Println("out_of_zone")
 				os.Exit(3)
@@ -646,6 +752,7 @@ func main() {
 		offset := 0
 		zonesPath := ""
 		roadsPath := ""
+		var nowTs *int64
 		i := 0
 		for i < len(cmdArgs) {
 			a := cmdArgs[i]
@@ -737,14 +844,23 @@ func main() {
 			} else if strings.HasPrefix(a, "--roads=") {
 				roadsPath = a[len("--roads="):]
 				i++
-			} else if strings.HasPrefix(a, "--now") {
-				// Step1 simplified: accept --now but ignore for zones (kept for compat with stale tests that don't use now)
-				// Consume value if --now <val> or --now=<val>
-				if a == "--now" {
-					i += 2
-				} else {
-					i++
+			} else if a == "--now" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --now value", true)
 				}
+				v, ok := parseIntArg(cmdArgs[i+1])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i += 2
+			} else if strings.HasPrefix(a, "--now=") {
+				v, ok := parseIntArg(a[len("--now="):])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i++
 			} else {
 				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
 			}
@@ -781,7 +897,12 @@ func main() {
 				continue
 			}
 			if zonesPath != "" && len(zones) > 0 {
-				ok, _ := isInsideAnyZone(loc.Lat, loc.Lng, zones)
+				useTime := nowTs != nil
+				var ts int64 = 0
+				if nowTs != nil {
+					ts = *nowTs
+				}
+				ok, _ := isInsideAnyZoneForFiltering(loc.Lat, loc.Lng, zones, ts, useTime)
 				if !ok {
 					continue
 				}
@@ -1059,7 +1180,12 @@ func main() {
 				}
 			}
 			if zonesPath != "" && len(zones) > 0 {
-				ok, _ := isInsideAnyZone(loc.Lat, loc.Lng, zones)
+				useTime := nowTs != nil
+				var ts int64 = 0
+				if nowTs != nil {
+					ts = *nowTs
+				}
+				ok, _ := isInsideAnyZoneForFiltering(loc.Lat, loc.Lng, zones, ts, useTime)
 				if !ok {
 					continue
 				}
@@ -1403,7 +1529,7 @@ func main() {
 		}
 		for _, op := range ops {
 			if op.kind == "update" && len(zones) > 0 {
-				ok, _ := isInsideAnyZone(op.lat, op.lng, zones)
+				ok, _ := isInsideAnyZoneForUpdate(op.lat, op.lng, zones, op.ts)
 				if !ok {
 					exitPrint(2, "out_of_zone in batch", true)
 				}
@@ -1465,6 +1591,7 @@ func main() {
 			exitPrint(2, "invalid lng", true)
 		}
 		zonesPath := ""
+		var nowTs *int64
 		i := 2
 		for i < len(cmdArgs) {
 			a := cmdArgs[i]
@@ -1477,12 +1604,23 @@ func main() {
 			} else if strings.HasPrefix(a, "--zones=") {
 				zonesPath = a[len("--zones="):]
 				i++
-			} else if strings.HasPrefix(a, "--now") {
-				if a == "--now" {
-					i += 2
-				} else {
-					i++
+			} else if a == "--now" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --now value", true)
 				}
+				v, ok := parseIntArg(cmdArgs[i+1])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i += 2
+			} else if strings.HasPrefix(a, "--now=") {
+				v, ok := parseIntArg(a[len("--now="):])
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i++
 			} else {
 				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
 			}
@@ -1506,8 +1644,21 @@ func main() {
 			fmt.Println(string(b))
 			return
 		}
-		for _, z := range zones {
-			if pointInPolygon(latF, lngF, z.Polygon) {
+		useTime := nowTs != nil
+		var ts int64 = 0
+		if nowTs != nil {
+			ts = *nowTs
+		}
+		active := filterActiveZones(zones, ts, useTime)
+		if len(active) == 0 {
+			// Simplified intuitive: list/near allow all when no active, but geofence-check returns outside
+			out := map[string]interface{}{"inside": false, "zone_id": ""}
+			b, _ := json.Marshal(out)
+			fmt.Println(string(b))
+			return
+		}
+		for _, z := range active {
+			if isInsideZone(latF, lngF, z) {
 				out := map[string]interface{}{"inside": true, "zone_id": z.ID}
 				b, _ := json.Marshal(out)
 				fmt.Println(string(b))
