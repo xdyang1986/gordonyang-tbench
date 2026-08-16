@@ -81,6 +81,76 @@ def test_binary_exists():
     assert os.path.exists(BIN)
 
 
+def test_gomod_stdlib_only():
+    """Go stdlib only – fail if go.mod has external require or .go imports external package (allow_internet=true)."""
+    gomod_path = os.path.join(APP, "go.mod")
+    if not os.path.exists(gomod_path):
+        # built fixture creates go.mod via go mod init, so if missing we skip but binary already built
+        return
+    with open(gomod_path) as f:
+        content = f.read()
+    # Check for external requires – any require containing github.com, golang.org/x, gopkg.in, etc. or any domain dot
+    lower = content.lower()
+    # Parse require blocks
+    forbidden_substrings = [
+        "github.com",
+        "golang.org/x",
+        "gopkg.in",
+        "gitlab.com",
+        "bitbucket.org",
+    ]
+    for substr in forbidden_substrings:
+        assert substr not in lower, (
+            f"go.mod contains external dep {substr}: {content[:500]}"
+        )
+    # Also check that there is no require with a module path that contains '.' (external modules have domain)
+    # Allow only comments and module/go lines. If 'require' appears, ensure its module doesn't look external.
+    # Simple heuristic: if file contains 'require (' block or single require, extract module names
+    import re as _re
+
+    # Find all require lines
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("require"):
+            # examples: require github.com/foo/bar v1.2.3
+            # or require (
+            # We look at the remainder after 'require'
+            rest = stripped[len("require") :].strip()
+            if rest.startswith("(") or rest == "":
+                continue
+            # rest should be module path
+            mod = rest.split()[0]
+            if "/" in mod and "." in mod.split("/")[0]:
+                assert False, f"go.mod has external require {mod}"
+
+    # Check .go files for external imports (import path containing '.' like github.com/)
+    for root, _dirs, files in os.walk(APP):
+        for fname in files:
+            if not fname.endswith(".go"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                text = open(path, encoding="utf-8", errors="ignore").read()
+            except:
+                continue
+            # Find import statements – naive regex for quoted import paths
+            imports = _re.findall(
+                r"import\s+(?:\(\s*([^)]+)\s*\)|\"([^\"]+)\"|\'([^\']+)\')",
+                text,
+                _re.DOTALL,
+            )
+            # Also single line imports
+            single_imports = _re.findall(r'"([^"]+)"', text)
+            # Heuristic: any import path containing '.' and '/' and not starting with standard lib prefix is external
+            # Stdlib packages never contain '.' (they are like fmt, net/http, encoding/json)
+            for imp in single_imports:
+                if "." in imp and "/" in imp:
+                    # check if it's known external domain
+                    assert False, (
+                        f"{path} imports external package {imp!r} – stdlib only required"
+                    )
+
+
 # ---- add / list / persistence ----
 
 
@@ -1465,22 +1535,34 @@ def test_lookup_fuzz_python_reference():
 
 
 def test_cli_relative_performance_5_vs_500():
-    """Relative performance for CLI: 5 vs 500 zones empty lookup should not grow linearly – requires index."""
+    """Relative performance for CLI: 5 vs 500 zones empty lookup should not grow linearly – requires bbox prefilter (and index if present). Uses many-point polygons to make naive scan expensive so ratio is detectable despite binary startup overhead."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
+        import math as _math
+
+        def make_poly(base_lat, base_lng, points=50):
+            # 50-point polygon approximating small circle – makes PIP expensive
+            pts = []
+            for j in range(points):
+                ang = 2 * _math.pi * j / points
+                lat = base_lat + 0.4 + 0.3 * _math.sin(ang)
+                lng = base_lng + 0.4 + 0.3 * _math.cos(ang)
+                pts.append(f"{lat},{lng}")
+            return ";".join(pts)
+
         # 5 zones
         for i in range(5):
             base_lat = (i // 5) * 2.0
             base_lng = (i % 5) * 2.0
-            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
+            poly = make_poly(base_lat, base_lng, points=50)
             r = run_cli(
                 db, ["add", f"rel5_{i}", "--polygon", poly, "--name", f"R5 {i}"]
             )
             assert r.returncode == 0
 
         def measure_avg(l):
-            # measure avg lookup time for empty point
+            # measure avg lookup time for empty point far from all zones – bbox should quickly reject
             start = time.time()
             for _ in range(20):
                 run_cli(l, ["lookup", "--lat", "80", "--lng", "150"])
@@ -1488,11 +1570,11 @@ def test_cli_relative_performance_5_vs_500():
 
         avg5 = measure_avg(db)
 
-        # add up to 500
+        # add up to 500 with many points each
         for i in range(5, 500):
             base_lat = (i // 20) * 2.0
             base_lng = (i % 20) * 2.0
-            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
+            poly = make_poly(base_lat, base_lng, points=50)
             r = run_cli(
                 db, ["add", f"rel5_{i}", "--polygon", poly, "--name", f"R5 {i}"]
             )
@@ -1503,9 +1585,10 @@ def test_cli_relative_performance_5_vs_500():
         print(
             f"CLI relative: 5-zone {avg5 * 1000:.2f}ms 500-zone {avg500 * 1000:.2f}ms ratio {ratio:.2f}x"
         )
-        # With index, ratio should be small (e.g., <5x). Naive bbox-only would be ~100x (500/5)
-        assert avg500 <= avg5 * 5 + 0.05, (
-            f"500-zone empty too slow vs 5-zone ratio {ratio:.1f}x, need index"
+        # With bbox prefilter, ratio should be small (e.g., <5x). Naive would be ~100x (500/5) * 50-point cost.
+        # Reduced additive slack from 0.05s (50ms, 25-50x measurement) to 0.02s to actually detect missing bbox.
+        assert avg500 <= avg5 * 5 + 0.02, (
+            f"500-zone empty too slow vs 5-zone ratio {ratio:.1f}x, need bbox prefilter / index"
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2183,5 +2266,156 @@ def test_lookup_with_negative_zero_and_plus():
             r = run_cli(db, ["lookup", "--lat", lat, "--lng", lng])
             assert r.returncode == 0, f"lookup {lat},{lng} should be allowed"
             assert json.loads(r.stdout) == ["z"], f"{lat},{lng} should be inside"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_self_intersection_vertex_on_nonadjacent_edge():
+    """A vertex lying on a non-adjacent edge interior must be rejected as self-intersecting."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Vertex 0.5,0 lies on edge 0,0-1,0 interior, non-adjacent to that edge
+        # Polygon: 0,0;1,0;0.5,0;0.5,1 — edge 0,0-1,0 contains point 0.5,0 which is start of edge 1,0-0.5,0? Actually need non-adjacent.
+        # Use: 0,0;2,0;2,2;1,1;0,2 where 1,1 is not on edge but let's use a clear case:
+        # Square with a point on bottom edge interior but not adjacent to bottom edge:
+        # 0,0 ->2,0 ->2,2 ->0,2 ->1,0 ->1,1 -> should have 1,0 on bottom edge 0,0-2,0 interior,
+        # edge 0,0-2,0 is edge0, edge 0,2-1,0 is edge3 (non-adjacent to edge0? edge0 adjacent to edge1(2,0) and edge5 wrapping)
+        # Let's construct polygon where vertex 1,0 lies on first edge.
+        poly = "0,0;2,0;2,2;0,2;1,0;1,1"
+        r = run_cli(db, ["add", "touch", "--polygon", poly, "--name", "Touch"])
+        assert r.returncode == 2, (
+            f"vertex on non-adjacent edge should be self-intersecting, got {r.returncode} {r.stderr}"
+        )
+
+        # Another: T-shape touching
+        poly2 = "0,0;1,0;1,0.5;0.5,0.5;0.5,1;0,1"
+        # 0.5,0.5 vertex lies on? Not.
+        # Simple bow-tie already tested, but this additional case:
+        poly3 = "0,0;1,0;0.5,0;0.5,1;0,1"
+        # Edge 0,0-1,0 contains 0.5,0 which is vertex of edge 1,0-0.5,0? Actually adjacent overlapping, but also edge 0.5,0-0.5,1 starts at that point, non-adjacent to first edge? first edge adjacent to last edge(0,1-0,0) only, not to middle.
+        r = run_cli(db, ["add", "touch2", "--polygon", poly3, "--name", "Touch2"])
+        assert r.returncode == 2, (
+            f"vertex on non-adjacent edge should be rejected {r.stderr}"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_self_intersection_colinear_complex_additional():
+    """Additional colinear overlap cases that are subtle and hard for naive orientation checks."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+
+        # Overlapping vertical: edge 0,0-0,3 and edge 1,1-1,2? Actually need overlapping of non-adjacent edges both vertical same x
+        # Polygon that goes up, right, down partially overlapping left edge
+        poly = "0,0;0,3;1,3;1,1;0,1;0,2;2,2;2,0"
+        # Edges: 0,0-0,3, 0,3-1,3, 1,3-1,1, 1,1-0,1, 0,1-0,2 (adjacent to 0,0-0,3? non-adjacent? Let's check)
+        # This polygon has self-intersection due to overlapping 0,0-0,3 with 0,1-0,2 colinear overlapping interior.
+        r = run_cli(db, ["add", "overlap", "--polygon", poly, "--name", "Overlap"])
+        assert r.returncode == 2, (
+            f"complex colinear overlap should be rejected {r.stderr}"
+        )
+
+        # Valid case: colinear points along same edge but not overlapping non-adjacent – must be allowed
+        poly_ok = "0,0;0,0.5;0,1;1,1;1,0"
+        r = run_cli(db, ["add", "ok_colinear", "--polygon", poly_ok, "--name", "Ok"])
+        assert r.returncode == 0, (
+            f"colinear points along same edge should be allowed {r.stderr} stdout={r.stdout}"
+        )
+
+        # Another valid: 3 colinear points on top edge
+        poly_ok2 = "0,0;0,1;0.3,1;0.6,1;1,1;1,0"
+        r = run_cli(db, ["add", "ok_colinear2", "--polygon", poly_ok2, "--name", "Ok2"])
+        assert r.returncode == 0, (
+            f"multiple colinear points on top edge should be allowed {r.stderr}"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_antimeridian_exact_edge_and_world_distinction():
+    """Antimeridian exact edge handling and world vs crossing distinction (hard family)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # Crossing rect
+        poly_cross = "0,179;0,-179;1,-179;1,179"
+        r = run_cli(db, ["add", "cross", "--polygon", poly_cross, "--name", "Cross"])
+        assert r.returncode == 0, f"cross add failed {r.stderr}"
+
+        # Point exactly on antimeridian edge at 180 must be inside (on edge)
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "180"])
+        assert json.loads(r.stdout) == ["cross"], (
+            f"180 should be on edge inside crossing, got {r.stdout}"
+        )
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "-180"])
+        assert json.loads(r.stdout) == ["cross"]
+
+        # Point at 0 must be outside crossing (large gap)
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0"])
+        assert json.loads(r.stdout) == [], f"0 should be outside crossing"
+
+        # World rect must be accepted and must match at 0 AND at 180 (covers all longitudes)
+        run_cli(db, ["clear"])
+        world = "-90,-180;-90,180;90,180;90,-180"
+        r = run_cli(db, ["add", "world", "--polygon", world, "--name", "World"])
+        assert r.returncode == 0, f"world should be valid {r.stderr}"
+
+        for lng in ["0", "180", "-180", "179.9", "-179.9"]:
+            r = run_cli(db, ["lookup", "--lat", "0", "--lng", lng])
+            assert json.loads(r.stdout) == ["world"], (
+                f"world should match at lng {lng}, got {r.stdout}"
+            )
+
+        # Distinction: world span is >=360, not crossing. Its bbox must keep full longitude range.
+        # The following checks world + crossing together: world matches everywhere, crossing only near 180.
+        run_cli(db, ["add", "cross", "--polygon", poly_cross, "--name", "Cross"])
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0"])
+        ids = json.loads(r.stdout)
+        assert ids == ["world"], f"0.5,0 should be only world, got {ids}"
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "179.5"])
+        ids = json.loads(r.stdout)
+        assert sorted(ids) == ["cross", "world"], (
+            f"179.5 should be cross+world, got {ids}"
+        )
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_id_hyphen_remove_and_lookup():
+    """ID starting with hyphen must work for remove and lookup sorting (part of disclosed H1 fix, now not sole discriminator)."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        r = run_cli(
+            db, ["add", "-hyphen", "--polygon", "0,0;0,1;1,1;1,0", "--name", "Hyphen"]
+        )
+        assert r.returncode == 0, f"add -hyphen should work {r.stderr}"
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0.5"])
+        assert "-hyphen" in json.loads(r.stdout)
+
+        r = run_cli(db, ["remove", "-hyphen"])
+        assert r.returncode == 0, f"remove -hyphen should work {r.stderr}"
+        r = run_cli(db, ["list"])
+        assert json.loads(r.stdout) == []
+
+        # Re-add with hyphen and underscore and check ASCII sort
+        for id_ in ["-a", "_a", "a"]:
+            r = run_cli(db, ["add", id_, "--polygon", "0,0;0,1;1,1;1,0", "--name", id_])
+            assert r.returncode == 0
+        r = run_cli(db, ["list"])
+        ids = [x["id"] for x in json.loads(r.stdout)]
+        assert ids == sorted(ids), f"ASCII sort with hyphen/underscore failed {ids}"
+        # '-' ASCII 45, 'a' 97, '_' 95, so order -a < a < _a
+        assert ids == ["-a", "a", "_a"], f"expected ['-a','a','_a'] got {ids}"
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

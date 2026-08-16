@@ -26,7 +26,7 @@ type Geofence struct {
   Polygon []Point `json:"polygon"`
 }
 ```
-- `ID`: non-empty, max 64 chars, regex `^[A-Za-z0-9_-]{1,64}$`.
+- `ID`: non-empty, max 64 chars, regex `^[A-Za-z0-9_-]{1,64}$`. An ID may begin with `-` or `_`; positional arguments (e.g. `<id>` in `add <id>`) must not be parsed as flags. For example, `geofencectl --db /path add -abc --polygon "0,0;0,1;1,1;1,0" --name "X"` must succeed with exit 0 and store a geofence with ID `-abc`, not fail with `unknown flag -abc`. The same applies to `remove` and other commands that take an ID.
 - `Name`: non-empty string, max 128 chars, trimmed. Cannot be only whitespace.
 - `Polygon`: array of Points, at least 3 points, at most 1000 points. Each point lat in [-90,90], lng in [-180,180]. Polygon is considered closed (last edge connects to first). Must be simple (no self-intersection) and have non-zero area.
 

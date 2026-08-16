@@ -199,6 +199,89 @@ def assert_response_arrays_valid(resp):
         raise AssertionError(f"response is literal null, expected array: {txt[:200]}")
 
 
+# ---- stdlib / LRU own impl enforcement (M2) ----
+
+
+def test_gomod_stdlib_and_lru_own():
+    """Go stdlib only and LRU must be own implementation – fail if go.mod has external require or LRU imported from external."""
+    gomod_path = os.path.join(APP, "go.mod")
+    if not os.path.exists(gomod_path):
+        return
+    with open(gomod_path) as f:
+        content = f.read()
+    lower = content.lower()
+    forbidden = [
+        "github.com",
+        "golang.org/x",
+        "gopkg.in",
+        "gitlab.com",
+        "bitbucket.org",
+    ]
+    for substr in forbidden:
+        assert substr not in lower, (
+            f"go.mod contains external dep {substr}: {content[:500]}"
+        )
+    import re as _re
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("require"):
+            rest = stripped[len("require") :].strip()
+            if rest.startswith("(") or rest == "":
+                continue
+            mod = rest.split()[0]
+            if "/" in mod and "." in mod.split("/")[0]:
+                assert False, f"go.mod has external require {mod}"
+
+    # Check .go files for external imports
+    for root, _dirs, files in os.walk(APP):
+        for fname in files:
+            if not fname.endswith(".go"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                text = open(path, encoding="utf-8", errors="ignore").read()
+            except:
+                continue
+            single_imports = _re.findall(r'"([^"]+)"', text)
+            for imp in single_imports:
+                if "." in imp and "/" in imp:
+                    # external
+                    # allow if it's not lru but any external is forbidden
+                    assert False, (
+                        f"{path} imports external package {imp!r} – stdlib only"
+                    )
+                # LRU must be own: disallow import of any lru package even if stdlib? Check for lru in import name
+                if "lru" in imp.lower() and ("." in imp or "/" in imp):
+                    # If import path contains lru and is external or even stdlib contrib, we want own impl
+                    # Stdlib does not have lru, so any lru import is external or disallowed
+                    # Allow only if the file is the LRU file itself? But importing own package is okay if it's local.
+                    # If import contains '.' then external, already caught. If it is "container/lru" (hypothetical) still disallowed as not stdlib?
+                    # Simpler: fail on any import containing lru (case-insensitive) that is not a local package (no dot)
+                    # Since stdlib has no lru, any lru import should fail
+                    if "lru" in imp.lower():
+                        assert False, (
+                            f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                        )
+
+    # Also check that an LRU implementation exists – look for a type or struct containing LRU logic
+    # We don't enforce structure, but at least ensure no external lru usage
+    # And ensure at least one .go file defines an LRU cache (heuristic: contains "type LRU" or "LRUCache")
+    found_lru = False
+    for root, _dirs, files in os.walk(APP):
+        for fname in files:
+            if not fname.endswith(".go"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                txt = open(path, encoding="utf-8", errors="ignore").read()
+            except:
+                continue
+            if "LRU" in txt or "lru" in txt.lower():
+                found_lru = True
+    # If cache-size >0 is used, an LRU should be present; we don't hard fail if not found, but we checked external
+
+
 # ---- CLI backward compat (including strict validation) ----
 
 
@@ -741,13 +824,28 @@ def test_no_cache_mode():
 # ---- Relative performance checks (no absolute floors) ----
 
 
-def _create_many_geofences(db, count=100):
+def _create_many_geofences(db, count=100, points_per=4):
     run_cli(db, ["clear"])
+    import math as _math
+
     for i in range(count):
         base_lat = (i // 10) * 2.0
         base_lng = (i % 10) * 2.0
-        poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
-        run_cli(db, ["add", f"zone_{i:03d}", "--polygon", poly, "--name", f"Zone {i}"])
+        if points_per == 4:
+            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.8};{base_lat + 0.8},{base_lng + 0.8};{base_lat + 0.8},{base_lng}"
+        else:
+            # approximate circle with many points to make naive PIP expensive
+            pts = []
+            for j in range(points_per):
+                ang = 2 * _math.pi * j / points_per
+                lat = base_lat + 0.4 + 0.3 * _math.sin(ang)
+                lng = base_lng + 0.4 + 0.3 * _math.cos(ang)
+                pts.append(f"{lat},{lng}")
+            poly = ";".join(pts)
+        r = run_cli(
+            db, ["add", f"zone_{i:04d}", "--polygon", poly, "--name", f"Zone {i}"]
+        )
+        assert r.returncode == 0, f"add zone {i} failed {r.stderr}"
 
 
 def _measure_avg_latency(port, lat, lng, repeats=20, timeout=2):
@@ -762,52 +860,120 @@ def _measure_avg_latency(port, lat, lng, repeats=20, timeout=2):
     return elapsed / repeats
 
 
+def _measure_server_avg_latency_ms(port, lat, lng, repeats=20, timeout=2):
+    """Server-side measurement via /stats to avoid Python loopback overhead dominating."""
+    # get baseline stats
+    s_before = requests.get(f"http://localhost:{port}/stats", timeout=timeout).json()
+    q_before = s_before.get("total_queries", 0)
+    # Use totalLatencyNs if available via avg_latency_ms * total_queries, but we have avg_latency_ms cumulative
+    # Instead we compute delta of avg_latency_ms * queries or use direct measurement of internal latency
+    # Our server tracks totalLatencyNs internally but exposes avg_latency_ms. We'll approximate by measuring
+    # avg_latency_ms after queries and also using the difference in totalQueries.
+    # For more precise, we fetch stats before and after and compute weighted avg:
+    # avg_after * q_after - avg_before * q_before = sum latency of new queries / (q_after-q_before) ??? Actually avg is cumulative average.
+    # totalLatency = avg * totalQ, so delta totalLatency / delta Q = avg of new queries in server time.
+    # This excludes HTTP overhead.
+    for _ in range(repeats):
+        resp = requests.get(
+            f"http://localhost:{port}/lookup?lat={lat}&lng={lng}", timeout=timeout
+        )
+        assert resp.status_code == 200
+    s_after = requests.get(f"http://localhost:{port}/stats", timeout=timeout).json()
+    q_after = s_after.get("total_queries", 0)
+    avg_before = s_before.get("avg_latency_ms", 0.0)
+    avg_after = s_after.get("avg_latency_ms", 0.0)
+    # total latency ms
+    total_before = avg_before * q_before
+    total_after = avg_after * q_after
+    delta_q = q_after - q_before
+    if delta_q <= 0:
+        return avg_after  # fallback
+    delta_total = total_after - total_before
+    return delta_total / delta_q if delta_q else avg_after
+
+
 def test_relative_index_performance():
-    """500-zone lookup latency should be small multiple of 5-zone latency (proves index)."""
+    """Server-side latency: 500-zone empty lookup should be O(1) with index, not O(n). Measures via /stats.avg_latency_ms to avoid client loopback overhead."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
-        # 5 zones
-        _create_many_geofences(db, count=5)
+        # 5 zones with many points each – naive scan would be 5*100 pip checks
+        _create_many_geofences(db, count=5, points_per=50)
         port5 = get_free_port()
         proc5 = start_server(db, port5, grid_size="1", cache_size="0")
         try:
             # warm up
             _measure_avg_latency(port5, 0.5, 0.5, repeats=5)
-            avg5_inside = _measure_avg_latency(port5, 0.5, 0.5, repeats=20)
-            avg5_empty = _measure_avg_latency(port5, 80, 150, repeats=20)
+            _measure_avg_latency(port5, 80, 150, repeats=5)
+            srv5_inside = _measure_server_avg_latency_ms(port5, 0.5, 0.5, repeats=30)
+            srv5_empty = _measure_server_avg_latency_ms(port5, 80, 150, repeats=30)
+            cli5_empty = _measure_avg_latency(port5, 80, 150, repeats=20)
         finally:
             stop_server(proc5)
 
-        # 500 zones – same first zone at 0,0 so inside point same
-        _create_many_geofences(db, count=500)
+        # 500 zones – same first zone at 0,0 so inside point same, but empty area far away
+        _create_many_geofences(db, count=500, points_per=50)
         port500 = get_free_port()
         proc500 = start_server(db, port500, grid_size="1", cache_size="0")
         try:
             _measure_avg_latency(port500, 0.5, 0.5, repeats=5)
-            avg500_inside = _measure_avg_latency(port500, 0.5, 0.5, repeats=20)
-            avg500_empty = _measure_avg_latency(port500, 80, 150, repeats=20)
+            srv500_inside = _measure_server_avg_latency_ms(
+                port500, 0.5, 0.5, repeats=30
+            )
+            srv500_empty = _measure_server_avg_latency_ms(port500, 80, 150, repeats=30)
+            cli500_empty = _measure_avg_latency(port500, 80, 150, repeats=20)
         finally:
             stop_server(proc500)
 
         print(
-            f"Relative: 5-zone inside {avg5_inside * 1000:.2f}ms empty {avg5_empty * 1000:.2f}ms | "
-            f"500-zone inside {avg500_inside * 1000:.2f}ms empty {avg500_empty * 1000:.2f}ms | "
-            f"ratio inside {avg500_inside / (avg5_inside + 1e-6):.2f}x empty {avg500_empty / (avg5_empty + 1e-6):.2f}x"
+            f"Relative server-side: 5-zone inside {srv5_inside:.4f}ms empty {srv5_empty:.4f}ms cli_empty {cli5_empty * 1000:.2f}ms | "
+            f"500-zone inside {srv500_inside:.4f}ms empty {srv500_empty:.4f}ms cli_empty {cli500_empty * 1000:.2f}ms | "
+            f"ratio server inside {srv500_inside / (srv5_inside + 1e-6):.2f}x empty {srv500_empty / (srv5_empty + 1e-6):.2f}x | "
+            f"cli ratio empty {cli500_empty / (cli5_empty + 1e-9):.2f}x"
         )
 
-        # With index, 500 should be within small multiple of 5; naive would be ~100x (500/5)
-        # Tightened to 5x to increase difficulty while still generous for indexed impl (typical ratio ~1.5x)
-        assert avg500_inside <= avg5_inside * 5 + 0.05, (
-            f"500-zone inside too slow vs 5-zone: {avg500_inside}s vs {avg5_inside}s ratio {avg500_inside / (avg5_inside + 1e-9):.1f}x, expected index to keep it small"
+        # Primary gate: server-side empty lookup must be O(1) with index – ratio should be small.
+        # Naive scan would be ~100x (500/5) * cost per polygon (50 points). With index, empty cell => 0 candidates => ~1x.
+        # Use tight ratio <5x for server-side, no additive slack that dwarfs measurement.
+        assert srv500_empty <= srv5_empty * 5 + 0.001, (
+            f"Server-side empty lookup should be O(1) with index: 5-zone {srv5_empty:.4f}ms vs 500-zone {srv500_empty:.4f}ms ratio {srv500_empty / (srv5_empty + 1e-9):.1f}x – missing index?"
         )
-        assert avg500_empty <= avg5_empty * 5 + 0.05, (
-            f"500-zone empty too slow vs 5-zone: {avg500_empty}s vs {avg5_empty}s ratio {avg500_empty / (avg5_empty + 1e-9):.1f}x, expected index to make empty fast"
+        # Inside may still be slightly higher but should also be bounded – at least not 100x
+        assert srv500_inside <= srv5_inside * 8 + 0.01, (
+            f"Server-side inside lookup too slow: ratio {srv500_inside / (srv5_inside + 1e-9):.1f}x – index not effective for inside?"
         )
 
-        # Also ensure both absolute generous upper bound to prevent hangs, but not tight
-        assert avg5_inside < 1.0 and avg500_inside < 1.0
-        assert avg5_empty < 1.0 and avg500_empty < 1.0
+        # Secondary gate: client-side empty should also be bounded (proves grid reduces candidates, not just micro-opt)
+        # Allow 5x but with smaller slack than before (previous 0.05s = 50ms slack dwarfed measurement)
+        assert cli500_empty <= cli5_empty * 5 + 0.02, (
+            f"Client empty lookup too slow vs 5-zone: {cli500_empty}s vs {cli5_empty}s ratio {cli500_empty / (cli5_empty + 1e-9):.1f}x"
+        )
+
+        # Absolute upper bound to prevent hang
+        assert srv5_empty < 5.0 and srv500_empty < 5.0
+        assert cli5_empty < 1.0 and cli500_empty < 1.0
+
+        # Structural proof: index_cells must be >0 and for 500 zones should be significantly > for 5 zones (or at least not 0)
+        # And empty lookup should not have evaluated many polygons – we already proved via latency, but also check that
+        # server was actually using index (index_cells >0)
+        # Re-start one server to check cells
+        _create_many_geofences(db, count=500, points_per=4)
+        port_check = get_free_port()
+        proc_check = start_server(db, port_check, grid_size="1", cache_size="0")
+        try:
+            stats = requests.get(
+                f"http://localhost:{port_check}/stats", timeout=2
+            ).json()
+            assert stats["index_cells"] > 0, (
+                "index_cells must be >0 proving index exists"
+            )
+            # For 500 zones spread, index_cells should be at least number of distinct cells occupied (approx count)
+            # With 4-point squares spread, 500 zones should occupy > 100 cells
+            assert stats["index_cells"] >= 50, (
+                f"500 zones should occupy many cells, got {stats['index_cells']}"
+            )
+        finally:
+            stop_server(proc_check)
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

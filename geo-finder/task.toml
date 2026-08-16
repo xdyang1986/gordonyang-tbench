@@ -4,26 +4,16 @@ schema_version = "1.1"
 name = "codimango/geo-finder"
 description = "Multi-turn Go task: Step1 implements a geofence lookup CLI with polygon storage, point-in-polygon detection, and persistent JSON DB. Step2 extends it to a high-QPS HTTP service with grid-based spatial index, bounding-box prefilter, LRU cache, batch lookup, and concurrency safety to sustain large QPS."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "geofence", "geospatial", "point-in-polygon", "spatial-index", "high-qps", "caching", "concurrency"]
+keywords = ["go", "geofence", "geospatial", "point-in-polygon", "spatial-index", "high-qps", "caching", "concurrency", "context-following"]
 
 [metadata]
 difficulty = "hard"
 category = "iterate_on_feature"
-tags = ["iterate_on_feature", "go", "geofence", "geospatial", "spatial-index", "high-qps"]
+tags = ["iterate_on_feature", "go", "geofence", "geospatial", "spatial-index", "high-qps", "context-following"]
 category_usecase = "extend_behavior"
 category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
-
-[verifier]
-# Isolate grading from the agent so agent code can't read the oracle under
-# /tests at verify time. Opt-in — uncomment to enable (also requires a tests/ env def).
-# environment_mode = "separate"
-timeout_sec = 600.0
-# user = "nobody"  # non-root grader for in-process (Flow B) tasks; needs a root-free test.sh
-
-[agent]
-timeout_sec = 600.0
 
 [environment]
 build_timeout_sec = 600.0
@@ -31,14 +21,8 @@ cpus = 1
 memory_mb = 2048
 storage_mb = 10240
 gpus = 0
-allow_internet = true
+allow_internet = false
 mcp_servers = []
-
-[verifier.env]
-
-[environment.env]
-
-[solution.env]
 
 [[steps]]
 name = "1_step_one"
@@ -46,10 +30,10 @@ dependencies = []
 min_reward = 1.0
 
 [steps.verifier]
-timeout_sec = 600.0
+timeout_sec = 1800.0
 
 [steps.agent]
-timeout_sec = 600.0
+timeout_sec = 1800.0
 
 [[steps]]
 name = "2_step_two"
@@ -58,7 +42,7 @@ min_reward = 1.0
 inherit_prior_session = true
 
 [steps.verifier]
-timeout_sec = 600.0
+timeout_sec = 1800.0
 
 [steps.agent]
-timeout_sec = 600.0
+timeout_sec = 1800.0

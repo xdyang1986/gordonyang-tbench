@@ -23,7 +23,7 @@ geofencectl --db <PATH> serve --port <int> [--grid-size <float>] [--cache-size <
 
 #### 1. Bounding Boxes
 Precompute bounding box per geofence for quick reject. Must correctly handle polygons near the poles, polygons that cross the antimeridian, and polygons that span all longitudes.
-Longitude classification is the same rule as step 1, applied to the bbox as well as the point-in-polygon test: span ≥ 360 covers every longitude and is not crossing, so the bbox keeps the full longitude range; 180 < span < 360 crosses the antimeridian and must be unwrapped; span ≤ 180 is ordinary. Classify world-spanning before applying the crossing rule. The same answers must come from the CLI lookup command and from GET /lookup.
+Longitude classification: use the same classification rule defined in Step 1 for both bounding-box computation and point-in-polygon evaluation. Refer to Step 1 spec for the exact definition of world-spanning vs antimeridian-crossing vs ordinary polygons (based on raw longitude span before normalisation), including the requirement to classify world-spanning before checking crossing, and the semantics for each class (full longitude coverage, unwrapped continuous interval, ordinary). The same answers must come from the CLI lookup command and from GET /lookup, and bbox handling must match that classification.
 
 #### 2. Grid Spatial Index
 Uniform grid over world lat [-90,90], lng [-180,180]. You must implement spatial indexing to reduce candidates. On query, compute cell for point and get candidates from index (empty cell -> empty result). Then bbox check, then point-in-polygon. Must track `index_cells` = number of cells with >=1 geofence.
