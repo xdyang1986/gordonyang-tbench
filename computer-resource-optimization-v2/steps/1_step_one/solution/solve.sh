@@ -113,6 +113,20 @@ func emptyData() ClusterData { return ClusterData{Nodes: map[string]*Node{}, Job
 func backupCorrupt(path string, raw []byte) {
 	_ = os.WriteFile(fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano()), raw, 0644)
 }
+func cleanStaleTmp(path string) {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, base+".tmp.") {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
 func writeDataAtomic(path string, data ClusterData) error {
 	if data.Nodes == nil {
 		data.Nodes = map[string]*Node{}
@@ -259,6 +273,7 @@ func main() {
 		remaining = append(remaining, a)
 		i++
 	}
+	cleanStaleTmp(dataPath)
 	if len(remaining) == 0 {
 		printHelpSingle()
 		os.Exit(0)
