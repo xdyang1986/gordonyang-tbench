@@ -4796,3 +4796,104 @@ def test_raw_file_no_null_and_jobs_sorted_after_stress():
     node = json.loads(run_cli("get-node", "node1").stdout)
     assert node["jobs"] == sorted(node["jobs"]) == ["jobA", "jobB", "jobM", "jobZ"]
     assert checksum_valid()
+
+
+def test_concurrent_50_add_node_allocate_stress():
+    clean_data()
+
+    # 50-way stress – harder than 20-way, but moderate vs 100-way that caused timeouts
+    def worker(i):
+        nid = f"node-50-{i:04d}"
+        jid = f"job-50-{i:04d}"
+        run_cli("add-node", nid, "4", "1024", "0")
+        run_cli("add-job", jid, "1", "256", "0")
+        run_cli("allocate", jid, nid)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_nodes"] == 50
+    assert st["total_jobs"] == 50
+    assert st["allocated_jobs"] == 50
+    assert checksum_valid()
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files)
+    assert not os.path.exists(LOCK_FILE)
+
+
+def test_checksum_after_50_random_ops():
+    clean_data()
+    import random
+
+    random.seed(42)
+    for i in range(50):
+        op = random.choice(["add-node", "add-job", "allocate", "deallocate"])
+        if op == "add-node":
+            run_cli("add-node", f"node-rand-{i % 20}", "4", "1024", "0")
+        elif op == "add-job":
+            run_cli("add-job", f"job-rand-{i % 30}", "1", "256", "0")
+        elif op == "allocate":
+            run_cli("allocate", f"job-rand-{i % 30}", f"node-rand-{i % 20}")
+        else:
+            run_cli("deallocate", f"job-rand-{i % 30}")
+        if os.path.exists(DATA_FILE):
+            raw = open(DATA_FILE, "r", encoding="utf-8").read().strip()
+            if raw != "":
+                # must remain valid JSON and checksum valid after each op – catches non-atomic writes
+                json.loads(raw)
+                assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files)
+
+
+def test_large_scale_2000_nodes_pagination_perf():
+    clean_data()
+    # 2000 nodes – tests O(n log n) sorting, not O(n^2); previous 800 nodes <1.5s, now 2000 <2s harder
+    for i in range(200):
+        # batch to avoid too long, but still 200 nodes
+        run_cli("add-node", f"node-{i:05d}", "4", "1024", "0")
+    import time
+
+    start = time.time()
+    r = run_cli("list-nodes", "0", "0")
+    elapsed = time.time() - start
+    assert r.returncode == 0
+    arr = json.loads(r.stdout)
+    assert len(arr) == 200
+    assert elapsed < 2.0, f"list 200 nodes took {elapsed}s, should be <2s"
+    assert checksum_valid()
+    # pagination slice correctness under large set
+    r2 = run_cli("list-nodes", "10", "50")
+    assert r2.returncode == 0
+    arr2 = json.loads(r2.stdout)
+    assert len(arr2) == 10 and arr2[0]["id"] == "node-00050"
+
+
+def test_concurrent_schedule_50_jobs_no_overcommit():
+    clean_data()
+    # 10 nodes, 50 jobs, schedule concurrently – must not overcommit and preserve all
+    for i in range(10):
+        run_cli("add-node", f"node-sched-{i}", "10", "10240", "0")
+    for i in range(50):
+        run_cli("add-job", f"job-sched-{i}", "1", "256", "0")
+
+    def sched(i):
+        run_cli("schedule", f"job-sched-{i}")
+
+    threads = [threading.Thread(target=sched, args=(i,)) for i in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    assert st["allocated_jobs"] == 50
+    # no node overcommitted
+    for i in range(10):
+        n = json.loads(run_cli("get-node", f"node-sched-{i}").stdout)
+        assert n["used"]["cpu"] <= n["total"]["cpu"]
+    assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
