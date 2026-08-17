@@ -674,8 +674,9 @@ def test_batch_evict_oldest():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch evict-oldest failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"batch evict-oldest failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_drop_and_backpressure():
@@ -708,8 +709,9 @@ def test_batch_processor_drop_and_backpressure():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch drop backpressure failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"batch drop backpressure failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_droppedcount_and_queuelen():
@@ -2138,7 +2140,9 @@ def test_batch_concurrent_shutdown_and_forceflush():
     }
     """)
     proc = go_run_with_race(code, timeout=60)
-    assert proc.returncode == 0, f"concurrent shutdown and forceflush failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"concurrent shutdown and forceflush failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_ratio_sampler_error_override_with_invalid_traceid():
@@ -2172,7 +2176,9 @@ def test_ratio_sampler_error_override_with_invalid_traceid():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"error override invalid traceid failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"error override invalid traceid failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_ratio_sampler_boundary_exact_threshold():
@@ -2202,7 +2208,9 @@ def test_ratio_sampler_boundary_exact_threshold():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"boundary exact threshold failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"boundary exact threshold failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_alias_last_wins():
@@ -2257,7 +2265,9 @@ def test_batch_alias_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch alias last wins failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch alias last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_order_preserved_with_evict_oldest():
@@ -2290,7 +2300,9 @@ def test_batch_order_preserved_with_evict_oldest():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"order preserved evict-oldest failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"order preserved evict-oldest failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_shutdown_idempotent():
@@ -2322,7 +2334,9 @@ def test_batch_shutdown_idempotent():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"shutdown idempotent failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"shutdown idempotent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_exporter_error_continues_processing():
@@ -2368,7 +2382,9 @@ def test_batch_exporter_error_continues_processing():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter error continues failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"exporter error continues failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_truncation_interaction():
@@ -2400,7 +2416,9 @@ def test_metrics_cardinality_truncation_interaction():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality truncation interaction failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality truncation interaction failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_drop_distinct_counting():
@@ -2426,7 +2444,9 @@ def test_metrics_cardinality_drop_distinct_counting():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality drop distinct counting failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality drop distinct counting failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_queuelen_never_exceeds_under_concurrency():
@@ -2487,7 +2507,9 @@ def test_batch_queuelen_never_exceeds_under_concurrency():
     }
     """)
     proc = go_run_with_race(code, timeout=60)
-    assert proc.returncode == 0, f"queuelen never exceeds under concurrency failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"queuelen never exceeds under concurrency failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_forceflush_block_many_concurrent_during_flush():
@@ -2546,7 +2568,9 @@ def test_batch_forceflush_block_many_concurrent_during_flush():
     }
     """)
     proc = go_run_with_race(code, timeout=60)
-    assert proc.returncode == 0, f"forceflush block many concurrent failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"forceflush block many concurrent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_parent_aware_nil_root_fallback():
@@ -2568,7 +2592,9 @@ def test_sampler_parent_aware_nil_root_fallback():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent aware nil root fallback failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"parent aware nil root fallback failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_aggregate_overflow_value():
@@ -2607,7 +2633,9 @@ def test_metrics_cardinality_aggregate_overflow_value():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"aggregate overflow value failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"aggregate overflow value failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_export_timeout_respects_with_forceflush():
@@ -2651,7 +2679,9 @@ def test_batch_export_timeout_respects_with_forceflush():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"export timeout respects with forceflush failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"export timeout respects with forceflush failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_with_sampler_nil_no_panic():
@@ -2677,7 +2707,9 @@ def test_tracer_with_sampler_nil_no_panic():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer with sampler nil no panic failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"tracer with sampler nil no panic failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_no_busy_loop_cpu():
@@ -2737,7 +2769,9 @@ def test_sampler_ratio_fraction_negative_zero_and_nan():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio fraction negative zero nan failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio fraction negative zero nan failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_priority_case_insensitive_and_nonstring():
@@ -2768,7 +2802,9 @@ def test_sampler_ratio_priority_case_insensitive_and_nonstring():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio priority case insensitive failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio priority case insensitive failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_invalid_traceid_variants():
@@ -2802,7 +2838,9 @@ def test_sampler_ratio_invalid_traceid_variants():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio invalid traceid variants failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio invalid traceid variants failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_boundary_7fffffff_and_80000001():
@@ -2826,7 +2864,9 @@ def test_sampler_ratio_boundary_7fffffff_and_80000001():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio boundary 7fffffff failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio boundary 7fffffff failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_description_contains_fraction():
@@ -2846,7 +2886,9 @@ def test_sampler_ratio_description_contains_fraction():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio description contains fraction failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio description contains fraction failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_ignores_status_ok():
@@ -2866,7 +2908,9 @@ def test_sampler_ratio_ignores_status_ok():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio ignores status ok failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio ignores status ok failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_parent_aware_combinations():
@@ -2904,7 +2948,9 @@ def test_parent_aware_combinations():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent aware combinations failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"parent aware combinations failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_parent_aware_nil_root_fallback():
@@ -2923,7 +2969,9 @@ def test_parent_aware_nil_root_fallback():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent aware nil root fallback failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"parent aware nil root fallback failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_parent_aware_nested():
@@ -2945,7 +2993,9 @@ def test_parent_aware_nested():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent aware nested failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"parent aware nested failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_sampler_priority_via_attribute_and_case():
@@ -2978,7 +3028,9 @@ def test_tracer_sampler_priority_via_attribute_and_case():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer sampler priority via attr failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"tracer sampler priority via attr failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_sampler_never_not_exported_but_context_propagated():
@@ -3012,7 +3064,9 @@ def test_tracer_sampler_never_not_exported_but_context_propagated():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer never not exported but propagated failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"tracer never not exported but propagated failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_non_positive_fallback_zero():
@@ -3036,7 +3090,9 @@ def test_batch_non_positive_fallback_zero():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch non-positive fallback zero failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch non-positive fallback zero failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_queue_size_one_evict_oldest():
@@ -3065,7 +3121,9 @@ def test_batch_queue_size_one_evict_oldest():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch queue size one evict failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch queue size one evict failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_queuelen_and_droppedcount_never_negative():
@@ -3106,7 +3164,9 @@ def test_batch_queuelen_and_droppedcount_never_negative():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"queuelen droppedcount never negative failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"queuelen droppedcount never negative failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_onend_after_shutdown_no_panic_and_no_increase():
@@ -3137,7 +3197,9 @@ def test_batch_onend_after_shutdown_no_panic_and_no_increase():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"onend after shutdown failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"onend after shutdown failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_concurrent_shutdown_idempotent():
@@ -3169,7 +3231,9 @@ def test_batch_concurrent_shutdown_idempotent():
     }
     """)
     proc = go_run_with_race(code)
-    assert proc.returncode == 0, f"concurrent shutdown idempotent failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"concurrent shutdown idempotent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_forceflush_timeout_and_shutdown_flushes_remaining():
@@ -3209,7 +3273,9 @@ def test_batch_forceflush_timeout_and_shutdown_flushes_remaining():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"forceflush timeout and shutdown flushes failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"forceflush timeout and shutdown flushes failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_export_error_continues():
@@ -3238,7 +3304,9 @@ def test_batch_export_error_continues():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"export error continues failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"export error continues failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_ordering_across_batches():
@@ -3279,7 +3347,9 @@ def test_batch_ordering_across_batches():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch ordering across batches failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch ordering across batches failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_droppedcount_excludes_non_recording():
@@ -3307,7 +3377,9 @@ def test_batch_droppedcount_excludes_non_recording():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"droppedcount excludes non-recording failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"droppedcount excludes non-recording failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_batchsize_hard_cap_on_shutdown():
@@ -3336,7 +3408,9 @@ def test_batch_batchsize_hard_cap_on_shutdown():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch hard cap on shutdown failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch hard cap on shutdown failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_alias_maxexportbatchsize_last_wins():
@@ -3364,7 +3438,9 @@ def test_batch_alias_maxexportbatchsize_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"alias maxexportbatchsize last wins failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"alias maxexportbatchsize last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_per_name_not_global():
@@ -3397,7 +3473,9 @@ def test_metrics_cardinality_per_name_not_global():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality per-name not global failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality per-name not global failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_distinct_dropped_no_double_count():
@@ -3424,10 +3502,12 @@ def test_metrics_cardinality_distinct_dropped_no_double_count():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality distinct dropped no double count failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality distinct dropped no double count failed: {proc.stdout} {proc.stderr}"
+    )
 
 
-def test_metrics_cardinality_aggregate_overflow_value():
+def test_metrics_cardinality_aggregate_overflow_value_sum():
     code = textwrap.dedent("""
     package main
     import (
@@ -3462,7 +3542,9 @@ def test_metrics_cardinality_aggregate_overflow_value():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"aggregate overflow value failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"aggregate overflow value sum failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_truncation_interaction_before_key():
@@ -3492,7 +3574,9 @@ def test_metrics_cardinality_truncation_interaction_before_key():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"truncation interaction before key failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"truncation interaction before key failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_reuse_at_limit_no_increase():
@@ -3521,7 +3605,9 @@ def test_metrics_cardinality_reuse_at_limit_no_increase():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"reuse at limit no increase failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"reuse at limit no increase failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_mixed_types_first_wins():
@@ -3547,7 +3633,9 @@ def test_metrics_cardinality_mixed_types_first_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"mixed types first wins failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"mixed types first wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_unlimited_zero():
@@ -3572,7 +3660,9 @@ def test_metrics_cardinality_unlimited_zero():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality unlimited zero failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality unlimited zero failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_overflow_mode_case_insensitive():
@@ -3599,7 +3689,9 @@ def test_metrics_cardinality_overflow_mode_case_insensitive():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"overflow mode case insensitive failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"overflow mode case insensitive failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_no_busy_loop_cpu_extra():
@@ -3623,7 +3715,9 @@ def test_batch_processor_no_busy_loop_cpu_extra():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"no busy loop cpu extra failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"no busy loop cpu extra failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_with_sampler_multiple_last_wins():
@@ -3648,7 +3742,9 @@ def test_tracer_with_sampler_multiple_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer with sampler multiple last wins failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"tracer with sampler multiple last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_backpressure_timing():
@@ -3674,7 +3770,9 @@ def test_batch_processor_backpressure_timing():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"backpressure timing failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"backpressure timing failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_with_attributes_priority_exact_key():
@@ -3710,7 +3808,9 @@ def test_sampler_ratio_with_attributes_priority_exact_key():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio with attributes priority exact key failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio with attributes priority exact key failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_shutdown_timeout_respects_ctx():
@@ -3747,7 +3847,9 @@ def test_batch_shutdown_timeout_respects_ctx():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"shutdown timeout respects ctx failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"shutdown timeout respects ctx failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_forceflush_concurrent_producers_block_then_succeed():
@@ -3795,7 +3897,9 @@ def test_batch_forceflush_concurrent_producers_block_then_succeed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"forceflush concurrent producers block then succeed failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"forceflush concurrent producers block then succeed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_overflow_aggregation_sum():
@@ -3835,7 +3939,9 @@ def test_metrics_cardinality_overflow_aggregation_sum():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality overflow aggregation sum failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality overflow aggregation sum failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_sampler_never_and_always_description():
@@ -3858,7 +3964,9 @@ def test_tracer_sampler_never_and_always_description():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer sampler never and always description failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"tracer sampler never and always description failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_goroutine_leak():
@@ -3888,7 +3996,9 @@ def test_batch_processor_goroutine_leak():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"batch processor goroutine leak failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"batch processor goroutine leak failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_sampler_ratio_deterministic_same_tid_diff_name_kind():
@@ -3910,7 +4020,9 @@ def test_sampler_ratio_deterministic_same_tid_diff_name_kind():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"ratio deterministic same tid diff name kind failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"ratio deterministic same tid diff name kind failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_batch_processor_queue_len_after_shutdown_zero():
@@ -3934,7 +4046,9 @@ def test_batch_processor_queue_len_after_shutdown_zero():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"queue len after shutdown zero failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"queue len after shutdown zero failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_cardinality_limit_negative_unlimited():
@@ -3959,7 +4073,9 @@ def test_metrics_cardinality_limit_negative_unlimited():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"cardinality limit negative unlimited failed: {proc.stdout} {proc.stderr}"
+    assert proc.returncode == 0, (
+        f"cardinality limit negative unlimited failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracer_start_with_sampler_and_parent_combined():
@@ -3990,5 +4106,6 @@ def test_tracer_start_with_sampler_and_parent_combined():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracer start with sampler and parent combined failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"tracer start with sampler and parent combined failed: {proc.stdout} {proc.stderr}"
+    )
