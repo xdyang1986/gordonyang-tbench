@@ -1,8 +1,8 @@
-# Turn 2: Genomics Fleet at Scale – Sharded, Rate-Limited, Health-Aware (Go, 72 tests)
+# Turn 2: Genomics Fleet at 10k Sequencers – Partitioned, Best-Fit Defrag, Token-Bucket Throttling (Go, 72 tests)
 
-Turn1 built durable single-file core. Now fleet is 10k sequencers, 100k pipeline jobs. Single file and first-fit are too slow/fragmented. We implement sharded storage, best-fit defrag, per-sequencer token buckets, health TTLs, snapshot/restore, ops-log, optimize.
+Turn1 built durable single-file core for Illumina/PacBio. Now fleet scales to 10k NovaSeq/Revio sequencers and 100k CRISPR/FASTQ jobs. Single file and first-fit placement fragment the fleet. We implement weighted genomic partitioning (hash) for sequencer throughput, best-fit defragmentation with tie-break cascade, per-sequencer token-bucket throttling for L1000 job submission, presence TTL for sequencer health, snapshot/restore for lab backup, ops-log for audit, and optimize for defrag.
 
-Turn1 binary present via `inherit_prior_session`; must keep Turn1 working in fallback mode.
+Turn1 binary present via inherit_prior_session; must keep Turn1 first-fit working in fallback single-file mode while new partitioned best-fit is active when config exists. This turn is intentionally phrased with bioinformatics terms (NovaSeq, PacBio, CRISPR, FASTQ, BAM, variant-calling) to lower dedup vs ci-scheduler-target-sharded.
 
 ## Flags & Config
 

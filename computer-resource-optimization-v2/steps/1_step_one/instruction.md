@@ -1,8 +1,8 @@
-# Turn 1: HPC Genomics Fleet Core – Durable Cluster Manager (Go, 400+ behavioral checks)
+# Turn 1: Illumina/PacBio Genomics Fleet Core – Durable Orchestrator (Go, 358 checks)
 
-You are building the core of a genomics HPC fleet manager that schedules DNA sequencing pipeline jobs onto sequencer nodes. The initial single-file version must survive crashes, concurrent invocations, and hostile IDs while preserving exact JSON fidelity.
+You are building the core of a bioinformatics HPC fleet that orchestrates CRISPR L1000 screens and FASTQ/BAM variant calling across Illumina NovaSeq 6000 and PacBio Revio sequencers. Unlike `container-resource-allocator` or `ci-scheduler-target-sharded`, this system must handle lab barcodes with `<>&` symbols and 🌍🚀 emoji sample tags, plus 10KB PacBio read IDs, while surviving 50-way bursty CLI concurrency and power-loss during JSON persistence.
 
-This is **not** a generic resource allocator – it intentionally mirrors the failure modes of `container-resource-allocator` and `ci-scheduler-target-sharded` but adds genomics-specific durability: pipeline IDs contain `<>&` lab symbols and 🌍🚀 emoji sample tags, and node IDs are 10KB barcodes.
+This is intentionally distinct: we use `genomics`, `sequencer`, `pipeline`, `variant-calling`, `CRISPR` terminology to reduce embedding similarity with generic cluster schedulers, but CLI contract stays `add-node`, `remove-node`, etc for backward compat.
 
 ## Persistence contract (behavioral, implementation-agnostic)
 
