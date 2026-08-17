@@ -4109,3 +4109,211 @@ def test_tracer_start_with_sampler_and_parent_combined():
     assert proc.returncode == 0, (
         f"tracer start with sampler and parent combined failed: {proc.stdout} {proc.stderr}"
     )
+
+
+def test_batch_queue_size_one_evict():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(1), observability.WithBatchSize(10), observability.WithBatchTimeout(1000))
+      tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+      for i:=0;i<3;i++{
+        _, span := tracer.Start(context.Background(), fmt.Sprintf("span-%d", i))
+        span.End()
+      }
+      proc.ForceFlush(context.Background())
+      spans := exp.GetSpans()
+      if len(spans)<1 { panic(fmt.Sprintf("expected at least 1 got %d", len(spans))) }
+      found := false
+      for _, s := range spans {
+        if s.Name=="span-2" { found=true }
+      }
+      if !found { panic(fmt.Sprintf("evict-oldest queue1 should keep span-2, got %v", spans)) }
+      fmt.Println("OK")
+      proc.Shutdown(context.Background())
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"queue size one evict failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_ratio_boundary_exact():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      sampler := observability.NewRatioSampler(0.5)
+      tid := "00000000000000000000000080000000"
+      p := observability.SamplingRequest{TraceID: tid}
+      d := sampler.ShouldSample(p)
+      if d!=observability.DecisionDrop { panic(fmt.Sprintf("exact threshold 0x80000000 at 0.5 should Drop, got %d", d)) }
+      tid2 := "0000000000000000000000007fffffff"
+      p2 := observability.SamplingRequest{TraceID: tid2}
+      d2 := sampler.ShouldSample(p2)
+      if d2!=observability.DecisionKeep { panic(fmt.Sprintf("0x7fffffff at 0.5 should Keep, got %d", d2)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"ratio boundary exact failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_parent_aware_nested():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      root := observability.NewNeverSampler()
+      mid := observability.NewParentAwareSampler(root)
+      outer := observability.NewParentAwareSampler(mid)
+      p := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: false}
+      d := outer.ShouldSample(p)
+      if d!=observability.DecisionDrop { panic(fmt.Sprintf("nested nil parent should Drop via root Never, got %d", d)) }
+      parent := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: true}
+      p2 := observability.SamplingRequest{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", HasParent: true, Parent: parent}
+      d2 := outer.ShouldSample(p2)
+      if d2!=observability.DecisionDrop { panic(fmt.Sprintf("nested parent sampled true but root Never should Drop, got %d", d2)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"parent aware nested failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_batch_goroutine_leak():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+      "runtime"
+      "time"
+    )
+    func main(){
+      before := runtime.NumGoroutine()
+      exp := observability.NewMemoryExporter()
+      proc := observability.NewBatchProcessor(exp)
+      tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+      for i:=0;i<10;i++{
+        _, span := tracer.Start(context.Background(), "leak-test")
+        span.End()
+      }
+      proc.Shutdown(context.Background())
+      time.Sleep(100*time.Millisecond)
+      after := runtime.NumGoroutine()
+      if after > before+2 { panic(fmt.Sprintf("goroutine leak: before %d after %d", before, after)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"goroutine leak failed: {proc.stdout} {proc.stderr}"
+
+
+def test_cardinality_unlimited_zero():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider(observability.WithMaxCardinality(0))
+      for i:=0;i<100;i++{
+        prov.Counter("unlimited", observability.WithLabels(map[string]string{"id": fmt.Sprintf("%d", i)})).Inc()
+      }
+      if prov.DroppedSeriesCount()!=0 { panic(fmt.Sprintf("unlimited 0 should not drop, got %d", prov.DroppedSeriesCount())) }
+      fams := prov.Collect()
+      for _, fam := range fams {
+        if fam.Name=="unlimited" {
+          if len(fam.Metrics)!=100 { panic(fmt.Sprintf("unlimited should have 100 got %d", len(fam.Metrics))) }
+          fmt.Println("OK")
+          return
+        }
+      }
+      panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"unlimited zero failed: {proc.stdout} {proc.stderr}"
+
+
+def test_batch_queue_len_after_shutdown():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      proc := observability.NewBatchProcessor(exp, observability.WithQueueSize(10), observability.WithBatchSize(2))
+      tracer := observability.NewTracer("svc", observability.WithProcessor(proc))
+      _, s1 := tracer.Start(context.Background(), "s1")
+      s1.End()
+      proc.Shutdown(context.Background())
+      _, s2 := tracer.Start(context.Background(), "s2")
+      s2.End()
+      if q, ok := proc.(interface{ QueueLen() int }); ok {
+        if q.QueueLen()!=0 { panic(fmt.Sprintf("QueueLen after shutdown should be 0 got %d", q.QueueLen())) }
+      }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"queue len after shutdown failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_cardinality_trunc_interaction_gauge():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "strings"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider(observability.WithMaxCardinality(1))
+      long1 := strings.Repeat("a", 256) + "1"
+      long2 := strings.Repeat("a", 256) + "2"
+      g1 := prov.Gauge("trunc_gauge", observability.WithLabels(map[string]string{"k": long1}))
+      g2 := prov.Gauge("trunc_gauge", observability.WithLabels(map[string]string{"k": long2}))
+      g1.Set(1)
+      g2.Set(2)
+      fams := prov.Collect()
+      for _, fam := range fams {
+        if fam.Name=="trunc_gauge" {
+          if len(fam.Metrics)!=1 { panic(fmt.Sprintf("trunc collision gauge should reuse 1 got %d", len(fam.Metrics))) }
+          if fam.Metrics[0].Value!=2 { panic(fmt.Sprintf("last wins 2 expected got %f", fam.Metrics[0].Value)) }
+          fmt.Println("OK")
+          return
+        }
+      }
+      panic("not found")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"trunc interaction gauge failed: {proc.stdout} {proc.stderr}"
+    )
