@@ -59,21 +59,83 @@ Backward compatible with Step1, adds:
 
 - **Old DB Migration**: old DB without history/total_distance/outlier_count must be auto-migrated, whitespace-only empty, array [] or null corrupt.
 
-## Latest Validation (oracle)
+## Latest online validation result
 
-Built from `steps/*/solution/solve.sh` at `/app/src` go 1.22 GOTOOLCHAIN=local.
+**Commit `ca823003` (HEAD, v0.39) · run 2026-08-17 · jobs 4937724 / 4937725 / 4937726 / 4937727 · AFTR run 9157610**
 
-- **Step1: 95/95 PASS (13s)** – hardened from 58 too-easy:
-  Re-added antimeridian unwrapping 179 to -179 is 2 deg wide, mixed roads legacy start/end, mandatory backup gate with distinct nanosec suffixes and contains original and truncated and stale tmp and atomic cleans and canonicalization, deeply nested parent dirs /a/b/c/d/e/f, batch zones before stale still fails, mixed update+delete same vehicle order, empty defaults all combos, radius 0 exact, circle exact radius 1000m inside just beyond outside, time boundaries inclusive same zone both inclusive only_from/to at boundary from-1/to+1 inactive, list pagination offset-limit exact order, history last==current after stale, multiple holes per zone, overlapping polygons first match, circle with time window, hole edge outside, interior vs endpoint snapping, closest among many segments, all filters combined list with since/until+zones+roads+accuracy/speed, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops performance, corrupt extra garbage, zones default vs custom precedence, etc. – previously removed to ease but now added back to make harder since 58 was too easy.
+> **All gates green.** Validation passing, Agentic Full-Task Review **GOOD**, TBR
+> 18/18 with no quality concerns. Status is `draft` — no revision is outstanding.
 
-- **Step2: 152/152 PASS (10s)** – hardened from 79 too-easy:
-  All Step1 compat 95 tests still passes, plus full extreme features: polygon with holes, circles, time windows inclusive, antimeridian, mixed roads, heading-aware no fallback comprehensive, outlier six conditions with exact boundaries teleport 0.05deg 101sec, heading flip exact 120 vs 150, acceleration spike 30/1sec, accuracy spike 80 vs 10, confidence high exact boundaries age 5000 acc5 and low when age 30001, prediction exact delta north 50m, pickup moving boundary 4.9 valid 5.0 invalid, dropoff 9.9 valid 10.0 invalid, batch low_accuracy and outlier mixed, EMA weighted accuracy decay, road mismatch multi roads, old DB migration, large scale estimate 200 vehicles 50 estimates <5s. Added back 59 hardest plus 14 new boundary tests.
+| Field | Value |
+| --- | --- |
+| `validationStatus` | **passing** — all 5 gates |
+| Agentic Full-Task Review | **GOOD** — difficulty `GENUINELY_HARD`, all 13 rubrics PASS, secondary issues NONE |
+| `tbdReviewStatus` | pass — **TBR 18/18**, all six axes 3, `quality_concern_titles` null |
+| Difficulty classification | GOOD — Opus 150/384 tests (39%), oracle 114/120 (95%) |
+| Quality dimensions | depth **3** / realism **3** / originality **3** |
+| Novelty risk | **LOW** |
+| Contamination | Not checked — repo not yet covered by the pipeline |
+| Provenance | CLEAN |
+| Structural checks | 10/10 PASS |
+| `status` / `reviewStatus` | draft |
 
-## Agent Failure Analysis
+| Stage | Job | Result | Reward split |
+| --- | --- | --- | --- |
+| oracle | 4937726 | **3/3** | 3 × 1.00 |
+| codex (`gpt-5.5`) | 4937725 | **7/10** | 7 × 1.00, 1 × 0.50, 2 × 0.00 |
+| agent (opus `claude-opus-4-8`) | 4937727 | **3/10** | 3 × 1.00, 7 × 0.00 |
+| metacode (avocado `avocado-5.14-code`) | 4937724 | **3/10** | 3 × 1.00, 6 × 0.50, 1 × 0.00 |
 
-Step1 was 59 0% fail no discrimination, hardened to 81/84 too hard 0% pass saturated crash-consistency backup gate, eased to 63 removing 8 backup tests, then to 60 removing antimeridian/mixed, then to 43 medium removing holes/circles/time → too easy high pass. Balanced to 58 hard keeping holes/circles/time but no antimeridian/mixed → still too easy online. Now hardened to 95 extreme-hard: re-added antimeridian (2 tests), mixed roads (1 test), mandatory backup gate (8 tests distinct nanosec and contains original and truncated etc.), plus 14 new hard edge cases multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint, closest among many, all filters combined, accuracy+speed together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence.
+Pass/fail balance gate: **passed** — avocado not trivial (3/10) and ≥1 agent solved.
 
-Step2 79 too easy after easing from 138 0% pass, now 152 with full priority chain and boundaries.
+### Failure spread (all 17 non-1.00 trials, from downloaded `ctrf.json`)
+
+| Test | Step | Count | opus | avocado | codex |
+| --- | --- | --- | --- | --- | --- |
+| `test_geofence_check_on_hole_edge_outside_v2` | **1** | 7 | 6 | 1 | 0 |
+| `test_estimate_prediction_exact_delta_north_v2` | **2** | 7 | 0 | 6 | 1 |
+| `test_zones_antimeridian` | 1 | 4 | 2 | 0 | 2 |
+| `test_zones_out_of_zone_rejection` | 1 | 3 | 2 | 0 | 1 |
+| `test_zones_holes` | 1 | 3 | 2 | 0 | 1 |
+| `test_zones_circle` | 1 | 3 | 2 | 0 | 1 |
+| `test_zones_default_file` | 1 | 3 | 2 | 0 | 1 |
+| `test_geofence_check_antimeridian` | 1 | 1 | 0 | 0 | 1 |
+
+Reading:
+- **Both steps discriminate, each through its own narrow test.** Step 1 is carried by
+  `test_geofence_check_on_hole_edge_outside_v2` (hole-edge points must count as
+  outside the zone); step 2 by `test_estimate_prediction_exact_delta_north_v2`
+  (`original_lat`/`original_lng` must be the pre-prediction smoothed value). Neither
+  step is load-bearing on a timing or hardware-dependent assertion.
+- **Failures are surgical, not "ran out of time".** 13 of the 17 failing trials fail
+  **exactly one test** out of 95 (step 1) or 152 (step 2). The other 4 fail a
+  correlated 2–6 test cluster in the zones/antimeridian family — one wrong
+  zones-file decision cascading, not independent misses.
+- **The two models fail in mirror-image ways.** Opus never scores 0.50: it either
+  solves both steps or fails step 1 outright (7/10). Avocado clears step 1 in 9/10
+  and then stalls on step-2 prediction (6 × 0.50).
+
+### AFTR: GOOD — no blockers
+
+> "All 13 required rubrics PASS and trajectory analysis clean -> GOOD."
+>
+> "The grading is sound. The oracle baseline records reward 0.0 for the empty
+> starting state, while the reference solution and all three oracle trials pass every
+> test… The hidden tests are broad and discriminating: failed rollouts were rejected
+> for real behavioral defects such as treating antimeridian polygons as covering
+> longitude 0, counting hole-edge points as inside the zone, or setting `original_lat`
+> equal to the predicted latitude. I did not find false-positive evidence, reward
+> hacking, grading crashes, or timeouts."
+
+Optional (non-blocking) improvements the AFTR suggested:
+
+1. Add small tests for no-command, `--help`/`-h`, unknown command exit 2, and a
+   practical observable check around temp-file/fsync behaviour.
+2. Slightly clarify the Step 2 road-snapping sentence about `original_lat`/
+   `original_lng` after prediction — several models made the same mistake even though
+   the prediction section already defines the expected behaviour. Note this is the
+   task's top step-2 discriminator (7 failures), so clarifying it would likely raise
+   the avocado pass rate; weigh that against the balance gate before acting.
 
 ## Structure
 
