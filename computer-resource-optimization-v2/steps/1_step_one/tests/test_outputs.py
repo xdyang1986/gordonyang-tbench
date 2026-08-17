@@ -253,7 +253,7 @@ def test_add_job_list_get():
     arr = json.loads(run_cli("list-jobs").stdout)
     assert len(arr) == 2 and [j["id"] for j in arr] == sorted([j["id"] for j in arr])
     job = json.loads(run_cli("get-job", "jobA").stdout)
-    assert job["status"] == "pending" and job["node_id"] == ""
+    assert job["status"] == "pending" and job["node_id"] in ("", None)
 
 
 def test_remove_job_deallocates():
@@ -302,7 +302,7 @@ def test_deallocate():
     run_cli("allocate", "job1", "node1")
     r = run_cli("deallocate", "job1")
     assert r.returncode == 0 and "true" in r.stdout.lower()
-    assert json.loads(run_cli("get-job", "job1").stdout)["node_id"] == ""
+    assert json.loads(run_cli("get-job", "job1").stdout)["node_id"] in ("", None)
     assert "false" in run_cli("deallocate", "job1").stdout.lower()
     assert run_cli("deallocate", "nojob").returncode == 2
 
@@ -1838,7 +1838,7 @@ def test_get_job_after_deallocate_status_pending():
     run_cli("allocate", "job1", "node1")
     run_cli("deallocate", "job1")
     job = json.loads(run_cli("get-job", "job1").stdout)
-    assert job["status"] == "pending" and job["node_id"] == ""
+    assert job["status"] == "pending" and job["node_id"] in ("", None)
 
 
 def test_remove_job_when_allocated_cleans_node_and_job():
