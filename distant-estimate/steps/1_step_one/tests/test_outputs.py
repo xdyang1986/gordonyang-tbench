@@ -3773,3 +3773,126 @@ def test_large_graph_and_batch_perf_extra_hard():
     finally:
         os.unlink(gp)
 
+
+# === EXTRA HARD v3 for Step1 - pushing to 150+ ===
+
+def test_graph_with_extra_nested_object_ignored_extra():
+    import tempfile, os, subprocess, json, math
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    graph={"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"meta":{"x":1,"nested":{"y":2}}}]}
+    gp=tmp(json.dumps(graph))
+    try:
+        proc=run(["--graph",gp,"--from","A","--to","B"])
+        assert proc.returncode==0
+        out=json.loads(proc.stdout.decode().strip())
+        assert math.isclose(out["distance"],5, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+
+def test_requests_file_bom_trailing_comment_extra_hard_v3():
+    import tempfile, os, subprocess, json
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def tmp_bytes(b):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="wb"); f.write(b); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    graph={"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":1}]}
+    gp=tmp(json.dumps(graph))
+    rp_trail=tmp('[{"source":"A","destination":"B"},]')
+    rp_comment=tmp('// comment\n[{"source":"A","destination":"B"}]')
+    rp_bom=tmp_bytes(b'\xef\xbb\xbf[{"source":"A","destination":"B"}]')
+    try:
+        for rp in [rp_trail, rp_comment, rp_bom]:
+            proc=run(["--graph",gp,"--requests",rp])
+            assert proc.returncode==2, f"requests malformed should be invalid"
+    finally:
+        os.unlink(gp); os.unlink(rp_trail); os.unlink(rp_comment); os.unlink(rp_bom)
+
+def test_batch_all_no_route_and_all_valid_mixed():
+    import tempfile, os, subprocess, json
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    graph={"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":1}]}
+    gp=tmp(json.dumps(graph))
+    rp_all_no=tmp(json.dumps([{"source":"X","destination":"Y"},{"source":"C","destination":"D"}]))
+    rp_mixed=tmp(json.dumps([{"source":"A","destination":"B"},{"source":"X","destination":"Y"}]))
+    try:
+        proc_all=run(["--graph",gp,"--requests",rp_all_no])
+        assert proc_all.returncode==1
+        assert len(proc_all.stdout.decode().strip().splitlines())==2
+        proc_mixed=run(["--graph",gp,"--requests",rp_mixed])
+        assert proc_mixed.returncode==1
+        lines=proc_mixed.stdout.decode().strip().splitlines()
+        assert len(lines)==2
+        o0=json.loads(lines[0])
+        assert o0["distance"]!=-1
+        o1=json.loads(lines[1])
+        assert o1["distance"]==-1
+    finally:
+        os.unlink(gp); os.unlink(rp_all_no); os.unlink(rp_mixed)
+
+def test_node_id_with_special_chars_valid():
+    import tempfile, os, subprocess, json, math
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    graph={"nodes":["A/B","C.D","E-F_G","H I"],"edges":[
+        {"from":"A/B","to":"C.D","distance":5},{"from":"C.D","to":"E-F_G","distance":5}]}
+    gp=tmp(json.dumps(graph))
+    try:
+        proc=run(["--graph",gp,"--from","A/B","--to","E-F_G"])
+        assert proc.returncode==0
+        out=json.loads(proc.stdout.decode().strip())
+        assert out["path"]==["A/B","C.D","E-F_G"]
+    finally:
+        os.unlink(gp)
+
+def test_tie_break_prefix_and_case_extra_hard():
+    import tempfile, os, subprocess, json
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    # Prefix shorter wins when one path is prefix of other? Actually need same cost and one path prefix? Dijkstra paths can't be prefix unless zero distance, but we test lex compare still
+    # Case-sensitive: 'B' < 'b'
+    graph={"nodes":["A","B","b","Z"],"edges":[
+        {"from":"A","to":"B","distance":5},{"from":"B","to":"Z","distance":5},
+        {"from":"A","to":"b","distance":5},{"from":"b","to":"Z","distance":5}]}
+    gp=tmp(json.dumps(graph))
+    try:
+        proc=run(["--graph",gp,"--from","A","--to","Z"])
+        assert proc.returncode==0
+        out=json.loads(proc.stdout.decode().strip())
+        assert out["path"]==["A","B","Z"], f"case-sensitive B < b, got {out['path']}"
+    finally:
+        os.unlink(gp)
+
+def test_performance_dense_graph_extra_hard_v3():
+    import tempfile, os, subprocess, json, time
+    def tmp(c):
+        f=tempfile.NamedTemporaryFile(delete=False,suffix=".json",mode="w"); f.write(c); f.close(); return f.name
+    def run(args):
+        return subprocess.run(["/app/router"]+args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    nodes=[f"N{i}" for i in range(200)]
+    edges=[]
+    for i in range(200):
+        for j in range(i+1, min(i+15,200)):
+            edges.append({"from":f"N{i}","to":f"N{j}","distance":1})
+    graph={"nodes":nodes,"edges":edges}
+    gp=tmp(json.dumps(graph))
+    try:
+        start=time.time()
+        proc=run(["--graph",gp,"--from","N0","--to","N199"])
+        elapsed=time.time()-start
+        assert proc.returncode==0
+        assert elapsed<10.0, f"dense 200 nodes too slow {elapsed}"
+    finally:
+        os.unlink(gp)
+

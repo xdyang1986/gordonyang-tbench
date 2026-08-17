@@ -8028,6 +8028,7 @@ def test_logger_level_filtering_exact():
     import (
       "bytes"
       "context"
+      "fmt"
       "ride-observability/observability"
     )
     func main(){
@@ -8060,6 +8061,7 @@ def test_logger_output_nil_fallback():
     package main
     import (
       "context"
+      "fmt"
       "ride-observability/observability"
     )
     func main(){
