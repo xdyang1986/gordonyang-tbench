@@ -253,7 +253,7 @@ def test_add_job_list_get():
     arr = json.loads(run_cli("list-jobs").stdout)
     assert len(arr) == 2 and [j["id"] for j in arr] == sorted([j["id"] for j in arr])
     job = json.loads(run_cli("get-job", "jobA").stdout)
-    assert job["status"] == "pending" and job["node_id"] in ("", None)
+    assert job["status"] == "pending" and job["node_id"] == ""
 
 
 def test_remove_job_deallocates():
@@ -302,7 +302,7 @@ def test_deallocate():
     run_cli("allocate", "job1", "node1")
     r = run_cli("deallocate", "job1")
     assert r.returncode == 0 and "true" in r.stdout.lower()
-    assert json.loads(run_cli("get-job", "job1").stdout)["node_id"] in ("", None)
+    assert json.loads(run_cli("get-job", "job1").stdout)["node_id"] == ""
     assert "false" in run_cli("deallocate", "job1").stdout.lower()
     assert run_cli("deallocate", "nojob").returncode == 2
 
@@ -1358,17 +1358,11 @@ def test_list_nodes_zero_padded_limit_offset():
     clean_data()
     for i in range(3):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    # "00" and "01" should be parsed as 0 and 1 – zero-padded valid, but allow alternative exit2 for leniency to keep difficulty moderate
-    r = run_cli("list-nodes", "00", "00")
-    assert r.returncode in (0, 2)
-    if r.returncode == 0:
-        arr = json.loads(r.stdout)
-        assert len(arr) == 3
-    r2 = run_cli("list-nodes", "01", "01")
-    assert r2.returncode in (0, 2)
-    if r2.returncode == 0:
-        arr2 = json.loads(r2.stdout)
-        assert len(arr2) == 1 and arr2[0]["id"] == "node-1"
+    # "00" and "01" must be parsed as 0 and 1 – zero-padded valid (hardening for Step1)
+    arr = json.loads(run_cli("list-nodes", "00", "00").stdout)
+    assert len(arr) == 3
+    arr2 = json.loads(run_cli("list-nodes", "01", "01").stdout)
+    assert len(arr2) == 1 and arr2[0]["id"] == "node-1"
 
 
 def test_corruption_backup_contains_original():
@@ -1735,12 +1729,9 @@ def test_list_nodes_zero_padded_many_zeros():
     clean_data()
     for i in range(3):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    # "00000" should be parsed as 0 – allow alternative exit2 for moderate difficulty
-    r = run_cli("list-nodes", "00000", "00000")
-    assert r.returncode in (0, 2)
-    if r.returncode == 0:
-        arr = json.loads(r.stdout)
-        assert len(arr) == 3
+    # "00000" must be parsed as 0 – hardening
+    arr = json.loads(run_cli("list-nodes", "00000", "00000").stdout)
+    assert len(arr) == 3
 
 
 def test_add_node_id_single_char_zero_valid():
@@ -1838,7 +1829,7 @@ def test_get_job_after_deallocate_status_pending():
     run_cli("allocate", "job1", "node1")
     run_cli("deallocate", "job1")
     job = json.loads(run_cli("get-job", "job1").stdout)
-    assert job["status"] == "pending" and job["node_id"] in ("", None)
+    assert job["status"] == "pending" and job["node_id"] == ""
 
 
 def test_remove_job_when_allocated_cleans_node_and_job():
@@ -2190,9 +2181,7 @@ def test_add_node_with_cpu_memory_zero_invalid_gpu_zero_valid():
     assert run_cli("add-node", "n0cpu", "0", "1024", "0").returncode == 2
     assert run_cli("add-node", "n0mem", "4", "0", "0").returncode == 2
     assert run_cli("add-node", "n0gpu", "4", "1024", "0").returncode == 0
-    # -0 is mathematically 0, so should be valid, but allow both for moderate difficulty
-    r = run_cli("add-node", "nNegZeroGPU", "4", "1024", "-0")
-    assert r.returncode in (0, 2)
+    assert run_cli("add-node", "nNegZeroGPU", "4", "1024", "-0").returncode == 0
     assert run_cli("add-node", "nNegGPU", "4", "1024", "-1").returncode == 2
 
 
@@ -2701,11 +2690,8 @@ def test_list_nodes_limit_offset_zero_padded_extra():
     clean_data()
     for i in range(5):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    r = run_cli("list-nodes", "00002", "00001")
-    assert r.returncode in (0, 2)
-    if r.returncode == 0:
-        arr = json.loads(r.stdout)
-        assert [n["id"] for n in arr] == ["node-1", "node-2"]
+    arr = json.loads(run_cli("list-nodes", "00002", "00001").stdout)
+    assert [n["id"] for n in arr] == ["node-1", "node-2"]
 
 
 def test_add_node_id_10kb_special_chars_again():
