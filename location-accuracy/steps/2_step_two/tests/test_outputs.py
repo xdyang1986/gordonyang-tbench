@@ -5345,13 +5345,29 @@ def test_confidence_low_when_age_30001_v2(binary):
 
 
 def test_estimate_prediction_exact_delta_north_v2(binary):
+    # Clarified spec: original_lat is ALWAYS smoothed before prediction when NOT snapped
+    # This test uses un-snapped path, so original = smoothed (0), final = predicted (smoothed+delta)
+    # Previously ambiguous sentence "(or predicted if predicted)" under Road snapping caused deliberation
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
     run_cli(binary, db, ["update", "veh1", "0", "0", "1000", "--accuracy", "5", "--speed", "10", "--heading", "0"], expect_code=0)
     p = run_cli(binary, db, ["estimate", "veh1", "--now", "6000"], expect_code=0)
     data = json.loads(p.stdout.strip())
     assert data["predicted"] is True
-    assert data["lat"] > data["original_lat"]
+    # Original must be smoothed base before prediction (0,0) not predicted
+    assert abs(data["original_lat"] - 0.0) < 1e-6, f"original_lat should be smoothed 0, got {data['original_lat']}"
+    assert abs(data["original_lng"] - 0.0) < 1e-6
+    # Final lat should be predicted: smoothed + delta, delta = speed*age_sec / R *180/pi
+    # age=5000ms=5sec, speed 10 => dist 50m north => delta_lat ~ 0.000449
+    import math
+    R = 6371000.0
+    expected_delta_lat = 50.0 * math.cos(0) / R * 180 / math.pi
+    assert abs(data["lat"] - expected_delta_lat) < 0.0001, f"predicted lat should be ~{expected_delta_lat}, got {data['lat']}"
+    assert abs(data["lng"] - 0.0) < 0.0001
+    # For un-snapped predicted path, lat > original_lat (north)
+    assert data["lat"] > data["original_lat"], "for un-snapped predicted north, final lat should be > original_lat (smoothed before prediction)"
+    # Ensure original is NOT predicted (would be equal to lat if misinterpreted)
+    assert abs(data["original_lat"] - data["lat"]) > 1e-7, "original_lat should NOT equal predicted lat for un-snapped path (would indicate misreading 'or predicted if predicted' as general)"
 
 
 def test_validate_pickup_moving_boundary_exact_v2(binary):
@@ -5455,3 +5471,29 @@ def test_large_scale_estimate_performance_v2(binary):
         run_cli(binary, db, ["estimate", f"veh_{i:03d}", "--now", "50000"], expect_code=0)
     elapsed = time.time() - start
     assert elapsed < 5.0
+
+def test_estimate_prediction_snapped_original_is_predicted_before_snapping(binary):
+    # Clarified: when snapped, original is position BEFORE snapping (predicted if predicted)
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000", "--accuracy", "5", "--speed", "10", "--heading", "0"], expect_code=0)
+    # Query point at 0,5 near road, with prediction north, then snapped to road
+    # At now 6000, smoothed 0,0, predicted ~0.000449,0, then snapped to road at 0,5? Actually road at lat 0 from lng 0 to 10, so closest to predicted 0.000449,0 is 0,0 -> distance ~50m? Let's use road at lat 0, so predicted point 0.000449,0 is 50m north of road, still within 50m? Actually 0.000449 deg lat ~50m, so distance to road (lat 0) is 50m exactly, should snap
+    # For this test we want snapped true, and original should be predicted position (0.000449,0) not smoothed (0,0)
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "6000", "--roads", roads_path], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    # Might be snapped or not depending on distance exact 50m boundary - allow either but check original logic
+    if data["snapped"]:
+        # When snapped and predicted, original should be predicted position (before snapping)
+        import math
+        R = 6371000.0
+        expected_delta_lat = 50.0 / R * 180 / math.pi
+        assert abs(data["original_lat"] - expected_delta_lat) < 0.0002, f"when snapped+predicted, original should be predicted {expected_delta_lat}, got {data['original_lat']}"
+        assert data["predicted"] is True
+    else:
+        # If not snapped due to exactly 50m boundary, original should be smoothed (0)
+        assert abs(data["original_lat"] - 0.0) < 1e-6

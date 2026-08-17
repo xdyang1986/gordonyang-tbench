@@ -101,9 +101,19 @@ All Step 1 commands must continue to work.
 
 - Not found must exit 3, invalid roads file must exit 2.
 - `now` handling: if `--now` is provided use it, otherwise use current time `time.Now().UnixMilli()`. Compute `age = now - timestamp_ms`, if negative set to 0.
-- **EMA smoothing**: if history has at least 2 entries, take last up to 5 entries, weight each by `w = (1/(accuracy+1)) * exp(-age_i/10000)` where `age_i = now - history_i.timestamp_ms`. Weighted average lat/lng is the smoothed base position.
-- **Prediction**: accuracy always degrades by `+0.5 * age_sec` where `age_sec = age/1000`. If `age > 0 && age <= 30000 && speed > 0`, prediction is true: `dist = speed * age_sec`, `delta_lat = dist * cos(heading_rad) / R * 180 / pi`, `delta_lng = dist * sin(heading_rad) / (R * cos(lat_rad)) * 180 / pi`. Predicted lat/lng = smoothed + delta. Original lat/lng = smoothed before prediction. Otherwise predicted false, original = smoothed.
-- **Road snapping**: if `--roads` is given, use heading-aware snapping when speed > 1, otherwise normal snapping. If snapped, final lat/lng = snapped point, original lat/lng = smoothed base before prediction (or predicted if predicted).
+- **EMA smoothing**: if history has at least 2 entries, take last up to 5 entries, weight each by `w = (1/(accuracy+1)) * exp(-age_i/10000)` where `age_i = now - history_i.timestamp_ms`. Weighted average lat/lng is the smoothed base position. If history has 1 or 0 entries, smoothed = latest stored location.
+- **Prediction**: accuracy always degrades by `+0.5 * age_sec` where `age_sec = age/1000` regardless of predicted flag. If `age > 0 && age <= 30000 && speed > 0`, prediction is true: `dist = speed * age_sec`, `delta_lat = dist * cos(heading_rad) / R * 180 / pi`, `delta_lng = dist * sin(heading_rad) / (R * cos(lat_rad)) * 180 / pi`, where heading_rad = heading * pi/180, lat_rad = smoothed lat * pi/180, R=6371000. Predicted position = smoothed + delta. Otherwise predicted false and predicted position = smoothed.
+- **Road snapping**: if `--roads` is given, for each road and each segment points[i]->points[i+1] (or start/end for legacy), convert to equirectangular projection with lat_ref = vehicle latitude (or predicted latitude if predicted path), R=6371000, find closest point clamped t in [0,1], track best overall by Euclidean distance in projected space. Compute road bearing via initial bearing formula. Heading-aware filtering: when `headingAware` is true (used for `estimate` and `validate-pickup/dropoff` when `--roads` is provided and vehicle speed >1), filter out candidate if `min(angularDiff(heading, roadBearing), angularDiff(heading, roadBearing+180)) > 45`. If all candidates filtered, result not snapped – you must NOT fallback to non-heading-aware. If best distance <=50m, snapped true with lat/lng = snapped point, plus road_id, road_bearing, road_dist_m. Otherwise not snapped.
+- **Original vs Final (clarified – this was ambiguous before):**
+  - `original_lat` / `original_lng` is always the **smoothed base position BEFORE prediction and BEFORE snapping** when the final result is **not snapped**. This means for un-snapped path: original = smoothed (even when predicted true).
+  - When the final result **is snapped**, `original_lat` / `original_lng` is the **position BEFORE snapping** (i.e., predicted position if predicted true, otherwise smoothed base). This lets you see what was snapped.
+  - `lat` / `lng` (final) is after prediction and after snapping: if snapped → snapped point, else if predicted → predicted position (smoothed+delta), else → smoothed base.
+  - So:
+    - Not predicted, not snapped: original = smoothed, final = smoothed (same)
+    - Predicted, not snapped: original = smoothed, final = smoothed+delta (different, lat != original)
+    - Not predicted, snapped: original = smoothed, final = snapped
+    - Predicted, snapped: original = smoothed+delta (predicted), final = snapped
+  - This matches reference implementation and makes `test_estimate_prediction_exact_delta_north_v2` (un-snapped) expect `lat > original_lat` for north heading.
 - **Confidence**: compute base confidence:
   - high if `(acc <= 5 && age <= 5000)` OR `(acc <= 10 && age <= 10000)`
   - medium if `acc <= 25 && age <= 20000`, otherwise low

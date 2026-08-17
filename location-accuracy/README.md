@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 95 tests, extreme-hard – hardened for too-easy)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 99 tests, extreme-hard – hardened, hole-edge clarified)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 152 tests, extreme-hard – hardened, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 153 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
 
 Backward compatible with Step1, adds:
 
@@ -153,3 +153,31 @@ pytest steps/2_step_two/tests/test_outputs.py -v
 ```
 
 Binary: `go build -o locationctl .` from `/app/src` module `locationservice` stdlib only.
+
+## Decision Feedback Fix (Request changes – keep difficulty)
+
+**Decision: Request changes**
+Reason: Step 2 is decided by one test. All seven step-2 failures are `test_estimate_prediction_exact_delta_north_v2` at 151/152, across Avocado and Codex. instruction.md defines original_lat as smoothed before prediction, then under Road snapping as smoothed base before prediction (or predicted if predicted). The test uses the un-snapped path. The Avocado trajectory shows deliberation, not incapacity: it quotes both sentences, argues four times, writes "We need to clarify", then picks the other reading. The reference resolves it with a branch that cannot change anything, since smoothedLat is never written after originalSmoothedLat is copied from it.
+
+**Fix applied, keeping difficulty:**
+- **Step2 instruction clarified**: Split Original vs Final into explicit 4 cases, removed ambiguous parenthetical "(or predicted if predicted)". Now:
+  - Not predicted, not snapped: original=smoothed, final=smoothed
+  - Predicted, not snapped: original=smoothed (ALWAYS smoothed before prediction when not snapped), final=smoothed+delta, so lat > original for north
+  - Not predicted, snapped: original=smoothed, final=snapped
+  - Predicted, snapped: original=predicted (smoothed+delta) position before snapping, final=snapped
+  This makes un-snapped test expect lat > original (smoothed) and clarifies snapped case.
+- **Reference solution fixed**: Removed dead branch `if predicted { originalLat = smoothedLat }` which did nothing because `smoothedLat` == `originalSmoothedLat`. Now code is clean: `originalLat := originalSmoothedLat` always for un-snapped, and `originalLat = estLat` only when snapped (before snapping). Added comments explaining clarified spec.
+- **Deciding test made unambiguous but kept hard**: `test_estimate_prediction_exact_delta_north_v2` now checks exact expected values:
+  - original_lat == 0 ±1e-6 (smoothed)
+  - lat == expected_delta_lat ~0.000449 for 50m north with tolerance 0.0001
+  - lat > original_lat and original != lat (catches misreading where original=predicted)
+  - predicted True
+  Added complementary `test_estimate_prediction_snapped_original_is_predicted_before_snapping` to clarify both paths.
+- **Step1 hole-edge clarified**: Instruction now explicitly says "Point on outer edge/vertex inside, point on hole edge/vertex inside hole thus outside zone – discriminator for test_geofence_check_on_hole_edge_outside_v2". Solution already implements this (pointInPolygonSingle true for edge, hole check returns false).
+- **Added small robustness tests per AFTR optional improvement 1**: test_help_no_command_prints_help, test_help_flag_variants (--help/-h/help), test_unknown_command_exit2, test_help_precedence_any_token – all passing.
+- **Difficulty kept**: Step1 95→99 (added 4 robustness + kept 82 hard), Step2 152→153 (added 1 new snapped-original test, clarified deciding test). Overall still extreme-hard, but no longer decided by ambiguous single sentence. The 7 previous failures at 151/152 should now be resolved by clear spec, while other discriminators (hole-edge, antimeridian, mixed roads, backup mandatory, outlier boundaries, confidence, priority chain) keep difficulty.
+
+**Latest oracle after fix:**
+- Step1: 99/99 PASS (14s)
+- Step2: 153/153 PASS (10s)
+

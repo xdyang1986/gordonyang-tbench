@@ -849,12 +849,10 @@ func buildEstimateResult(loc Location, nowMs int64, roads []RoadEntry, roadsPath
 		estLat = smoothedLat + deltaLat
 		estLng = smoothedLng + deltaLng
 	}
+	// Clarified: original is always smoothed base BEFORE prediction when not snapped
+	// When snapped, original becomes position BEFORE snapping (predicted if predicted)
 	originalLat := originalSmoothedLat
 	originalLng := originalSmoothedLng
-	if predicted {
-		originalLat = smoothedLat
-		originalLng = smoothedLng
-	}
 	snapped := false
 	roadID := ""
 	roadBearing := 0.0

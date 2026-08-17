@@ -62,8 +62,8 @@ Rules:
 - Circle center valid lat/lng, radius 0 < radius <=1e6.
 - Both polygon and circle in same zone invalid → exit 2 when used.
 - `active_from`/`active_to` optional >=0, if both present from <= to else invalid file exit 2.
-- Point-in-polygon even-odd x=lng y=lat. Must handle antimeridian crossing by unwrapping longitudes to continuous range, so rectangle from 179 to -179 is 2 deg wide not 358. Point on edge or vertex counts as inside. Circle Haversine distance <= radius inside. Holes outside (inside outer but inside hole → outside).
-- Circle exact radius boundary: distance == radius counts as inside; just beyond radius outside.
+- Point-in-polygon even-odd x=lng y=lat. Must handle antimeridian crossing by unwrapping longitudes to continuous range, so rectangle from 179 to -179 is 2 deg wide not 358. Point on **outer** edge or vertex counts as inside. Point on **hole** edge or vertex counts as inside the hole, thus **outside** the zone (hole is outside) – this is the discriminator for `test_geofence_check_on_hole_edge_outside_v2`. Circle Haversine distance <= radius inside. Holes outside (inside outer but inside hole → outside).
+- Circle exact radius boundary: distance == radius counts as inside; just beyond radius outside. This is discriminative for `test_geofence_circle_exact_radius_inside`.
 
 Zone activation and filtering (seam):
 - Active at `ts` if `(active_from absent OR ts >= active_from) AND (active_to absent OR ts <= active_to)`. Bounds inclusive: ts==from and ts==to both active. Only-from active onward, only-to up to that time. from-1 and to+1 inactive.

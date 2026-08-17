@@ -2099,3 +2099,36 @@ def test_update_with_zones_default_and_custom_precedence_v2(binary):
                 os.remove(default_path)
             except:
                 pass
+
+def test_help_no_command_prints_help(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    p = run_cli(binary, db, [], expect_code=0)
+    out = p.stdout.lower()
+    assert "update" in out and "geofence-check" in out
+
+
+def test_help_flag_variants(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    for flag in ["--help", "-h", "help"]:
+        p = run_cli(binary, db, [flag], expect_code=0)
+        out = p.stdout.lower()
+        assert "update" in out, f"help flag {flag} missing commands"
+
+
+def test_unknown_command_exit2(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["unknowncmd"], expect_code=2)
+    run_cli(binary, db, ["invalid"], expect_code=2)
+
+
+def test_help_precedence_any_token(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # If first arg is help, should print help even if second is unknown? Spec: If no command or first arg is help/--help/-h, print help containing strings and exit0
+    p = run_cli(binary, db, ["help", "unknowncmd"], expect_code=0)
+    assert "update" in p.stdout.lower()
+    p2 = run_cli(binary, db, ["--help", "update", "veh1", "0", "0", "1000"], expect_code=0)
+    assert "update" in p2.stdout.lower()
