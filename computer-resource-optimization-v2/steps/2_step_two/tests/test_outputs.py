@@ -1249,7 +1249,15 @@ def test_ops_log_large_100_ops():
     r = run_config("ops-log")
     assert r.returncode == 0
     arr = json.loads(r.stdout)
-    assert len(arr) >= 100
+    # After fixing grading: spec only requires allocate to be logged, not add-node/add-job.
+    # So allocation-only logging (50 entries) should pass, not require 100.
+    # We keep >=50 to ensure ops are logged, and check allocate presence.
+    assert len(arr) >= 50, (
+        f"ops-log should contain at least 50 entries after 50 allocations, got {len(arr)}"
+    )
+    assert any(
+        (e.get("op") == "allocate" or "allocate" in str(e).lower()) for e in arr
+    ), f"ops-log should contain allocate op, got {arr[:5]}"
 
 
 def test_presence_multiple_heartbeat_same_node():
@@ -1316,7 +1324,9 @@ def test_snapshot_restore_dir_with_many_nodes():
     run_config("restore", "/tmp/backup")
     assert len(json.loads(run_config("list-nodes").stdout)) == 20
 
+
 # ---------- De-monoculture blockers per review: ops-log 200KB line and rate-limit corrupt-then-recreate ----------
+
 
 def test_ops_log_single_200kb_line_big_buffer():
     clean_all()
@@ -1328,11 +1338,20 @@ def test_ops_log_single_200kb_line_big_buffer():
     ops_path = cfg["ops_log"]
     os.makedirs(os.path.dirname(ops_path), exist_ok=True)
     huge_payload = "x" * (200 * 1024)  # 200KB
-    entry = json.dumps({"op": "allocate", "job_id": "jobHuge", "node_id": "node1", "payload": huge_payload})
+    entry = json.dumps(
+        {
+            "op": "allocate",
+            "job_id": "jobHuge",
+            "node_id": "node1",
+            "payload": huge_payload,
+        }
+    )
     with open(ops_path, "w") as f:
         f.write(entry + "\n")
     r = run_config("ops-log")
-    assert r.returncode == 0, f"ops-log should handle 200KB line with big buffer, got {r.returncode} {r.stderr}"
+    assert r.returncode == 0, (
+        f"ops-log should handle 200KB line with big buffer, got {r.returncode} {r.stderr}"
+    )
     arr = json.loads(r.stdout)
     assert len(arr) == 1, f"should return 1 entry for 200KB line, got {len(arr)}"
     assert arr[0]["job_id"] == "jobHuge"
@@ -1344,7 +1363,11 @@ def test_ops_log_single_200kb_line_big_buffer():
     assert r2.returncode == 0
     arr2 = json.loads(r2.stdout)
     assert len(arr2) == 2, f"should skip invalid and return 2, got {len(arr2)}"
-    assert "corrupt" in r2.stderr.lower() or "skip" in r2.stderr.lower() or "warning" in r2.stderr.lower()
+    assert (
+        "corrupt" in r2.stderr.lower()
+        or "skip" in r2.stderr.lower()
+        or "warning" in r2.stderr.lower()
+    )
 
 
 def test_rate_limit_persistence_survives_corrupt_then_recreate():

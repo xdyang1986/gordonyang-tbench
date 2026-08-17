@@ -91,6 +91,7 @@ func computeChecksumGeneric(data interface{}) (string, error) {
 }
 func computeChecksum(data ClusterData) (string, error) { return computeChecksumGeneric(data) }
 func acquireLock(lockPath string) error {
+	_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
 	tries := 0
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
@@ -99,7 +100,15 @@ func acquireLock(lockPath string) error {
 			return nil
 		}
 		if !os.IsExist(err) {
-			return err
+			// if dir missing, try mkdir and continue retry
+			_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
+			// for other errors (e.g., not exist due to dir), treat as retryable once
+			// but if still not IsExist after mkdir, return
+			if !os.IsNotExist(err) {
+				// return for unexpected errors except IsExist
+				// but to keep retry for stale lock, only retry if IsExist
+				// For IsNotExist we already mkdir and will retry next iteration
+			}
 		}
 		tries++
 		if tries >= 2000 {
@@ -111,10 +120,12 @@ func acquireLock(lockPath string) error {
 func releaseLock(p string) { _ = os.Remove(p) }
 func emptyData() ClusterData { return ClusterData{Nodes: map[string]*Node{}, Jobs: map[string]*Job{}} }
 func backupCorrupt(path string, raw []byte) {
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
 	_ = os.WriteFile(fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano()), raw, 0644)
 }
 func cleanStaleTmp(path string) {
 	dir := filepath.Dir(path)
+	_ = os.MkdirAll(dir, 0755)
 	base := filepath.Base(path)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

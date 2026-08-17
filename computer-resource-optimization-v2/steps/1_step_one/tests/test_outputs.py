@@ -4389,7 +4389,9 @@ def test_list_nodes_after_concurrent_add_and_remove():
     assert len(arr) == 20
     assert checksum_valid()
 
+
 # ---------- New canonicalization divergence tests per review (only family that ever caught anything is 10KB-ID+unicode+special-chars) ----------
+
 
 def test_canonicalization_id_with_lt_gt_amp_and_emoji_same_key():
     clean_data()
@@ -4401,13 +4403,21 @@ def test_canonicalization_id_with_lt_gt_amp_and_emoji_same_key():
     assert "<" in raw, "raw < must be present, SetEscapeHTML(false) required"
     assert ">" in raw and "&" in raw
     assert "🌍" in raw and "🚀" in raw and "😀" in raw, "raw emoji must be preserved"
-    assert "\\u003c" not in raw.lower() and "\\u003e" not in raw.lower() and "\\u0026" not in raw.lower()
+    assert (
+        "\\u003c" not in raw.lower()
+        and "\\u003e" not in raw.lower()
+        and "\\u0026" not in raw.lower()
+    )
     # checksum must match canonical with ensure_ascii=False and raw UTF-8
     obj = json.loads(raw)
-    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     # Go escapes U+2028/U+2029 even with SetEscapeHTML(false), but not for this ID, so direct
     computed = hashlib.md5(canonical.encode()).hexdigest()
-    assert obj["checksum"] == computed, f"checksum mismatch for <>&+emoji ID: {obj['checksum']} vs {computed}"
+    assert obj["checksum"] == computed, (
+        f"checksum mismatch for <>&+emoji ID: {obj['checksum']} vs {computed}"
+    )
     assert checksum_valid()
 
 
@@ -4423,8 +4433,12 @@ def test_canonicalization_keys_with_u2028_u2029():
     # So raw file should contain escaped form OR raw char? Actually Go escapes them, so file should contain \u2028
     # Our verifier must accept both raw and escaped checksum computation
     obj = json.loads(raw)
-    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
+        "\u2029", "\\u2029"
+    )
     checksum = obj["checksum"]
     assert checksum in (
         hashlib.md5(canonical.encode()).hexdigest(),
@@ -4451,8 +4465,12 @@ def test_canonicalization_mixed_scripts_byte_vs_codepoint_ordering():
     raw = open(DATA_FILE, "r", encoding="utf-8").read()
     assert checksum_valid()
     obj = json.loads(raw)
-    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
+        "\u2029", "\\u2029"
+    )
     assert obj["checksum"] in (
         hashlib.md5(canonical.encode()).hexdigest(),
         hashlib.md5(canonical_escaped.encode()).hexdigest(),
@@ -4497,18 +4515,22 @@ def test_stale_lock_retry_and_no_corrupt():
         pass
     with open(lock_path, "w") as f:
         f.write("stale lock")
+
     def remove_stale_lock():
         time.sleep(0.15)
         try:
             os.remove(lock_path)
         except:
             pass
+
     t = threading.Thread(target=remove_stale_lock)
     t.start()
     r = run_cli("add-node", "nodeAfterStaleLock", "4", "1024", "0")
     t.join()
     # Must either acquire after retry or fail cleanly, never leaving corrupt DB
-    assert r.returncode == 0, f"should acquire after stale lock removed, got {r.returncode} {r.stderr}"
+    assert r.returncode == 0, (
+        f"should acquire after stale lock removed, got {r.returncode} {r.stderr}"
+    )
     assert not os.path.exists(lock_path)
     assert checksum_valid()
     assert len(json.loads(run_cli("list-nodes").stdout)) == 1
@@ -4532,14 +4554,16 @@ def test_truncated_file_corruption_path():
 
 def test_exact_state_concurrency_interleaved_add_node_allocate_overlapping():
     clean_data()
+
     # 20 concurrent CLI processes doing interleaved add-node + allocate on overlapping IDs, then assert exact used/free arithmetic plus valid checksum
     def worker(i):
         # Overlapping IDs: node-0..4 and job-0..9 overlapping across workers
-        nid = f"node-{i%5}"
-        jid = f"job-{i%10}"
+        nid = f"node-{i % 5}"
+        jid = f"job-{i % 10}"
         run_cli("add-node", nid, "20", "20480", "2")
         run_cli("add-job", jid, "1", "256", "0")
         run_cli("allocate", jid, nid)
+
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
     for t in threads:
         t.start()
@@ -4557,3 +4581,289 @@ def test_exact_state_concurrency_interleaved_add_node_allocate_overlapping():
         assert n["used"]["cpu"] <= n["total"]["cpu"]
         assert n["free"]["cpu"] == n["total"]["cpu"] - n["used"]["cpu"]
     assert not os.path.exists(LOCK_FILE)
+
+
+# ---------- New hardening: Step1 too easy -> add 20+ extra discriminators ----------
+
+
+def test_global_prefix_in_step1_is_normal_id():
+    clean_data()
+    # In single-file mode, global: prefix is NOT special, just normal ID
+    r = run_cli("add-node", "global:sequencer-1", "4", "1024", "0")
+    assert r.returncode == 0
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 1 and arr[0]["id"] == "global:sequencer-1"
+    assert (
+        json.loads(run_cli("get-node", "global:sequencer-1").stdout)["id"]
+        == "global:sequencer-1"
+    )
+    assert checksum_valid()
+    assert not any(".tmp." in f for f in os.listdir(os.path.dirname(DATA_FILE)))
+
+
+def test_id_substring_no_prefix_confusion():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    run_cli("add-node", "node10", "10", "10240", "0")
+    run_cli("add-node", "node100", "10", "10240", "0")
+    run_cli("add-job", "job1", "1", "256", "0")
+    run_cli("allocate", "job1", "node1")
+    n1 = json.loads(run_cli("get-node", "node1").stdout)
+    n10 = json.loads(run_cli("get-node", "node10").stdout)
+    assert "job1" in n1["jobs"]
+    assert "job1" not in n10["jobs"]
+    assert n10["used"]["cpu"] == 0
+    assert checksum_valid()
+
+
+def test_concurrent_100_add_node_allocate_stress():
+    clean_data()
+
+    # 100-way concurrency stress – naive lock without retry or non-atomic write will lose updates or corrupt
+    def worker(i):
+        nid = f"node-stress-{i:04d}"
+        jid = f"job-stress-{i:04d}"
+        run_cli("add-node", nid, "4", "1024", "0")
+        run_cli("add-job", jid, "1", "256", "0")
+        run_cli("allocate", jid, nid)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(100)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_nodes"] == 100
+    assert st["total_jobs"] == 100
+    assert st["allocated_jobs"] == 100
+    assert checksum_valid()
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files), f"tmp leftover {files}"
+    assert not os.path.exists(LOCK_FILE)
+    # ensure sorted order preserved after heavy concurrency
+    arr = json.loads(run_cli("list-nodes", "0", "0").stdout)
+    assert [n["id"] for n in arr] == sorted([n["id"] for n in arr])
+
+
+def test_concurrent_allocate_deallocate_same_job_50():
+    clean_data()
+    run_cli("add-node", "nodeA", "100", "100000", "10")
+    run_cli("add-job", "jobX", "1", "256", "0")
+
+    def alloc():
+        for _ in range(10):
+            run_cli("allocate", "jobX", "nodeA")
+
+    def dealloc():
+        for _ in range(10):
+            run_cli("deallocate", "jobX")
+
+    threads = []
+    for _ in range(25):
+        threads.append(threading.Thread(target=alloc))
+        threads.append(threading.Thread(target=dealloc))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # final state must be valid, no overcommit, no negative used
+    node = json.loads(run_cli("get-node", "nodeA").stdout)
+    assert node["used"]["cpu"] in (0, 1)
+    assert node["used"]["cpu"] >= 0
+    assert node["free"]["cpu"] == node["total"]["cpu"] - node["used"]["cpu"]
+    assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
+
+
+def test_checksum_after_100_random_ops():
+    clean_data()
+    import random
+
+    # deterministic pseudo-random sequence
+    for i in range(100):
+        op = random.choice(["add-node", "add-job", "allocate", "deallocate"])
+        if op == "add-node":
+            run_cli("add-node", f"node-{i % 20}", "4", "1024", "0")
+        elif op == "add-job":
+            run_cli("add-job", f"job-{i % 30}", "1", "256", "0")
+        elif op == "allocate":
+            # may fail if not exist or insufficient, that's ok
+            run_cli("allocate", f"job-{i % 30}", f"node-{i % 20}")
+        else:
+            run_cli("deallocate", f"job-{i % 30}")
+        # after each op, file must be valid JSON and checksum valid if exists
+        if os.path.exists(DATA_FILE):
+            raw = open(DATA_FILE, "r", encoding="utf-8").read().strip()
+            if raw != "":
+                json.loads(raw)  # should not throw
+                assert checksum_valid(), f"checksum invalid after op {i} {op}"
+    assert not os.path.exists(LOCK_FILE)
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files)
+
+
+def test_status_with_max_int_resources():
+    clean_data()
+    big = 2147483647
+    r = run_cli("add-node", "bigNode", str(big), str(big), str(big))
+    assert r.returncode == 0
+    st = json.loads(run_cli("status").stdout)
+    assert st["total_resources"]["cpu"] == big
+    # adding second big node may overflow Python int? but should handle big ints
+    run_cli("add-node", "bigNode2", "1", "1", "0")
+    st2 = json.loads(run_cli("status").stdout)
+    assert st2["total_nodes"] == 2
+    assert checksum_valid()
+
+
+def test_list_nodes_limit_offset_random_sorted():
+    clean_data()
+    for i in range(30):
+        run_cli("add-node", f"node-{i:02d}", "4", "1024", "0")
+    # random pagination checks – O(n^2) impl would be slow but must be correct
+    import random
+
+    for _ in range(20):
+        limit = random.randint(0, 10)
+        offset = random.randint(0, 35)
+        r = run_cli("list-nodes", str(limit), str(offset))
+        assert r.returncode == 0
+        arr = json.loads(r.stdout)
+        # sorted asc slice check
+        all_ids = [f"node-{i:02d}" for i in range(30)]
+        expected = all_ids[offset : offset + limit] if limit > 0 else all_ids[offset:]
+        assert [n["id"] for n in arr] == expected
+
+
+def test_corrupt_file_then_immediate_allocate():
+    clean_data()
+    run_cli("add-node", "node1", "4", "1024", "0")
+    # corrupt file to trigger backup and reset
+    with open(DATA_FILE, "w") as f:
+        f.write("{ invalid")
+    r = run_cli("add-node", "nodeAfterCorrupt", "4", "1024", "0")
+    assert r.returncode == 0
+    arr = json.loads(run_cli("list-nodes").stdout)
+    # after corruption handling, old data gone, only new node
+    assert len(arr) == 1 and arr[0]["id"] == "nodeAfterCorrupt"
+    assert any(".corrupt." in fn for fn in os.listdir(os.path.dirname(DATA_FILE)))
+    assert checksum_valid()
+
+
+def test_empty_data_dir_recreated():
+    clean_data()
+    # remove entire data dir
+    import shutil
+
+    d = os.path.dirname(DATA_FILE)
+    shutil.rmtree(d, ignore_errors=True)
+    r = run_cli("list-nodes")
+    assert r.returncode == 0
+    assert json.loads(r.stdout) == []
+    # dir should be recreated
+    assert os.path.exists(d)
+    assert checksum_valid() or not os.path.exists(DATA_FILE)
+
+
+def test_concurrent_remove_node_while_allocating_same_node():
+    clean_data()
+    for i in range(10):
+        run_cli("add-node", f"node-{i}", "10", "10240", "0")
+        run_cli("add-job", f"job-{i}", "1", "256", "0")
+
+    def alloc_worker(i):
+        run_cli("allocate", f"job-{i}", f"node-{i}")
+
+    def remove_worker(i):
+        # try to remove node that may have job – should fail if allocated, else succeed
+        run_cli("remove-node", f"node-{i}")
+
+    threads = []
+    for i in range(10):
+        threads.append(threading.Thread(target=alloc_worker, args=(i,)))
+        threads.append(threading.Thread(target=remove_worker, args=(i,)))
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # final state must be valid, no overcommit, checksum valid, no lock leftover
+    assert checksum_valid()
+    assert not os.path.exists(LOCK_FILE)
+    files = os.listdir(os.path.dirname(DATA_FILE))
+    assert not any(".tmp." in f for f in files)
+    st = json.loads(run_cli("status").stdout)
+    # allocated jobs + pending = total jobs, no overcommit
+    assert st["total_jobs"] == 10
+    assert st["allocated_jobs"] + st["pending_jobs"] == 10
+
+
+def test_unicode_normalization_bytewise_distinct():
+    clean_data()
+    # é as single codepoint vs e + combining accent – must be distinct IDs byte-wise
+    id1 = "node-é"  # U+00E9
+    id2 = "node-e\u0301"  # e + combining
+    r1 = run_cli("add-node", id1, "4", "1024", "0")
+    r2 = run_cli("add-node", id2, "4", "1024", "0")
+    assert r1.returncode == 0 and r2.returncode == 0
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 2
+    ids = [n["id"] for n in arr]
+    assert id1 in ids and id2 in ids
+    assert checksum_valid()
+
+
+def test_special_chars_mixed_10kb_concurrent():
+    clean_data()
+
+    # 10KB IDs with mixed special chars concurrently – stress file handling
+    def worker(i):
+        base = "n" + "<>&-_.:/%$*+@" * 200 + f"{i:04d}"
+        # truncate to 10KB
+        large_id = base[:10240]
+        run_cli("add-node", large_id, "4", "1024", "0")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    arr = json.loads(run_cli("list-nodes").stdout)
+    assert len(arr) == 20
+    assert checksum_valid()
+    assert not any(".tmp." in f for f in os.listdir(os.path.dirname(DATA_FILE)))
+
+
+def test_allocate_exact_fit_then_fragmented_no_fit():
+    clean_data()
+    run_cli("add-node", "nodeA", "2", "512", "0")
+    run_cli("add-node", "nodeB", "2", "512", "0")
+    run_cli("add-job", "job1", "2", "512", "0")
+    run_cli("add-job", "job2", "2", "512", "0")
+    run_cli("add-job", "job3", "1", "256", "0")
+    assert run_cli("allocate", "job1", "nodeA").returncode == 0
+    assert run_cli("allocate", "job2", "nodeB").returncode == 0
+    # both nodes full, job3 should not fit
+    r = run_cli("allocate", "job3", "nodeA")
+    assert r.returncode == 2 and "insufficient" in r.stderr.lower()
+    r2 = run_cli("schedule", "job3")
+    assert r2.returncode == 1 and "no fit" in r2.stderr.lower()
+    # deallocate one, then schedule should pick nodeA (first-fit)
+    run_cli("deallocate", "job1")
+    out = json.loads(run_cli("schedule", "job3").stdout)
+    assert out["node_id"] == "nodeA"
+    assert checksum_valid()
+
+
+def test_raw_file_no_null_and_jobs_sorted_after_stress():
+    clean_data()
+    run_cli("add-node", "node1", "10", "10240", "0")
+    for jid in ["jobZ", "jobA", "jobM", "jobB"]:
+        run_cli("add-job", jid, "1", "256", "0")
+        run_cli("allocate", jid, "node1")
+    raw = open(DATA_FILE, "r", encoding="utf-8").read()
+    assert '"jobs":null' not in raw.replace(" ", "")
+    # jobs should be present and sorted, not null. Raw may be '["jobA","jobB"...]' compact.
+    assert '"jobs":[' in raw.replace(" ", "") or '"jobs": [' in raw
+    node = json.loads(run_cli("get-node", "node1").stdout)
+    assert node["jobs"] == sorted(node["jobs"]) == ["jobA", "jobB", "jobM", "jobZ"]
+    assert checksum_valid()

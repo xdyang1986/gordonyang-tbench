@@ -170,6 +170,7 @@ func computeChecksumRateLimit(data RateLimitData) (string, error) {
 }
 
 func acquireLock(lockPath string) error {
+	_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
 	tries := 0
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
@@ -178,7 +179,7 @@ func acquireLock(lockPath string) error {
 			return nil
 		}
 		if !os.IsExist(err) {
-			return err
+			_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
 		}
 		tries++
 		if tries >= 2000 {
@@ -209,6 +210,7 @@ func emptyRateLimit() RateLimitData {
 }
 
 func backupCorrupt(path string, raw []byte) {
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
 	nanos := time.Now().UnixNano()
 	backupPath := fmt.Sprintf("%s.corrupt.%d", path, nanos)
 	_ = os.WriteFile(backupPath, raw, 0644)
@@ -216,6 +218,7 @@ func backupCorrupt(path string, raw []byte) {
 
 func cleanStaleTmp(path string) {
 	dir := filepath.Dir(path)
+	_ = os.MkdirAll(dir, 0755)
 	base := filepath.Base(path)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
