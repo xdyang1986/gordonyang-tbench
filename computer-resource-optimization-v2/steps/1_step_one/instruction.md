@@ -48,7 +48,7 @@ Node JSON: `{"id":...,"total":{"cpu":...,"memory":...,"gpu":...},"used":{...},"f
 - Jobs array must be `[]` not `null` after add-node, deallocate, remove-job (Go nil slice bug).
 - Idempotent: re-adding existing node/job with different resources must keep old values and existing allocation.
 - First-fit semantics: sorted ID asc first that fits wins even if wasteful (tested vs best-fit).
-- Pagination: `list-nodes 2 1` → items 1,2 not 0,1. Limit/offset as float, negative, plus sign, hex, spaces, zero-padded → validation.
+- Pagination: `list-nodes 2 1` → items 1,2 not 0,1. Limit/offset: decimal int >=0, zero-padded like `00`, `00002` must be parsed as 0,2 (valid). Negative, float string like `4.0`, plus sign `+2` is lenient (either 0 or 2 allowed), hex like `0x2` → exit2, spaces → exit2. Resource values: leading zeros like `0004` valid as 4, `-0` valid as 0 for gpu (since -0==0), but `-1` invalid.
 - Special chars: IDs containing `<>&`, `-_ . :`, `/`, `=;`, `[]`, `%&`, `$*+@`, `` ` `` must be preserved, raw `<` in file (no `\u003c`), and jobs sorted.
 - Unicode: `node-🌍`, `job-🌍🚀😀` preserved raw UTF-8 in file and API.
 - Large IDs: 10KB IDs with mixed special chars must work for add/get/allocate.
