@@ -997,6 +997,66 @@ def test_road_invalid_file(binary):
     )
 
 
+def test_ema_smoothing_time_decay(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "37.0", "-122.0", "1000", "--accuracy", "1"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "38.0",
+            "-122.0",
+            "1000000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert 37.5 < data["lat"] < 38.1
+
+
+def test_ema_exponential_decay(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "37.0", "-122.0", "1000", "--accuracy", "1"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "38.0",
+            "-122.0",
+            "1000000",
+            "--accuracy",
+            "20",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert data["lat"] > 37.8
+
+
 def test_geofence_check_inside_outside(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
@@ -1227,6 +1287,49 @@ def test_estimate_confidence_low_after_many_outliers(binary):
     p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000"], expect_code=0)
     data = json.loads(p.stdout.strip())
     assert data["confidence"] == "low"
+
+
+def test_estimate_with_roads_heading_aware(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7750",
+            "-122.4140",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["snapped"] is True
 
 
 def test_estimate_accuracy_degradation_with_age(binary):
@@ -1840,6 +1943,717 @@ def test_validate_pickup_heading_mismatch(binary):
     assert data["reason"] == "heading_mismatch"
 
 
+def test_validate_pickup_priority_moving_beats_too_far(binary):
+    # moving(5) beats too_far(8): speed 8 triggers moving, distance ~200m triggers too_far, priority says moving wins
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7767", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "moving"
+
+
+def test_estimate_confidence_snapped_upgrade_to_high(binary):
+    # snapped, road_dist <=10, acc 20 (base medium) -> high per spec L65 upgrade chain
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "20",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = _json.loads(p.stdout.strip())
+    # base confidence with acc 20 would be medium (acc <=25 age<=20000), but snapped with road_dist<=10 upgrades medium->high
+    assert data["snapped"] is True
+    assert data["confidence"] == "high"
+
+
+def test_validate_dropoff_speed_leniency_boundary(binary):
+    # dropoff leniency speed: 5 vs 10, per spec L88. speed 7: pickup -> moving, dropoff -> valid true
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "7",
+        ],
+        expect_code=0,
+    )
+    p_pick = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    assert json.loads(p_pick.stdout.strip())["reason"] == "moving"
+    p_drop = run_cli(
+        binary,
+        db,
+        ["validate-dropoff", "veh1", "37.7749", "-122.4194", "--now", "1000000"],
+        expect_code=0,
+    )
+    assert json.loads(p_drop.stdout.strip())["valid"] is True
+
+
+def test_validate_pickup_priority_off_road_beats_moving(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "off_road"
+
+
+def test_validate_pickup_priority_out_of_geofence_beats_stale(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "pickup_sf",
+            "polygon": [
+                {"lat": 37.7, "lng": -122.5},
+                {"lat": 37.7, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.5},
+            ],
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "0",
+            "0",
+            "--now",
+            str(1000000 + 40000),
+            "--zones",
+            zones_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "out_of_geofence"
+
+
+def test_estimate_confidence_snapped_upgrade_low_to_medium(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "35",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["confidence"] == "medium"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_off_road(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_road_mismatch_beats_too_far(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4144",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "road_mismatch"
+
+
+def test_estimate_confidence_age_override_low_even_when_snapped(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", str(1000000 + 35000), "--roads", roads_path],
+        expect_code=0,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["confidence"] == "low"
+
+
+def test_validate_pickup_priority_stale_beats_low_accuracy(binary):
+    # stale(2) beats low_accuracy(3): age>30k (stale) and accuracy 60>50
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            str(1000000 + 40000),
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_stale_beats_moving(binary):
+    # stale(2) beats moving(5): age>30k and speed 8
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            str(1000000 + 40000),
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_moving(binary):
+    # low_accuracy(3) beats moving(5): accuracy 60 and speed 8
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_off_road_beats_road_mismatch(binary):
+    # off_road(4) beats road_mismatch(6): far road for vehicle, but pickup snapped to far road? Actually need vehicle not snapped, pickup snapped to different road?
+    # Simpler: vehicle not snapped (off_road), pickup not relevant for road_mismatch because road_mismatch requires both snapped to different roads.
+    # For off_road to beat road_mismatch, need vehicle not snapped, but if vehicle not snapped, road_mismatch false. So need scenario where both true?
+    # Actually off_road true means vehicle not snapped. road_mismatch requires both vehicle and pickup snapped to different roads.
+    # So both cannot be true simultaneously. So test off_road beats too_far instead? We already have moving>too_far.
+    # Let's test off_road beats heading_mismatch: off_road true, heading_mismatch requires same road, so cannot both true.
+    # Instead test off_road beats too_far is redundant with moving>too_far, but we can test off_road beats too_far directly:
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    # pickup 200m away, so too_far true, and off_road true (road far), off_road priority 4 beats 8
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7767",
+            "-122.4194",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "off_road"
+
+
+def test_validate_pickup_priority_stale_beats_off_road(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            str(1000000 + 40000),
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_road_mismatch(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "0",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4144",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_road_mismatch_beats_heading_mismatch(binary):
+    # road_mismatch(6) beats heading_mismatch(7): different roads, even if heading diff would also trigger heading_mismatch, road_mismatch wins
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    # vehicle heading east 90, pickup west ~50m but on different road, so both road_mismatch and heading_mismatch would be true if same road, but since different roads, road_mismatch true, heading_mismatch false? Actually heading requires same road, so this tests priority 6 vs 7 when both would be true if same road?
+    # For this test, vehicle on road_a heading west (270) would be opposite to pickup east, but pickup on road_b different road, so road_mismatch true, heading false. To make both true, need same road but different heading? Actually road_mismatch requires different roads, heading requires same road, so they cannot both be true.
+    # Instead test road_mismatch beats too_far is already covered, so this test will just check road_mismatch alone with heading that would otherwise be heading_mismatch if same road.
+    # Use speed 2 heading 90, pickup 50m west but on different road 122m north, so road_mismatch true, too_far? distance ~122m >100, road_mismatch beats too_far already.
+    # We'll just keep as road_mismatch beats too_far variant with heading set.
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "2",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4150",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "road_mismatch"
+
+
 def test_validate_dropoff_heading_mismatch(binary):
     # dropoff heading_mismatch same logic as pickup but with dropoff leniency distance 150 not 100
     tmp = tempfile.mkdtemp()
@@ -1952,6 +2766,440 @@ def test_validate_dropoff_road_mismatch(binary):
     assert data["reason"] == "road_mismatch"
 
 
+def test_estimate_confidence_medium_with_acc_30_snapped(binary):
+    # base low acc 30, snapped <=10, age small but acc>25 -> base low, but snapped upgrade with acc<=40 age<=15k -> medium
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "30",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["confidence"] == "medium"
+
+
+def test_validate_pickup_priority_stale_beats_road_mismatch(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4144",
+            "--now",
+            str(1000000 + 40000),
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_stale_beats_too_far(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7767",
+            "-122.4194",
+            "--now",
+            str(1000000 + 40000),
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_heading_mismatch(binary):
+    # low_accuracy(3) beats heading_mismatch(7): acc 60, road east-west, heading east but pickup west
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "2",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4150",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_too_far(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7767", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
+def test_validate_pickup_priority_moving_beats_road_mismatch(binary):
+    # moving(5) beats road_mismatch(6): speed 8, different roads
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4144",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "moving"
+
+
+def test_validate_pickup_priority_moving_beats_heading_mismatch(binary):
+    # moving(5) beats heading_mismatch(7): same road, speed 8, heading opposite
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4150",
+            "--now",
+            "1000000",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["reason"] == "moving"
+
+
+def test_estimate_confidence_high_with_outlier_count_2_still_high(binary):
+    # outlier_count 2 should downgrade high->medium, but with acc 5 age 0 and snapped, should still be medium? Actually spec: outlier>2 high->medium, so 2 is not >2, stays high
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # create 2 outliers first to get outlier_count 2
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    # teleport outlier
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "38.0",
+            "-123.0",
+            "1000100",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=3,
+    )
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "38.1",
+            "-123.1",
+            "1000200",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=3,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    # age 0, acc 5 -> high base, outlier_count 2 not >2, so high
+    assert data["confidence"] == "high"
+
+
+def test_estimate_confidence_medium_with_outlier_count_3(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "38.0", "-123.0", "1000100", "--accuracy", "5"],
+        expect_code=3,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "38.1", "-123.1", "1000200", "--accuracy", "5"],
+        expect_code=3,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "38.2", "-123.2", "1000300", "--accuracy", "5"],
+        expect_code=3,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    # outlier>2 high->medium
+    assert data["confidence"] == "medium"
+
+
 def test_total_distance_not_increment_on_outlier(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
@@ -2001,6 +3249,90 @@ def test_history_not_include_outlier(binary):
     assert data["history"][0]["lat"] == 37.0
 
 
+def test_validate_pickup_priority_stale_beats_heading_mismatch(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "2",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7749",
+            "-122.4150",
+            "--now",
+            str(1000000 + 40000),
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["reason"] == "stale"
+
+
+def test_validate_pickup_priority_low_accuracy_beats_stale_beats_moving_chain(binary):
+    # low_accuracy beats moving already tested, but test low beats moving with accuracy 60 and speed 8 and distance 200m -> low wins over moving and too_far
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7767", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    data = __import__("json").loads(p.stdout.strip())
+    assert data["reason"] == "low_accuracy"
+
+
 def test_validate_dropoff_out_of_geofence(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
@@ -2042,6 +3374,641 @@ def test_validate_dropoff_out_of_geofence(binary):
         expect_code=1,
     )
     assert _json.loads(p.stdout.strip())["reason"] == "out_of_geofence"
+
+
+def test_validate_dropoff_too_far_boundary(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    # 160m away >150 dropoff too_far
+    p = run_cli(
+        binary,
+        db,
+        ["validate-dropoff", "veh1", "37.7763", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    assert __import__("json").loads(p.stdout.strip())["reason"] == "too_far"
+    # 140m <150 ok
+    p2 = run_cli(
+        binary,
+        db,
+        ["validate-dropoff", "veh1", "37.7761", "-122.4194", "--now", "1000000"],
+        expect_code=0,
+    )
+    assert __import__("json").loads(p2.stdout.strip())["valid"] is True
+
+
+def test_estimate_with_roads_confidence_low_when_not_snapped(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "30",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["snapped"] is False
+    # acc 30 base low, not snapped, so low per spec (acc>25 or age>10k)
+    assert data["confidence"] == "low"
+
+
+def test_validate_pickup_ok_exact_100m_boundary(binary):
+    # at exactly 100m, should be ok? spec says >100 too_far, so 100 is ok, but use 90m and 110m for tolerance
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    # 90m north ~0.00081 deg
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7757", "-122.4194", "--now", "1000000"],
+        expect_code=0,
+    )
+    data = json.loads(p.stdout.strip())
+    assert data["valid"] is True and data["reason"] == "ok"
+    # 110m north ~0.00099 deg
+    p2 = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7759", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    assert json.loads(p2.stdout.strip())["reason"] == "too_far"
+
+
+def test_batch_with_multiple_vehicles_and_zones(binary):
+    import os
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones = [
+        {
+            "id": "z1",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+        }
+    ]
+    default_path = "/app/data/zones.json"
+    backup = None
+    if os.path.exists(default_path):
+        with open(default_path) as f:
+            backup = f.read()
+    os.makedirs(os.path.dirname(default_path), exist_ok=True)
+    import json as _json
+
+    with open(default_path, "w") as f:
+        _json.dump(zones, f)
+    try:
+        batch_input = "update\tveh1\t5\t5\t1000\nupdate\tveh2\t5\t5\t2000\n"
+        p = run_cli(binary, db, ["batch"], input_data=batch_input, expect_code=0)
+        assert "batch_ok 2" in p.stdout
+        p2 = run_cli(binary, db, ["list"], expect_code=0)
+        ids = [x["vehicle_id"] for x in _json.loads(p2.stdout.strip())]
+        assert "veh1" in ids and "veh2" in ids
+    finally:
+        if backup is not None:
+            with open(default_path, "w") as f:
+                f.write(backup)
+        else:
+            try:
+                os.remove(default_path)
+            except:
+                pass
+
+
+def test_list_with_now_and_roads_combined(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "r1",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "37.7749", "-122.4144", "1000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary, db, ["list", "--roads", roads_path, "--now", "1000000"], expect_code=0
+    )
+    ids = [x["vehicle_id"] for x in _json.loads(p.stdout.strip())]
+    assert "veh1" in ids
+
+
+def test_estimate_confidence_low_when_accuracy_high_age_small_not_snapped(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "30",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    assert data["snapped"] is False
+    assert data["confidence"] == "low"
+
+
+def test_validate_pickup_ok_when_exactly_same_location(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-pickup", "veh1", "37.7749", "-122.4194", "--now", "1000000"],
+        expect_code=0,
+    )
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    assert data["valid"] is True and data["reason"] == "ok"
+    assert data["distance_m"] == 0 or data["distance_m"] < 1.0
+
+
+def test_validate_pickup_priority_out_of_geofence_beats_low_accuracy(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "pickup_sf",
+            "polygon": [
+                {"lat": 37.7, "lng": -122.5},
+                {"lat": 37.7, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.5},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(zones_path, "w") as f:
+        _json.dump(zones, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "0",
+            "0",
+            "--now",
+            "1000000",
+            "--zones",
+            zones_path,
+        ],
+        expect_code=1,
+    )
+    assert _json.loads(p.stdout.strip())["reason"] == "out_of_geofence"
+
+
+def test_validate_pickup_priority_out_of_geofence_beats_off_road(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    zones = [
+        {
+            "id": "pickup_sf",
+            "polygon": [
+                {"lat": 37.7, "lng": -122.5},
+                {"lat": 37.7, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.3},
+                {"lat": 37.9, "lng": -122.5},
+            ],
+        }
+    ]
+    roads = [{"id": "far_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]}]
+    import json as _json
+
+    with open(zones_path, "w") as f:
+        _json.dump(zones, f)
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0", "0", "1000000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "0",
+            "0",
+            "--now",
+            "1000000",
+            "--zones",
+            zones_path,
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    assert _json.loads(p.stdout.strip())["reason"] == "out_of_geofence"
+
+
+def test_validate_pickup_priority_stale_beats_road_mismatch_heading_mismatch_chain(
+    binary,
+):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_a",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        },
+        {
+            "id": "road_b",
+            "points": [
+                {"lat": 37.7760, "lng": -122.4194},
+                {"lat": 37.7760, "lng": -122.4094},
+            ],
+        },
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "37.7760",
+            "-122.4144",
+            "--now",
+            str(1000000 + 50000),
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    assert _json.loads(p.stdout.strip())["reason"] == "stale"
+
+
+def test_validate_dropoff_priority_stale_beats_moving(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-dropoff",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "--now",
+            str(1000000 + 40000),
+        ],
+        expect_code=1,
+    )
+    import json as _json
+
+    assert _json.loads(p.stdout.strip())["reason"] == "stale"
+
+
+def test_validate_dropoff_priority_low_accuracy_beats_moving(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "8",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["validate-dropoff", "veh1", "37.7749", "-122.4194", "--now", "1000000"],
+        expect_code=1,
+    )
+    import json as _json
+
+    assert _json.loads(p.stdout.strip())["reason"] == "low_accuracy"
+
+
+def test_estimate_accuracy_degradation_formula(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4194",
+            "1000000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary, db, ["estimate", "veh1", "--now", str(1000000 + 20000)], expect_code=0
+    )
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    # accuracy degrades +0.5*age_sec, age 20s => +10, so 20
+    assert abs(data["accuracy"] - 20) < 1.0
+
+
+def test_total_distance_with_road_snapped_still_counts(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "37.7749", "-122.4144", "1000000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "37.7749", "-122.4094", "2000000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = _json.loads(p.stdout.strip())
+    assert data["total_distance_m"] > 100
+
+
+def test_near_with_heading_aware_roads_filter(binary):
+    import os
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [
+        {
+            "id": "road_east",
+            "points": [
+                {"lat": 37.7749, "lng": -122.4194},
+                {"lat": 37.7749, "lng": -122.4094},
+            ],
+        }
+    ]
+    import json as _json
+
+    with open(roads_path, "w") as f:
+        _json.dump(roads, f)
+    # near --roads uses simple snap (not heading-aware), so both headings snap
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "2",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh2",
+            "37.7749",
+            "-122.4144",
+            "1000000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "2",
+            "--heading",
+            "180",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "near",
+            "--lat",
+            "37.7749",
+            "--lng",
+            "-122.4144",
+            "--radius",
+            "100",
+            "--roads",
+            roads_path,
+        ],
+        expect_code=0,
+    )
+    ids = [x["vehicle_id"] for x in _json.loads(p.stdout.strip())]
+    assert "veh1" in ids and "veh2" in ids
+    # estimate DOES use heading-aware: veh1 snapped, veh2 not
+    p_est1 = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    assert _json.loads(p_est1.stdout.strip())["snapped"] is True
+    p_est2 = run_cli(
+        binary,
+        db,
+        ["estimate", "veh2", "--now", "1000000", "--roads", roads_path],
+        expect_code=0,
+    )
+    assert _json.loads(p_est2.stdout.strip())["snapped"] is False
 
 
 def test_outlier_persistence_across_get_verbose(binary):
@@ -2841,3 +4808,483 @@ def test_outlier_count_persist_after_low_accuracy_and_stale(binary):
 # --- Crash-consistency gate for Step2 as well (same family as Step1) ---
 
 
+def test_corrupt_db_creates_backup_with_nanosec_suffix_step2(binary):
+    import re
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    with open(db, "w") as f:
+        f.write("{invalid")
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = os.listdir(tmp)
+    corrupt_files = [ff for ff in files if ".corrupt." in ff]
+    assert len(corrupt_files) >= 1
+    assert any(re.search(r"\.corrupt\.(\d+)$", fn) for fn in corrupt_files)
+
+
+def test_stale_tmp_file_ignored_step2(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    stale_tmp = os.path.join(tmp, "db.json.tmp.99999")
+    with open(stale_tmp, "w") as f:
+        f.write("garbage")
+    run_cli(
+        binary, db, ["update", "veh1", "37.7749", "-122.4194", "1000"], expect_code=0
+    )
+    files = os.listdir(tmp)
+    assert not any(f.startswith("db.json.tmp.") for f in files)
+
+
+# ---------- Additional hardening to make Step2 not too easy ----------
+
+
+def test_outlier_stale_dt_zero_not_outlier(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    # same timestamp -> stale, not outlier
+    p = run_cli(binary, db, ["update", "veh1", "10", "10", "1000"], expect_code=0)
+    assert "stale" in p.stdout.lower()
+    p_get = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+
+    assert _json.loads(p_get.stdout.strip()).get("outlier_count", 0) == 0
+    # earlier timestamp also stale
+    p2 = run_cli(binary, db, ["update", "veh1", "10", "10", "500"], expect_code=0)
+    assert "stale" in p2.stdout.lower()
+    p_get2 = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    assert _json.loads(p_get2.stdout.strip()).get("outlier_count", 0) == 0
+
+
+def test_total_distance_not_increment_on_outlier_and_low_accuracy(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "0.001", "0", "2000"], expect_code=0)
+    p_before = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    import json as _json
+
+    dist_before = _json.loads(p_before.stdout.strip())["total_distance_m"]
+    # outlier should not increment
+    run_cli(binary, db, ["update", "veh1", "10", "10", "3000"], expect_code=3)
+    p_after = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    dist_after = _json.loads(p_after.stdout.strip())["total_distance_m"]
+    assert abs(dist_before - dist_after) < 1e-6
+    # low_accuracy should not increment
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0.002", "0", "4000", "--accuracy", "150"],
+        expect_code=3,
+    )
+    p_after2 = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    dist_after2 = _json.loads(p_after2.stdout.strip())["total_distance_m"]
+    assert abs(dist_after - dist_after2) < 1e-6
+
+
+def test_history_not_include_outlier_and_low_accuracy(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "1", "1", "2000"], expect_code=3)  # outlier
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "2", "2", "3000", "--accuracy", "150"],
+        expect_code=3,
+    )
+    p = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    assert len(data["history"]) == 1
+    assert data["history"][0]["lat"] == 0
+
+
+def test_ema_weighted_smoothing_with_accuracy_decay(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # older with bad accuracy, newer with good accuracy -> weighted avg closer to newer
+    # Use large dt to avoid outlier detection (speed vs implied and teleport)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0", "0", "1000", "--accuracy", "50"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "10", "0", "1000000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "1000000"], expect_code=0)
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    # EMA should be closer to 10 than to 0 because accuracy 5 >> 50
+    assert data["lat"] > 5, f"EMA should weight good accuracy more, got {data['lat']}"
+
+
+def test_prediction_exact_delta(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # heading 0 (north), speed 10 m/s, age 10 sec -> dist 100m north
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(binary, db, ["estimate", "veh1", "--now", "11000"], expect_code=0)
+    import json as _json
+
+    data = _json.loads(p.stdout.strip())
+    assert data["predicted"] is True
+    # 100m north delta lat = distance / R * 180/pi
+    expected_delta = 100.0 / 6371000.0 * 180.0 / 3.141592653589793
+    # smoothed lat is 0, so predicted lat ~ expected_delta
+    assert abs(data["lat"] - expected_delta) < 0.0001
+    # heading 90 east
+    run_cli(binary, db, ["clear"], expect_code=0)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "10",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p2 = run_cli(binary, db, ["estimate", "veh1", "--now", "11000"], expect_code=0)
+    data2 = _json.loads(p2.stdout.strip())
+    assert data2["predicted"] is True
+    # east delta lng similar magnitude at equator
+    assert abs(data2["lng"] - expected_delta) < 0.0001
+
+
+def test_confidence_no_upgrade_when_road_dist_gt_10(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    # vehicle accuracy 15 age 0 -> would be medium (acc<=25 age<=20000)
+    # snapped at distance 0.0001 deg ~11m >10 should NOT upgrade medium->high
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0.0001", "5", "1000", "--accuracy", "15"],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["road_dist_m"] > 10
+    assert data["confidence"] == "medium", (
+        f"should not upgrade when road_dist>10, got {data['confidence']}"
+    )
+
+
+def test_heading_aware_no_fallback_comprehensive(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    # two parallel roads: r1 at lat 0 heading 0 (north), r2 at lat 0.0001 heading 90 (east)
+    # Actually bearing of points (0,0)-(1,0) is 0 north, (0,0)-(0,1) is 90 east
+    roads = [
+        {"id": "north_road", "points": [{"lat": 0, "lng": 0}, {"lat": 1, "lng": 0}]},
+        {"id": "east_road", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 1}]},
+    ]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    # vehicle heading 0 speed 5 near origin, should snap to north_road, not east (heading diff 90 >45 filtered)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "5",
+            "--heading",
+            "0",
+        ],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["snapped"] is True
+    assert data["road_id"] == "north_road"
+    # vehicle heading 45, both roads have diff 45 (min diff with opposite allowed) -> both candidates, closest wins
+    run_cli(binary, db, ["clear"], expect_code=0)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "5",
+            "--heading",
+            "45",
+        ],
+        expect_code=0,
+    )
+    p2 = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data2 = _json.loads(p2.stdout.strip())
+    # both within 45, should snap to something
+    assert data2["snapped"] is True
+    # heading 90 should snap east
+    run_cli(binary, db, ["clear"], expect_code=0)
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "5",
+            "--heading",
+            "90",
+        ],
+        expect_code=0,
+    )
+    p3 = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "1000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data3 = _json.loads(p3.stdout.strip())
+    assert data3["road_id"] == "east_road"
+
+
+def test_validate_pickup_priority_exhaustive_chain(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    zones = [
+        {
+            "id": "z1",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+        }
+    ]
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    # out_of_geofence beats everything
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5", "5", "1000", "--accuracy", "5", "--speed", "0"],
+        expect_code=0,
+    )
+    # pickup outside zone, also stale, low_accuracy, off_road, moving, too_far -> should be out_of_geofence
+    run_cli(
+        binary,
+        db,
+        [
+            "update",
+            "veh1",
+            "5",
+            "5",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
+        expect_code=0,
+    )
+    # Make vehicle stale (now 40000) and low_accuracy and off_road and moving and too_far but pickup outside zone
+    p = run_cli(
+        binary,
+        db,
+        [
+            "validate-pickup",
+            "veh1",
+            "20",
+            "20",
+            "--now",
+            "40000",
+            "--zones",
+            zones_path,
+            "--roads",
+            roads_path,
+        ],
+        expect_code=1,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["reason"] == "out_of_geofence"
+
+
+def test_old_db_migration_with_outlier_count_missing(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    # write old DB without outlier_count, history, total_distance
+    old = {
+        "veh1": {
+            "vehicle_id": "veh1",
+            "lat": 0,
+            "lng": 0,
+            "timestamp_ms": 1000,
+            "accuracy": 5,
+            "speed": 0,
+            "heading": 0,
+        }
+    }
+    with open(db, "w") as f:
+        json.dump(old, f)
+    p = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    data = _json.loads(p.stdout.strip())
+    assert data["vehicle_id"] == "veh1"
+    assert data.get("outlier_count", 0) == 0
+    # after update, should have count
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "10", "10", "2000", "--accuracy", "5"],
+        expect_code=3,
+    )
+    p2 = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    assert _json.loads(p2.stdout.strip()).get("outlier_count", 0) == 1
+
+
+def test_confidence_low_when_age_gt_30000_even_if_snapped_high_accuracy(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0", "0", "1000", "--accuracy", "5", "--speed", "0"],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary,
+        db,
+        ["estimate", "veh1", "--now", "40000", "--roads", roads_path],
+        expect_code=0,
+    )
+    data = _json.loads(p.stdout.strip())
+    assert data["confidence"] == "low", (
+        f"age>30000 should be low regardless of snap, got {data['confidence']}"
+    )
+
+
+def test_low_accuracy_in_batch_should_not_increment_distance(binary):
+    import json as _json
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0", "0", "1000", "--accuracy", "5"],
+        expect_code=0,
+    )
+    p_before = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    dist_before = _json.loads(p_before.stdout.strip())["total_distance_m"]
+    # batch with low_accuracy (150) should be rejected? In Step2, batch should handle low_accuracy as rejection?
+    # Even if batch currently treats it as valid, distance should not increment drastically
+    # We test that valid update in batch still works and outlier count not incremented for low_accuracy in batch if implemented
+    batch_input = "update\tveh1\t0.001\t0\t2000\t150\n"
+    # Depending on implementation, batch may exit 0 with 0 applied or exit 2, both are okay as long as distance unchanged
+    proc = run_cli(binary, db, ["batch"], input_data=batch_input)
+    # distance should remain same regardless of batch outcome for low_accuracy
+    p_after = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    dist_after = _json.loads(p_after.stdout.strip())["total_distance_m"]
+    assert abs(dist_before - dist_after) < 1.0
+
+
+def test_corrupt_multiple_backups_step2(binary):
+    import re, time, os
+
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    with open(db, "w") as f:
+        f.write("{bad1")
+    run_cli(binary, db, ["list"], expect_code=4)
+    time.sleep(0.01)
+    with open(db, "w") as f:
+        f.write("{bad2")
+    run_cli(binary, db, ["list"], expect_code=4)
+    files = [fn for fn in os.listdir(tmp) if ".corrupt." in fn]
+    assert len(files) >= 2
+    assert len(set(files)) == len(files)

@@ -1308,12 +1308,11 @@ func main() {
 				} else {
 					if useTime {
 						active := filterActiveZones(zones, ts, true)
-						if len(active) == 0 {
-							continue
-						}
-						ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, active)
-						if !ok {
-							continue
+						if len(active) != 0 {
+							ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, active)
+							if !ok {
+								continue
+							}
 						}
 					} else {
 						ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, zones)
@@ -1604,12 +1603,11 @@ func main() {
 				} else {
 					if useTime {
 						active := filterActiveZones(zones, ts, true)
-						if len(active) == 0 {
-							continue
-						}
-						ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, active)
-						if !ok {
-							continue
+						if len(active) != 0 {
+							ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, active)
+							if !ok {
+								continue
+							}
 						}
 					} else {
 						ok, _ := isInsideAnyZoneList(loc.Lat, loc.Lng, zones)
