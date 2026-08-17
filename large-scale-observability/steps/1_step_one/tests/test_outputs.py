@@ -52,13 +52,13 @@ def go_run_race_program(go_code: str, timeout=30):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+
 def test_files_exist():
     assert os.path.isdir(os.path.join(APP_DIR, "observability"))
     for fname in ["tracing.go", "metrics.go", "logger.go"]:
         assert os.path.isfile(os.path.join(APP_DIR, "observability", fname)), (
             f"missing {fname}"
         )
-
 
 
 def test_go_mod_no_external():
@@ -70,7 +70,6 @@ def test_go_mod_no_external():
         if m:
             dep = m.group(2).split("/")[0]
             assert "." not in dep, f"external dependency {m.group(2)} not allowed"
-
 
 
 def test_stdlib_only():
@@ -97,13 +96,11 @@ def test_stdlib_only():
                 assert "." not in first, f"non stdlib import {imp} in {path}"
 
 
-
 def test_go_build_and_vet():
     p = run(["go", "vet", "./..."])
     assert p.returncode == 0, f"go vet failed: {p.stdout} {p.stderr}"
     p = run(["go", "build", "./..."])
     assert p.returncode == 0, f"go build failed: {p.stdout} {p.stderr}"
-
 
 
 def test_tracing_id_format():
@@ -141,7 +138,6 @@ def test_tracing_id_format():
     )
 
 
-
 def test_tracing_id_uniqueness():
     code = textwrap.dedent("""
     package main
@@ -173,7 +169,6 @@ def test_tracing_id_uniqueness():
     assert proc.returncode == 0, f"id uniqueness failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_no_parent_new_trace():
     code = textwrap.dedent("""
     package main
@@ -200,7 +195,6 @@ def test_tracing_no_parent_new_trace():
     assert proc.returncode == 0, (
         f"no parent new trace failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_child_inherits():
@@ -240,7 +234,6 @@ def test_tracing_child_inherits():
     assert proc.returncode == 0, f"child inherits failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_withparent_overrides():
     code = textwrap.dedent("""
     package main
@@ -276,7 +269,6 @@ def test_tracing_withparent_overrides():
     )
 
 
-
 def test_tracing_span_kind():
     code = textwrap.dedent("""
     package main
@@ -298,7 +290,6 @@ def test_tracing_span_kind():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"span kind failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_attributes_events_status():
@@ -339,7 +330,6 @@ def test_tracing_attributes_events_status():
     )
 
 
-
 def test_tracing_add_after_end_noop():
     code = textwrap.dedent("""
     package main
@@ -368,7 +358,6 @@ def test_tracing_add_after_end_noop():
     assert proc.returncode == 0, f"add after end failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_event_attributes():
     code = textwrap.dedent("""
     package main
@@ -395,7 +384,6 @@ def test_tracing_event_attributes():
     assert proc.returncode == 0, f"event attrs failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_end_idempotent():
     code = textwrap.dedent("""
     package main
@@ -419,7 +407,6 @@ def test_tracing_end_idempotent():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"idempotent failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_marshal_unmarshal_single_header():
@@ -467,7 +454,6 @@ def test_tracing_marshal_unmarshal_single_header():
     )
 
 
-
 def test_tracing_inject_extract_alias_single_header():
     code = textwrap.dedent("""
     package main
@@ -503,7 +489,6 @@ def test_tracing_inject_extract_alias_single_header():
     assert proc.returncode == 0, (
         f"inject/extract alias single-header failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_marshal_preserves_sampled():
@@ -545,7 +530,6 @@ def test_tracing_marshal_preserves_sampled():
     assert proc.returncode == 0, (
         f"marshal sampled flag failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_concurrent():
@@ -591,7 +575,6 @@ def test_tracing_concurrent():
     )
 
 
-
 def test_tracing_concurrent_addattr():
     code = textwrap.dedent("""
     package main
@@ -629,7 +612,6 @@ def test_tracing_concurrent_addattr():
     )
 
 
-
 def test_tracing_attribute_limit():
     code = textwrap.dedent("""
     package main
@@ -656,7 +638,6 @@ def test_tracing_attribute_limit():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"attr limit failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_attribute_initial_limit():
@@ -690,7 +671,6 @@ def test_tracing_attribute_initial_limit():
     )
 
 
-
 def test_tracing_starttime_bounds():
     code = textwrap.dedent("""
     package main
@@ -719,7 +699,6 @@ def test_tracing_starttime_bounds():
     assert proc.returncode == 0, f"starttime bounds failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_context_direct():
     code = textwrap.dedent("""
     package main
@@ -739,7 +718,6 @@ def test_tracing_context_direct():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"context direct failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_metrics_counter_basic():
@@ -772,7 +750,6 @@ def test_metrics_counter_basic():
     assert proc.returncode == 0, f"counter basic failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_counter_reuse():
     code = textwrap.dedent("""
     package main
@@ -803,7 +780,6 @@ def test_metrics_counter_reuse():
     assert proc.returncode == 0, f"counter reuse failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_distinct_labels():
     code = textwrap.dedent("""
     package main
@@ -830,7 +806,6 @@ def test_metrics_distinct_labels():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"distinct labels failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_metrics_concurrency():
@@ -871,7 +846,6 @@ def test_metrics_concurrency():
     assert proc.returncode == 0, (
         f"metrics concurrency failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_gauge_histogram():
@@ -917,7 +891,6 @@ def test_metrics_gauge_histogram():
     assert proc.returncode == 0, f"gauge/hist failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_histogram_default_buckets():
     code = textwrap.dedent("""
     package main
@@ -943,7 +916,6 @@ def test_metrics_histogram_default_buckets():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"default buckets failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_metrics_histogram_cumulative_strict():
@@ -981,7 +953,6 @@ def test_metrics_histogram_cumulative_strict():
     )
 
 
-
 def test_metrics_invalid_name():
     code = textwrap.dedent("""
     package main
@@ -1010,7 +981,6 @@ def test_metrics_invalid_name():
     assert proc.returncode == 0, (
         f"invalid name test failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_collect_copy():
@@ -1057,7 +1027,6 @@ def test_metrics_collect_copy():
     assert proc.returncode == 0, f"collect copy failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_label_truncate():
     code = textwrap.dedent("""
     package main
@@ -1085,7 +1054,6 @@ def test_metrics_label_truncate():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"label truncate failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_metrics_gauge_negative():
@@ -1116,7 +1084,6 @@ def test_metrics_gauge_negative():
     assert proc.returncode == 0, f"gauge negative failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_provider_isolation():
     code = textwrap.dedent("""
     package main
@@ -1138,7 +1105,6 @@ def test_metrics_provider_isolation():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"isolation failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_logger_json_and_trace():
@@ -1177,7 +1143,6 @@ def test_logger_json_and_trace():
     )
 
 
-
 def test_logger_no_trace():
     code = textwrap.dedent("""
     package main
@@ -1200,7 +1165,6 @@ def test_logger_no_trace():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"logger no trace failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_logger_with_immutable():
@@ -1235,7 +1199,6 @@ def test_logger_with_immutable():
     )
 
 
-
 def test_logger_multiple_with_chain():
     code = textwrap.dedent("""
     package main
@@ -1264,7 +1227,6 @@ def test_logger_multiple_with_chain():
     )
 
 
-
 def test_logger_field_overwrite():
     code = textwrap.dedent("""
     package main
@@ -1289,7 +1251,6 @@ def test_logger_field_overwrite():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"field overwrite failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_logger_level_filter():
@@ -1324,7 +1285,6 @@ def test_logger_level_filter():
     )
 
 
-
 def test_logger_timestamp_format():
     code = textwrap.dedent("""
     package main
@@ -1352,7 +1312,6 @@ def test_logger_timestamp_format():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"timestamp format failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_logger_concurrent():
@@ -1391,7 +1350,6 @@ def test_logger_concurrent():
     )
 
 
-
 def test_exporter_clear_and_count():
     code = textwrap.dedent("""
     package main
@@ -1417,7 +1375,6 @@ def test_exporter_clear_and_count():
     assert proc.returncode == 0, (
         f"exporter clear/count failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracer_isolation():
@@ -1450,7 +1407,6 @@ def test_tracer_isolation():
     assert proc.returncode == 0, f"tracer isolation failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_attribute_types():
     code = textwrap.dedent("""
     package main
@@ -1479,7 +1435,6 @@ def test_tracing_attribute_types():
     assert proc.returncode == 0, f"attr types failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_event_limit():
     code = textwrap.dedent("""
     package main
@@ -1505,7 +1460,6 @@ def test_tracing_event_limit():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"event limit failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_with_race():
@@ -1544,7 +1498,6 @@ def test_tracing_with_race():
     assert proc.returncode == 0, f"race test failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_custom_id_generator():
     code = textwrap.dedent("""
     package main
@@ -1573,7 +1526,6 @@ def test_tracing_custom_id_generator():
     assert proc.returncode == 0, f"custom id gen failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_service_name_override():
     code = textwrap.dedent("""
     package main
@@ -1597,7 +1549,6 @@ def test_tracing_service_name_override():
     assert proc.returncode == 0, (
         f"service name override failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_description():
@@ -1624,7 +1575,6 @@ def test_metrics_description():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"description failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_metrics_histogram_unsorted_buckets():
@@ -1659,7 +1609,6 @@ def test_metrics_histogram_unsorted_buckets():
     assert proc.returncode == 0, f"unsorted buckets failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_logger_level_case_insensitive():
     code = textwrap.dedent("""
     package main
@@ -1687,7 +1636,6 @@ def test_logger_level_case_insensitive():
     )
 
 
-
 def test_tracing_traceflags():
     code = textwrap.dedent("""
     package main
@@ -1711,7 +1659,6 @@ def test_tracing_traceflags():
     assert proc.returncode == 0, f"traceflags failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_tracecontext_field_names():
     code = textwrap.dedent("""
     package main
@@ -1729,7 +1676,6 @@ def test_tracing_tracecontext_field_names():
     assert proc.returncode == 0, (
         f"tracecontext field test failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_exporter_getspans_deep_copy():
@@ -1765,7 +1711,6 @@ def test_exporter_getspans_deep_copy():
     )
 
 
-
 def test_tracing_context_immutability():
     code = textwrap.dedent("""
     package main
@@ -1793,7 +1738,6 @@ def test_tracing_context_immutability():
     )
 
 
-
 def test_tracing_attribute_duplicate_last_wins():
     code = textwrap.dedent("""
     package main
@@ -1818,7 +1762,6 @@ def test_tracing_attribute_duplicate_last_wins():
     assert proc.returncode == 0, (
         f"duplicate attr last wins failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_event_attr_copy():
@@ -1848,7 +1791,6 @@ def test_tracing_event_attr_copy():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"event attr copy failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_marshal_empty_parent_format():
@@ -1884,7 +1826,6 @@ def test_tracing_marshal_empty_parent_format():
     )
 
 
-
 def test_metrics_histogram_boundary_inclusive():
     code = textwrap.dedent("""
     package main
@@ -1918,7 +1859,6 @@ def test_metrics_histogram_boundary_inclusive():
     assert proc.returncode == 0, (
         f"histogram boundary inclusive failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_exporter_concurrent():
@@ -1957,7 +1897,6 @@ def test_exporter_concurrent():
     assert proc.returncode == 0, f"race test failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_collect_race():
     code = textwrap.dedent("""
     package main
@@ -1985,7 +1924,6 @@ def test_metrics_collect_race():
     """)
     proc = go_run_race_program(code)
     assert proc.returncode == 0, f"race test failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_parent_id_rules():
@@ -2023,7 +1961,6 @@ def test_tracing_parent_id_rules():
     assert proc.returncode == 0, f"parent id rules failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_tracing_isrecording_after_end():
     code = textwrap.dedent("""
     package main
@@ -2047,7 +1984,6 @@ def test_tracing_isrecording_after_end():
     assert proc.returncode == 0, (
         f"isrecording after end failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_string_truncate_exact_boundary():
@@ -2086,7 +2022,6 @@ def test_tracing_string_truncate_exact_boundary():
     )
 
 
-
 def test_exporter_clear_then_reuse():
     code = textwrap.dedent("""
     package main
@@ -2119,7 +2054,6 @@ def test_exporter_clear_then_reuse():
     assert proc.returncode == 0, (
         f"exporter clear then reuse failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_parent_chain_three_levels():
@@ -2165,7 +2099,6 @@ def test_tracing_parent_chain_three_levels():
     )
 
 
-
 def test_tracing_attribute_map_non_nil():
     code = textwrap.dedent("""
     package main
@@ -2190,7 +2123,6 @@ def test_tracing_attribute_map_non_nil():
     assert proc.returncode == 0, (
         f"attribute map non-nil failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_event_timestamp_recent():
@@ -2225,7 +2157,6 @@ def test_tracing_event_timestamp_recent():
     assert proc.returncode == 0, (
         f"event timestamp recent failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_histogram_boundary_and_sum():
@@ -2263,7 +2194,6 @@ def test_metrics_histogram_boundary_and_sum():
     )
 
 
-
 def test_logger_json_fields():
     code = textwrap.dedent("""
     package main
@@ -2295,7 +2225,6 @@ def test_logger_json_fields():
     )
 
 
-
 def test_tracing_service_name_empty_fallback():
     code = textwrap.dedent("""
     package main
@@ -2319,7 +2248,6 @@ def test_tracing_service_name_empty_fallback():
     assert proc.returncode == 0, (
         f"service name empty fallback failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_id_generator_nil_fallback():
@@ -2347,7 +2275,6 @@ def test_tracing_id_generator_nil_fallback():
     )
 
 
-
 def test_logger_level_default_info():
     code = textwrap.dedent("""
     package main
@@ -2372,7 +2299,6 @@ def test_logger_level_default_info():
     assert proc.returncode == 0, (
         f"logger default level failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_exporter_getspans_slice_mutation():
@@ -2403,7 +2329,6 @@ def test_exporter_getspans_slice_mutation():
     )
 
 
-
 def test_logger_with_empty_fields():
     code = textwrap.dedent("""
     package main
@@ -2429,7 +2354,6 @@ def test_logger_with_empty_fields():
     assert proc.returncode == 0, (
         f"logger with empty fields failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_gauge_set_and_add():
@@ -2466,7 +2390,6 @@ def test_metrics_gauge_set_and_add():
     )
 
 
-
 def test_metrics_label_order_irrelevant_for_reuse():
     code = textwrap.dedent("""
     package main
@@ -2496,7 +2419,6 @@ def test_metrics_label_order_irrelevant_for_reuse():
     assert proc.returncode == 0, (
         f"label order irrelevant failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_label_truncate_for_gauge_and_histogram():
@@ -2534,7 +2456,6 @@ def test_metrics_label_truncate_for_gauge_and_histogram():
     )
 
 
-
 def test_tracing_add_attribute_after_limit_still_128():
     code = textwrap.dedent("""
     package main
@@ -2563,7 +2484,6 @@ def test_tracing_add_attribute_after_limit_still_128():
     assert proc.returncode == 0, (
         f"add attribute after limit failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_attribute_value_truncate_add():
@@ -2595,7 +2515,6 @@ def test_tracing_attribute_value_truncate_add():
     )
 
 
-
 def test_tracing_context_overwrites():
     code = textwrap.dedent("""
     package main
@@ -2619,7 +2538,6 @@ def test_tracing_context_overwrites():
     assert proc.returncode == 0, (
         f"context overwrites failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_event_copy_isolation():
@@ -2651,7 +2569,6 @@ def test_tracing_event_copy_isolation():
     )
 
 
-
 def test_tracing_withattributes_duplicate_across_calls():
     code = textwrap.dedent("""
     package main
@@ -2680,7 +2597,6 @@ def test_tracing_withattributes_duplicate_across_calls():
     )
 
 
-
 def test_tracing_marshal_nil_carrier():
     code = textwrap.dedent("""
     package main
@@ -2704,7 +2620,6 @@ def test_tracing_marshal_nil_carrier():
     assert proc.returncode == 0, (
         f"marshal nil carrier failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_unmarshal_invalid():
@@ -2744,7 +2659,6 @@ def test_tracing_unmarshal_invalid():
     )
 
 
-
 def test_tracing_withattributes_nil():
     code = textwrap.dedent("""
     package main
@@ -2769,7 +2683,6 @@ def test_tracing_withattributes_nil():
     assert proc.returncode == 0, (
         f"withattributes nil failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_counter_type_conflict():
@@ -2813,7 +2726,6 @@ def test_metrics_counter_type_conflict():
     )
 
 
-
 def test_tracing_flags_zero_when_not_sampled():
     code = textwrap.dedent("""
     package main
@@ -2839,7 +2751,6 @@ def test_tracing_flags_zero_when_not_sampled():
     assert proc.returncode == 0, (
         f"flags zero when not sampled failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_concurrent_end_exactly_once():
@@ -2876,7 +2787,6 @@ def test_tracing_concurrent_end_exactly_once():
     assert proc.returncode == 0, (
         f"concurrent End exactly once failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_export_snapshots_span():
@@ -2918,7 +2828,6 @@ def test_tracing_export_snapshots_span():
     assert proc.returncode == 0, (
         f"export snapshots span failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_racing_add_after_end_noop_atomic():
@@ -2996,8 +2905,9 @@ def test_metrics_withlabels_defensive_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withlabels defensive copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withlabels defensive copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_withbuckets_defensive_copy():
@@ -3029,8 +2939,9 @@ def test_metrics_withbuckets_defensive_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withbuckets defensive copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withbuckets defensive copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_label_truncation_reuse_after_truncate():
@@ -3064,8 +2975,9 @@ def test_metrics_label_truncation_reuse_after_truncate():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"label truncation reuse failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"label truncation reuse failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_collect_buckets_deep_copy():
@@ -3097,8 +3009,9 @@ def test_metrics_collect_buckets_deep_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"collect buckets deep copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"collect buckets deep copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_gauge_ignore_nan_inf():
@@ -3128,8 +3041,9 @@ def test_gauge_ignore_nan_inf():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"gauge ignore nan inf failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"gauge ignore nan inf failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_start_nil_context():
@@ -3155,8 +3069,9 @@ def test_tracing_start_nil_context():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"start nil context failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"start nil context failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_contextwithtrace_nil():
@@ -3182,8 +3097,9 @@ def test_tracing_contextwithtrace_nil():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"contextwithtrace nil failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"contextwithtrace nil failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_context_returns_copy():
@@ -3209,8 +3125,9 @@ def test_tracing_context_returns_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"context returns copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"context returns copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_duplicate_key_not_count_toward_limit():
@@ -3248,8 +3165,9 @@ def test_tracing_duplicate_key_not_count_toward_limit():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"duplicate key not count toward limit failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"duplicate key not count toward limit failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_empty_attribute_key_ignored():
@@ -3273,8 +3191,9 @@ def test_tracing_empty_attribute_key_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"empty attribute key ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"empty attribute key ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_flags_preserved_via_propagation():
@@ -3308,8 +3227,9 @@ def test_tracing_flags_preserved_via_propagation():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"flags preserved via propagation failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"flags preserved via propagation failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_exporter_event_attributes_deep_copy():
@@ -3341,8 +3261,9 @@ def test_exporter_event_attributes_deep_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter event attributes deep copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter event attributes deep copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_with_immutability_and_concurrent():
@@ -3392,8 +3313,9 @@ def test_logger_with_immutability_and_concurrent():
     }
     """)
     proc = go_run_race_program(code, timeout=60)
-    assert proc.returncode == 0, f"logger with immutability concurrent failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger with immutability concurrent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_histogram_dedup_buckets():
@@ -3424,8 +3346,9 @@ def test_histogram_dedup_buckets():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram dedup buckets failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram dedup buckets failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_parent_id_consistency():
@@ -3461,8 +3384,9 @@ def test_tracing_parent_id_consistency():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent id consistency failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"parent id consistency failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_output_nil_fallback():
@@ -3483,8 +3407,9 @@ def test_logger_output_nil_fallback():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger output nil fallback failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger output nil fallback failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attribute_nil_value_ignored():
@@ -3508,8 +3433,9 @@ def test_tracing_attribute_nil_value_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attribute nil value ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attribute nil value ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attribute_invalid_type_ignored():
@@ -3540,8 +3466,9 @@ def test_tracing_attribute_invalid_type_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attribute invalid type ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attribute invalid type ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_endtime_preserved_on_idempotent():
@@ -3575,8 +3502,9 @@ def test_tracing_endtime_preserved_on_idempotent():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"endtime preserved failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"endtime preserved failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_setstatus_after_end_noop():
@@ -3600,8 +3528,9 @@ def test_tracing_setstatus_after_end_noop():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"setstatus after end noop failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"setstatus after end noop failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_bucket_nan_inf_filtered():
@@ -3635,8 +3564,9 @@ def test_metrics_histogram_bucket_nan_inf_filtered():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram bucket NaN Inf filtered failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram bucket NaN Inf filtered failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_field_duplicate_last_wins():
@@ -3662,8 +3592,9 @@ def test_logger_field_duplicate_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger field duplicate last wins failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger field duplicate last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_with_defensive_copy_fields():
@@ -3695,8 +3626,9 @@ def test_logger_with_defensive_copy_fields():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger with defensive copy fields failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger with defensive copy fields failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_exporter_concurrent_clear():
@@ -3736,8 +3668,9 @@ def test_exporter_concurrent_clear():
     }
     """)
     proc = go_run_race_program(code, timeout=30)
-    assert proc.returncode == 0, f"exporter concurrent clear failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter concurrent clear failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_custom_idgen_invalid_hex_marshal_no_write():
@@ -3774,8 +3707,9 @@ def test_tracing_custom_idgen_invalid_hex_marshal_no_write():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"custom idgen invalid hex marshal no write failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"custom idgen invalid hex marshal no write failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_service_name_preserved():
@@ -3806,8 +3740,9 @@ def test_tracing_service_name_preserved():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"service name preserved failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"service name preserved failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_marshal_overwrites_existing_carrier():
@@ -3833,8 +3768,9 @@ def test_tracing_marshal_overwrites_existing_carrier():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"marshal overwrites existing carrier failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"marshal overwrites existing carrier failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_withlabels_nil():
@@ -3866,7 +3802,6 @@ def test_metrics_withlabels_nil():
     assert proc.returncode == 0, f"withlabels nil failed: {proc.stdout} {proc.stderr}"
 
 
-
 def test_metrics_histogram_empty_buckets_uses_default():
     code = textwrap.dedent("""
     package main
@@ -3893,8 +3828,9 @@ def test_metrics_histogram_empty_buckets_uses_default():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram empty buckets uses default failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram empty buckets uses default failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_timestamp_recent_and_utc():
@@ -3933,8 +3869,9 @@ def test_logger_timestamp_recent_and_utc():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger timestamp recent and utc failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger timestamp recent and utc failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_withparent_duplicate_across_withattributes_and_addafterlimit():
@@ -3967,8 +3904,9 @@ def test_tracing_withparent_duplicate_across_withattributes_and_addafterlimit():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withparent duplicate across limit failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withparent duplicate across limit failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_json_escaping_special_chars():
@@ -3994,8 +3932,9 @@ def test_logger_json_escaping_special_chars():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger json escaping failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger json escaping failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_context_withattributes_duplicate_within_same_call_last_wins():
@@ -4023,8 +3962,9 @@ def test_tracing_context_withattributes_duplicate_within_same_call_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"duplicate within same call failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"duplicate within same call failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_finished_span_attributes_non_nil_when_present():
@@ -4050,8 +3990,9 @@ def test_tracing_finished_span_attributes_non_nil_when_present():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"finished span attributes non-nil failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"finished span attributes non-nil failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_parent_overrides_context_even_when_root():
@@ -4084,8 +4025,9 @@ def test_tracing_parent_overrides_context_even_when_root():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"parent overrides context failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"parent overrides context failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_unmarshal_extra_colon_invalid():
@@ -4113,8 +4055,9 @@ def test_tracing_unmarshal_extra_colon_invalid():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"unmarshal extra colon invalid failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"unmarshal extra colon invalid failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_marshal_does_not_write_on_invalid_ids():
@@ -4148,8 +4091,9 @@ def test_tracing_marshal_does_not_write_on_invalid_ids():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"marshal does not write on invalid ids failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"marshal does not write on invalid ids failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_inclusive_and_sum():
@@ -4186,8 +4130,9 @@ def test_metrics_histogram_inclusive_and_sum():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram inclusive and sum failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram inclusive and sum failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_invalid_labels_noop_does_not_affect_valid():
@@ -4218,8 +4163,9 @@ def test_metrics_invalid_labels_noop_does_not_affect_valid():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"invalid labels noop does not affect valid failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"invalid labels noop does not affect valid failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_context_overwrite_and_copy():
@@ -4249,8 +4195,9 @@ def test_tracing_context_overwrite_and_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"context overwrite and copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"context overwrite and copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_span_kind_default_internal():
@@ -4273,8 +4220,9 @@ def test_tracing_span_kind_default_internal():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"span kind default internal failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"span kind default internal failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_warning_alias():
@@ -4299,8 +4247,9 @@ def test_logger_warning_alias():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger warning alias failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger warning alias failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_counter_add_zero_allowed():
@@ -4327,8 +4276,9 @@ def test_metrics_counter_add_zero_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"counter Add zero allowed failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"counter Add zero allowed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_event_attributes_empty_key_ignored():
@@ -4361,8 +4311,9 @@ def test_tracing_event_attributes_empty_key_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"event attributes empty key ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"event attributes empty key ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_exporter_getcount_consistency():
@@ -4390,8 +4341,9 @@ def test_tracing_exporter_getcount_consistency():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter getcount consistency failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter getcount consistency failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_default_buckets_used_when_nil():
@@ -4421,8 +4373,9 @@ def test_metrics_histogram_default_buckets_used_when_nil():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram default buckets used when nil failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram default buckets used when nil failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_service_field_always_present():
@@ -4446,8 +4399,9 @@ def test_logger_service_field_always_present():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger service field always present failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger service field always present failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_provider_isolation_after_collect():
@@ -4481,8 +4435,9 @@ def test_metrics_provider_isolation_after_collect():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"provider isolation after collect failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"provider isolation after collect failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_span_attribute_types_varied():
@@ -4512,8 +4467,9 @@ def test_tracing_span_attribute_types_varied():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"span attribute types varied failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"span attribute types varied failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_extract_header_case_insensitive():
@@ -4550,8 +4506,9 @@ def test_tracing_extract_header_case_insensitive():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"extract header case insensitive failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"extract header case insensitive failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_extract_trims_whitespace():
@@ -4572,8 +4529,9 @@ def test_tracing_extract_trims_whitespace():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"extract trims whitespace failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"extract trims whitespace failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_unmarshal_uppercase_hex_allowed():
@@ -4593,8 +4551,9 @@ def test_tracing_unmarshal_uppercase_hex_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"uppercase hex allowed failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"uppercase hex allowed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attribute_value_truncate_event():
@@ -4624,8 +4583,9 @@ def test_tracing_attribute_value_truncate_event():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attr truncate event failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attr truncate event failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_withspanKind_last_wins():
@@ -4653,8 +4613,9 @@ def test_tracing_withspanKind_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withspankind last wins failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withspankind last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_setstatus_last_wins_before_end():
@@ -4680,8 +4641,9 @@ def test_tracing_setstatus_last_wins_before_end():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"setstatus last wins failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"setstatus last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_concurrent_addattr_addevent_setstatus_end():
@@ -4733,8 +4695,9 @@ def test_tracing_concurrent_addattr_addevent_setstatus_end():
     }
     """)
     proc = go_run_race_program(code)
-    assert proc.returncode == 0, f"concurrent addattr addevent setstatus end failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"concurrent addattr addevent setstatus end failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_context_withtrace_overwrites():
@@ -4758,8 +4721,9 @@ def test_tracing_context_withtrace_overwrites():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"context withtrace overwrites failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"context withtrace overwrites failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_span_context_copy_on_parent():
@@ -4788,8 +4752,9 @@ def test_tracing_span_context_copy_on_parent():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"span context copy on parent failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"span context copy on parent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_marshal_preserves_other_keys():
@@ -4814,8 +4779,9 @@ def test_tracing_marshal_preserves_other_keys():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"marshal preserves other keys failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"marshal preserves other keys failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_event_empty_name_ignored():
@@ -4841,8 +4807,9 @@ def test_tracing_event_empty_name_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"event empty name ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"event empty name ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attr_limit_and_event_limit_independent():
@@ -4872,8 +4839,9 @@ def test_tracing_attr_limit_and_event_limit_independent():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attr and event limit independent failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attr and event limit independent failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_counter_negative_noop():
@@ -4898,8 +4866,9 @@ def test_metrics_counter_negative_noop():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"counter negative noop failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"counter negative noop failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_collect_buckets_deep_copy_modification_2():
@@ -4934,8 +4903,9 @@ def test_metrics_collect_buckets_deep_copy_modification_2():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"collect buckets deep copy mutation 2 failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"collect buckets deep copy mutation 2 failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_observe_negative_allowed():
@@ -4963,8 +4933,9 @@ def test_metrics_histogram_observe_negative_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram observe negative allowed failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram observe negative allowed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_label_truncation_collision():
@@ -4995,8 +4966,9 @@ def test_metrics_label_truncation_collision():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"label truncation collision failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"label truncation collision failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_concurrent_create_same_labelset():
@@ -5031,8 +5003,9 @@ def test_metrics_concurrent_create_same_labelset():
     }
     """)
     proc = go_run_race_program(code)
-    assert proc.returncode == 0, f"concurrent create same labelset failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"concurrent create same labelset failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_provider_collect_empty_after_clear():
@@ -5055,8 +5028,9 @@ def test_metrics_provider_collect_empty_after_clear():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"provider collect empty after clear failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"provider collect empty after clear failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_gauge_add_nan_inf_ignored():
@@ -5084,8 +5058,9 @@ def test_metrics_gauge_add_nan_inf_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"gauge add nan inf ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"gauge add nan inf ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_counter_race_add_and_collect():
@@ -5117,8 +5092,9 @@ def test_metrics_counter_race_add_and_collect():
     }
     """)
     proc = go_run_race_program(code)
-    assert proc.returncode == 0, f"counter race add and collect failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"counter race add and collect failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_level_unknown_defaults_info():
@@ -5148,8 +5124,9 @@ def test_logger_level_unknown_defaults_info():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger level unknown defaults info failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger level unknown defaults info failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_error_level_filters_lower():
@@ -5181,8 +5158,9 @@ def test_logger_error_level_filters_lower():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger error level filters lower failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger error level filters lower failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_service_cannot_be_overridden_by_with():
@@ -5207,8 +5185,9 @@ def test_logger_service_cannot_be_overridden_by_with():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger service cannot be overridden failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger service cannot be overridden failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_fields_json_types():
@@ -5234,8 +5213,9 @@ def test_logger_fields_json_types():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger fields json types failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger fields json types failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_concurrent_with_and_log():
@@ -5266,8 +5246,9 @@ def test_logger_concurrent_with_and_log():
     }
     """)
     proc = go_run_race_program(code)
-    assert proc.returncode == 0, f"logger concurrent with and log failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger concurrent with and log failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_finished_span_parent_id_empty_for_root():
@@ -5290,8 +5271,9 @@ def test_tracing_finished_span_parent_id_empty_for_root():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"finished span parentID empty for root failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"finished span parentID empty for root failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_finished_span_start_before_end():
@@ -5314,8 +5296,9 @@ def test_tracing_finished_span_start_before_end():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"finished span start before end failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"finished span start before end failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_id_generator_nil_fallback_ensures_valid_traceid():
@@ -5339,8 +5322,9 @@ def test_tracing_id_generator_nil_fallback_ensures_valid_traceid():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"id generator nil fallback ensures valid traceID failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"id generator nil fallback ensures valid traceID failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_unmarshal_empty_parent_valid():
@@ -5360,8 +5344,9 @@ def test_tracing_unmarshal_empty_parent_valid():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"unmarshal empty parent valid failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"unmarshal empty parent valid failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_unmarshal_invalid_sampled():
@@ -5388,8 +5373,9 @@ def test_tracing_unmarshal_invalid_sampled():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"unmarshal invalid sampled failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"unmarshal invalid sampled failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_unmarshal_spaces_around_colons():
@@ -5409,8 +5395,9 @@ def test_tracing_unmarshal_spaces_around_colons():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"unmarshal spaces around colons failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"unmarshal spaces around colons failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_context_withtrace_defensive_copy():
@@ -5432,8 +5419,9 @@ def test_tracing_context_withtrace_defensive_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"context withtrace defensive copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"context withtrace defensive copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_tracefromcontext_returns_copy():
@@ -5455,8 +5443,9 @@ def test_tracing_tracefromcontext_returns_copy():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"tracefromcontext returns copy failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"tracefromcontext returns copy failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_withattributes_nil_no_panic():
@@ -5478,8 +5467,9 @@ def test_tracing_withattributes_nil_no_panic():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withattributes nil no panic failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withattributes nil no panic failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attribute_overwrite_after_limit():
@@ -5508,8 +5498,9 @@ def test_tracing_attribute_overwrite_after_limit():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attribute overwrite after limit failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attribute overwrite after limit failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_exporter_events_attrs_value_mutation():
@@ -5540,8 +5531,9 @@ def test_tracing_exporter_events_attrs_value_mutation():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter events attrs value mutation failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter events attrs value mutation failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_with_no_args_immutable():
@@ -5576,8 +5568,9 @@ def test_logger_with_no_args_immutable():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger with no args immutable failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger with no args immutable failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_field_empty_key_ignored():
@@ -5603,8 +5596,9 @@ def test_logger_field_empty_key_ignored():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger field empty key ignored failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger field empty key ignored failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_timestamp_monotonic():
@@ -5640,8 +5634,9 @@ def test_logger_timestamp_monotonic():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger timestamp monotonic failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger timestamp monotonic failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_counter_inc_after_collect():
@@ -5669,8 +5664,9 @@ def test_metrics_counter_inc_after_collect():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"counter inc after collect failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"counter inc after collect failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_unsorted_buckets_sort():
@@ -5697,8 +5693,9 @@ def test_metrics_histogram_unsorted_buckets_sort():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram unsorted buckets sort failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram unsorted buckets sort failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_duplicate_dedup():
@@ -5720,8 +5717,9 @@ def test_metrics_histogram_duplicate_dedup():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram duplicate dedup failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram duplicate dedup failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_count_sum_accurate():
@@ -5751,8 +5749,9 @@ def test_metrics_histogram_count_sum_accurate():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram count sum accurate failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram count sum accurate failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_gauge_inc_dec_after_set():
@@ -5777,8 +5776,9 @@ def test_metrics_gauge_inc_dec_after_set():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"gauge inc dec after set failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"gauge inc dec after set failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_spancontext_alias_same():
@@ -5803,8 +5803,9 @@ def test_tracing_spancontext_alias_same():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"spancontext alias same failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"spancontext alias same failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_inject_extract_alias_preserve_sampled():
@@ -5831,8 +5832,9 @@ def test_tracing_inject_extract_alias_preserve_sampled():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"inject extract alias preserve sampled failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"inject extract alias preserve sampled failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_withlabels_order_irrelevant():
@@ -5858,8 +5860,9 @@ def test_metrics_withlabels_order_irrelevant():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withlabels order irrelevant failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withlabels order irrelevant failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_attribute_uint_types_allowed():
@@ -5892,8 +5895,9 @@ def test_tracing_attribute_uint_types_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"attribute uint types allowed failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"attribute uint types allowed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_withattributes_overwrite_and_truncate():
@@ -5924,8 +5928,9 @@ def test_tracing_withattributes_overwrite_and_truncate():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withattributes overwrite and truncate failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withattributes overwrite and truncate failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_addattribute_nil_and_invalid_no_count():
@@ -5955,8 +5960,9 @@ def test_tracing_addattribute_nil_and_invalid_no_count():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"addattribute nil and invalid no count failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"addattribute nil and invalid no count failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_event_timestamp_between_start_end():
@@ -5987,8 +5993,9 @@ def test_tracing_event_timestamp_between_start_end():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"event timestamp between start end failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"event timestamp between start end failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_event_attrs_monotonic_timestamps():
@@ -6014,8 +6021,9 @@ def test_tracing_event_attrs_monotonic_timestamps():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"event attrs monotonic timestamps failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"event attrs monotonic timestamps failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_span_isrecording_after_end_false():
@@ -6038,8 +6046,9 @@ def test_tracing_span_isrecording_after_end_false():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"span isrecording after end false failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"span isrecording after end false failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_counter_zero_add_allowed():
@@ -6062,8 +6071,9 @@ def test_metrics_counter_zero_add_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"counter zero add allowed failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"counter zero add allowed failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_gauge_set_nan_inf_keeps_prev():
@@ -6088,8 +6098,9 @@ def test_metrics_gauge_set_nan_inf_keeps_prev():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"gauge set nan inf keeps prev failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"gauge set nan inf keeps prev failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_observations_independent_per_label():
@@ -6121,8 +6132,9 @@ def test_metrics_histogram_observations_independent_per_label():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"hist observations independent per label failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"hist observations independent per label failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_with_chaining_overwrite():
@@ -6148,8 +6160,9 @@ def test_logger_with_chaining_overwrite():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger with chaining overwrite failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger with chaining overwrite failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_per_call_overwrites_with():
@@ -6174,8 +6187,9 @@ def test_logger_per_call_overwrites_with():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"logger per-call overwrites with failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"logger per-call overwrites with failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_custom_idgen_same_ids_child_differs():
@@ -6206,8 +6220,9 @@ def test_tracing_custom_idgen_same_ids_child_differs():
     func (g *fixedGen) NewSpanID() string { return g.spanID }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"custom idgen same ids child differs failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"custom idgen same ids child differs failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_exporter_getspans_deep_copy_name():
@@ -6232,8 +6247,9 @@ def test_tracing_exporter_getspans_deep_copy_name():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter getspans deep copy name failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter getspans deep copy name failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_provider_isolation_multiple():
@@ -6258,8 +6274,9 @@ def test_metrics_provider_isolation_multiple():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"provider isolation multiple failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"provider isolation multiple failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_start_with_parent_overrides_context_and_new_traceid_when_no_parent():
@@ -6291,8 +6308,9 @@ def test_tracing_start_with_parent_overrides_context_and_new_traceid_when_no_par
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"start with parent overrides failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"start with parent overrides failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_addattribute_after_end_noop_preserves_exported():
@@ -6317,8 +6335,9 @@ def test_tracing_addattribute_after_end_noop_preserves_exported():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"addattribute after end noop failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"addattribute after end noop failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_addevent_after_end_noop():
@@ -6342,8 +6361,9 @@ def test_tracing_addevent_after_end_noop():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"addevent after end noop failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"addevent after end noop failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_invalid_name_noop():
@@ -6370,8 +6390,9 @@ def test_metrics_invalid_name_noop():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"invalid name noop failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"invalid name noop failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_withlabels_nil_treated_empty():
@@ -6392,8 +6413,9 @@ def test_metrics_withlabels_nil_treated_empty():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"withlabels nil treated empty failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"withlabels nil treated empty failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_nil_buckets_default():
@@ -6415,8 +6437,9 @@ def test_metrics_histogram_nil_buckets_default():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"nil buckets default failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"nil buckets default failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_withattributes_duplicate_within_same_call_last_wins():
@@ -6444,8 +6467,9 @@ def test_tracing_withattributes_duplicate_within_same_call_last_wins():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"duplicate within same call last wins failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"duplicate within same call last wins failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_gauge_dec_below_zero_allowed():
@@ -6469,8 +6493,9 @@ def test_metrics_gauge_dec_below_zero_allowed():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"gauge dec below zero failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"gauge dec below zero failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_metrics_histogram_observe_exact_boundary_inclusive():
@@ -6497,8 +6522,9 @@ def test_metrics_histogram_observe_exact_boundary_inclusive():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"histogram exact boundary inclusive failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"histogram exact boundary inclusive failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_tracing_exporter_clear_reuse_order_preserved():
@@ -6525,8 +6551,9 @@ def test_tracing_exporter_clear_reuse_order_preserved():
     }
     """)
     proc = go_run_program(code)
-    assert proc.returncode == 0, f"exporter clear reuse order preserved failed: {proc.stdout} {proc.stderr}"
-
+    assert proc.returncode == 0, (
+        f"exporter clear reuse order preserved failed: {proc.stdout} {proc.stderr}"
+    )
 
 
 def test_logger_level_debug_shows_all():
@@ -6562,7 +6589,6 @@ def test_logger_level_debug_shows_all():
     )
 
 
-
 def test_logger_no_trace_when_invalid_context():
     code = textwrap.dedent("""
     package main
@@ -6586,7 +6612,6 @@ def test_logger_no_trace_when_invalid_context():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"logger no trace failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_logger_trace_includes_parent_id():
@@ -6623,7 +6648,6 @@ def test_logger_trace_includes_parent_id():
     )
 
 
-
 def test_metrics_description_first_wins():
     code = textwrap.dedent("""
     package main
@@ -6650,7 +6674,6 @@ def test_metrics_description_first_wins():
     assert proc.returncode == 0, (
         f"description first wins failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_histogram_negative_buckets_sorted():
@@ -6680,7 +6703,6 @@ def test_metrics_histogram_negative_buckets_sorted():
     assert proc.returncode == 0, (
         f"histogram negative buckets sorted failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_metrics_label_key_validation_more():
@@ -6717,7 +6739,6 @@ def test_metrics_label_key_validation_more():
     )
 
 
-
 def test_metrics_type_conflict_first_wins():
     code = textwrap.dedent("""
     package main
@@ -6744,7 +6765,6 @@ def test_metrics_type_conflict_first_wins():
     assert proc.returncode == 0, (
         f"type conflict first wins failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_all_zero_ids_invalid_marshal():
@@ -6781,7 +6801,6 @@ def test_tracing_all_zero_ids_invalid_marshal():
     )
 
 
-
 def test_tracing_all_zero_spanid_parentid_variants():
     code = textwrap.dedent("""
     package main
@@ -6810,7 +6829,6 @@ def test_tracing_all_zero_spanid_parentid_variants():
     )
 
 
-
 def test_tracing_flags_normalized_in_contextwithtrace():
     code = textwrap.dedent("""
     package main
@@ -6833,7 +6851,6 @@ def test_tracing_flags_normalized_in_contextwithtrace():
     """)
     proc = go_run_program(code)
     assert proc.returncode == 0, f"flags normalized failed: {proc.stdout} {proc.stderr}"
-
 
 
 def test_tracing_long_attribute_key_allowed():
@@ -6865,7 +6882,6 @@ def test_tracing_long_attribute_key_allowed():
     )
 
 
-
 def test_tracing_marshal_nil_carrier_and_nil_context_no_panic():
     code = textwrap.dedent("""
     package main
@@ -6888,7 +6904,6 @@ def test_tracing_marshal_nil_carrier_and_nil_context_no_panic():
     )
 
 
-
 def test_tracing_unmarshal_nil_and_empty_carrier_no_panic():
     code = textwrap.dedent("""
     package main
@@ -6909,7 +6924,6 @@ def test_tracing_unmarshal_nil_and_empty_carrier_no_panic():
     assert proc.returncode == 0, (
         f"unmarshal nil and empty failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_withattributes_mixed_valid_invalid():
@@ -6943,7 +6957,6 @@ def test_tracing_withattributes_mixed_valid_invalid():
     )
 
 
-
 def test_tracing_event_attr_duplicate_last_wins():
     code = textwrap.dedent("""
     package main
@@ -6969,7 +6982,6 @@ def test_tracing_event_attr_duplicate_last_wins():
     assert proc.returncode == 0, (
         f"event attr duplicate last wins failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_event_attr_invalid_and_truncate():
@@ -7007,7 +7019,6 @@ def test_tracing_event_attr_invalid_and_truncate():
     )
 
 
-
 def test_tracing_contextwithtrace_nil_and_empty():
     code = textwrap.dedent("""
     package main
@@ -7036,7 +7047,6 @@ def test_tracing_contextwithtrace_nil_and_empty():
     assert proc.returncode == 0, (
         f"contextwithtrace nil and empty failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_tracing_parent_parentid_handling():
@@ -7069,7 +7079,6 @@ def test_tracing_parent_parentid_handling():
     )
 
 
-
 def test_tracing_attributes_map_deep_copy_key_mutation():
     code = textwrap.dedent("""
     package main
@@ -7098,7 +7107,6 @@ def test_tracing_attributes_map_deep_copy_key_mutation():
     assert proc.returncode == 0, (
         f"attributes map deep copy key mutation failed: {proc.stdout} {proc.stderr}"
     )
-
 
 
 def test_logger_concurrent_exact_lines():
@@ -7136,4 +7144,704 @@ def test_logger_concurrent_exact_lines():
     )
 
 
+def test_tracing_id_generator_returns_empty():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    type emptyGen struct{}
+    func (g emptyGen) NewTraceID() string { return "" }
+    func (g emptyGen) NewSpanID() string { return "" }
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)), observability.WithIDGenerator(emptyGen{}))
+      ctx, span := tracer.Start(context.Background(), "empty-gen")
+      if ctx==nil { panic("ctx nil") }
+      carrier := map[string]string{}
+      observability.MarshalTrace(ctx, carrier)
+      if len(carrier)!=0 { panic("empty IDs should not marshal") }
+      span.End()
+      spans := exp.GetSpans()
+      if len(spans)!=1 { panic("should export 1") }
+      if spans[0].SpanContext.TraceID!="" { panic("TraceID should be empty from gen") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, f"id gen empty failed: {proc.stdout} {proc.stderr}"
 
+
+def test_tracing_contextwithtrace_flags_normalized_both():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      tc1 := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: true, Flags: 0}
+      ctx1 := observability.ContextWithTrace(context.Background(), tc1)
+      sc1, _ := observability.TraceFromContext(ctx1)
+      if sc1.Flags!=1 { panic(fmt.Sprintf("expected Flags 1 when Sampled true, got %d", sc1.Flags)) }
+      tc2 := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: false, Flags: 1}
+      ctx2 := observability.ContextWithTrace(context.Background(), tc2)
+      sc2, _ := observability.TraceFromContext(ctx2)
+      if sc2.Flags!=0 { panic(fmt.Sprintf("expected Flags 0 when Sampled false, got %d", sc2.Flags)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"flags normalized both failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_contextwithtrace_defensive_copy_original_mutation():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      tc := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: true}
+      ctx := observability.ContextWithTrace(context.Background(), tc)
+      tc.TraceID = "ffffffffffffffffffffffffffffffff"
+      sc, _ := observability.TraceFromContext(ctx)
+      if sc.TraceID == "ffffffffffffffffffffffffffffffff" { panic("ContextWithTrace should copy") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"ctx defensive copy failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_tracefromcontext_returns_copy_mutation_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      tc := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: true}
+      ctx := observability.ContextWithTrace(context.Background(), tc)
+      sc1, _ := observability.TraceFromContext(ctx)
+      sc1.TraceID = "ffffffffffffffffffffffffffffffff"
+      sc2, _ := observability.TraceFromContext(ctx)
+      if sc2.TraceID == "ffffffffffffffffffffffffffffffff" { panic("TraceFromContext should return copy") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"from ctx copy mutation v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_marshal_invalid_parent_hex_no_write():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      tc := observability.TraceContext{TraceID: "0102030405060708090a0b0c0d0e0f10", SpanID: "0102030405060708", ParentID: "zzzzzzzzzzzzzzzz", Sampled: true}
+      ctx := observability.ContextWithTrace(context.Background(), tc)
+      carrier := map[string]string{}
+      observability.MarshalTrace(ctx, carrier)
+      if len(carrier)!=0 { panic(fmt.Sprintf("invalid parent hex should not marshal, got %v", carrier)) }
+      tc2 := observability.TraceContext{TraceID: "0102030405060708090a0b0c0d0e0f10", SpanID: "0102030405060708", ParentID: "gggggggggggggggg", Sampled: true}
+      ctx2 := observability.ContextWithTrace(context.Background(), tc2)
+      carrier2 := map[string]string{}
+      observability.MarshalTrace(ctx2, carrier2)
+      if len(carrier2)!=0 { panic("non-hex parent should not marshal") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"invalid parent hex no write failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_unmarshal_sampled_invalid_str_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      invalids := []string{
+        "0102030405060708090a0b0c0d0e0f10:0102030405060708::true",
+        "0102030405060708090a0b0c0d0e0f10:0102030405060708::2",
+        "0102030405060708090a0b0c0d0e0f10:0102030405060708::01",
+        "0102030405060708090a0b0c0d0e0f10:0102030405060708::",
+        "0102030405060708090a0b0c0d0e0f10:0102030405060708::1:extra",
+      }
+      for _, v := range invalids {
+        c := map[string]string{"x-ride-trace": v}
+        ctx := observability.UnmarshalTrace(c)
+        if _, ok := observability.TraceFromContext(ctx); ok {
+          panic(fmt.Sprintf("should be invalid for sampled %q", v))
+        }
+      }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"sampled invalid str v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_unmarshal_spaces_around_colons_trimmed_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      c := map[string]string{"x-ride-trace": " 0102030405060708090a0b0c0d0e0f10 : 0102030405060708 : : 1 "}
+      ctx := observability.UnmarshalTrace(c)
+      sc, ok := observability.TraceFromContext(ctx)
+      if !ok { panic("spaces around colons should be trimmed and valid") }
+      if sc.TraceID != "0102030405060708090a0b0c0d0e0f10" { panic("tid mismatch") }
+      c2 := map[string]string{"x-ride-trace": " 0102030405060708090a0b0c0d0e0f10:0102030405060708:0102030405060708:0 "}
+      ctx2 := observability.UnmarshalTrace(c2)
+      if _, ok := observability.TraceFromContext(ctx2); !ok { panic("trimmed valid with parent") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"spaces around colons trimmed v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_root_parent_empty_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      _, span := tracer.Start(context.Background(), "root")
+      sc := span.SpanContext()
+      if sc.ParentID != "" { panic(fmt.Sprintf("root ParentID should be empty, got %q", sc.ParentID)) }
+      span.End()
+      fs := exp.GetSpans()[0]
+      if fs.ParentID != "" { panic("FinishedSpan root ParentID empty") }
+      if fs.ParentID != fs.SpanContext.ParentID { panic("ParentID mismatch") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"root parent empty v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_logger_with_chain_shares_mutex_concurrent_children():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "bytes"
+      "context"
+      "encoding/json"
+      "fmt"
+      "sync"
+      "ride-observability/observability"
+    )
+    func main(){
+      buf := &bytes.Buffer{}
+      base := observability.NewLogger("fleet", observability.WithOutput(buf))
+      child1 := base.With(observability.Field{Key:"driver", Value:"d1"})
+      child2 := child1.With(observability.Field{Key:"ride", Value:"r1"})
+      var wg sync.WaitGroup
+      n:=50
+      wg.Add(n*3)
+      for i:=0;i<n;i++{
+        go func(){ defer wg.Done(); base.Info(context.Background(), "base") }()
+        go func(){ defer wg.Done(); child1.Info(context.Background(), "child1") }()
+        go func(){ defer wg.Done(); child2.Info(context.Background(), "child2") }()
+      }
+      wg.Wait()
+      count := 0
+      for _, b := range buf.Bytes() { if b=='\\n' { count++ } }
+      if count!=n*3 { panic(fmt.Sprintf("expected %d lines got %d", n*3, count)) }
+      data := buf.String()
+      start:=0
+      valid:=0
+      for i:=0;i<len(data);i++{
+        if data[i]=='\\n'{
+          line := data[start:i]
+          start=i+1
+          if len(line)==0 { continue }
+          var m map[string]interface{}
+          if err:=json.Unmarshal([]byte(line), &m); err!=nil { panic(fmt.Sprintf("invalid json line: %q err %v", line, err)) }
+          valid++
+        }
+      }
+      if valid!=n*3 { panic(fmt.Sprintf("valid %d expected %d", valid, n*3)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_race_program(code)
+    assert proc.returncode == 0, (
+        f"logger shared mutex children failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_parent_invalid_reuse_still_uses_traceid():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      parentTC := observability.TraceContext{TraceID: "invalid-not-hex-but-reused", SpanID: "parentspan123456", ParentID: "", Sampled: true}
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      ctx, _ := tracer.Start(context.Background(), "root", observability.WithParent(parentTC))
+      sc, ok := observability.TraceFromContext(ctx)
+      if !ok { panic("ctx should have trace") }
+      if sc.TraceID != parentTC.TraceID { panic(fmt.Sprintf("should reuse parent TraceID even if invalid hex, got %q expected %q", sc.TraceID, parentTC.TraceID)) }
+      if sc.ParentID != parentTC.SpanID { panic("ParentID should be parent SpanID") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"parent invalid reuse failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_addattribute_after_limit_duplicate_still_updates_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      _, span := tracer.Start(context.Background(), "limit-dup")
+      for i:=0;i<128;i++{
+        span.AddAttribute(fmt.Sprintf("k%d", i), i)
+      }
+      span.AddAttribute("k0", 999)
+      span.End()
+      fs := exp.GetSpans()[0]
+      if v, ok := fs.Attributes["k0"]; !ok || v!=999 { panic(fmt.Sprintf("dup after limit should update, got %v", fs.Attributes["k0"])) }
+      if len(fs.Attributes)!=128 { panic(fmt.Sprintf("len should stay 128 got %d", len(fs.Attributes))) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"attr limit dup update v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_event_attrs_duplicate_last_wins_within_event_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      _, span := tracer.Start(context.Background(), "ev-dup")
+      span.AddEvent("ev", observability.Attribute{Key:"k", Value:"v1"}, observability.Attribute{Key:"k", Value:"v2"})
+      span.End()
+      fs := exp.GetSpans()[0]
+      if len(fs.Events)!=1 { panic("1 event") }
+      if len(fs.Events[0].Attributes)!=1 { panic(fmt.Sprintf("dup should dedup to 1 got %d", len(fs.Events[0].Attributes))) }
+      if fs.Events[0].Attributes[0].Value!="v2" { panic("last wins") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"event dup last wins v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_start_nil_ctx_with_parent_option_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      parent := observability.TraceContext{TraceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SpanID: "bbbbbbbbbbbbbbbb", Sampled: true}
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      ctx, span := tracer.Start(nil, "child-nil", observability.WithParent(parent))
+      if ctx==nil { panic("nil ctx should become non-nil") }
+      sc, _ := observability.TraceFromContext(ctx)
+      if sc.TraceID!=parent.TraceID { panic("should inherit parent") }
+      if sc.ParentID!=parent.SpanID { panic("parentid") }
+      span.End()
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"nil ctx parent v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_histogram_default_buckets_when_invalid_only_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "math"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      h1 := prov.Histogram("h_invalid", observability.WithBuckets([]float64{math.NaN(), math.Inf(1), math.Inf(-1)}))
+      h1.Observe(1)
+      fams := prov.Collect()
+      if len(fams)!=1 { panic("1 family") }
+      if len(fams[0].Metrics)==0 { panic("metrics empty") }
+      buckets := fams[0].Metrics[0].Buckets
+      if len(buckets)!=11 { panic(fmt.Sprintf("should fallback to default 11 got %d", len(buckets))) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"hist invalid buckets v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_withlabels_defensive_copy_after_creation_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      labels := map[string]string{"env":"prod"}
+      c := prov.Counter("mylabel", observability.WithLabels(labels))
+      c.Inc()
+      labels["env"]="dev"
+      labels["new"]="x"
+      fams := prov.Collect()
+      if fams[0].Metrics[0].Labels["env"]!="prod" { panic(fmt.Sprintf("defensive copy failed got %v", fams[0].Metrics[0].Labels)) }
+      if _, ok:=fams[0].Metrics[0].Labels["new"]; ok { panic("new key leaked") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"labels defensive copy v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_exporter_events_deep_copy_mutation_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      _, span := tracer.Start(context.Background(), "ev-mut")
+      span.AddEvent("ev", observability.Attribute{Key:"k", Value:"v1"})
+      span.End()
+      spans := exp.GetSpans()
+      spans[0].Events[0].Name="hacked"
+      spans[0].Events[0].Attributes[0].Value="hacked"
+      spans2 := exp.GetSpans()
+      if spans2[0].Events[0].Name=="hacked" { panic("Events deep copy failed Name") }
+      if spans2[0].Events[0].Attributes[0].Value=="hacked" { panic("Events attrs deep copy failed") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"exporter events deep copy v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_service_fallback_empty_override_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("original", observability.WithProcessor(observability.NewSimpleProcessor(exp)), observability.WithServiceName(""))
+      _, span := tracer.Start(context.Background(), "svc-test")
+      span.End()
+      fs := exp.GetSpans()[0]
+      if fs.ServiceName!="original" { panic(fmt.Sprintf("empty WithServiceName should fallback to original, got %q", fs.ServiceName)) }
+      exp2 := observability.NewMemoryExporter()
+      tracer2 := observability.NewTracer("original", observability.WithProcessor(observability.NewSimpleProcessor(exp2)), observability.WithServiceName("override"))
+      _, span2 := tracer2.Start(context.Background(), "svc-test2")
+      span2.End()
+      fs2 := exp2.GetSpans()[0]
+      if fs2.ServiceName!="override" { panic(fmt.Sprintf("override should be override, got %q", fs2.ServiceName)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"service fallback v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_withlabels_nil_treated_empty_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      c := prov.Counter("nil_label", observability.WithLabels(nil))
+      c.Inc()
+      fams := prov.Collect()
+      if len(fams)!=1 { panic(fmt.Sprintf("should have 1 got %d", len(fams))) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"withlabels nil v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_gauge_nan_inf_keep_prev_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "math"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      g := prov.Gauge("g_nan")
+      g.Set(5)
+      g.Set(math.NaN())
+      g.Set(math.Inf(1))
+      fams := prov.Collect()
+      if fams[0].Metrics[0].Value!=5 { panic(fmt.Sprintf("Set NaN/Inf should keep prev 5 got %v", fams[0].Metrics[0].Value)) }
+      g.Add(math.NaN())
+      g.Add(math.Inf(1))
+      fams2 := prov.Collect()
+      if fams2[0].Metrics[0].Value!=5 { panic("Add NaN should keep") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"gauge nan inf keep v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_counter_negative_noop_preserves_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      c := prov.Counter("c_neg")
+      c.Inc()
+      c.Add(-5)
+      fams := prov.Collect()
+      if fams[0].Metrics[0].Value!=1 { panic(fmt.Sprintf("Add -5 should noop, got %v", fams[0].Metrics[0].Value)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"counter negative noop v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_histogram_negative_buckets_sorted_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      h := prov.Histogram("h_neg", observability.WithBuckets([]float64{-10, -5, 0, 5, 10}))
+      h.Observe(-7)
+      h.Observe(-3)
+      h.Observe(3)
+      fams := prov.Collect()
+      buckets := fams[0].Metrics[0].Buckets
+      if buckets[0].Count!=0 { panic(fmt.Sprintf("bucket -10 count expected 0 got %d", buckets[0].Count)) }
+      if buckets[1].Count!=1 { panic(fmt.Sprintf("bucket -5 count expected 1 got %d", buckets[1].Count)) }
+      if buckets[2].Count!=2 { panic(fmt.Sprintf("bucket 0 count expected 2 got %d", buckets[2].Count)) }
+      if buckets[4].Count!=3 { panic(fmt.Sprintf("bucket 10 count expected 3 got %d", buckets[4].Count)) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"hist negative buckets v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_logger_service_no_override_via_with_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "bytes"
+      "context"
+      "encoding/json"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      buf := &bytes.Buffer{}
+      logger := observability.NewLogger("real-service", observability.WithOutput(buf))
+      child := logger.With(observability.Field{Key:"service", Value:"evil"})
+      child.Info(context.Background(), "msg")
+      line := buf.String()
+      var m map[string]interface{}
+      if err:=json.Unmarshal([]byte(line[:len(line)-1]), &m); err!=nil { panic(err) }
+      if m["service"]!="real-service" { panic(fmt.Sprintf("service field should be real-service, got %v", m["service"])) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"logger service no override v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_tracing_withattributes_duplicate_within_same_call_last_wins_v7_extra():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "context"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      exp := observability.NewMemoryExporter()
+      tracer := observability.NewTracer("svc", observability.WithProcessor(observability.NewSimpleProcessor(exp)))
+      _, span := tracer.Start(context.Background(), "dup-same", observability.WithAttributes(
+        observability.Attribute{Key:"k", Value:"v1"},
+        observability.Attribute{Key:"k", Value:"v2"},
+        observability.Attribute{Key:"k", Value:"v3"},
+      ))
+      span.End()
+      fs := exp.GetSpans()[0]
+      if v, ok := fs.Attributes["k"]; !ok || v!="v3" { panic(fmt.Sprintf("last wins within same call expected v3 got %v", v)) }
+      if len(fs.Attributes)!=1 { panic(fmt.Sprintf("should be 1 distinct got %d", len(fs.Attributes))) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"dup within same call v7 extra failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_metrics_collect_buckets_deep_copy_modification_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      prov := observability.NewMetricsProvider()
+      h := prov.Histogram("h_deep_bucket", observability.WithBuckets([]float64{1,5,10}))
+      h.Observe(3)
+      fams := prov.Collect()
+      // mutate returned buckets
+      fams[0].Metrics[0].Buckets[0].Count = 999
+      fams[0].Metrics[0].Buckets[0].UpperBound = 999
+      fams2 := prov.Collect()
+      if fams2[0].Metrics[0].Buckets[0].Count==999 { panic("Buckets deep copy failed Count") }
+      if fams2[0].Metrics[0].Buckets[0].UpperBound==999 { panic("Buckets deep copy failed UpperBound") }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"collect buckets deep copy v7 failed: {proc.stdout} {proc.stderr}"
+    )
+
+
+def test_logger_with_immutable_backing_array_v7():
+    code = textwrap.dedent("""
+    package main
+    import (
+      "bytes"
+      "context"
+      "encoding/json"
+      "fmt"
+      "ride-observability/observability"
+    )
+    func main(){
+      bufChild := &bytes.Buffer{}
+      baseLogger2 := observability.NewLogger("svc", observability.WithOutput(bufChild))
+      child2 := baseLogger2.With(observability.Field{Key:"a", Value:"1"})
+      baseLogger2.Info(context.Background(), "base-msg")
+      child2.Info(context.Background(), "child-msg")
+      lines := bytes.Split(bufChild.Bytes(), []byte("\\n"))
+      if len(lines)<2 { panic("expected 2 lines") }
+      var m0 map[string]interface{}
+      if err:=json.Unmarshal(lines[0], &m0); err!=nil { panic(err) }
+      if _, ok:=m0["a"]; ok { panic("base should not have child's field backing array") }
+      var m1 map[string]interface{}
+      if err:=json.Unmarshal(lines[1], &m1); err!=nil { panic(err) }
+      if m1["a"]!="1" { panic(fmt.Sprintf("child should have a=1 got %v", m1["a"])) }
+      fmt.Println("OK")
+    }
+    """)
+    proc = go_run_program(code)
+    assert proc.returncode == 0, (
+        f"logger immutable backing array v7 failed: {proc.stdout} {proc.stderr}"
+    )

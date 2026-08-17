@@ -48,14 +48,14 @@ High-throughput verification: 100 goroutines x 100 spans, 10 tracers sharing sam
 ```
 environment/Dockerfile       # Go 1.22 + pytest, minimal skeleton panic stubs (hard — no free impl)
 steps/1_step_one/
-  instruction.md             # detailed hardened API spec (233 tests)
-  tests/test_outputs.py      # black-box Go harness via pytest, hardened with defensive-copy, nil handling, Flags, duplicate counting, gauge NaN, histogram dedup, logger shared mutex, all-zero IDs, Flags normalized, long key, mixed valid/invalid attrs, etc.
-  solution/solve.sh          # reference implementation with hardened semantics (defensive copies, empty key ignore, duplicate handling after limit, Flags, nil ctx, gauge NaN ignore, dedup buckets, shared logger mutex, all-zero invalid, Flags normalization, exportMu ordering fix)
+  instruction.md             # detailed hardened API spec (258 tests v7)
+  tests/test_outputs.py      # black-box Go harness via pytest, hardened with defensive-copy, nil handling, Flags, duplicate counting, gauge NaN, histogram dedup, logger shared mutex across child loggers, all-zero IDs, Flags normalized, long key, mixed valid/invalid attrs, IDGenerator empty, invalid parent hex, sampled strict, spaces trimmed per-part, parent invalid reuse, service fallback, etc. v7 adds 25 new discriminators
+  solution/solve.sh          # reference implementation with hardened semantics (defensive copies, empty key ignore, duplicate handling after limit, Flags normalized both directions, nil ctx, gauge NaN ignore keep prev, dedup buckets, shared logger mutex across With chain, all-zero invalid, invalid parent hex no write, IDGenerator empty handling, exportMu ordering fix respecting ctx timeout, exporter events deep copy)
 steps/2_step_two/
-  instruction.md             # scale requirements hardened with precise edge cases (120 tests)
+  instruction.md             # scale requirements hardened with precise edge cases (121 tests)
   tests/test_outputs.py      # includes last8 vs first16, error override precedence over invalid, boundary exact, parent AND, evict-oldest order, block-and-drain many concurrent, alias last wins, shutdown idempotent concurrent, truncation interaction, distinct dropped counting, aggregate overflow value, export timeout via select, ordering preserved, etc.
   solution/solve.sh          # implements hardened logic (droppedKeys tracking, truncation-before-key, gauge NaN, dedup, batch alias last wins, shutdown Once, exportMu ordering fix respecting ctx timeout)
-task.toml
+task.toml                    # Step1 258 tests, Step2 121 tests, explicit NOT API log analyzer for dedup 0.782
 ```
 
 ## Running

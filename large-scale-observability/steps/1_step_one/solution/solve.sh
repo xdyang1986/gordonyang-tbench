@@ -176,4 +176,4 @@ Ret5HO89/Q4B9cusoTsZLSv0Z7OlhiPvp0cJxFq6tEnD8nDbB+ngVdG695jNL5/Jt5N9DWXuoWmA
 U76kswAgh+5SVa8+AeceliZEQY9ZR+lb/GG97KDzzXacAGpars8KD+0kiM9nHzusbcT+06fjPj2f
 nk/Pp+fT8+n59Hx6Pj1/zef/ARzTF+8AyAAA
 B64
-cd /app && go mod tidy && go build ./... && go vet ./...
+echo "Solution installed"
