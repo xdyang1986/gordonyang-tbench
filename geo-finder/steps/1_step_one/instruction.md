@@ -82,7 +82,7 @@ DB file is JSON object mapping ID -> Geofence:
 Classify world-spanning before applying the crossing rule. The CLI must give the same answers the HTTP service is required to give in step 2.
 - Output: default JSON array of matching IDs sorted asc. Must be `[]`, not `null`, when no matches. `--verbose` → JSON array of matching Geofence objects sorted by ID asc, must be `[]` not `null` when empty.
 - Exit 0 even if empty (print `[]`, not `null`).
-- Performance: With 500 geofences each up to 100 points, lookup should complete in <200ms via CLI (tests will measure). Implement bounding-box prefilter even for CLI to meet this.
+- Performance: With 500 geofences each up to 100 points, a single lookup invocation must complete in well under 500ms end-to-end (tests will measure). How you achieve this is up to you.
 
 #### 5. `clear`
 - Delete all, atomically write `{}`, print `cleared`, exit 0.

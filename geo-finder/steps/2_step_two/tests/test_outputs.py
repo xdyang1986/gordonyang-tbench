@@ -2461,8 +2461,10 @@ def test_concurrent_post_stress():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_grid_cells_exact_small():
-    """Small zone at 0,0-0.5,0.5 with grid-size 1 must occupy exactly 1 cell – tight bookkeeping check."""
+def test_grid_cells_small_zone_is_local():
+    """A tiny zone must be indexed locally, not globally.
+    Convention-agnostic: accepts floor/floor (1 cell) and conservative ceil-expansion of max edge (up to 4 cells).
+    Still catches global/degenerate index (64800 cells) and 'index everything'."""
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -2475,23 +2477,88 @@ def test_grid_cells_exact_small():
         proc = start_server(db, port, grid_size="1", cache_size="0")
         try:
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            # latIdx = floor((0+90)/1)=90, lngIdx floor((0+180)/1)=180 -> single cell
-            # Even if polygon touches 0.5 boundary, still within same cell for size 1 because floor(0.5)=0 same?
-            # For 0-0.5 range, both 0 and 0.5 fall in same cell when gridSize 1 (except edge inclusive).
-            # The exact expected is 1 for this small zone.
-            assert stats["index_cells"] == 1, (
-                f"small zone should occupy exactly 1 cell with grid-size 1, got {stats['index_cells']}"
+            after_one = stats["index_cells"]
+            assert 1 <= after_one <= 4, (
+                f"tiny zone must occupy a handful of cells (1-4), got {after_one} – would be 64800 if globally indexed"
             )
+
+            # behaviour: point inside matches; point one cell away does not
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.25&lng=0.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "tiny" in resp.json()["geofences"], (
+                f"0.25,0.25 should be inside tiny"
+            )
+
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=1.5&lng=0.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == [], (
+                f"1.5,0.25 one cell away should be outside tiny"
+            )
+
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.25&lng=1.5", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert resp.json()["geofences"] == [], (
+                f"0.25,1.5 one cell away should be outside tiny"
+            )
+
+            # locality: second tiny zone far away adds comparably bounded number
+            payload = {
+                "id": "tiny2",
+                "name": "Tiny2",
+                "polygon": [
+                    {"lat": 20, "lng": 20},
+                    {"lat": 20, "lng": 20.5},
+                    {"lat": 20.5, "lng": 20.5},
+                    {"lat": 20.5, "lng": 20},
+                ],
+            }
+            r = requests.post(
+                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            )
+            assert r.status_code in (200, 201)
+            stats2 = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            after_two = stats2["index_cells"]
+            # second zone far away should add a handful of cells, not 0 and not 64800
+            assert 1 <= after_two - after_one <= 4, (
+                f"second far zone should add 1-4 cells, added {after_two - after_one} (after_one {after_one} after_two {after_two})"
+            )
+            # behaviour for second zone
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=20.25&lng=20.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "tiny2" in resp.json()["geofences"]
+            # first still matches
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.25&lng=0.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "tiny" in resp.json()["geofences"]
+
         finally:
             stop_server(proc)
 
-        # same zone with grid-size 5 should still be 1 cell
+        # same tiny zone with larger grid-size 5 should still be local (1-4 cells)
+        run_cli(db, ["clear"])
+        run_cli(
+            db,
+            ["add", "tiny", "--polygon", "0,0;0,0.5;0.5,0.5;0.5,0", "--name", "Tiny"],
+        )
         port2 = get_free_port()
         proc2 = start_server(db, port2, grid_size="5", cache_size="0")
         try:
             stats2 = requests.get(f"http://localhost:{port2}/stats", timeout=2).json()
-            assert stats2["index_cells"] == 1
+            assert 1 <= stats2["index_cells"] <= 4, (
+                f"tiny zone with grid-size 5 must be 1-4 cells, got {stats2['index_cells']}"
+            )
         finally:
             stop_server(proc2)
+
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

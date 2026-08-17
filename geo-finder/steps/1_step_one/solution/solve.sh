@@ -317,6 +317,51 @@ func crossesAntimeridianPoly(poly []Point) bool {
 	return diff > 180
 }
 
+func computeBBox(poly []Point) BBox {
+	if len(poly) == 0 {
+		return BBox{}
+	}
+	minLat := poly[0].Lat
+	maxLat := poly[0].Lat
+	minLng := poly[0].Lng
+	maxLng := poly[0].Lng
+	for _, p := range poly[1:] {
+		if p.Lat < minLat {
+			minLat = p.Lat
+		}
+		if p.Lat > maxLat {
+			maxLat = p.Lat
+		}
+		if p.Lng < minLng {
+			minLng = p.Lng
+		}
+		if p.Lng > maxLng {
+			maxLng = p.Lng
+		}
+	}
+	return BBox{MinLat: minLat, MaxLat: maxLat, MinLng: minLng, MaxLng: maxLng}
+}
+
+func pointInBBox(lat, lng float64, bbox BBox) bool {
+	if lat < bbox.MinLat-eps || lat > bbox.MaxLat+eps {
+		return false
+	}
+	span := bbox.MaxLng - bbox.MinLng
+	if span >= 360-eps {
+		return true
+	}
+	if span > 180 {
+		if lng > bbox.MinLng+eps && lng < bbox.MaxLng-eps {
+			return false
+		}
+		return true
+	}
+	if lng < bbox.MinLng-eps || lng > bbox.MaxLng+eps {
+		return false
+	}
+	return true
+}
+
 func pointInPolygon(lat, lng float64, poly []Point) bool {
 	usePoly := poly
 	useLng := lng
@@ -500,6 +545,10 @@ func cmdLookup(dbPath string, args []string) {
 	matchingIDs := make([]string, 0)
 	matchingGeofences := make([]Geofence, 0)
 	for _, g := range db {
+		bbox := computeBBox(g.Polygon)
+		if !pointInBBox(lat, lng, bbox) {
+			continue
+		}
 		if pointInPolygon(lat, lng, g.Polygon) {
 			matchingIDs = append(matchingIDs, g.ID)
 			matchingGeofences = append(matchingGeofences, g)
