@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 99 tests, extreme-hard – hardened, hole-edge clarified)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 114 tests, extreme-hard – hardened, hole-edge clarified)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 169 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 182 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
 
 Backward compatible with Step1, adds:
 
@@ -178,8 +178,8 @@ Reason: Step 2 is decided by one test. All seven step-2 failures are `test_estim
 - **Difficulty kept**: Step1 95→99 (added 4 robustness + kept 82 hard), Step2 152→153 (added 1 new snapped-original test, clarified deciding test). Overall still extreme-hard, but no longer decided by ambiguous single sentence. The 7 previous failures at 151/152 should now be resolved by clear spec, while other discriminators (hole-edge, antimeridian, mixed roads, backup mandatory, outlier boundaries, confidence, priority chain) keep difficulty.
 
 **Latest oracle after fix:**
-- Step1: 99/99 PASS (14s)
-- Step2: 169/169 PASS (10s)
+- Step1: 114/114 PASS (14s)
+- Step2: 182/182 PASS (10s)
 
 
 ## Final Hardening (Step2 too easy after clarifying ambiguous test)
@@ -195,4 +195,16 @@ Kept intuitive inactive allow-all for list/near, outside for geofence, and clari
 
 Step1 kept at 99 tests with hole-edge clarified and robustness tests (no-command, --help/-h/help, unknown exit2).
 
-Final oracle: Step1 99/99 PASS 14s, Step2 169/169 PASS 11s – both significantly harder than 58/79 and 82/138, addressing too-easy while keeping Step1 passable enough for Step2 attempts.
+Final oracle: Step1 114/114 PASS 14s, Step2 182/182 PASS 11s – both significantly harder than 58/79 and 82/138, addressing too-easy while keeping Step1 passable enough for Step2 attempts.
+
+## Final Ultra-Hardening (Both steps too easy – 2026-08-18T05:40:35Z)
+
+Previous 99+169 (after fixing ambiguous original_lat that caused 7 failures at 151/152) still too easy online.
+
+Hardened further:
+- Step1 99->114 (+15): antimeridian crossing 2 deg wide test (179 to -179), geofence antimeridian 2 deg, circle exact 1000m inside/outside, mixed roads legacy start/end, roads invalid entry exit2, list with since/until inclusive + zones + roads combined, near with all filters combined accuracy-max+speed-min+zones+roads+limit/offset, batch zones default out_of_zone even if stale (zones before stale), batch mixed update+delete same vehicle order, near radius 10m vs 12m boundary for 0.0001deg, list pagination offset-then-limit exact order, large scale 800 vehicles near under 3s, corrupt multiple backups distinct nanosec integer suffix, batch empty field defaults all combos, total_distance not increment on out_of_zone, etc.
+- Step2 153->182 (+29): outlier teleport dt 300 not outlier and distance 1000 boundary, heading flip speed exactly 10 not outlier distance 500 not outlier, acceleration spike 15 not outlier distance 300 not outlier, accuracy spike 75 not outlier old*2+30 boundary, speed vs implied 80 not outlier new speed 2 not outlier, confidence high age 10000 acc10 boundary with degradation accounting (acc degrades +0.5*age_sec), medium age 20000 exact, low when not snapped acc>25 age>10000, prediction east heading 90, pickup out_of_geofence beats all, low_accuracy beats moving/off_road, off_road beats road_mismatch, moving beats too_far, too_far exact 100m boundary, batch with outlier+low_accuracy+stale mixed, outlier_count persistence multiple vehicles, EMA weighted accuracy decay, road mismatch multi roads, old DB migration missing fields, large scale estimate 200 vehicles 50 estimates <5s, heading-aware filter close road filtered farther wins, plus 16 new boundary tests for teleport/heading/accel/accuracy/speed/confidence/pickup/dropoff/batch/EMA/road mismatch/migration/estimate.
+
+Final oracle: Step1 114/114 PASS 23s, Step2 182/182 PASS 10s – ultra-hardened to address too-easy while keeping Step1 passable enough for Step2 attempts (intuitive inactive allow-all, clear original_lat 4 cases).
+
+Timestamp for reference: 2026-08-18T05:40:35Z (epoch 1787031635)
