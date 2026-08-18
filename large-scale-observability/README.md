@@ -48,30 +48,108 @@ High-throughput verification: 100 goroutines x 100 spans, 10 tracers sharing sam
 ```
 environment/Dockerfile       # Go 1.22 + pytest, minimal skeleton panic stubs (hard — no free impl)
 steps/1_step_one/
-  instruction.md             # detailed hardened API spec (258 tests v7)
-  tests/test_outputs.py      # black-box Go harness via pytest, hardened with defensive-copy, nil handling, Flags, duplicate counting, gauge NaN, histogram dedup, logger shared mutex across child loggers, all-zero IDs, Flags normalized, long key, mixed valid/invalid attrs, IDGenerator empty, invalid parent hex, sampled strict, spaces trimmed per-part, parent invalid reuse, service fallback, etc. v7 adds 25 new discriminators
+  instruction.md             # detailed hardened API spec (step 1: 284 defs, 281 collected)
+  tests/test_outputs.py      # black-box Go harness via pytest, hardened with defensive-copy, nil handling, Flags, duplicate counting, gauge NaN, histogram dedup, logger shared mutex across child loggers, all-zero IDs, Flags normalized, long key, mixed valid/invalid attrs, IDGenerator empty, invalid parent hex, sampled strict, spaces trimmed per-part, parent invalid reuse, service fallback, etc.
   solution/solve.sh          # reference implementation with hardened semantics (defensive copies, empty key ignore, duplicate handling after limit, Flags normalized both directions, nil ctx, gauge NaN ignore keep prev, dedup buckets, shared logger mutex across With chain, all-zero invalid, invalid parent hex no write, IDGenerator empty handling, exportMu ordering fix respecting ctx timeout, exporter events deep copy)
 steps/2_step_two/
-  instruction.md             # scale requirements hardened with precise edge cases (121 tests)
+  instruction.md             # scale requirements hardened with precise edge cases (step 2: 128 defs, 127 collected)
   tests/test_outputs.py      # includes last8 vs first16, error override precedence over invalid, boundary exact, parent AND, evict-oldest order, block-and-drain many concurrent, alias last wins, shutdown idempotent concurrent, truncation interaction, distinct dropped counting, aggregate overflow value, export timeout via select, ordering preserved, etc.
   solution/solve.sh          # implements hardened logic (droppedKeys tracking, truncation-before-key, gauge NaN, dedup, batch alias last wins, shutdown Once, exportMu ordering fix respecting ctx timeout)
-task.toml                    # Step1 258 tests, Step2 121 tests, explicit NOT API log analyzer for dedup 0.782
+task.toml                    # explicit NOT API log analyzer, for dedup separation
 ```
 
 ## Running
-Verifier is pytest that generates ephemeral Go modules importing `ride-observability` from `/app` and runs `go run` and `go run -race`.
 
-Reference solutions:
-- Step1: passes 233 tests (was 55, added 178 harder: defensive-copy WithLabels/WithBuckets, truncation reuse, buckets deep copy, gauge NaN/Inf ignore, nil ctx handling, Context returns copy, duplicate key not counting toward limit, empty key ignored, Flags preserved, event attrs deep copy, logger immutability concurrent with shared mutex fix, histogram dedup, parent id consistency, output nil fallback, plus v3 hardening: nil attribute value ignored, invalid type ignored, EndTime preserved on idempotent, SetStatus after End noop, bucket NaN/Inf filtered, logger field duplicate last-wins, With defensive copy fields, exporter concurrent Clear, custom IDGen invalid hex marshal no-write, service name preserved, marshal overwrites carrier, WithLabels nil reuse, empty buckets default, timestamp recent UTC, duplicate across limit overwrite, JSON escaping, duplicate within same call, plus v6: all-zero IDs invalid, Flags normalized, long attribute key allowed, marshal nil carrier/ctx no panic, unmarshal nil/empty carrier no panic, mixed valid/invalid attrs, event attr duplicate last-wins and invalid truncation, ContextWithTrace nil+empty, parent handling, map deep copy key mutation, logger concurrent exact lines, level debug shows all, no trace when invalid context, trace includes parent_id, metrics description first wins, histogram negative buckets sorted, label key validation more, type conflict first wins)
-- Step2: passes 120 tests (was 41, added 79 harder: error override precedence over invalid, boundary exact threshold < not <=, alias last wins, order preserved with evict-oldest, shutdown idempotent, exporter error continues, cardinality truncation interaction, drop distinct counting avoiding double count, queueLen never exceeds under concurrency, block many concurrent during flush, nil root fallback, aggregate overflow value aggregated, export timeout respects with ForceFlush, sampler nil no panic, no busy loop CPU, ordering preserved across batches, backpressure timing, goroutine leak, etc.)
+Verifier is pytest that generates ephemeral Go modules importing `ride-observability`
+from `/app` and runs `go run` and `go run -race`. The harness wraps pytest in `set +e`
+so `reward.txt` is always written.
 
-Test harness uses `set +e` around pytest to ensure reward.txt is always written.
+```bash
+bash steps/1_step_one/solution/solve.sh && pytest steps/1_step_one/tests/test_outputs.py -q
+bash steps/2_step_two/solution/solve.sh && pytest steps/2_step_two/tests/test_outputs.py -q
+```
 
-## Difficulty — Increased to Very Hard (v6 - 233 tests)
-Very Hard+, ~180min expert, 360min junior. Both turns now have many subtle edge cases requiring precise spec reading. Step1 alone now gates most models with 190 discriminators.
+## Latest online validation result
 
-- **Turn 1 (233 tests)** — discriminators: `test_metrics_collect_copy` (deep copy Labels non-nil) + `test_metrics_withlabels_defensive_copy` + `test_metrics_withbuckets_defensive_copy` + `test_metrics_label_truncation_reuse_after_truncate` (truncate before key) + `test_metrics_collect_buckets_deep_copy` + `test_gauge_ignore_nan_inf` + `test_tracing_start_nil_context` + `test_tracing_contextwithtrace_nil` + `test_tracing_context_returns_copy` + `test_tracing_duplicate_key_not_count_toward_limit` + `test_tracing_empty_attribute_key_ignored` + `test_tracing_flags_preserved_via_propagation` + `test_exporter_event_attributes_deep_copy` + `test_logger_with_immutability_and_concurrent` (shared mutex) + `test_histogram_dedup_buckets` + **new v3**: `test_tracing_attribute_nil_value_ignored` (nil value ignored not counted) + `test_tracing_attribute_invalid_type_ignored` (slice/map/struct ignored) + `test_tracing_endtime_preserved_on_idempotent` (EndTime preserved) + `test_tracing_setstatus_after_end_noop` + `test_metrics_histogram_bucket_nan_inf_filtered` (NaN/Inf filtered) + `test_logger_field_duplicate_last_wins` + `test_logger_with_defensive_copy_fields` + `test_exporter_concurrent_clear` + `test_tracing_custom_idgen_invalid_hex_marshal_no_write` + `test_tracing_service_name_preserved` + `test_tracing_marshal_overwrites_existing_carrier` + `test_metrics_withlabels_nil` + `test_metrics_histogram_empty_buckets_uses_default` + `test_logger_timestamp_recent_and_utc` + `test_tracing_withparent_duplicate_across_withattributes_and_addafterlimit` + `test_logger_json_escaping_special_chars` + `test_tracing_context_withattributes_duplicate_within_same_call_last_wins` + **new v6**: `test_tracing_all_zero_ids_invalid_marshal` (all-zero IDs invalid) + `test_tracing_flags_normalized_in_contextwithtrace` (Flags normalized) + `test_tracing_long_attribute_key_allowed` + `test_tracing_marshal_nil_carrier_and_nil_context_no_panic` + `test_tracing_unmarshal_nil_and_empty_carrier_no_panic` + `test_tracing_withattributes_mixed_valid_invalid` + `test_tracing_event_attr_duplicate_last_wins` + `test_tracing_event_attr_invalid_and_truncate` + `test_tracing_contextwithtrace_nil_and_empty` + `test_tracing_parent_parentid_handling` + `test_tracing_attributes_map_deep_copy_key_mutation` + `test_logger_concurrent_exact_lines` + `test_logger_level_debug_shows_all` + `test_logger_no_trace_when_invalid_context` + `test_logger_trace_includes_parent_id` + `test_metrics_description_first_wins` + `test_metrics_histogram_negative_buckets_sorted` + `test_metrics_label_key_validation_more` + `test_metrics_type_conflict_first_wins` + single-header strict
-- **Turn 2** — main discriminators: `test_batch_batch_size_limit` (hard cap even on shutdown) + `test_batch_evict_oldest` order preserved + `test_batch_forceflush_block_and_drain` + `test_ratio_sampler_error_override_with_invalid_traceid` (override precedence) + `test_ratio_sampler_boundary_exact_threshold` (< not <=) + `test_batch_alias_last_wins` (alias handling) + `test_batch_order_preserved_with_evict_oldest` + `test_batch_shutdown_idempotent` + `test_batch_exporter_error_continues_processing` + `test_metrics_cardinality_truncation_interaction` + `test_metrics_cardinality_drop_distinct_counting` + `test_batch_queuelen_never_exceeds_under_concurrency` + `test_batch_forceflush_block_many_concurrent_during_flush` + evict-oldest, block-and-drain, ratio last8, error override, parent AND, QueueLen semantics, DroppedCount distinct counting
+**Commit `f6cf85ba` (HEAD, v1.48) · run 2026-08-17 · jobs 4968008 / 4968009 / 4968010 / 4968011 · AFTR run 9223875**
+
+> **All gates green.** Validation passing, Agentic Full-Task Review **GOOD**, TBR
+> 17/18 now passing (was 16/18 `fail` at `c021115c`). Status is `draft` — no revision
+> outstanding.
+
+| Field | Value |
+| --- | --- |
+| `validationStatus` | **passing** — all 5 gates |
+| Agentic Full-Task Review | **GOOD** — difficulty `GENUINELY_HARD`, all 13 rubrics PASS, secondary issues NONE |
+| `tbdReviewStatus` | **pass** — TBR 17/18 |
+| TBR axes | instruction_clarity **2**; all five others 3 |
+| Difficulty classification | GOOD — Opus 467/877 tests (53%), oracle 237/277 (86%) |
+| Novelty risk | MEDIUM |
+| Contamination | Not checked — repo not yet covered by the pipeline |
+| Provenance | CLEAN |
+| Embedding dedup | 0.7664 (threshold 0.8) |
+| Structural checks | 10/10 PASS |
+| `status` / `reviewStatus` | draft |
+
+| Stage | Job | Result | Reward split |
+| --- | --- | --- | --- |
+| oracle | 4968009 | **3/3** | 3 × 1.00 |
+| codex (`gpt-5.5`) | 4968011 | **9/10** | 9 × 1.00, 1 × 0.50 |
+| metacode (avocado `avocado-5.14-code`) | 4968010 | **3/10** | 3 × 1.00, 2 × 0.50, 5 × 0.00 |
+| agent (opus `claude-opus-4-8`) | 4968008 | **1/10** | 1 × 1.00, 9 × 0.00 |
+
+Pass/fail balance gate: **passed** — avocado not trivial (3/10) and ≥1 agent solved.
+
+### Failure spread (all 17 non-1.00 trials, from downloaded `ctrf.json`)
+
+| Test | Step | Count | opus | avocado | codex |
+| --- | --- | --- | --- | --- | --- |
+| `test_tracing_flags_normalized_in_contextwithtrace` | **1** | 14 | 9 | 5 | 0 |
+| `test_tracing_contextwithtrace_flags_normalized_both` | **1** | 14 | 9 | 5 | 0 |
+| `test_tracing_all_zero_spanid_parentid_variants` | 1 | 4 | 4 | 0 | 0 |
+| `test_batch_forceflush_block_many_concurrent_during_flush` | 2 | 2 | 0 | 2 | 0 |
+| `test_batch_timeout_trigger` | 2 | 1 | 0 | 0 | 1 |
+| `test_batch_order_preserved` | 2 | 1 | 0 | 1 | 0 |
+| `test_batch_forceflush_concurrent_producers_block_then_succeed` | 2 | 1 | 0 | 1 | 0 |
+
+Reading:
+- **Step 1 rests on a single semantic rule, duplicated across two tests.** The two
+  flags-normalization tests fail *in lockstep in all 14 failing trials* — never one
+  without the other. They are one discriminator counted twice: `ContextWithTrace` must
+  normalise `Flags` from `Sampled` in both directions. The AFTR independently suggests
+  consolidating them.
+- **That one rule sets opus's score.** Opus is 1/10, and every one of its 9 failures is
+  a step-1 failure containing this pair. The rule *is* specified, but only inside the
+  changelog-style dump at the end of step 1's `instruction.md` — the same text TBR
+  penalises for clarity.
+- **Failures are surgical.** No trial fails more than 3 tests out of 281 (step 1) or
+  127 (step 2); most fail exactly 2 — the lockstep pair.
+- **Step 2 discriminates only lightly**, via four distinct batch-processor tests
+  (ForceFlush block-and-drain, FIFO order, timeout trigger) hitting one trial each.
+
+### Open quality items (non-blocking)
+
+Both remaining TBR concerns and the AFTR's optional notes, verified against the repo:
+
+1. **Four test functions are shadowed by duplicate names.** Step 1 defines 284 but
+   collects **281**; step 2 defines 128 but collects **127**. Duplicates:
+   `test_logger_output_nil_fallback`, `test_tracing_concurrent_end_exactly_once`,
+   `test_tracing_event_timestamp_between_start_end` (step 1) and
+   `test_parent_aware_nested` (step 2). Python keeps only the last definition, so the
+   earlier body never runs. This exactly explains the count mismatch the AFTR reports —
+   the fix is to de-duplicate so all 284/128 run, not to restate 281/127 in prose.
+2. **The "no busy loop CPU" tests do not measure CPU.**
+   `test_batch_processor_no_busy_loop_cpu` (step 2) sleeps 500 ms then asserts one span
+   exports; a busy-looping implementation passes. Vacuous relative to its name.
+3. **Instruction verbosity** keeps `instruction_clarity` at 2 — the spec carries
+   internal changelog noise (`v6: … v7 new: …`) and self-hedging prose, and leaks
+   version and test-count information to the solver.
+4. **Timing margins** — the AFTR asks that batch timing tests stay conservative, since
+   `R09:Test reliability` depends on scheduler behaviour on slower hosts.
+
+None of these block use; the AFTR states *"No required fixes are needed before use."*
+Note that consolidating the duplicate flags-normalization tests would remove step 1's
+only discriminator, so weigh that against the balance gate before acting.
 
 ## Novelty Fix Details
 
@@ -105,61 +183,13 @@ These are exact identifiers from `go.opentelemetry.io/otel/sdk/trace`, `tracetes
 - BatchProcessor alias last wins (WithBatchSize vs WithMaxBatchSize), non-positive fallback to defaults, QueueLen excludes batch never exceeds, DroppedCount distinct counting avoiding double count, truncation interaction before key, shutdown idempotent sync.Once, concurrent Shutdown+ForceFlush no deadlock, ExportTimeout via select, exporter error continues, ordering preserved, block-and-drain many concurrent.
 - Metrics cardinality droppedKeys tracking to avoid double counting same dropped label.
 
-## Latest Run Analysis
-
-Post-hardening (v2):
-| Gate | Expected | Notes |
-|------|----------|-------|
-| Oracle | 213/213 step1, 78/78 step2 (100%) | reference solutions pass all |
-| Weak models | <50% expected | many new edge cases require precise reading |
-
-## Recent Enhancements (v2 Hardening)
-- **Minimal skeleton**: MemoryExporter, SimpleProcessor, MarshalTrace/UnmarshalTrace, MetricsProvider, Logger all panic stubs (was previously fully implemented helpers giving away deep-copy and propagation logic)
-- **Defensive copies**: WithLabels, WithBuckets, context, GetSpans, Collect Buckets
-- **Nil handling**: Start nil ctx, ContextWithTrace nil, TraceFromContext nil, Marshal nil carrier, WithOutput nil, WithSampler nil
-- **Duplicate key handling**: distinct counting not increasing on duplicate, overwrite allowed after limit, empty key ignored
-- **Flags**: Flags 1 if sampled else 0 preserved via propagation
-- **Gauge NaN/Inf**: Set/Add ignore NaN/Inf
-- **Histogram dedup**: sorted dedup exact duplicate buckets
-- **Logger shared mutex**: With chain shares mutex for atomic writes across child loggers
-- **RatioSampler**: error/critical override precedence over invalid, boundary exact threshold < not <=, case-insensitive
-- **Batch alias**: WithMaxBatchSize alias last wins
-- **QueueLen**: never exceeds under concurrency, excludes batch
-- **DroppedCount distinct**: same dropped label repeated does not double count
-- **Truncation interaction**: label truncate 256 before cardinality key
-- **Shutdown idempotent**: sync.Once and concurrent with ForceFlush no deadlock
-- **ExportTimeout**: via goroutine select respected in ForceFlush
-
-
 ## Description
 
 This task asks to implement a production-grade observability library in Go for a ride-hailing system handling 10k+ req/sec. It tests three coupled domains: distributed tracing with custom single-header propagation `x-ride-trace` (not W3C 4-header), metrics with cardinality limiting and defensive-copy semantics, and structured JSON logging with trace correlation. Naive approaches fail because (a) OTel recall is punished — ratio sampler uses last 8 hex vs OTel first 16, error/critical override precedence, parent AND logic, batch evict-oldest vs drop-newest; (b) defensive-copy and truncation-before-key reuse require precise map/slice copying; (c) concurrency requires shared mutex for logger and snapshot export for spans, otherwise `go run -race` fails.
 
-## Completion Rates
-
-Empirical pass rates out of 5 oracle trials and 10 trials per gate model (pinned versions: Avocado Code Latest, Claude Opus 4.6, Codex):
-
-- Oracle (reference solution from solve.sh): 5/5 (100%) — 213/213 step1, 78/78 step2
-- Avocado Code Latest: 0/10 step1 (0%), 0/10 step2 (0%) — fails on defensive copy, Flags, truncation collision, batch alias last-wins, distinct dropped counting
-- Claude Opus 4.6: 1/10 step1 (10%), 0/10 step2 (0%) — passes basic propagation but fails on nil ctx, duplicate key not counting toward limit, gauge NaN/Inf, histogram dedup, logger shared mutex
-- Codex (1P): 2/10 step1 (20%), 1/10 step2 (10%) — partially handles truncation but fails on case-insensitive header, event empty name, service override protection, block-and-drain
-
-Overall task pass rate 0/10 for full multi-turn, aligning with difficulty=hard.
-
-## Model Analysis
-
-**Avocado (0/10):** Fails earliest on `test_tracing_context_returns_copy` (returns reference not copy), `test_metrics_withlabels_defensive_copy` (mutates original map affects provider), `test_logger_with_immutability_and_concurrent` (creates new mutex per child causing data race on shared buffer). Cross-model failure category: defensive-copy isolation accounts for 40% of Avocado failures.
-
-**Opus (1/10):** Gets past basic tracing but fails on `test_tracing_duplicate_key_not_count_toward_limit` (counts duplicate as new distinct, exhausts 128), `test_gauge_ignore_nan_inf` (sets NaN overwrites value), `test_tracing_attribute_nil_value_ignored` (stores nil). Failure category: resource limit distinct counting and type filtering = 50% of failures.
-
-**Codex (2/10):** Handles many edge cases but fails on `test_tracing_extract_header_case_insensitive` (exact key match only), `test_tracing_event_empty_name_ignored` (stores empty name), `test_logger_service_cannot_be_overridden_by_with` (allows overriding service), `test_batch_alias_last_wins` (only implements WithBatchSize not aliases), `test_metrics_cardinality_drop_distinct_counting` (double counts same dropped label). Category: propagation robustness and cardinality distinct counting = 60% of Codex failures.
-
-All failures reflect reasoning gaps (not setup): models recall OTel 4-header and drop-newest semantics, miss truncation-before-key ordering, miss shared logger mutex requirement, miss Flags preservation.
-
 ## Anti-Cheating Analysis
 
 - **Hardcoded outputs:** Tests generate ephemeral Go modules via `go run` importing `/app` and assert behavior via runtime panics, not static expected.txt files. No hardcoded output file to copy.
-- **Overfitting to visible tests:** 170 step1 tests cover many combinatorial edge cases (case-insensitive, whitespace, truncation collision, concurrent create same labelset). Overfitting to a subset still fails others. No visible answer in test files — only Go code that must be executed.
+- **Overfitting to visible tests:** 281 collected step1 tests cover many combinatorial edge cases (case-insensitive, whitespace, truncation collision, concurrent create same labelset). Overfitting to a subset still fails others. No visible answer in test files — only Go code that must be executed.
 - **Modifying test files:** Tests are mounted at `/tests/` at runtime (TBench harness mounts `tests/` directory). The container's task directory is read-only for tests? Even if agent edits `/app/observability`, it cannot modify `/tests/` to bypass. Solve.sh does not modify tests.
 - **Bypassing intended path:** Dockerfile provides only minimal panic stubs for MemoryExporter, SimpleProcessor, MarshalTrace/UnmarshalTrace, MetricsProvider, Logger. No pre-solved files to diff. Agent must implement all public symbols from scratch; merely copying skeleton fails.
-
