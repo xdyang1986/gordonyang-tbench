@@ -3,117 +3,120 @@
 ## Description
 This multi-turn T-Bench task builds a Go CLI router in two phases, now both GIGA HARD EXTRA.
 
-- **Turn1 (1_step_one) – GIGA HARD (134 tests, was 97, was 69):** Implements distance-based shortest path selection. The agent must read a graph JSON (`nodes` + undirected `edges` with positive `distance`), compute Dijkstra shortest paths minimizing total physical distance, handle source==destination, disconnected graphs (exit 1 with empty path), invalid graphs (duplicate nodes, empty IDs, self-loops, negative distance, missing node reference, **nodes containing non-string, edges containing non-object, edge missing from/to/distance, from/to non-string, distance null/bool/string/0/negative/-0, trailing comma, // comments, BOM, top-level not object, nodes empty array, edge leading/trailing space exact-match semantics, distance scientific 1e+3/1E+3/1e+2 plus valid, +5 invalid JSON** → exit 2), support single mode (`--graph --from --to`) and batch mode (`--graph --requests` array of `{source,destination}` or `{from,to}`), enforce lexicographically smallest path tie-breaking (critical for determinism when equal-distance paths exist, including **5-way/10-way ties, deeper diamond-of-diamonds where decision at depth 2, case-sensitive ASCII where 'A' < 'a' and '-' < '.' < '_'**, prefix shorter wins), produce help output containing `graph, from, to, requests, help` with **help precedence over unknown flags** (`--help --unknown` → help exit 0), **flag order independence**, **positional help `help`**, **single-mode empty/whitespace from/to invalid exit2 vs batch empty no-route**, **non-existing node query no-route exit1**, **duplicate edges reverse direction keep min**, **requests array entries must be objects, null/non-object invalid, null source/dest invalid, empty object {} invalid, missing key vs empty string distinction**, **invalid JSON trailing comma in requests**, **large graphs 2000 nodes 10000 edges, batch 1000 float distances, 5000 nodes <4.5s, 200 batch 2000 nodes <6s, same-source amortization, relative bound batch 100 <=25*base+1**. Built via `go build -o router .` from `/app`, stdlib only, no external deps, binary at `/app/router`.
+- **Turn1 (1_step_one) – GIGA HARD (140 tests):** Implements distance-based shortest path selection. The agent must read a graph JSON (`nodes` + undirected `edges` with positive `distance`), compute Dijkstra shortest paths minimizing total physical distance, handle source==destination, disconnected graphs (exit 1 with empty path), invalid graphs (duplicate nodes, empty IDs, self-loops, negative distance, missing node reference, **nodes containing non-string, edges containing non-object, edge missing from/to/distance, from/to non-string, distance null/bool/string/0/negative/-0, trailing comma, // comments, BOM, top-level not object, nodes empty array, edge leading/trailing space exact-match semantics, distance scientific 1e+3/1E+3/1e+2 plus valid, +5 invalid JSON** → exit 2), support single mode (`--graph --from --to`) and batch mode (`--graph --requests` array of `{source,destination}` or `{from,to}`), enforce lexicographically smallest path tie-breaking (critical for determinism when equal-distance paths exist, including **5-way/10-way ties, deeper diamond-of-diamonds where decision at depth 2, case-sensitive ASCII where 'A' < 'a' and '-' < '.' < '_'**, prefix shorter wins), produce help output containing `graph, from, to, requests, help` with **help precedence over unknown flags** (`--help --unknown` → help exit 0), **flag order independence**, **positional help `help`**, **single-mode empty/whitespace from/to invalid exit2 vs batch empty no-route**, **non-existing node query no-route exit1**, **duplicate edges reverse direction keep min**, **requests array entries must be objects, null/non-object invalid, null source/dest invalid, empty object {} invalid, missing key vs empty string distinction**, **invalid JSON trailing comma in requests**, **large graphs 2000 nodes 10000 edges, batch 1000 float distances, 5000 nodes <4.5s, 200 batch 2000 nodes <6s, same-source amortization, relative bound batch 100 <=25*base+1**. Built via `go build -o router .` from `/app`, stdlib only, no external deps, binary at `/app/router`.
 
-- **Turn2 (2_step_two) – GIGA HARD EXTRA (256 tests, was 161, was 122):** Extends same binary with traffic-aware routing. New flag `--traffic` points to traffic JSON (`{"traffic":[{"from","to","factor":>0,"delay":>=0}]}` or direct array), validates factor >0, delay>=0 default 0, edge must exist in graph undirected, self-loop invalid, duplicate same unordered pair including reverse B-A **last-wins including delay reset to 0 when second entry missing delay**, missing entries default factor 1.0 delay 0, direct array and object-wrapped forms accepted, **BOM/trailing comma/comment must not crash**, **top-level must be object with traffic array or direct array – string/number/null invalid**, **wrapper traffic null vs empty valid distinction: {"traffic":null} invalid vs {"traffic":[]} and [] valid empty**, **direct array elements must be objects starting with '{' not null**, **null/number/string/array like [1,2,3] invalid**, **from/to must be string non-empty whitespace-only invalid, leading/trailing spaces exact-match no trim – " A" ≠ "A" → edge not found invalid (different from requests where " A" is no-route)**, **factor 0/negative/-0/null/string/bool/object/array invalid, factor scientific with plus 1e+3/1E+3/1e+2/2.5e+2 valid**, **delay negative/null/string/bool/object/array invalid, delay scientific plus 1e+2 valid**, **extra nested fields ignored**. Routing now minimizes effective distance `effective = raw*factor + delay` **strict per edge not (raw+delay)*factor** – multi-edge sum discrimination critical, reports both raw `distance`, `effective_distance`, `traffic_delay = effective - raw` (float tolerance 1e-6) per-edge sum, supports factor <1 (faster lane, negative delay allowed), **raw must be sum along effective-best path not raw-best** (reroute changes raw), batch mode outputs extra fields, source==dest 0 values, no-route outputs -1 for all distance fields, **3-level tie-break effective (1e-9) → raw (1e-9) → lex smallest path ASCII case-sensitive**, deeper diamond-of-diamonds effective equal where decision at depth2, **10-way effective tie B..K must pick B**, **secondary raw tie: effective equal 12 raw 11 vs 4 pick 4 even though B<C lex would pick 11**, **special chars '-' < '.' < '_'**, **case-sensitive 'A'<'a'**, **prefix shorter wins**, **float tolerance tie 1e-9 effective equal within epsilon → raw wins**, lexicographic tie-break remains but on effective distance. Help must now include `traffic` keyword (6 keywords). Turn1 functionality must still work when traffic not supplied (117/119 Turn1 tests pass with Turn2 binary, excluding 2 Turn1-only traffic-unknown checks). Also inherits all Turn1 extra-hard validations (BOM, trailing comma, leading space exact-match, null handling, help precedence, flag equals/order independence, etc.) – Turn2 solution updated to pass **256 tests** plus **117/119 Turn1 tests**.
+- **Turn2 (2_step_two) – GIGA HARD EXTRA (269 tests):** Extends same binary with traffic-aware routing. New flag `--traffic` points to traffic JSON (`{"traffic":[{"from","to","factor":>0,"delay":>=0}]}` or direct array), validates factor >0, delay>=0 default 0, edge must exist in graph undirected, self-loop invalid, duplicate same unordered pair including reverse B-A **last-wins including delay reset to 0 when second entry missing delay**, missing entries default factor 1.0 delay 0, direct array and object-wrapped forms accepted, **BOM/trailing comma/comment must not crash**, **top-level must be object with traffic array or direct array – string/number/null invalid**, **wrapper traffic null vs empty valid distinction: {"traffic":null} invalid vs {"traffic":[]} and [] valid empty**, **direct array elements must be objects starting with '{' not null**, **null/number/string/array like [1,2,3] invalid**, **from/to must be string non-empty whitespace-only invalid, leading/trailing spaces exact-match no trim – " A" ≠ "A" → edge not found invalid (different from requests where " A" is no-route)**, **factor 0/negative/-0/null/string/bool/object/array invalid, factor scientific with plus 1e+3/1E+3/1e+2/2.5e+2 valid**, **delay negative/null/string/bool/object/array invalid, delay scientific plus 1e+2 valid**, **extra nested fields ignored**. Routing now minimizes effective distance `effective = raw*factor + delay` **strict per edge not (raw+delay)*factor** – multi-edge sum discrimination critical, reports both raw `distance`, `effective_distance`, `traffic_delay = effective - raw` (float tolerance 1e-6) per-edge sum, supports factor <1 (faster lane, negative delay allowed), **raw must be sum along effective-best path not raw-best** (reroute changes raw), batch mode outputs extra fields, source==dest 0 values, no-route outputs -1 for all distance fields, **3-level tie-break effective (1e-9) → raw (1e-9) → lex smallest path ASCII case-sensitive**, deeper diamond-of-diamonds effective equal where decision at depth2, **10-way effective tie B..K must pick B**, **secondary raw tie: effective equal 12 raw 11 vs 4 pick 4 even though B<C lex would pick 11**, **special chars '-' < '.' < '_'**, **case-sensitive 'A'<'a'**, **prefix shorter wins**, **float tolerance tie 1e-9 effective equal within epsilon → raw wins**, lexicographic tie-break remains but on effective distance. Help must now include `traffic` keyword (6 keywords). Turn1 functionality must still work when traffic not supplied (Turn1 tests pass with the Turn2 binary, excluding the Turn1-only "help must not contain traffic" checks). Also inherits all Turn1 extra-hard validations (BOM, trailing comma, leading space exact-match, null handling, help precedence, flag equals/order independence, etc.). Current suite sizes: **Turn1 140 tests, Turn2 269 tests**.
 
 Why naive fails: simple BFS ignores weights; sorting only by distance without lexicographic tie-break fails deterministic tests; forgetting undirected nature; not handling duplicate edges with minimal distance including reverse; missing exit code distinction (0 all routed, 1 some no route, 2 invalid); ignoring batch order; traffic mode requiring effective-distance minimization not raw, requiring recomputed raw sum along traffic-chosen path (raw along effective-best not raw-best); handling both `{source,destination}` and `{from,to}` request keys; handling traffic file dual formats; floating tolerance; **help precedence** (Go flag package errors on unknown before help unless you scan args early); **BOM/trailing comma/comment JSON must not crash**; **nodes non-string, edges non-object must be invalid**; **edge " A" with leading space is not auto-trimmed – exact match matters – its reference missing → invalid graph, but request " A" is no-route, traffic " A" is invalid (edge not found)**; **null literal in batch source/dest – Go's json.Unmarshal null into string gives "" without error, must explicitly detect "null" raw**; **flag order independence**, **equals syntax --graph=path requires flag package or custom parsing**; **single vs batch empty semantics**; **deep lex tie requiring full path compare, not just second node**; **case-sensitive ASCII ordering**; **reverse duplicate min**; **traffic per-edge formula raw*factor+delay vs (raw+delay)*factor – sum over 2 edges discriminates**; **duplicate traffic last-wins with delay reset – second entry without delay must reset delay 0 not keep old delay**; **reverse duplicate traffic B-A overwrites A-B**; **factor scientific plus 1e+3 valid – many hand parsers reject plus**; **traffic wrapper null vs empty distinct – {"traffic":null} invalid vs [] valid**; **direct array invalid elements – null/number/string/array must be invalid**; **from/to whitespace-only invalid, leading/trailing space exact invalid**; **factor 0/negative invalid, delay negative invalid**; **secondary raw tie – effective equal raw differs pick raw smaller**; **float tolerance effective equal within 1e-9 considered tie**; **same-source amortization – cache per origin else 500 same vs 500 distinct fails 25% bound**; **output strictness – exactly 4 keys single with traffic, 6 keys batch, no extra, -1 for all fields on no-route**.
 
-## What Changed to Make Step1 Harder (previous PR)
+## Latest online validation result
 
-- Added 28 new tests (69 → 97) then extended to 119:
-  - `test_invalid_graph_nodes_contain_non_string`, `test_invalid_graph_edges_contain_non_object`, `test_invalid_graph_edge_missing_fields`, `test_invalid_graph_edge_from_to_not_string`, `test_invalid_graph_edge_distance_various_invalid`, `test_invalid_graph_json_trailing_comma`, `test_invalid_graph_json_comment`, `test_invalid_graph_json_bom`, `test_graph_top_not_object_invalid`, `test_edge_with_leading_trailing_space_invalid`, `test_node_id_with_leading_space_distinct_valid`, `test_request_non_object_entries_invalid`, `test_request_with_null_source_invalid` (including raw `null` literal), `test_request_empty_object_invalid`, `test_batch_with_missing_field_invalid` (explicit dominant failure), `test_help_with_extra_invalid_flags_still_help`, `test_help_positional`, `test_flag_order_independence`, `test_single_mode_empty_from_invalid`, `test_query_non_existing_node_no_route`, `test_duplicate_edges_reverse_min`, `test_lexicographic_deeper_tie` (diamond of diamonds), `test_lexicographic_case_sensitive_ascii`, `test_large_graph_2000_nodes`, `test_batch_1000_float_distances`, `test_requests_file_invalid_json_trailing_comma`, `test_invalid_graph_nodes_empty_array`, `test_batch_source_equals_dest_batch`, plus 22 more to reach 119.
-- Updated `instruction.md` to EXTRA HARD spec covering all new validations, help precedence, flag order, exact-match space semantics, JSON malformation, type checks.
-- Rewrote `solution/solve.sh` for Turn1 with robust parsing: top-level must be object, nodes array elements must be strings, edges array elements must be objects starting with '{' not null, explicit "null" literal detection, leading/trailing space exact-match (no auto-trim except whitespace-only check), help early scan before flag.Parse, null handling for batch.
-- Performance thresholds tightened: 2000 nodes <3.5s, 1000 float batch <5s, 5000 line <4.5s, 200 linear 2000 batch <6s.
+**Commit `a546ac05` (HEAD, v1.31) · run 2026-08-17 · jobs 4968241 / 4968242 / 4968243 / 4968244 · AFTR run 9220238**
 
-## What Changed to Make Step2 Harder (this PR – addressing "step 2 is too easy")
+> **BLOCKED — validation FAILED.** The oracle fails 0/3: the reference solution is
+> OOM-killed on one Step 2 performance test. The Agentic Full-Task Review returned
+> **`BAD_GRADING_WEAK`** (secondary **`BAD_GOLDEN`**), TBR is `fail`, and the platform
+> set `status = needs_revision`. Two concrete defects must be fixed — see below.
 
-Previous online validation showed Turn2 not discriminating:
+| Field | Value |
+| --- | --- |
+| `validationStatus` | **failed** — Oracle validation 0/3 (all must pass) |
+| `status` / `reviewStatus` | **needs_revision** |
+| `tbdReviewStatus` | **fail** |
+| Agentic Full-Task Review | **`BAD_GRADING_WEAK`** (primary R06), secondary **`BAD_GOLDEN`** (R12/R13) |
+| Difficulty classification | GOOD — Opus 231/595 tests (39%), oracle 188/196 (96%) |
+| Novelty risk | MEDIUM |
+| Contamination | Not checked — repo not yet covered by the pipeline |
+| Provenance | CLEAN |
+| Embedding dedup | **0.7993** against a 0.8 threshold — 0.0007 under, effectively at the line |
+| Structural checks | 10/10 PASS |
 
-| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 | Mean |
-|-------|---------------|-----------------|--------|--------|------|
-| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | 1.00 |
-| Agent | claude-code / claude-opus-4-8 | 5/10 (50%) | 5/10 | 5/5 (100% of Turn1 passes) | 0.50 |
-| Metacode | meta/avocado-5.14-code | 3/10 (30%) | 3/10 | 3/3 (100%) | 0.30 |
-| Codex | gpt-5.5 | 1/10 (10%) | 1/10 | 1/1 (100%) | 0.10 |
+| Stage | Job | Result | Reward split |
+| --- | --- | --- | --- |
+| oracle | 4968243 | **0/3** | 3 × 0.50 (Step 1 passes, Step 2 fails every run) |
+| metacode (avocado `avocado-5.14-code`) | 4968241 | **1/10** | 1 × 1.00, 4 × 0.50, 5 × 0.00 |
+| agent (opus `claude-opus-4-8`) | 4968242 | **0/10** | 10 × 0.00 |
+| codex (`gpt-5.5`) | 4968244 | **0/10** | 10 × 0.00 |
 
-Turn2 pass rate = 100% conditional on Turn1 pass → too easy.
+The pass/fail balance gate reports "passed" (avocado non-trivial at 1/10 and ≥1 agent
+solved), but the oracle gate fails, so overall validation is **failed**.
 
-**Enhancements added to Turn2 (161 → 256 tests, +35 new GIGA HARD EXTRA):**
+### Blocker 1 — `BAD_GOLDEN` / R12 + R13: the reference solution is OOM-killed
 
-- **Traffic file top-level validation:** `test_traffic_top_level_string_invalid` – string/number/null/true/object without traffic key, wrapper null, wrapper object not array all invalid exit2 no stdout.
-- **Direct array invalid elements:** `test_traffic_direct_array_invalid_elements` – null, number, string, array, bool, {} missing fields, {from only} invalid.
-- **Entry missing fields:** `test_traffic_entry_missing_fields` – missing from/to/factor, {} empty, {"foo":1} invalid.
-- **From/to not string:** `test_traffic_entry_from_to_not_string` – number/null/bool/object/array for from/to invalid.
-- **Whitespace-only from/to invalid:** `test_traffic_entry_whitespace_only_invalid`.
-- **Leading/trailing space exact invalid:** `test_traffic_entry_leading_trailing_space_exact_invalid`, `test_traffic_entries_with_leading_trailing_spaces_invalid` – " A" vs "A" distinct, traffic with leading space → invalid because edge not found (not trimmed), vs requests where it's no-route.
-- **Factor various invalid:** `test_traffic_factor_various_invalid`, `test_traffic_file_with_factor_string_invalid` – 0, -1, -0.5, "2", true, null, {}, [].
-- **Delay various invalid:** `test_traffic_delay_various_invalid`, `test_traffic_file_with_delay_string_invalid` – negative, "5", true, null, {}, [].
-- **BOM/trailing comma/comment for traffic:** `test_traffic_file_bom_trailing_comma_comment_extra`, plus existing `test_traffic_file_bom_must_not_crash`, `test_traffic_file_trailing_comma_invalid`, `test_traffic_file_comment_invalid`, direct array trailing comma/comment.
-- **Effective formula strict per-edge:** `test_traffic_effective_formula_strict_per_edge` – A-B raw10 factor2 delay5 correct 25 not (10+5)*2=30, B-C raw10 factor1 total 35 vs 40 wrong.
-- **Raw along effective-best not raw-best:** `test_traffic_raw_along_effective_best_not_raw_best` – raw-short 1+1=2 factor100 eff200 vs longer 10+10=20 eff20, should pick longer and report raw20 not 2.
-- **3-level tie-break:** `test_traffic_3_level_tie_effective_raw_lex`, `test_traffic_tie_break_secondary_raw_with_delay`, `test_traffic_tie_break_deeper_with_traffic`, `test_traffic_lex_deeper_diamond_with_traffic` – effective tie → raw → lex, diamond-of-diamonds depth2, 5-way/10-way.
-- **Case-sensitive ASCII with traffic:** `test_traffic_case_sensitive_ascii_with_traffic`, `test_traffic_case_sensitive_with_traffic`, `test_traffic_special_chars_secondary_raw_with_traffic`.
-- **Duplicate reverse with delay reset:** `test_traffic_duplicate_reverse_with_delay_reset`, `test_traffic_factor_zero_delay_reset_last_wins`, `test_traffic_duplicate_same_factor_different_delay_last_wins`, `test_traffic_duplicate_with_delay_only_second_no_delay` – second entry without delay resets delay0, reverse B-A overwrites A-B.
-- **Output strictness with traffic:** `test_traffic_output_fields_strict`, `test_traffic_batch_output_fields_strict_with_traffic`, `test_traffic_no_path_fields_minus_one_strict` – exactly 4 keys single with traffic, 6 keys batch, -1 for all fields on no-route, no extra keys.
-- **Flag order independence with traffic:** `test_traffic_flag_order_independence`, `test_traffic_flag_equals_syntax_with_traffic`, `test_traffic_batch_equals_syntax`, `test_traffic_equals_syntax`.
-- **Help precedence with traffic:** `test_traffic_help_precedence_with_traffic`, `test_traffic_help_with_extra_flags_still_contains_traffic`, `test_traffic_help_with_equals_and_traffic_and_requests_mixed`.
-- **Single empty invalid vs batch no-route with traffic:** `test_traffic_single_empty_from_invalid_vs_batch_no_route`, `test_traffic_batch_with_empty_source_no_route`, `test_traffic_batch_with_empty_destination_no_route`, `test_traffic_batch_with_empty_dest_no_route_with_traffic`.
-- **Non-existing node no-route with traffic:** `test_traffic_non_existing_node_no_route_with_traffic`, leading-space no-route.
-- **Requests validation with traffic:** `test_traffic_requests_validation_with_traffic` – non-object, null, empty object, missing field vs empty distinct, trailing comma `test_traffic_requests_trailing_comma_invalid_with_traffic`, non-object entries `test_request_non_object_entries_invalid` analog.
-- **Large graphs with traffic:** `test_traffic_large_graph_2000_nodes_with_traffic`, `test_traffic_large_graph_5000_nodes_with_traffic`, `test_traffic_large_graph_10000_nodes_with_traffic`, performance 2000 <5s 5000 <5.5s 10000 <8s, 2000 batch <7.5s 5000 batch <12s.
-- **Batch 1000 float distances with traffic:** `test_traffic_batch_1000_float_distances_with_traffic`, `test_traffic_batch_1000_with_traffic`, `test_traffic_batch_1500_with_traffic`, float distances 0.5.
-- **Graph duplicate min plus traffic:** `test_traffic_graph_duplicate_min_plus_traffic`, `test_traffic_duplicate_edges_min_plus_traffic`.
-- **Special chars node IDs with traffic:** `test_traffic_special_chars_node_ids_with_traffic`, dot/slash/hyphen/underscore valid distinct.
-- **Very small and large factor same path:** `test_traffic_very_small_and_large_factor_same_path`, `test_traffic_very_small_and_large`, `test_traffic_factor_very_small_and_delay_large`.
-- **Delay accumulation and negative delay (factor<1):** `test_traffic_delay_accumulation_and_negative_delay`, `test_traffic_factor_less_than_one_negative_delay`.
-- **10-way tie with traffic:** `test_traffic_10_way_tie_with_traffic_real`, `test_traffic_tie_break_10_way_effective_raw_lex`.
-- **Graph validation with traffic present:** `test_traffic_graph_nodes_contain_non_string_with_traffic`, `test_traffic_graph_edges_contain_non_object_with_traffic`, `test_invalid_graph_still_exit2_with_traffic`.
-- **Factor scientific plus valid:** `test_traffic_factor_scientific_plus_valid_detailed` – 1e+2, 1E+3, 1e+3, 1E+2, 2.5e+2 must be valid (many hand parsers reject plus in exponent).
-- **Batch 2000 relative and same-source amortization stricter:** `test_traffic_batch_2000_with_traffic_relative`, `test_traffic_same_source_amortization_with_traffic_500`, `test_traffic_same_source_amortization_stricter`, `test_traffic_batch_same_source_amortized` – same 500 ≤25% multi 500 distinct, batch 100/2000 relative ≤25*base+1.
-- **Float tolerance effective equal within 1e-9:** `test_traffic_float_tolerance_effective_equal_within_1e9` – effective diff 1e-10 should be tie → raw wins.
-- **Missing traffic flag still raw:** `test_traffic_missing_traffic_flag_still_raw` – Turn2 binary without traffic must still produce raw-only output exactly 2 keys.
+Every oracle trial fails exactly one test. Step 1 is 140/140; Step 2 is 268/269, failing
+`test_traffic_batch_2000_with_traffic_perf_v7`:
 
-- Updated `instruction.md` to GIGA HARD EXTRA covering all above: top-level must be object with traffic array or direct array, wrapper null invalid vs empty valid, direct array empty valid, trailing comma/comment/BOM must not crash exit2, entries must be objects starting with '{', missing fields invalid, from/to string non-empty whitespace-only invalid, exact no trim leading/trailing space → invalid, self-loop invalid, node must exist exact, edge must exist undirected, factor>0 int/float/scientific 1e+3/1E+3/1e+2 plus valid, delay >=0 default0 scientific plus valid, duplicate last-wins including reverse and delay reset, extra fields ignored, default factor 1 delay0, effective = raw*factor+delay per edge strict not (raw+delay)*factor multi-edge sum, raw along effective-best, traffic_delay = effective-raw negative allowed, source==dest 0, no-route -1 for all fields, 3-level tie cascade effective 1e-9→raw 1e-9→lex ASCII case-sensitive '-' < '.' < '_' 'A'<'a' prefix shorter wins deeper diamond depth2 5-way/10-way, reroute factor and delay-only, flag order independence, equals syntax, help precedence, single empty invalid vs batch empty no-route, non-existing no-route, requests validation with traffic, performance 10000 line <8s 5000 batch <12s same-source ≤25% batch relative ≤25*base+1, output strict 4/6 keys.
+```
+>  assert proc.returncode in (0,1)
+E  assert -9 in (0, 1)
+```
 
-- Rewrote Turn2 solution to ensure it passes new validations (already robust: checks RawMessage "null", trimmed empty, startsWith '{', exact match no trim, factor>0, delay>=0, NaN/Inf, duplicate last-wins with delay reset, effective per-edge, 3-level tie-break, caching per source).
+`-9` is SIGKILL — the router is killed mid-stream (stdout is truncated partway through
+the batch, stderr empty), i.e. the OOM killer, not a timeout assertion.
 
-Expected after hardening: Turn2 pass rate should drop from 100% (conditional) to <30% for weaker models, requiring correct handling of: per-edge formula discrimination, raw along effective-best, delay reset reverse duplicate, factor scientific plus 1e+3 valid, top-level validation string/number/null invalid, direct array invalid elements, leading/trailing space exact invalid vs no-route distinction, 3-level tie effective→raw→lex with deeper diamond and 10-way, flag order independence with --traffic and equals syntax, help precedence with traffic, output strict 4/6 keys.
+**Root cause**, confirmed in `steps/2_step_two/solution/solve.sh`: the batch path builds
+`cache := make(map[string]allRes)` keyed by source, and `allRes` holds
+`bestPath map[string][]string` — the full path slice to *every* destination. The test's
+workload is a 1000-node line graph with 2000 requests whose sources are `N{i%1000}`, so
+there are **1000 distinct sources**. The cache therefore retains 1000 × 1000 destination
+entries whose average path length on a line graph is ~333 nodes — on the order of 3×10⁸
+string entries, never evicted.
 
-## Completion Rates (old, before Turn2 hardening)
+**Fix directions.** Cache predecessor pointers (`prev map[string]string`, O(N) per source)
+and reconstruct paths on demand, or bound/evict the cache. Note the full-path map *is*
+genuinely needed during a single Dijkstra run for the lexicographic tie-break — but not
+after it, so convert to predecessors before inserting into the cache.
 
-**Latest online validation — commit `2c6713a`, status: PASSING.** Structural 10/10 pass, oracle 3/3, contamination LOW, provenance CLEAN. All stages completed.
+**This is a golden bug, not a test bug.** Avocado's 1.00 trial passed the same test, and
+the AFTR notes the suite "can accept an independent correct implementation."
 
-| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 | Mean |
-|-------|---------------|-----------------|--------|--------|------|
-| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 | 1.00 |
-| Agent | claude-code / claude-opus-4-8 | 5/10 (50%) | 5/10 | 5/5 (100% of T1) | 0.50 |
-| Metacode | meta/avocado-5.14-code | 3/10 (30%) | 3/10 | 3/3 (100%) | 0.30 |
-| Codex | gpt-5.5 | 1/10 (10%) | 1/10 | 1/1 (100%) | 0.10 |
+### Blocker 2 — `BAD_GRADING_WEAK` / R06: the Go-binary constraint is not enforced
 
-Turn 2 only runs after a Turn-1 pass, so Turn-2 denominators equal Turn-1 passes. **Turn2 100% conditional pass rate → too easy, not discriminating.**
+`find_bin` in `steps/2_step_two/tests/test_outputs.py:6` iterates `CANDIDATES` and returns
+any existing executable **before** falling through to `go build`. `test_stdlib_only`
+inspects Go sources, not the executable actually invoked. A shell or Python script placed
+at `/app/router` would satisfy the stdlib-only Go requirement.
 
-### Previous Failure analysis (from trial ctrf verifier output, pre-hardening)
+**Fix per the AFTR:** delete any pre-existing `/app/router`, force
+`go build -o /app/router .` before tests run, and add a binary-provenance check.
 
-| Model | Dominant Turn-1 failure | Frequency | Root cause |
-|-------|-------------------------|-----------|------------|
-| Codex (gpt-5.5) | `test_from_to_equals_syntax` | **9/9 failing trials** | CLI doesn't accept equals-sign flag syntax `--graph=… --from=A --to=B`; hand-rolled arg parser only handles space-separated `--from A` form (Go's `flag` package would handle both for free). |
-| Metacode (avocado) | `test_from_to_equals_syntax` | **7/7 failing trials** | Same equals-syntax parsing gap (one trial additionally failed `test_edge_string_distance_invalid`). |
-| Agent (opus-4-8) | `test_batch_with_missing_field_invalid` | 4/5 failing trials | Batch request missing `destination` (`[{"source":"A"}]`) must exit 2; model returned no-route/exit 1 instead. One additional trial had a catastrophic build/run failure (all tests failed). |
+### Also flagged: `test.sh` runs the whole suite twice on failure
 
-Key observations pre-hardening:
-- **`test_from_to_equals_syntax` is the primary wall** for weaker models.
-- Opus handles equals but trips on missing-key vs empty-string distinction.
-- Turn2 was not discriminating – once Turn1 passed, Turn2 always passed.
+```bash
+if pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA 2>&1; then
+  status=${PIPESTATUS[0]}
+else
+  pytest /tests/test_outputs.py -rA 2>&1   # full re-run
+```
 
-New harder gates added to push pass rate lower and require robust JSON validation, exact-match space semantics, null handling, help precedence, deeper lex ties, **and for Turn2**: per-edge effective formula, raw along effective-best, delay reset, reverse duplicate last-wins, scientific plus valid, top-level invalid, direct array invalid elements, 3-level tie effective→raw→lex.
+Any failure re-executes the entire suite, including the 2000-request performance tests.
+That doubles wall-clock and makes perf failures far more expensive to diagnose. The AFTR
+suggests removing the fallback or making it conditional.
 
-## Online Status After Turn2 Hardening (local verification)
+### Calibration note: opus and codex are 0/10 because of two `--help` tests
 
-**Current local verification — after enhancement:**
+All four downloaded opus/codex trials fail **exactly the same 2 of 140** Step 1 tests and
+nothing else — 138/140 otherwise pass:
 
-- Turn1: 134 tests (GIGA HARD) – oracle 134 passed locally, 2 expected fails when using Turn2 binary (traffic keyword present) → 117/119 effective Turn1 pass via Turn2 binary.
-- Turn2: 256 tests (GIGA HARD EXTRA) – oracle 236/256 passed locally (9.76s). Full multi-turn: Turn1 134/134 (Turn1 binary) + Turn2 236/236 (27.96s Docker) (Turn2 binary layered) = PASSING.
-- Structural: go.mod stdlib only, binary /app/router via go build -o router ., help contains 6 keywords with traffic.
+| Test | Step | Trials |
+| --- | --- | --- |
+| `test_help_equals_syntax` | 1 | 4/4 |
+| `test_help_precedence_extra_hard` | 1 | 4/4 |
 
-**Expected new completion rates:** Turn1 should remain ~10-30% for strong models, <10% for weaker (due to equals syntax, missing vs empty, BOM/trailing comma, leading-space exact-match, deeper lex tie, etc.). Turn2 conditional pass should drop from 100% → ~20-40% because of new traps: effective formula discrimination (raw*factor+delay vs (raw+delay)*factor), raw along effective-best vs raw-best distinction, duplicate delay reset including reverse, factor scientific plus 1e+3 valid, top-level string/number/null invalid, direct array invalid elements, leading/trailing space exact invalid vs batch no-route distinction, 3-level tie effective→raw→lex where raw differs, 10-way tie, deeper diamond depth2, output strict 4/6 keys with -1 for no-route, flag order independence with --traffic and equals syntax, help precedence with traffic.
+`instruction.md:19` does state *"Equals form `--help=true` also help"* plus help
+precedence, so the rule is specified — but the tests additionally require `--help=1` and
+`-h=true`, which must be generalized from the flag-syntax rule at line 21 rather than read
+directly. The consequence is that the task's headline difficulty — Dijkstra, the
+lexicographic tie-break cascade, the per-edge `raw*factor+delay` formula — is **not** what
+gates the strong models. A help-flag parsing detail is. Worth deciding whether that is the
+intended discriminator before the next run.
+
 
 ## Anti-Cheating Analysis
 - Hardcoded outputs: Tests use randomized graphs and traffic (generated per test), multiple graph shapes (triangle, diamond, line, disconnected, duplicate edges reverse, leading-space distinct IDs, special chars dot/slash/hyphen/underscore, case-sensitive). No fixed output can pass. Traffic tests use random factors/delays, duplicate last-wins random.
 - Overfitting to visible tests: Tests are hidden under `/tests`; agent cannot read them in production TBR (hidden). Moreover, tests include dynamic tie-breaking where lexicographic order matters – requires general Dijkstra with path comparison sorted neighbors, priority queue ordered by (effective, raw, lex), not memorized. Effective formula trap cannot be overfit.
 - Modifying test files: `test.sh` runs as root in container but reward file is written via `pytest --ctrf /logs/verifier/ctrf.json`; modifying test files would require writing to `/tests` which is read-only in TBR (or hidden).
-- Bypassing intended solution path: Task requires Go binary built via `go build -o router .`, stdlib only check (`go list` no dotted imports, `go.mod` no external require, test_stdlib_only). Agent cannot bypass by writing Python stub router – tests invoke `/app/router` binary which must be Go-built (checked via go list and binary exists).
+- Bypassing intended solution path: **currently a gap — see Blocker 2 below.** The intent is that `/app/router` must be a Go binary built via `go build -o router .` with a stdlib-only check (`go list` no dotted imports, `go.mod` no external require, `test_stdlib_only`). In practice `find_bin` accepts any pre-existing executable at `/app/router` before it attempts a rebuild, and `test_stdlib_only` inspects Go sources rather than the executable under test, so a shell or Python stub would satisfy the Go-only requirement. This is the AFTR's primary finding and must be fixed.
 - Verifier isolation: `test.sh` creates restrictive lock via `mkdir -p /logs/verifier`, no `chmod 700 /tests`; but standard TBR hides tests. Output strictness checks exact keys, no extra fields, numbers not strings, path elements strings, -1 for no-route, prevents cheating via extra output.
 - Effective formula cheating: test_traffic_effective_formula_strict_per_edge specifically checks multi-edge sum where per-edge vs combined formula differs (10*2+5 +10 =35 vs (10+5)*2+10=40) – agent must implement per-edge formula.
 - Delay reset cheating: test_traffic_factor_zero_delay_reset_last_wins and duplicate reverse with delay reset checks that last duplicate without delay resets delay to 0 not keeps old.
