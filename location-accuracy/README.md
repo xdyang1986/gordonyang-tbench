@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 153 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 169 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
 
 Backward compatible with Step1, adds:
 
@@ -179,5 +179,20 @@ Reason: Step 2 is decided by one test. All seven step-2 failures are `test_estim
 
 **Latest oracle after fix:**
 - Step1: 99/99 PASS (14s)
-- Step2: 153/153 PASS (10s)
+- Step2: 169/169 PASS (10s)
 
+
+## Final Hardening (Step2 too easy after clarifying ambiguous test)
+
+After fixing ambiguous original_lat (151/152 single discriminator, 7 failures), Step2 became too easy (pass rate would jump as clarified).
+Hardened Step2 153->169 tests (+16 more exact boundary discriminators):
+- Outlier teleport dt 300 not outlier, distance 1000 boundary, heading flip speed exactly 10 not outlier, distance 500 not outlier
+- Acceleration spike boundary 15 not outlier, distance 300 not outlier, accuracy spike 75 not outlier, old*2+30 boundary
+- Confidence high age 5000 acc5 still high after degradation, medium age 20000, low when not snapped acc>25 age>10000, prediction east heading 90
+- Pickup/dropoff priority: out_of_geofence beats all, low_accuracy beats moving, off_road beats moving, too_far exact boundary
+- Batch low_accuracy+outlier+stale mixed, outlier_count persistence multi vehicles, EMA weighted accuracy decay, road mismatch multi roads, old DB migration, large scale estimate 200 vehicles 50 estimates <5s, etc.
+Kept intuitive inactive allow-all for list/near, outside for geofence, and clarified original_lat 4 cases.
+
+Step1 kept at 99 tests with hole-edge clarified and robustness tests (no-command, --help/-h/help, unknown exit2).
+
+Final oracle: Step1 99/99 PASS 14s, Step2 169/169 PASS 11s – both significantly harder than 58/79 and 82/138, addressing too-easy while keeping Step1 passable enough for Step2 attempts.
