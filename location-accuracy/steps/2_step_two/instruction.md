@@ -155,13 +155,28 @@ Same as Step 1 extreme behavior.
 
 ## Persistence and Crash Consistency
 
-- Same atomic write pattern as Step 1: temp file `<db>.tmp.<pid>` + rename, no leftover, cleanup stale tmp files.
-- On corruption (invalid JSON, array, null, truncated file), create backup `<db>.corrupt.<nanosec>` with integer nanosec suffix, then exit 4.
+- Same atomic write pattern as Step 1: temp file `<db>.tmp.<pid>` + rename, no leftover, cleanup stale tmp files, including BOM and trailing comma corrupt.
+- On corruption (invalid JSON, array, null, truncated file, BOM, trailing comma), create backup `<db>.corrupt.<nanosec>` with integer nanosec suffix, then exit 4.
 - Stale tmp files must be ignored on load and cleaned on next successful write.
+
+## Robustness (batch2, for too-easy hardening)
+
+- Help variants with equals: `--help=true`, `-h=true`, `help=true` → print help containing `update,get,list,near,track,distance,delete,stats,batch,clear,estimate,validate-pickup,validate-dropoff,geofence-check` exit0. Unknown with equals `--unknown=true` exit2.
+- Output keys exact: estimate must contain exactly `vehicle_id,lat,lng,timestamp_ms,accuracy,speed,heading,total_distance_m,confidence,age_ms,snapped,road_id,road_bearing,road_dist_m,predicted,original_lat,original_lng` plus optional `outlier_count`. Pickup/dropoff must contain at least `valid,reason,distance_m,confidence,age_ms,accuracy,snapped,road_id,pickup_road_id`.
+- Batch empty input → `batch_ok 0`.
+- Zones file: empty array `[]` allows all, top-level non-array (string, number, null, bool, object) invalid exit2.
+- Flag order: `--db` may appear after command (e.g. `update veh 0 0 1000 --db path`) must work.
+- Large scale: 1000 batch <5s, 500 near <3s, 200 vehicles estimate 50 queries <5s.
+- Outlier boundaries isolated: test teleport dt 300 not outlier, distance 1000, implied 50, old accuracy 50, new accuracy 50, heading 120, speed 10, dist 500, accel 15, dist 300, accuracy 75, old*2+30, implied 80, speed 2 – each must avoid overlapping conditions (set speed 10 to avoid speed-vs-implied, accuracy 60 to avoid teleport).
+- Estimate original_lat 4 cases exhaustive must hold: not predicted not snapped original==final==smoothed, predicted not snapped original==smoothed != final, not predicted snapped original==smoothed, predicted snapped original==predicted before snapping.
+- EMA last 5 only with small increments 0.0001 to avoid outlier, prediction east/north/south delta exact, heading-aware 45 boundary snaps, 46 on north-south road filtered.
+- Batch zones before low_accuracy still fails: batch with low_accuracy out_of_zone must exit2 (zones check before low_accuracy in batch), while update low_accuracy out_of_zone returns low_accuracy exit3 (low_accuracy before zones in update).
+- Total_distance not increment on outlier/low_accuracy/out_of_zone for both paths, history not include outlier/low_accuracy, outlier_count not increment for low_accuracy/stale, double-trigger counts one.
+- Confidence no upgrade when road_dist>10 and outlier_count boundaries 2/3/5/6.
 
 ## Exit Codes
 
-- 0: success or valid pickup/dropoff.
+- 0: success or valid pickup/dropoff or batch_ok.
 - 1: invalid pickup/dropoff (reason indicates why).
 - 2: invalid argument, malformed value, unreadable zones/roads file, batch failure.
 - 3: not found, out_of_zone, low_accuracy, outlier.
@@ -170,8 +185,8 @@ Same as Step 1 extreme behavior.
 ## Backward Compatibility and Performance
 
 - Old DB files without history, total_distance, or outlier_count must be readable and auto-migrated.
-- Whitespace-only files are empty stores, array and null are corrupt.
-- All Step 1 tests must still pass.
-- Large scale: 800+ vehicles, near and estimate queries under 3 seconds.
+- Whitespace-only files are empty stores, array and null are corrupt (BOM also corrupt).
+- All Step 1 tests must still pass (140 tests).
+- Large scale: 800+ vehicles, near and estimate queries under 3 seconds, plus batch 1000 <5s.
 
 Deliverable remains `/app/src/` with stdlib-only Go binary.

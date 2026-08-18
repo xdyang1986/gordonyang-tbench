@@ -298,8 +298,13 @@ func loadZones(path string) ([]Zone, error) {
 		return nil, err
 	}
 	// Allow empty file? Should be invalid? Treat empty as empty list
-	if len(strings.TrimSpace(string(data))) == 0 {
+	trimmed := strings.TrimSpace(string(data))
+	if len(trimmed) == 0 {
 		return []Zone{}, nil
+	}
+	// Strict: zones file must be JSON array, not string, number, null, bool, object
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, fmt.Errorf("zones top-level must be array")
 	}
 	var zones []Zone
 	if err := json.Unmarshal(data, &zones); err != nil {
@@ -816,7 +821,7 @@ func main() {
 		return
 	}
 	first := rem[0]
-	if first == "help" || first == "--help" || first == "-h" {
+	if first == "help" || strings.HasPrefix(first, "help=") || first == "--help" || strings.HasPrefix(first, "--help=") || first == "-h" || strings.HasPrefix(first, "-h=") {
 		printHelp()
 		return
 	}

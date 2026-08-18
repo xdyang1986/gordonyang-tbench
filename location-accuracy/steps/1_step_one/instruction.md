@@ -133,7 +133,18 @@ Check if point inside any active zone (polygons with holes, circles, antimeridia
 - Only Go stdlib.
 - Atomic writes tmp+rename no leftover tmp files clean stale tmp files parent dirs auto-created deeply nested.
 - ID regex, zones with holes/circles/time/antimeridian/edge-inside, roads mixed polyline and start/end, pagination offset then limit, batch variable fields empty default, NaN/Inf rejection, history 10 asc with current as last, total_distance Haversine, batch zones before stale.
-- Large scale: 800+ vehicles near query under 3 seconds, list with zones and roads 200 vehicles.
-- Persistence survive restart including corrupt backup handling with integer nanosec suffix distinct, containing original.
+- Large scale: 800+ vehicles near query under 3 seconds, list with zones and roads 200 vehicles, plus 1000 batch <5s, 1000 near <3s performance gates.
+- Persistence survive restart including corrupt backup handling with integer nanosec suffix distinct, containing original, plus BOM and trailing comma corrupt.
+
+## Robustness (added for too-easy hardening, batch2)
+- Help: if no command or first arg `help`, `--help`, `-h` OR variants with equals like `--help=true`, `-h=true`, `help=true` → print help containing `update,get,list,near,track,distance,delete,stats,batch,clear,geofence-check` exit 0. Unknown command like `unknowncmd` or `--unknown=true` or `unknown=true` exit 2.
+- Output JSON keys must be exact: update/get/list without verbose exactly `vehicle_id,lat,lng,timestamp_ms,accuracy,speed,heading,total_distance_m` (allow extra `outlier_count` for Step2 compat), near adds `distance_m`, track history entries exactly `lat,lng,timestamp_ms,accuracy,speed,heading`, stats exactly `live,total_updates,total_distance_m,avg_accuracy`, distance exactly `vehicle_id,total_distance_m`, geofence-check exactly `inside,zone_id`. No extra random fields.
+- Batch empty stdin (whitespace only) must print `batch_ok 0` exit0.
+- Zones file empty array `[]` is valid and allows all (no filtering). Top-level JSON that is not array (string, number, literal null, bool true, object `{"id":"x"}`) is invalid → exit2 when used.
+- Roads file with duplicate points or colinear points should not crash (exit 0/2/3).
+- Flag order: `--db` may appear before or after command, parser should handle anywhere.
+- Batch atomicity: batch line with NaN accuracy or invalid speed 60 must fail exit2 DB unchanged.
+- Total_distance must be sum of accepted only and persist across restart, history sorted asc even after batch mixed timestamps.
+- List since/until inclusive boundaries exact, track from==to returns one entry, clear then distance/get not found exit3.
 
 Delivery under `/app/src/`.

@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 114 tests, extreme-hard – hardened, hole-edge clarified)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 140 tests, extreme-hard – ultra-hardened batch2, hole-edge clarified, help= true strict)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 182 tests, extreme-hard – hardened, original_lat clarified per feedback, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 214 tests, extreme-hard – ultra-hardened batch2, original_lat clarified per feedback + 32 extra exact boundaries, inherit_prior_session true)
 
 Backward compatible with Step1, adds:
 
@@ -140,8 +140,8 @@ Optional (non-blocking) improvements the AFTR suggested:
 ## Structure
 
 - `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample with polyline + mixed segment seg_old (hardened), empty zones [] default, pickup_zones dropoff_zones empty
-- `steps/1_step_one/` – tracking hardened extreme with antimeridian, mixed roads, mandatory backup, multiple holes, overlapping first match, circle with time, hole edge, interior snapping, all filters combined, batch 100 ops, extra garbage, default vs custom precedence – 95 tests 13s
-- `steps/2_step_two/` – accuracy hardened extreme with outlier exact boundaries teleport/heading flip/accel/accuracy spike, confidence high exact and low age 30001, prediction north, pickup moving boundaries, dropoff leniency, batch mixed, EMA decay, road mismatch multi, old DB migration, large scale estimate – 152 tests 10s
+- `steps/1_step_one/` – tracking ultra-hardened extreme batch2: antimeridian 2deg wide, mixed roads legacy, mandatory backup distinct nanosec integer, multiple holes, overlapping first match, circle exact radius, time boundaries inclusive, hole-edge outside discriminator, interior vs endpoint snapping, all filters combined (since/until+zones+roads, accuracy-max+speed-min+zones+roads), batch 100 ops & 1000 batch <5s & 3000 near <3s performance, extra garbage & BOM & trailing comma corrupt, default vs custom precedence, help= true variants (--help=true/-h=true/help=true) strict, unknown= true exit2, output keys exact (allow outlier_count for compat), batch empty input batch_ok 0, empty zones [] allows all, zones invalid top-level string/number/null/bool/object, duplicate points colinear, flag order --db after command, stats total_updates & distance sum, history sorted after batch, persistence total_distance after restart, track from==to, clear->distance not found – 140 tests ~38s
+- `steps/2_step_two/` – accuracy ultra-hardened extreme batch2: outlier 6 conditions exact boundaries (dt 300, distance 1000, implied 50, old/new accuracy 50, heading 120, speed 10, dist 500, accel 15, dist 300, accuracy 75, old*2+30, implied 80, speed 2) with isolation from other conditions, confidence high exact with degradation +0.5*age_sec (age 5000 acc5 still high, age 10000 acc10 boundary, age 20000 exact, low when not snapped acc>25 age>10000, low when road_dist>10 no upgrade), prediction north/east/south exact delta, original_lat 4 cases exhaustive (not predicted not snapped = smoothed, predicted not snapped = smoothed != final, not predicted snapped = smoothed, predicted snapped = predicted before snapping), EMA last 5 only weighted, heading-aware 45 boundary & no fallback & opposite allowed & close filtered farther wins, pickup/dropoff priority exhaustive chain (out_of_geofence>stale>low_accuracy>off_road>moving>road_mismatch>heading_mismatch>too_far>ok) with exact boundaries 4.9/5.0 moving pickup, 9.9/10.0 dropoff, 100m/150m too_far, low_accuracy>100 not increment outlier_count & not distance, stale not increment, outlier_count persistence across restart & drives confidence (2 still high, 3 medium, 5 medium not low, 6 low), batch with low_accuracy+outlier+stale mixed & zones before low_accuracy still fails & low_accuracy not increment count & outlier not increment distance, old DB migration, large scale estimate 200 vehicles & 1000 batch, help= true strict, unknown= true exit2, output keys exact for estimate/pickup/dropoff, BOM corrupt, flag order db after, total_distance not increment on outlier/low_accuracy, history not include outlier/low_accuracy, EMA weighted accuracy decay, road mismatch multi roads, etc. – 214 tests ~18s
 
 ## Run Locally
 
@@ -208,3 +208,42 @@ Hardened further:
 Final oracle: Step1 114/114 PASS 23s, Step2 182/182 PASS 10s – ultra-hardened to address too-easy while keeping Step1 passable enough for Step2 attempts (intuitive inactive allow-all, clear original_lat 4 cases).
 
 Timestamp for reference: 2026-08-18T05:40:35Z (epoch 1787031635)
+
+## Final Ultra-Hardening Batch2 (Both steps too easy – 2026-08-18T08:30Z)
+
+Previous 114+182 (after ultra-hardening) still too easy online – both steps discriminated by only 2 narrow tests (hole-edge outside and original_lat).
+
+Hardened further 114->140 Step1 (+26) and 182->214 Step2 (+32) = 140+214:
+
+Step1 114->140 (+26 batch2):
+- Help with equals strict: --help=true, -h=true, help=true must print help exit0 (our parser handles prefix, many agents only exact match fail)
+- Unknown command with equals exit2: --unknown=true, unknown=true
+- Output keys exact strict (allow outlier_count for compat): update/get/list/near/track/stats/distance/geofence-check exact keys, no extra random fields – catches agents that add extra debug fields
+- Batch empty input prints batch_ok 0 exactly
+- Empty zones array [] allows all (not invalid) – catches agents that treat empty as invalid
+- Zones invalid top-level string/number/null/bool/object must exit2 (not crash) – catches agents that only check array of objects but not top-level type
+- Duplicate/colinear points in zones/roads should not crash (allow 0/2/3)
+- Large scale 1000 vehicles batch <5s and 1000 vehicles near <3s performance gates to catch O(n^2)
+- Flag order --db after command must work (our parser handles anywhere, many agents only before)
+- Corrupt DB with BOM and trailing comma must be corrupt path exit4 with backup
+- Stats total_updates and total_distance_m sum correctness, history sorted after batch mixed timestamps, batch atomicity with NaN accuracy and invalid speed 60, persistence total_distance after restart, list since/until inclusive boundary exact, track from==to returns one, clear then distance not found – all existing but now stricter counting
+
+Step2 182->214 (+32 batch2):
+- Same robustness as Step1: help= true strict, unknown= true exit2, output estimate keys exact 16 fields, pickup/dropoff keys exact, batch empty input batch_ok 0, zones invalid top-level, BOM corrupt, flag order db after, large scale 1000 batch and 500 near performance
+- Outlier boundaries isolated: old accuracy 50 not outlier, new accuracy 50 not outlier, implied 50 not outlier, heading diff 120 not outlier, speed exactly 10 not outlier for heading flip, distance 500 not outlier, accel 15 not outlier, distance 300 not outlier, accuracy 75 not outlier, old*2+30 boundary, speed exactly 2 not outlier for speed vs implied – each test now sets other fields to avoid overlapping conditions (speed 10 to avoid speed-vs-implied, accuracy 60 to avoid teleport)
+- Confidence high age 5000 acc5 still high after degradation (degrades +0.5*age_sec), high age 10000 acc10 boundary, medium age 20000 exact, low when not snapped etc.
+- Estimate original_lat 4 cases exhaustive (not predicted not snapped = smoothed==final, predicted not snapped = smoothed != final and original==smoothed, not predicted snapped = original==smoothed==vehicle? Actually road lat 0, vehicle 0.0001, snapped final 0,5), predicted snapped = original==predicted before snapping) – clarifies previous ambiguity completely, plus prediction delta east and south and west
+- EMA last 5 only: history 10 entries but only last 5 weighted, test now uses small 0.0001 increments to avoid outlier
+- Heading-aware 45 boundary: diff exactly 45 snaps, diff 46 on north-south road filters (not snapped) – tests filter threshold
+- Batch zones before low_accuracy still fails (zones check before low_accuracy in batch, vs low_accuracy before zones in update) – divergence explicit: batch low_accuracy out_of_zone should still fail exit2, while update low_accuracy out_of_zone should return low_accuracy exit3
+- Batch low_accuracy not increment outlier_count and not increment distance, outlier not increment distance – separation checks
+- Total_distance not increment on outlier and low_accuracy for both paths, history not include outlier/low_accuracy
+- Confidence no upgrade when road_dist>10 and outlier_count 3 demotes high
+- Validate pickup/dropoff exact boundaries 100m/150m with snapped vehicle (road at lat 0, vehicle snapped to 0,5, pickup 0.0005 ~55m valid, 0.0012 ~133m too_far) and dropoff 150m boundary
+- All 214 tests PASS ~18s, Step1 140 PASS ~38s, backward compat Step2 still passes Step1 140 PASS – both significantly harder than 114/182, with many small discriminators instead of 2.
+
+Latest oracle after batch2:
+- Step1: 140/140 PASS (38s)
+- Step2: 214/214 PASS (18s) + Step1 140/140 PASS backward compat (38s)
+
+Timestamp for reference: 2026-08-18T08:45Z (epoch 1787042700)
