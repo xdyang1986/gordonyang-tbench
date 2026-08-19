@@ -380,3 +380,150 @@ def test_pagination_performance():
 # ---------- best-fit with tie-break cascade ----------
 
 
+def test_best_fit_efficient_cpu():
+    clean_all()
+    run_config("add-node", "nodeA", "10", "10240", "0")
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    run_config("add-job", "job1", "2", "512", "0")
+    assert json.loads(run_config("schedule", "job1").stdout)["node_id"] == "nodeB"
+
+
+def test_best_fit_tie_break_mem():
+    clean_all()
+    # equal CPU waste, different MEM waste -> smaller MEM waste wins
+    # nodeA: 4 CPU 2048 MEM, nodeB: 4 CPU 1024 MEM, job: 2 CPU 512 MEM
+    # free CPU both 4, waste CPU both 2, mem waste A 1536 vs B 512 → B wins
+    run_config("add-node", "nodeA", "4", "2048", "0")
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    run_config("add-job", "job1", "2", "512", "0")
+    nid = json.loads(run_config("schedule", "job1").stdout)["node_id"]
+    assert nid == "nodeB", f"expected nodeB best-fit mem tie-break, got {nid}"
+
+
+def test_best_fit_tie_break_gpu():
+    clean_all()
+    # cpu waste equal, mem waste equal, gpu waste differs
+    run_config("add-node", "nodeX", "4", "1024", "1")
+    run_config("add-node", "nodeY", "4", "1024", "0")
+    run_config("add-job", "jobGPU", "2", "512", "0")
+    # both cpu waste 2, mem waste 512, gpu waste X=1, Y=0 → Y wins
+    nid = json.loads(run_config("schedule", "jobGPU").stdout)["node_id"]
+    assert nid == "nodeY", f"gpu tie-break expected nodeY got {nid}"
+
+
+def test_best_fit_tie_break_id_lex():
+    clean_all()
+    # identical resources, identical waste → lexicographically smallest id wins
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    run_config("add-node", "nodeA", "4", "1024", "0")
+    run_config("add-job", "jobID", "1", "256", "0")
+    nid = json.loads(run_config("schedule", "jobID").stdout)["node_id"]
+    assert nid == "nodeA", f"lex id tie-break expected nodeA got {nid}"
+
+
+def test_best_fit_fragmentation_vs_first_fit():
+    clean_all()
+    # first-fit would pick nodeA (sorted id) even though nodeB is better fit
+    # Setup: nodeA 10 CPU, nodeB 3 CPU, job 2 CPU
+    # Both fit, but best-fit waste: A 8 vs B 1 → B should win. First-fit would pick A.
+    run_config("add-node", "nodeA", "10", "10240", "0")
+    run_config("add-node", "nodeB", "3", "1024", "0")
+    run_config("add-job", "jobFrag", "2", "512", "0")
+    out = json.loads(run_config("schedule", "jobFrag").stdout)
+    assert out["node_id"] == "nodeB"
+
+
+def test_rate_limit_burst_refill_simple():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 2, "burst": 2}
+    write_config(cfg)
+    run_config("add-node", "nodeA", "10", "10240", "0")
+    for j in ["job0", "job1"]:
+        run_config("add-job", j, "1", "256", "0")
+        assert run_config("allocate", j, "nodeA").returncode == 0
+    run_config("add-job", "job2", "1", "256", "0")
+    assert run_config("allocate", "job2", "nodeA").returncode == 1
+    time.sleep(1.1)
+    run_config("add-job", "job3", "1", "256", "0")
+    assert run_config("allocate", "job3", "nodeA").returncode == 0
+
+
+def test_snapshot_restore_with_10_nodes():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    for i in range(10):
+        run_config("add-node", f"node-{i}", "4", "1024", "0")
+        run_config("add-job", f"job-{i}", "1", "256", "0")
+        run_config("allocate", f"job-{i}", f"node-{i}")
+    import tempfile, os as _os
+
+    snap = tempfile.mkdtemp()
+    snap_path = _os.path.join(snap, "backup")
+    assert run_config("snapshot", snap_path).returncode == 0
+    run_config("add-node", "node-new", "4", "1024", "0")
+    assert run_config("restore", snap_path).returncode == 0
+    arr = json.loads(run_config("list-nodes").stdout)
+    assert "node-new" not in [n["id"] if isinstance(n, dict) else n for n in arr]
+    assert len(arr) == 10
+
+
+def test_distribution_weighted_50_nodes():
+    clean_all()
+    cfg = {
+        "shard_count": 4,
+        "shards": [
+            {"id": 0, "path": "/app/data/shard_0.json", "weight": 1},
+            {"id": 1, "path": "/app/data/shard_1.json", "weight": 2},
+            {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},
+            {"id": 3, "path": "/app/data/shard_3.json", "weight": 1},
+        ],
+        "rate_limit": {"allocations_per_second": 1000, "burst": 10000},
+    }
+    write_config(cfg)
+    for i in range(50):
+        run_config("add-node", f"node-{i:04d}", "4", "1024", "0")
+    dist = json.loads(run_config("distribution").stdout)
+    total = sum(dist.values())
+    assert total >= 50
+
+
+def test_ops_log_order_simple():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 10000, "burst": 10000}
+    write_config(cfg)
+    for i in range(10):
+        run_config("add-node", f"node-{i}", "4", "1024", "0")
+        run_config("add-job", f"job-{i}", "1", "256", "0")
+        run_config("allocate", f"job-{i}", f"node-{i}")
+    r = run_config("ops-log")
+    assert r.returncode == 0
+    arr = json.loads(r.stdout)
+    assert len(arr) >= 10
+    assert any(e.get("op") == "allocate" for e in arr)
+
+
+def test_concurrent_sharded_allocate_20():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    for i in range(10):
+        run_config("add-node", f"node-{i}", "10", "10240", "0")
+    for i in range(20):
+        run_config("add-job", f"job-{i}", "1", "256", "0")
+    import threading
+
+    def alloc(i):
+        run_config("allocate", f"job-{i}", f"node-{i % 10}")
+
+    threads = [threading.Thread(target=alloc, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    st = json.loads(run_config("status").stdout)
+    assert st["allocated_jobs"] == 20
