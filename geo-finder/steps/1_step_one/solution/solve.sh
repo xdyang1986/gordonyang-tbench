@@ -86,7 +86,8 @@ func loadDB(path string) DB {
 		printErrExit(4, "corrupt DB: %v", err)
 	}
 	if db == nil {
-		db = make(DB)
+		// null is valid JSON but not an object -> per spec :57 must be corrupt exit 4, not empty (previous coerced and pinned p1 to 0.0)
+		printErrExit(4, "corrupt DB: expected object, got null")
 	}
 	return db
 }

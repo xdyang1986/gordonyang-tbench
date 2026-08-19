@@ -561,14 +561,13 @@ def test_corrupt_db():
             f"[] should be corrupt (not object) exit 4, got {r.returncode} stdout={r.stdout}"
         )
 
-        # null should be coerced to empty map (not corrupt) – BAD_GOLDEN fix
+        # null is valid JSON but not an object -> per spec :57 must be corrupt exit 4 (previous treated as empty and pinned p1 to 0.0)
         with open(db, "w") as f:
             f.write("null")
         r = run_cli(db, ["list"])
-        assert r.returncode == 0, (
-            f"null should be treated as empty, not corrupt, got {r.returncode}"
+        assert r.returncode == 4, (
+            f"null should be corrupt (not object) exit 4 per spec instruction.md:57, got {r.returncode} stdout={r.stdout}"
         )
-        assert json.loads(r.stdout) == [], f"null should give [] got {r.stdout}"
 
         # number / string / bool are valid JSON but not objects -> corrupt
         for bad in ["123", "0", "1.5", '"hello"', "true", "false", '"null"', "123.45"]:

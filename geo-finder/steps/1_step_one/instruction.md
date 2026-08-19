@@ -37,11 +37,11 @@ On `add`, after basic parsing and range checks, you must also enforce:
 
 2. **No duplicate points**: Polygon must not contain duplicate points with numerically equal lat and lng (e.g., `0,0` and `0.0,0.0` are duplicates). If any two points have identical coordinates, reject exit 2. This includes duplicate first/last point – you should not require explicit closure; closure is implicit. So `"0,0;0,1;1,1;1,0;0,0"` contains duplicate `0,0` and must be rejected.
 
-3. **Non-zero area**: Polygon area computed via shoelace must have absolute area > 1e-9 (not colinear or degenerate). If degenerate (all points colinear or collapsed), reject exit 2.
+3. **Non-zero area**: Polygon must have non-zero area (not degenerate – all points colinear or collapsed). If degenerate, reject exit 2.
 
-4. **Self-intersection**: Polygon must be simple – no two non-adjacent edges may intersect, including colinear overlapping segments. Adjacent edges share a vertex and are allowed to meet at that vertex. If self-intersecting (e.g., bow-tie `"0,0;1,1;0,1;1,0"` or colinear overlap `"0,0;0,2;0,1;1,1;1,0"` where `0,0-0,2` overlaps `0,2-0,1`), reject exit 2. Implement correct segment intersection with orientation and on-segment checks, handling colinear cases. Complexity O(n^2) is acceptable for n<=1000.
+4. **Self-intersection**: Polygon must be simple – no self-intersection, including cases where non-adjacent edges cross, where a vertex lies on a non-adjacent edge interior, and where non-adjacent edges have colinear overlapping segments. Adjacent edges share a vertex and are allowed to meet at that vertex. If self-intersecting, reject exit 2.
 
-Validation uses the coordinates exactly as given. Checks 2, 3 and 4 run on the raw parsed lat/lng values, before any longitude normalisation or antimeridian unwrapping. For validation, -180 and 180 are distinct longitudes. Consequently the world rectangle "-90,-180;-90,180;90,180;90,-180" contains no duplicate points and has shoelace area 64800 — it is a valid polygon and must be accepted.
+Validation uses the coordinates exactly as given. Checks 2, 3 and 4 run on the raw parsed lat/lng values, before any longitude normalisation or antimeridian unwrapping. For validation, -180 and 180 are distinct longitudes.
 
 If any validation fails, print error to stderr, do NOT modify DB (including overwrite attempts – old entry must survive), do not leave temp files, exit 2.
 
@@ -74,12 +74,7 @@ DB file is JSON object mapping ID -> Geofence:
 - Find geofences containing point.
 - lat in [-90,90], lng in [-180,180], else exit 2.
 - Points on edge or vertex are considered **inside** (epsilon 1e-9). Must handle horizontal edges, vertices, concave polygons correctly.
-- Longitude classification. Wrapping affects the point-in-polygon test and any bounding box, never validation. Classify each polygon once from its raw span maxLng - minLng:
-  - span ≥ 360 — covers every longitude (e.g. the world rectangle -180…180). Not antimeridian-crossing: it matches any point inside its latitude band, at every longitude.
-  - 180 < span < 360 — crosses the antimeridian (e.g. 179 … -179, span 358). Unwrap longitudes to a continuous interval; a point is outside only if it falls in the large gap, not the small wrapping interval.
-  - span ≤ 180 — ordinary polygon, no wrapping.
-
-Classify world-spanning before applying the crossing rule. The CLI must give the same answers the HTTP service is required to give in step 2.
+- Longitude handling: Wrapping affects the point-in-polygon test and any bounding box, never validation. A polygon may cross the antimeridian (e.g., an area that includes both 179 and -179 should be treated as a small interval around 180, not a large interval around 0 – point at 179.5 inside, point at 0 outside). A polygon that spans all longitudes (e.g., world rectangle) must match any point inside its latitude band at every longitude (point at any lng inside). Ordinary polygons have no wrapping. If a polygon spans all longitudes, treat it as world (covers every longitude), not as crossing. The CLI must give the same answers the HTTP service is required to give in step 2.
 - Output: default JSON array of matching IDs sorted asc. Must be `[]`, not `null`, when no matches. `--verbose` → JSON array of matching Geofence objects sorted by ID asc, must be `[]` not `null` when empty.
 - Exit 0 even if empty (print `[]`, not `null`).
 - Performance: With 500 geofences each up to 100 points, a single lookup invocation must complete in well under 500ms end-to-end (tests will measure). How you achieve this is up to you.

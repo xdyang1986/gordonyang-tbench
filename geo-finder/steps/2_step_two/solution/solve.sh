@@ -104,14 +104,13 @@ func loadDB(path string) DB {
 		printErrExit(4, "corrupt DB: %v", err)
 	}
 	// check if it's array then corrupt per spec
-	// We already try to unmarshal as object; if data is [] it would succeed as empty? Actually DB map from [] would fail? In Go, json.Unmarshal array into map fails.
-	// So we check if data trimmed starts with '['
 	trim := strings.TrimSpace(string(data))
 	if strings.HasPrefix(trim, "[") {
 		printErrExit(4, "corrupt DB: expected object, got array")
 	}
 	if db == nil {
-		db = make(DB)
+		// null is valid JSON but not an object -> per spec must be corrupt exit 4
+		printErrExit(4, "corrupt DB: expected object, got null")
 	}
 	return db
 }
