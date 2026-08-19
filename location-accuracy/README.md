@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 140 tests, extreme-hard – ultra-hardened batch2, hole-edge clarified, help= true strict)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 150 tests, extreme-hard – balanced batch4, hole-edge clarified, help= true strict, 150 middle-ground)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 214 tests, extreme-hard – ultra-hardened batch2, original_lat clarified per feedback + 32 extra exact boundaries, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 224 tests, extreme-hard – balanced middle-ground batch4, original_lat clarified per feedback + positive outlier cases, heading-aware 46 filtered, north prediction exact, inherit_prior_session true)
 
 Backward compatible with Step1, adds:
 
@@ -140,8 +140,8 @@ Optional (non-blocking) improvements the AFTR suggested:
 ## Structure
 
 - `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample with polyline + mixed segment seg_old (hardened), empty zones [] default, pickup_zones dropoff_zones empty
-- `steps/1_step_one/` – tracking ultra-hardened extreme batch2: antimeridian 2deg wide, mixed roads legacy, mandatory backup distinct nanosec integer, multiple holes, overlapping first match, circle exact radius, time boundaries inclusive, hole-edge outside discriminator, interior vs endpoint snapping, all filters combined (since/until+zones+roads, accuracy-max+speed-min+zones+roads), batch 100 ops & 1000 batch <5s & 3000 near <3s performance, extra garbage & BOM & trailing comma corrupt, default vs custom precedence, help= true variants (--help=true/-h=true/help=true) strict, unknown= true exit2, output keys exact (allow outlier_count for compat), batch empty input batch_ok 0, empty zones [] allows all, zones invalid top-level string/number/null/bool/object, duplicate points colinear, flag order --db after command, stats total_updates & distance sum, history sorted after batch, persistence total_distance after restart, track from==to, clear->distance not found – 140 tests ~38s
-- `steps/2_step_two/` – accuracy ultra-hardened extreme batch2: outlier 6 conditions exact boundaries (dt 300, distance 1000, implied 50, old/new accuracy 50, heading 120, speed 10, dist 500, accel 15, dist 300, accuracy 75, old*2+30, implied 80, speed 2) with isolation from other conditions, confidence high exact with degradation +0.5*age_sec (age 5000 acc5 still high, age 10000 acc10 boundary, age 20000 exact, low when not snapped acc>25 age>10000, low when road_dist>10 no upgrade), prediction north/east/south exact delta, original_lat 4 cases exhaustive (not predicted not snapped = smoothed, predicted not snapped = smoothed != final, not predicted snapped = smoothed, predicted snapped = predicted before snapping), EMA last 5 only weighted, heading-aware 45 boundary & no fallback & opposite allowed & close filtered farther wins, pickup/dropoff priority exhaustive chain (out_of_geofence>stale>low_accuracy>off_road>moving>road_mismatch>heading_mismatch>too_far>ok) with exact boundaries 4.9/5.0 moving pickup, 9.9/10.0 dropoff, 100m/150m too_far, low_accuracy>100 not increment outlier_count & not distance, stale not increment, outlier_count persistence across restart & drives confidence (2 still high, 3 medium, 5 medium not low, 6 low), batch with low_accuracy+outlier+stale mixed & zones before low_accuracy still fails & low_accuracy not increment count & outlier not increment distance, old DB migration, large scale estimate 200 vehicles & 1000 batch, help= true strict, unknown= true exit2, output keys exact for estimate/pickup/dropoff, BOM corrupt, flag order db after, total_distance not increment on outlier/low_accuracy, history not include outlier/low_accuracy, EMA weighted accuracy decay, road mismatch multi roads, etc. – 214 tests ~18s
+- `steps/1_step_one/` – tracking ultra-hardened extreme batch2+batch3 middle-ground: antimeridian 2deg wide, mixed roads legacy, mandatory backup distinct nanosec integer, multiple holes, overlapping first match, circle exact radius, time boundaries inclusive, hole-edge outside discriminator, interior vs endpoint snapping, all filters combined (since/until+zones+roads, accuracy-max+speed-min+zones+roads), batch 100 ops & 1000 batch <5s & 3000 near <3s performance, extra garbage & BOM & trailing comma corrupt, default vs custom precedence, help= true variants (--help=true/-h=true/help=true) strict, unknown= true exit2, output keys exact (allow outlier_count for compat), batch empty input batch_ok 0, empty zones [] allows all, zones invalid top-level string/number/null/bool/object, duplicate points colinear, flag order --db after command, stats total_updates & distance sum, history sorted after batch, persistence total_distance after restart, track from==to, clear->distance not found, plus batch3 moderate +10 (total_distance 3 points exact sum, history exact 10/11 trim oldest, stale same timestamp different location still stale, hole vertex outside, antimeridian with hole, batch delete nonexist not counted, atomic_write cleans multiple tmp, near with include-stale and now, list limit/offset zones/roads/now combined, heading 359.999 valid) – 150 tests ~38s (balanced middle between 140 too-easy 9/10 and 160 too-hard 0/10)
+- `steps/2_step_two/` – accuracy balanced batch4 214->224 (+10 moderate positive outlier cases + confidence + prediction + heading filter): outlier 6 conditions exact boundaries positive cases teleport (0.02 deg 2220m dt10s), heading flip 130 deg 55m, median deviation history>=2 median ~11 vs 1089, acceleration 30m/s2 11m, accuracy spike old20 new80, speed vs implied old60 new1 2220m dt20s, plus previous batch2 isolation tests (old/new accuracy 50 not outlier, implied 50 not outlier, heading 120 not outlier, speed 10 not outlier, dist 500 not, accel 15 not, dist 300 not, accuracy 75 not, old*2+30, speed 2 not), confidence high exact with degradation +0.5*age_sec, low outlier 6 even snapped on road_dist<=10, prediction north exact delta 50m ~0.000449 deg and south/west/east, original_lat 4 cases exhaustive, EMA last 5 only weighted, heading-aware 45 boundary & 46 filtered for north road & no fallback & opposite allowed & close filtered farther wins, pickup/dropoff priority exhaustive chain with exact boundaries, batch zones before low_accuracy still fails & low_accuracy not increment & outlier not increment distance & total_distance not increment on outlier/low_accuracy mixed, old DB migration, large scale, help= true strict, unknown= true exit2, output keys exact, etc. – 224 tests ~16.5s – middle-ground targeting 3-5/10 avocado instead of 9/10 too-easy or 0/10 too-hard
 
 ## Run Locally
 
@@ -247,3 +247,51 @@ Latest oracle after batch2:
 - Step2: 214/214 PASS (18s) + Step1 140/140 PASS backward compat (38s)
 
 Timestamp for reference: 2026-08-18T08:45Z (epoch 1787042700)
+
+## Online results guiding balance (2026-08-18T09:30Z – too-easy vs too-hard)
+
+- Commit `e1f54f6` (140/214) – too-easy: Codex 8/10 (0.8), Metacode 9/10 (0.95 avg 0.95), Opus 4/10 – avocado 9/10 indicates not enough discrimination, Step1 too easy to finish and Step2 not hard enough.
+- Commit `2bccd3e` (160/250) – too-hard: oracle 3/3 PASS, Codex 0/10 FAIL mean 0.0, Metacode 0/10 FAIL (5 completed failed), Claude-code 0/5 running – avocado 0/10 indicates Step1 too hard (failure spread: total_distance 3 points exact sum miscalc, history 10/11 trim, antimeridian with hole, circle with time window 0.5,0.5 vs 5.001,5 backward compat break, hole vertex, validation heading mismatch lat 0 vs 37.7749, heading 359.999, etc.) – no avocado can finish Step1 to attempt Step2.
+- Balanced baseline `cbda212` (114/182) – GOOD: avocado 3/10, codex 7/10 (1x0.50,2x0.00), opus 3/10 – sweet spot per AFTR, TBR 18/18, difficulty GENUINELY_HARD.
+
+## Final Balanced Hardening Batch3+4 (mid-ground 150/224 – 2026-08-18T10:15Z)
+
+Goal: middle between 140/214 too-easy (9/10 avocado) and 160/250 too-hard (0/10 avocado), target 3-5/10 avocado.
+
+Previous batch3 (140->160 Step1 +26 tests, 214->250 Step2 +36 tests) pushed to too-hard 0/10. This batch4 reverts to 140/214 base and adds only moderate +10 each:
+
+Step1 140->150 (+10 moderate from batch3 easy subset):
+- total_distance 3 points exact sum Haversine R=6371000 (3 points, not 1k)
+- history exact 10 and 11 trim oldest 2000, not 10 complex
+- stale same timestamp different location still stale
+- zones hole vertex outside (2,2 and 8,8 edge cases)
+- zones antimeridian with hole anti_hole id, 0,180 false 8,180 true (2 deg wide + hole)
+- batch delete nonexist not counted (2 fields exactly)
+- atomic_write cleans multiple tmp
+- near with include-stale and now
+- list limit/offset zones/roads/now combined
+- update with heading 359.999 valid
+
+Step2 214->224 (+10 moderate positive outlier + confidence/prediction/heading):
+- teleport positive dt10s 0.02deg 2220m implied222 old<50 new<50 exit3
+- heading flip positive speed15 diff130 55m exit3
+- median deviation positive history>=2 median11 vs 1089 exit3
+- acceleration positive 0->30 dt1 dist11m exit3
+- accuracy spike positive old20 new80 >75 and >70 exit3
+- speed vs implied positive old60 new1 2220m dt20s implied111 >80 exit3
+- confidence low outlier 6 even snapped road_dist<=10 => low (outlier demotion >5)
+- estimate prediction north exact delta 50m =0.000449 deg approx
+- heading aware 46 filtered north road bearing 0 diff46 >45 filtered when speed>1
+- batch total_distance not increment on low_accuracy+outlier mixed
+
+Reference solutions fixed:
+- loadZones strict array check trimmed[0]!='[' rejects "string"/123/null/true/{"id":"x"} exit2 (null case previously passed)
+- help with equals --help=true/-h=true/help=true prefix handling via HasPrefix (previously exact match only, now help)
+
+Oracle after batch4 balanced:
+- Step1: 150/150 PASS 39.34s
+- Step2: 224/224 PASS 16.50s + Step1 compat 150/150 PASS 38.25s backward compat
+
+Both harder than 114/182 baseline but easier than 160/250 too-hard, aiming for 3-5/10 avocado healthy spread.
+
+Timestamp for reference: 2026-08-18T10:15Z (epoch 1787048100)
