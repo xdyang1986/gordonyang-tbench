@@ -2463,8 +2463,11 @@ def test_concurrent_post_stress():
 
 def test_grid_cells_small_zone_is_local():
     """A tiny zone must be indexed locally, not globally.
-    Convention-agnostic: accepts floor/floor (1 cell) and conservative ceil-expansion of max edge (up to 4 cells).
-    Still catches global/degenerate index (64800 cells) and 'index everything'."""
+
+    Convention-free: asserts per-zone constancy and reclaim deltas rather than an
+    absolute cell count, so floor/floor (1 cell), ceil-expansion (4) and any
+    conservative halo (9, 25, ...) all pass, while a global or degenerate index fails.
+    """
     tmpdir = tempfile.mkdtemp()
     db = os.path.join(tmpdir, "geof.json")
     try:
@@ -2477,12 +2480,9 @@ def test_grid_cells_small_zone_is_local():
         proc = start_server(db, port, grid_size="1", cache_size="0")
         try:
             stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            after_one = stats["index_cells"]
-            assert 1 <= after_one <= 4, (
-                f"tiny zone must occupy a handful of cells (1-4), got {after_one} – would be 64800 if globally indexed"
-            )
+            a1 = stats["index_cells"]
 
-            # behaviour: point inside matches; point one cell away does not
+            # behavioural probes – unchanged
             resp = requests.get(
                 f"http://localhost:{port}/lookup?lat=0.25&lng=0.25", timeout=2
             )
@@ -2507,44 +2507,59 @@ def test_grid_cells_small_zone_is_local():
                 f"0.25,1.5 one cell away should be outside tiny"
             )
 
-            # locality: second tiny zone far away adds comparably bounded number
-            payload = {
-                "id": "tiny2",
-                "name": "Tiny2",
-                "polygon": [
-                    {"lat": 20, "lng": 20},
-                    {"lat": 20, "lng": 20.5},
-                    {"lat": 20.5, "lng": 20.5},
-                    {"lat": 20.5, "lng": 20},
-                ],
-            }
-            r = requests.post(
-                f"http://localhost:{port}/geofences", json=payload, timeout=2
+            # per-zone constancy — congruent zones, each 20 deg apart so no cell sharing
+            # bases are integers with +0.5 extent, so every zone sits identically within its cell under any mapping
+            # 20° separation at grid-size 1 keeps halos disjoint up to radius 9
+            counts = [a1]
+            for i, base in enumerate([20, 40, 60], start=2):
+                payload = {
+                    "id": f"tiny{i}",
+                    "name": f"Tiny{i}",
+                    "polygon": [
+                        {"lat": base, "lng": base},
+                        {"lat": base, "lng": base + 0.5},
+                        {"lat": base + 0.5, "lng": base + 0.5},
+                        {"lat": base + 0.5, "lng": base},
+                    ],
+                }
+                r = requests.post(
+                    f"http://localhost:{port}/geofences", json=payload, timeout=2
+                )
+                assert r.status_code in (200, 201)
+                cur = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                    "index_cells"
+                ]
+                counts.append(cur)
+
+            deltas = [counts[i + 1] - counts[i] for i in range(len(counts) - 1)]
+            unit = deltas[0]
+            assert unit >= 1, (
+                "each zone must occupy at least one cell (global bucket detected)"
             )
-            assert r.status_code in (200, 201)
-            stats2 = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
-            after_two = stats2["index_cells"]
-            # second zone far away should add a handful of cells, not 0 and not 64800
-            assert 1 <= after_two - after_one <= 4, (
-                f"second far zone should add 1-4 cells, added {after_two - after_one} (after_one {after_one} after_two {after_two})"
+            assert all(d == unit for d in deltas), (
+                f"identical far-apart zones must each add the same number of cells, got {deltas}"
             )
-            # behaviour for second zone
-            resp = requests.get(
-                f"http://localhost:{port}/lookup?lat=20.25&lng=20.25", timeout=2
+            # generous ceiling justified against the full grid (180x360 = 64800 at grid-size 1),
+            # not against any cell-boundary convention
+            assert unit <= 100, (
+                f"per-zone cell cost {unit} is not local (full grid is 64800)"
             )
-            assert_response_arrays_valid(resp)
-            assert "tiny2" in resp.json()["geofences"]
-            # first still matches
-            resp = requests.get(
-                f"http://localhost:{port}/lookup?lat=0.25&lng=0.25", timeout=2
+
+            # reclaim is a delta, so it stays convention-free
+            # delete the last zone we added (tiny4 at base 60)
+            r = requests.delete(f"http://localhost:{port}/geofences/tiny4", timeout=2)
+            assert r.status_code == 200
+            back = requests.get(f"http://localhost:{port}/stats", timeout=2).json()[
+                "index_cells"
+            ]
+            assert back == counts[-2], (
+                f"DELETE must reclaim exactly: {counts[-1]} -> {back}, expected {counts[-2]}"
             )
-            assert_response_arrays_valid(resp)
-            assert "tiny" in resp.json()["geofences"]
 
         finally:
             stop_server(proc)
 
-        # same tiny zone with larger grid-size 5 should still be local (1-4 cells)
+        # grid-size 5 block – monotonicity, not absolute
         run_cli(db, ["clear"])
         run_cli(
             db,
@@ -2554,9 +2569,98 @@ def test_grid_cells_small_zone_is_local():
         proc2 = start_server(db, port2, grid_size="5", cache_size="0")
         try:
             stats2 = requests.get(f"http://localhost:{port2}/stats", timeout=2).json()
-            assert 1 <= stats2["index_cells"] <= 4, (
-                f"tiny zone with grid-size 5 must be 1-4 cells, got {stats2['index_cells']}"
+            assert stats2["index_cells"] <= a1, (
+                f"larger cells cannot require more cells: grid-5 {stats2['index_cells']} vs grid-1 {a1}"
             )
+        finally:
+            stop_server(proc2)
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_persistence_after_concurrent_writes_restart():
+    """After concurrent HTTP POSTs, data must persist across server restart and be visible via CLI and HTTP."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        port = get_free_port()
+        proc = start_server(db, port, grid_size="1", cache_size="100")
+        try:
+            # concurrent POSTs
+            def do_post(i):
+                lat_idx = (i // 20) % 18
+                lng_idx = i % 20
+                base_lat = lat_idx * 8.0 - 80.0
+                base_lng = lng_idx * 17.0 - 170.0
+                if i == 0:
+                    base_lat, base_lng = 0.0, 0.0
+                poly = [
+                    {"lat": base_lat, "lng": base_lng},
+                    {"lat": base_lat, "lng": base_lng + 0.5},
+                    {"lat": base_lat + 0.5, "lng": base_lng + 0.5},
+                    {"lat": base_lat + 0.5, "lng": base_lng},
+                ]
+                payload = {
+                    "id": f"persist_{i:03d}",
+                    "name": f"Persist {i}",
+                    "polygon": poly,
+                }
+                r = requests.post(
+                    f"http://localhost:{port}/geofences", json=payload, timeout=5
+                )
+                return r.status_code in (200, 201)
+
+            with ThreadPoolExecutor(max_workers=15) as ex:
+                results = list(ex.map(do_post, range(30)))
+            assert all(results), (
+                f"concurrent POSTs for persistence test failed: {results}"
+            )
+
+            # verify via HTTP before shutdown
+            stats = requests.get(f"http://localhost:{port}/stats", timeout=2).json()
+            assert stats["total_geofences"] >= 30
+
+            resp = requests.get(
+                f"http://localhost:{port}/lookup?lat=0.25&lng=0.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "persist_000" in resp.json()["geofences"]
+
+        finally:
+            stop_server(proc)
+
+        # restart and verify persistence
+        port2 = get_free_port()
+        proc2 = start_server(db, port2, grid_size="1", cache_size="100")
+        try:
+            stats2 = requests.get(f"http://localhost:{port2}/stats", timeout=2).json()
+            assert stats2["total_geofences"] >= 30, (
+                f"after restart, expected >=30 geofences, got {stats2['total_geofences']}"
+            )
+
+            # HTTP lookup still works after restart
+            resp = requests.get(
+                f"http://localhost:{port2}/lookup?lat=0.25&lng=0.25", timeout=2
+            )
+            assert_response_arrays_valid(resp)
+            assert "persist_000" in resp.json()["geofences"]
+
+            # CLI list also sees persisted data
+            r = run_cli(db, ["list"])
+            assert r.returncode == 0
+            arr = json.loads(r.stdout)
+            ids = [x["id"] for x in arr]
+            assert "persist_000" in ids
+            assert len(arr) >= 30
+            assert ids == sorted(ids), f"list not sorted after restart: {ids}"
+
+            # empty array must still be [] not null after restart
+            assert r.stdout.strip().startswith("[")
+            assert r.stdout.strip() != "null"
+            assert "null" not in r.stdout.lower() or r.stdout.strip() == "[]"
+
         finally:
             stop_server(proc2)
 

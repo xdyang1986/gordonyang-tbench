@@ -553,18 +553,32 @@ def test_corrupt_db():
         assert r.returncode == 0
         assert json.loads(r.stdout) == []
 
-        # array instead of object should be corrupt
+        # array instead of object must be corrupt -> exit 4 (strict, no soft acceptance)
         with open(db, "w") as f:
             f.write("[]")
         r = run_cli(db, ["list"])
-        # Depending on implementation, empty array might be considered corrupt if not object.
-        # We require object, so array should be corrupt -> exit 4 or at least not crash.
-        # Allow either 4 or treat as empty? Spec says if JSON is not an object, exit 4.
-        if r.returncode == 0:
-            # If implementation treats [] as empty, that's lenient but we check it doesn't crash
-            assert json.loads(r.stdout) == [] or r.returncode == 4
-        else:
-            assert r.returncode == 4
+        assert r.returncode == 4, (
+            f"[] should be corrupt (not object) exit 4, got {r.returncode} stdout={r.stdout}"
+        )
+
+        # null should be coerced to empty map (not corrupt) – BAD_GOLDEN fix
+        with open(db, "w") as f:
+            f.write("null")
+        r = run_cli(db, ["list"])
+        assert r.returncode == 0, (
+            f"null should be treated as empty, not corrupt, got {r.returncode}"
+        )
+        assert json.loads(r.stdout) == [], f"null should give [] got {r.stdout}"
+
+        # number / string / bool are valid JSON but not objects -> corrupt
+        for bad in ["123", "0", "1.5", '"hello"', "true", "false", '"null"', "123.45"]:
+            with open(db, "w") as f:
+                f.write(bad)
+            r = run_cli(db, ["list"])
+            assert r.returncode == 4, (
+                f"{bad!r} should be corrupt exit 4, got {r.returncode} stdout={r.stdout}"
+            )
+
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
