@@ -22,8 +22,11 @@ else
 fi
 
 if [ $EXIT -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi
+# Materialize buggy starter for Step 2 (appears exactly when Step2 needs it, never before)
+mkdir -p /app/buggy && cp /tests/buggy_main.go /app/buggy/main.go || true
+cp /tests/buggy_main.go /app/buggy/buggy_main.go 2>/dev/null || true
 # Isolation: remove test files so Step-2 trajectory cannot read /tests/
-rm -rf /tests/test_outputs.py /tests/test.sh || true
-rm -rf /tests/test_outputs.py /tests/test.sh 2>/dev/null || true
+rm -rf /tests/test_outputs.py /tests/test.sh /tests/buggy_main.go || true
+rm -rf /tests/test_outputs.py /tests/test.sh /tests/buggy_main.go 2>/dev/null || true
 # Also clean possible copies in working dir
-rm -rf ./test_outputs.py ./test.sh 2>/dev/null || true
+rm -rf ./test_outputs.py ./test.sh ./buggy_main.go 2>/dev/null || true

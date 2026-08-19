@@ -274,16 +274,22 @@ def test_delete_nonexist_prints_deleted(binary):
 
 
 def test_saveDB_best_effort_fsync_present():
-    # Source inspection: saveDB must contain best-effort fsync (Sync)
-    # This is required by spec: Use best-effort fsync
+    # Loosened: accept .Sync() or syscall.Fsync anywhere in submitted .go sources,
+    # no specific function name required (instruction never mandates func saveDB name)
     found = False
     for root, _, files in os.walk(SRC_DIR):
         for fn in files:
             if fn.endswith(".go"):
                 content = open(os.path.join(root, fn)).read()
-                if "func saveDB" in content and ".Sync()" in content:
+                if (
+                    ".Sync()" in content
+                    or "syscall.Fsync" in content
+                    or "Fsync(" in content
+                ):
                     found = True
-    assert found, "saveDB should implement best-effort fsync via File.Sync()"
+    assert found, (
+        "implementation should contain best-effort fsync via .Sync() or syscall.Fsync"
+    )
 
 
 def test_list_sorted_and_filter(binary):

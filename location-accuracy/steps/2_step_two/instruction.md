@@ -58,7 +58,7 @@ Six conditions (qualitative):
 5. Accuracy Spike: sudden degradation vs old accuracy.
 6. Speed vs Implied Mismatch: reports nearly stopped but actually moved far in short time.
 
-Quantitative thresholds are not listed here; they must be inferred from the failing observations below and from the hidden tests. Each observation pins a boundary.
+Quantitative thresholds are not listed here; they must be inferred from the failing observations below. Each observation pins a boundary.
 
 Failing observations – current buggy binary `/app/buggy/main.go`:
 
@@ -71,6 +71,7 @@ Failing observations – current buggy binary `/app/buggy/main.go`:
 7. Distance for accel: `0.0027 deg ~300 m` with Δ 30 – at boundary 300 should NOT be outlier, so needs <300.
 8. Accuracy spike: first `0 0 1000 acc10`, second `0.0005 0 2000 acc80` where old 10 – old*2+30=50, new 80 >50 and >75 should be outlier. Boundary new acc exactly 75 should NOT be outlier.
 9. Speed vs implied: first `0 0 1000 acc10 speed10`, second `0.0072 0 11000 acc10 speed1` dist ~800 m dt10s implied 80 – at boundary 80 should NOT be outlier; with dist 1000+ and dt<60 and speed<2 and implied>80 should be outlier. Speed exactly 2 should NOT be outlier.
+10. Accuracy boundary for teleport: first update `veh1 0 0 1000 acc50 speed10`, then `veh1 0.02 0 11000 acc10 speed10` (~2220 m in 10 s, implied ~222 m/s) – should succeed, not outlier, because the old fix's accuracy is not strictly better than the good-accuracy cutoff. Same with accuracies swapped (acc10 then acc50) – also succeeds. Both accuracies must be strictly below the cutoff for teleport to fire.
 
 ### Zones
 
@@ -167,7 +168,7 @@ Failing observations:
 - off_road beats moving and too_far.
 - moving beats too_far, road_mismatch, heading_mismatch.
 - Boundaries: pickup speed 4.9 valid true, 5.0 moving invalid; dropoff 9.9 valid true, 10.0 moving invalid.
-- too_far: pickup 90m valid true, 110m too_far; dropoff 140m valid, 160m too_far.
+- too_far: pickup at exactly 100 m is valid, 101 m is too_far; dropoff at exactly 150 m is valid, 151 m is too_far. (Tests check 99/101 and exact 100, so 100 valid / 101 too_far pins the cutoff; similarly 150/151 for dropoff.)
 - heading_mismatch: east-west road, vehicle heading 90 speed2 pickup 50m west bearing diff 180 distance>10 -> heading_mismatch.
 - road_mismatch: road_a at lat0 and road_b at lat0.001, vehicle snapped to a, pickup snapped to b -> road_mismatch.
 
