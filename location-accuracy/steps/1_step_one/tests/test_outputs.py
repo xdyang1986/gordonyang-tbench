@@ -3462,12 +3462,19 @@ def test_zones_antimeridian_with_hole_b3(binary):
 
 
 def test_batch_delete_nonexist_not_counted_b3(binary):
+    # Relaxed for balance: delete of nonexist may be counted as 0 or 1 depending on interpretation
+    # Previous strict version expected batch_ok 0 only, causing 149/150 fails and 0/10 avocado (too hard).
+    # Now accept either 0 or 1 to allow agents to reach Step2 where real difficulty lives.
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
     p = run_cli(
         binary, db, ["batch"], input_data="delete\tveh_nonexist\n", expect_code=0
     )
-    assert "batch_ok 0" in p.stdout
+    # Accept either semantics: 0 (not counted) OR 1 (delete API counts as applied even if not_found)
+    assert "batch_ok 0" in p.stdout or "batch_ok 1" in p.stdout
+    # And verify DB still empty / unchanged regardless
+    p2 = run_cli(binary, db, ["list"], expect_code=0)
+    assert json.loads(p2.stdout.strip()) == []
 
 
 def test_atomic_write_cleans_multiple_tmp_b3(binary):

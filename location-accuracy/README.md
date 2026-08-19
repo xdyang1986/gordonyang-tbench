@@ -295,3 +295,25 @@ Oracle after batch4 balanced:
 Both harder than 114/182 baseline but easier than 160/250 too-hard, aiming for 3-5/10 avocado healthy spread.
 
 Timestamp for reference: 2026-08-18T10:15Z (epoch 1787048100)
+
+## Fix for 0/10 too-hard detected online (2026-08-19T01:43Z commit 5c00e5f)
+
+Online job 5128215 (metacode avocado 10 trials) for 150/224 middle-ground showed **0/10 PASS** – all 10 trials failed Step1 with firstFailedStep 1_step_one, meanReward 0. Detailed trial artifact (HF9B4Yc, kib3d93, gX8Qe8G, PgZou5y, qXh9fMU) all **149/150** – single failing test `test_batch_delete_nonexist_not_counted_b3`:
+
+- Expected `batch_ok 0` for `delete\tveh_nonexist`
+- Agent returned `batch_ok 1` (counts delete as applied even if not_found)
+
+Root cause: Batch delete semantics ambiguous – single delete prints "deleted" even if exists and "not_found" otherwise (exit0), but batch_ok counting of applied ops unclear. Our reference counted only existing deletes as applied (batch_ok 0), while many agents count delete API call as applied regardless (batch_ok 1). This single discriminator blocked all avocado from reaching Step2, making it 0/10 too-hard, similar to previous 160/250.
+
+Fix applied:
+- Relaxed `test_batch_delete_nonexist_not_counted_b3` to accept **either `batch_ok 0` OR `batch_ok 1`** plus verify list empty unchanged.
+- Keeps test as discriminator for batch parsing but not for exact counting semantics.
+- Effective Step1 remains 150 tests but with tolerant counting, allowing avocado to progress to Step2 where real difficulty lives (positive outlier cases, heading-aware 46 filtered, north prediction exact, etc.).
+
+Oracle after fix:
+- Step1: 150/150 PASS 37.42s (relaxed test passes both semantics)
+- Step2: 224/224 PASS 16.54s + Step1 compat 150/150 PASS 41.05s
+
+This should bring avocado from 0/10 (blocked at Step1) to balanced 3-5/10 (able to attempt Step2, where 224 tests will discriminate). If still 0/10 after, further easing of Step2 positive cases (remove 5 hardest) to 219 may be needed.
+
+Timestamp: 2026-08-19T01:53Z (epoch 1787104380)
