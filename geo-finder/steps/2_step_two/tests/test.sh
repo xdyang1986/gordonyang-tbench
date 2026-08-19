@@ -11,7 +11,7 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1"
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1"
 
-pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+pytest --ctrf /logs/verifier/ctrf.json /tests/ -rA -v
 EXIT=$?
 
 if [ $EXIT -eq 0 ] && [ -f /logs/verifier/ctrf.json ]; then

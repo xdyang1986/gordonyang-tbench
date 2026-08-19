@@ -37,7 +37,7 @@ On `add`, after basic parsing and range checks, you must also enforce:
 
 2. **No duplicate points**: Polygon must not contain duplicate points with numerically equal lat and lng (e.g., `0,0` and `0.0,0.0` are duplicates). If any two points have identical coordinates, reject exit 2. This includes duplicate first/last point – you should not require explicit closure; closure is implicit. So `"0,0;0,1;1,1;1,0;0,0"` contains duplicate `0,0` and must be rejected.
 
-3. **Non-zero area**: Polygon must have non-zero area (not degenerate – all points colinear or collapsed). If degenerate, reject exit 2.
+3. **Non-zero area**: Compute the absolute shoelace area on the raw lat/lng values. Reject with exit 2 if it is ≤ 1e-9 — colinear, collapsed, or a sliver below that threshold.
 
 4. **Self-intersection**: Polygon must be simple – no self-intersection, including cases where non-adjacent edges cross, where a vertex lies on a non-adjacent edge interior, and where non-adjacent edges have colinear overlapping segments. Adjacent edges share a vertex and are allowed to meet at that vertex. If self-intersecting, reject exit 2.
 

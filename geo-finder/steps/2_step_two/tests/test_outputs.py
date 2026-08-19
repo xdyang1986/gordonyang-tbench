@@ -256,10 +256,9 @@ def test_gomod_stdlib_and_lru_own():
                             assert False, (
                                 f"{path} imports external package {imp!r} – stdlib only"
                             )
-                        if "lru" in imp.lower():
-                            # any import containing lru is disallowed – LRU must be own impl, stdlib has no lru
+                        if "lru" in imp.lower() and "." in imp.split("/")[0]:
                             assert False, (
-                                f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                                f"{path} imports external lru package {imp!r} – LRU must be own implementation"
                             )
                     continue
                 if in_block:
@@ -269,9 +268,9 @@ def test_gomod_stdlib_and_lru_own():
                             assert False, (
                                 f"{path} imports external package {imp!r} – stdlib only"
                             )
-                        if "lru" in imp.lower():
+                        if "lru" in imp.lower() and "." in imp.split("/")[0]:
                             assert False, (
-                                f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                                f"{path} imports external lru package {imp!r} – LRU must be own implementation"
                             )
                     if ")" in stripped:
                         in_block = False
@@ -283,9 +282,9 @@ def test_gomod_stdlib_and_lru_own():
                                 assert False, (
                                     f"{path} imports external package {imp!r} – stdlib only"
                                 )
-                            if "lru" in imp.lower():
+                            if "lru" in imp.lower() and "." in imp.split("/")[0]:
                                 assert False, (
-                                    f"{path} imports lru package {imp!r} – LRU must be own implementation"
+                                    f"{path} imports external lru package {imp!r} – LRU must be own implementation"
                                 )
 
     # Also check that an LRU implementation exists – look for a type or struct containing LRU logic
