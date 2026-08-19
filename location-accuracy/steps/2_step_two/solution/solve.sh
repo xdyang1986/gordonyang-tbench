@@ -653,9 +653,19 @@ func saveDB(path string, db map[string]Location) error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}
+	// best-effort fsync tmp file
+	if f, err := os.OpenFile(tmp, os.O_RDWR, 0644); err == nil {
+		_ = f.Sync()
+		_ = f.Close()
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	// best-effort fsync directory after rename
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		_ = df.Close()
 	}
 	if files, err := os.ReadDir(dir); err == nil {
 		prefix := filepath.Base(path) + ".tmp."
@@ -1833,10 +1843,8 @@ func main() {
 			if err := saveDB(dbPath, db); err != nil {
 				exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
 			}
-			fmt.Println("deleted")
-		} else {
-			fmt.Println("not_found")
 		}
+		fmt.Println("deleted")
 		os.Exit(0)
 
 	case "stats":

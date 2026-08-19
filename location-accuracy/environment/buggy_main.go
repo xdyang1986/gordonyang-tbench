@@ -1,12 +1,3 @@
-#!/bin/bash
-set -e
-mkdir -p /app/src
-cat > /app/src/go.mod <<'GOMOD'
-module locationservice
-
-go 1.22
-GOMOD
-cat > /app/src/main.go <<'GOMAIN'
 package main
 
 import (
@@ -47,16 +38,17 @@ type Location struct {
 	Heading        float64        `json:"heading"`
 	TotalDistanceM float64        `json:"total_distance_m"`
 	History        []HistoryEntry `json:"history,omitempty"`
+	OutlierCount   int            `json:"outlier_count,omitempty"`
 }
 
 type Zone struct {
-	ID         string     `json:"id"`
-	Polygon    []Point    `json:"polygon,omitempty"`
-	Holes      [][]Point  `json:"holes,omitempty"`
-	Center     *Point     `json:"center,omitempty"`
-	RadiusM    *float64   `json:"radius_m,omitempty"`
-	ActiveFrom *int64     `json:"active_from,omitempty"`
-	ActiveTo   *int64     `json:"active_to,omitempty"`
+	ID         string    `json:"id"`
+	Polygon    []Point   `json:"polygon,omitempty"`
+	Holes      [][]Point `json:"holes,omitempty"`
+	Center     *Point    `json:"center,omitempty"`
+	RadiusM    *float64  `json:"radius_m,omitempty"`
+	ActiveFrom *int64    `json:"active_from,omitempty"`
+	ActiveTo   *int64    `json:"active_to,omitempty"`
 }
 
 type RoadEntry struct {
@@ -79,16 +71,13 @@ func exitPrint(code int, msg string, isErr bool) {
 	os.Exit(code)
 }
 
-func isInvalidFloat(f float64) bool {
-	return math.IsNaN(f) || math.IsInf(f, 0)
-}
+func isInvalidFloat(f float64) bool { return math.IsNaN(f) || math.IsInf(f, 0) }
 
 func parseFloatArg(s, name string) (float64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
 	}
-	// Reject NaN, Inf case-insensitive via explicit check before ParseFloat
 	low := strings.ToLower(s)
 	if low == "nan" || low == "+nan" || low == "-nan" || low == "inf" || low == "+inf" || low == "-inf" || low == "infinity" || low == "+infinity" || low == "-infinity" {
 		return 0, false
@@ -108,12 +97,6 @@ func parseIntArg(s, name string) (int64, bool) {
 	if s == "" {
 		return 0, false
 	}
-	// Must be integer, no float
-	if strings.Contains(s, ".") || strings.Contains(strings.ToLower(s), "e") {
-		// Could still be integer with e? But spec says integer string, reject float hex etc. We'll try ParseInt, it will fail for decimal.
-	}
-	// Reject hex etc by ensuring no letters except minus
-	// Use ParseInt base 10
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, false
@@ -132,50 +115,43 @@ func haversine(lat1, lng1, lat2, lng2 float64) float64 {
 	return R * c
 }
 
-func normalizeLng(lng, ref float64) float64 {
-	for lng < ref-180 {
-		lng += 360
+func bearing(lat1, lng1, lat2, lng2 float64) float64 {
+	phi1 := lat1 * math.Pi / 180
+	phi2 := lat2 * math.Pi / 180
+	dlambda := (lng2 - lng1) * math.Pi / 180
+	x := math.Sin(dlambda) * math.Cos(phi2)
+	y := math.Cos(phi1)*math.Sin(phi2) - math.Sin(phi1)*math.Cos(phi2)*math.Cos(dlambda)
+	br := math.Atan2(x, y) * 180 / math.Pi
+	br = math.Mod(br+360, 360)
+	return br
+}
+
+func angularDiff(a, b float64) float64 {
+	d := math.Mod(math.Abs(a-b), 360)
+	if d > 180 {
+		d = 360 - d
 	}
-	for lng > ref+180 {
-		lng -= 360
-	}
-	return lng
+	return d
 }
 
 func pointOnSegmentEdge(lat, lng float64, a, b Point, eps float64) bool {
-	// Check if point is on segment a-b within eps for distance to line and within bounding box
-	// Use equirectangular for small distances? For edge check, use simple bounding box plus area check.
-	// Compute cross product in lng/lat space (approx)
-	// For robustness, check if point close to segment using haversine? But for polygon edge test we want point on edge => inside.
-	// We'll use: check if point is colinear with a-b and within bbox.
-	// Use tolerance 1e-9 degrees ~ 0.1mm, but also for antimeridian normalized.
-	// Normalize b lng relative to a
 	bLngNorm := normalizeLng(b.Lng, a.Lng)
 	pLngNorm := normalizeLng(lng, a.Lng)
-	// Vector a->b: dx = bLngNorm - a.Lng, dy = b.Lat - a.Lat
-	// Vector a->p: dxp = pLngNorm - a.Lng, dyp = lat - a.Lat
 	dx := bLngNorm - a.Lng
 	dy := b.Lat - a.Lat
 	dxp := pLngNorm - a.Lng
 	dyp := lat - a.Lat
-	// Cross product
 	cross := dx*dyp - dy*dxp
 	if math.Abs(cross) > 1e-9 {
 		return false
 	}
-	// Dot product to check within segment
-	// If segment is point, check distance
 	if math.Abs(dx) < 1e-12 && math.Abs(dy) < 1e-12 {
 		return math.Abs(dxp) < 1e-9 && math.Abs(dyp) < 1e-9
 	}
-	// Projection
-	if dx != 0 || dy != 0 {
-		t := (dxp*dx + dyp*dy) / (dx*dx + dy*dy)
-		if t < -1e-9 || t > 1+1e-9 {
-			return false
-		}
+	t := (dxp*dx + dyp*dy) / (dx*dx + dy*dy)
+	if t < -1e-9 || t > 1+1e-9 {
+		return false
 	}
-	// Bounding box check with epsilon
 	minLat := math.Min(a.Lat, b.Lat) - 1e-9
 	maxLat := math.Max(a.Lat, b.Lat) + 1e-9
 	minLng := math.Min(a.Lng, bLngNorm) - 1e-9
@@ -189,6 +165,16 @@ func pointOnSegmentEdge(lat, lng float64, a, b Point, eps float64) bool {
 	return true
 }
 
+func normalizeLng(lng, ref float64) float64 {
+	for lng < ref-180 {
+		lng += 360
+	}
+	for lng > ref+180 {
+		lng -= 360
+	}
+	return lng
+}
+
 func unwrapPolygon(poly []Point) []Point {
 	if len(poly) == 0 {
 		return poly
@@ -198,28 +184,18 @@ func unwrapPolygon(poly []Point) []Point {
 	for i := 1; i < len(poly); i++ {
 		prev := unwrapped[i-1].Lng
 		curr := poly[i].Lng
-		// find curr equivalent closest to prev
-		diff := curr - poly[i-1].Lng
-		// Actually difference of original lnga? Use prev unwrapped vs raw curr
-		// Choose k to minimize abs(curr+360k - prev)
-		// Compute diff = curr - prev; adjust to [-180,180]
-		d := curr - prev
-		for d > 180 {
-			d -= 360
+		for curr-prev > 180 {
 			curr -= 360
 		}
-		for d < -180 {
-			d += 360
+		for curr-prev < -180 {
 			curr += 360
 		}
 		unwrapped[i] = Point{Lat: poly[i].Lat, Lng: curr}
-		_ = diff
 	}
 	return unwrapped
 }
 
 func unwrapLngForQuery(qLng float64, refLng float64) float64 {
-	// unwrap qLng to be within [ref-180, ref+180]
 	for qLng < refLng-180 {
 		qLng += 360
 	}
@@ -233,11 +209,8 @@ func pointInPolygonSingle(lat, lng float64, poly []Point) bool {
 	if len(poly) < 3 {
 		return false
 	}
-	// Unwrap polygon to continuous longitudes
 	unwrapped := unwrapPolygon(poly)
-	// Unwrap query lng to near first point
 	qLng := unwrapLngForQuery(lng, unwrapped[0].Lng)
-	// Check on edge using unwrapped
 	for i := 0; i < len(unwrapped); i++ {
 		j := (i + 1) % len(unwrapped)
 		if pointOnSegmentEdge(lat, qLng, unwrapped[i], unwrapped[j], 1e-9) {
@@ -413,7 +386,6 @@ func isInsideAnyZoneList(lat, lng float64, zones []Zone) (bool, string) {
 	return false, ""
 }
 
-// For update: if filtered active zones empty => allow (return true)
 func isInsideAnyZoneForUpdate(lat, lng float64, zones []Zone, ts int64) (bool, string) {
 	active := filterActiveZones(zones, ts, true)
 	if len(active) == 0 {
@@ -421,18 +393,6 @@ func isInsideAnyZoneForUpdate(lat, lng float64, zones []Zone, ts int64) (bool, s
 	}
 	return isInsideAnyZoneList(lat, lng, active)
 }
-
-// For near/list: intuitive - if no active zones at given now, allow all (no filtering)
-// This is hardened but intuitive vs old [] behavior
-func isInsideAnyZoneForFiltering(lat, lng float64, zones []Zone, ts int64, useTimeFilter bool) (bool, string) {
-	active := filterActiveZones(zones, ts, useTimeFilter)
-	if len(active) == 0 {
-		return true, ""
-	}
-	return isInsideAnyZoneList(lat, lng, active)
-}
-
-// Roads
 
 func loadRoads(path string) ([]RoadEntry, error) {
 	if path == "" {
@@ -523,19 +483,18 @@ func closestPointOnSegment(px, py, x1, y1, x2, y2 float64) (cx, cy, dist, t floa
 }
 
 type SnapResult struct {
-	Snapped   bool
-	Lat       float64
-	Lng       float64
-	RoadID    string
-	DistM     float64
-	Bearing   float64
+	Snapped bool
+	Lat     float64
+	Lng     float64
+	RoadID  string
+	DistM   float64
+	Bearing float64
 }
 
 func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 	if len(roads) == 0 {
 		return SnapResult{Snapped: false}
 	}
-	// Convert query to XY once per latRef? We need per segment latRef = lat (query lat) for simplicity using same ref
 	latRef := lat
 	px, py := latLngToXY(lat, lng, latRef)
 	bestDist := math.MaxFloat64
@@ -559,7 +518,6 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 			if dist < bestDist {
 				bestDist = dist
 				cLat, cLng := xyToLatLng(cx, cy, latRef)
-				// Bearing of segment
 				br := bearing(p1.Lat, p1.Lng, p2.Lat, p2.Lng)
 				best = SnapResult{Snapped: true, Lat: cLat, Lng: cLng, RoadID: road.ID, DistM: dist, Bearing: br}
 			}
@@ -571,15 +529,55 @@ func snapToRoads(lat, lng float64, roads []RoadEntry) SnapResult {
 	return SnapResult{Snapped: false}
 }
 
-func bearing(lat1, lng1, lat2, lng2 float64) float64 {
-	phi1 := lat1 * math.Pi / 180
-	phi2 := lat2 * math.Pi / 180
-	dlambda := (lng2 - lng1) * math.Pi / 180
-	x := math.Sin(dlambda) * math.Cos(phi2)
-	y := math.Cos(phi1)*math.Sin(phi2) - math.Sin(phi1)*math.Cos(phi2)*math.Cos(dlambda)
-	br := math.Atan2(x, y) * 180 / math.Pi
-	br = math.Mod(br+360, 360)
-	return br
+func snapToRoadsHeadingAware(lat, lng, heading float64, speed float64, roads []RoadEntry, headingAware bool) SnapResult {
+	if len(roads) == 0 {
+		return SnapResult{Snapped: false}
+	}
+	if !headingAware {
+		return snapToRoads(lat, lng, roads)
+	}
+	latRef := lat
+	px, py := latLngToXY(lat, lng, latRef)
+	bestDist := math.MaxFloat64
+	var best SnapResult
+	best.Snapped = false
+	for _, road := range roads {
+		var pts []Point
+		if len(road.Points) >= 2 {
+			pts = road.Points
+		} else if road.Start != nil && road.End != nil {
+			pts = []Point{*road.Start, *road.End}
+		} else {
+			continue
+		}
+		for i := 0; i < len(pts)-1; i++ {
+			p1 := pts[i]
+			p2 := pts[i+1]
+			x1, y1 := latLngToXY(p1.Lat, p1.Lng, latRef)
+			x2, y2 := latLngToXY(p2.Lat, p2.Lng, latRef)
+			cx, cy, dist, _ := closestPointOnSegment(px, py, x1, y1, x2, y2)
+			if dist > 50.0+1e-9 {
+				continue
+			}
+			br := bearing(p1.Lat, p1.Lng, p2.Lat, p2.Lng)
+			diff := angularDiff(heading, br)
+			diffOpp := angularDiff(heading, math.Mod(br+180, 360))
+			minDiff := math.Min(diff, diffOpp)
+			if minDiff > 45.0+1e-9 {
+				continue // skip candidate
+			}
+			if dist < bestDist {
+				bestDist = dist
+				cLat, cLng := xyToLatLng(cx, cy, latRef)
+				best = SnapResult{Snapped: true, Lat: cLat, Lng: cLng, RoadID: road.ID, DistM: dist, Bearing: br}
+			}
+		}
+	}
+	if best.Snapped && bestDist <= 50.0+1e-9 {
+		return best
+	}
+	// BUG: fallback to non-heading-aware
+	return snapToRoads(lat, lng, roads)
 }
 
 func backupCorrupt(path string, raw []byte) {
@@ -661,7 +659,6 @@ func saveDB(path string, db map[string]Location) error {
 		_ = df.Sync()
 		_ = df.Close()
 	}
-	// cleanup any stale tmp files from previous crashes
 	if files, err := os.ReadDir(dir); err == nil {
 		prefix := filepath.Base(path) + ".tmp."
 		for _, f := range files {
@@ -674,9 +671,9 @@ func saveDB(path string, db map[string]Location) error {
 	return nil
 }
 
-func parseGlobalDBFlag(args []string) (dbPath string, remaining []string) {
-	dbPath = ""
-	remaining = []string{}
+func parseGlobalDBFlag(args []string) (string, []string) {
+	dbPath := ""
+	rem := []string{}
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--db" {
 			if i+1 < len(args) {
@@ -688,10 +685,10 @@ func parseGlobalDBFlag(args []string) (dbPath string, remaining []string) {
 		} else if strings.HasPrefix(args[i], "--db=") {
 			dbPath = args[i][5:]
 		} else {
-			remaining = append(remaining, args[i])
+			rem = append(rem, args[i])
 		}
 	}
-	return
+	return dbPath, rem
 }
 
 type UpdateArgs struct {
@@ -703,9 +700,6 @@ type UpdateArgs struct {
 	Speed     float64
 	Heading   float64
 	ZonesPath string
-	hasAcc    bool
-	hasSpeed  bool
-	hasHead   bool
 }
 
 func parseUpdateArgs(cmdArgs []string) UpdateArgs {
@@ -735,7 +729,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 	ua.Accuracy = 10.0
 	ua.Speed = 0.0
 	ua.Heading = 0.0
-	// parse flags
 	for i := 4; i < len(cmdArgs); i++ {
 		arg := cmdArgs[i]
 		if arg == "--accuracy" {
@@ -747,7 +740,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid accuracy", true)
 			}
 			ua.Accuracy = v
-			ua.hasAcc = true
 			i++
 		} else if strings.HasPrefix(arg, "--accuracy=") {
 			v, ok := parseFloatArg(arg[len("--accuracy="):], "accuracy")
@@ -755,7 +747,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid accuracy", true)
 			}
 			ua.Accuracy = v
-			ua.hasAcc = true
 		} else if arg == "--speed" {
 			if i+1 >= len(cmdArgs) {
 				exitPrint(2, "missing --speed value", true)
@@ -765,7 +756,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid speed", true)
 			}
 			ua.Speed = v
-			ua.hasSpeed = true
 			i++
 		} else if strings.HasPrefix(arg, "--speed=") {
 			v, ok := parseFloatArg(arg[len("--speed="):], "speed")
@@ -773,7 +763,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid speed", true)
 			}
 			ua.Speed = v
-			ua.hasSpeed = true
 		} else if arg == "--heading" {
 			if i+1 >= len(cmdArgs) {
 				exitPrint(2, "missing --heading value", true)
@@ -783,7 +772,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid heading", true)
 			}
 			ua.Heading = v
-			ua.hasHead = true
 			i++
 		} else if strings.HasPrefix(arg, "--heading=") {
 			v, ok := parseFloatArg(arg[len("--heading="):], "heading")
@@ -791,7 +779,6 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 				exitPrint(2, "invalid heading", true)
 			}
 			ua.Heading = v
-			ua.hasHead = true
 		} else if arg == "--zones" {
 			if i+1 >= len(cmdArgs) {
 				exitPrint(2, "missing --zones value", true)
@@ -809,20 +796,148 @@ func parseUpdateArgs(cmdArgs []string) UpdateArgs {
 
 func printHelp() {
 	fmt.Println("locationctl help")
-	fmt.Println("Commands: update,get,list,near,track,distance,delete,stats,batch,clear,geofence-check")
-	fmt.Println("Usage: locationctl --db <PATH> <command> [args] [flags]")
+	fmt.Println("Commands: update,get,list,near,track,distance,delete,stats,batch,clear,estimate,validate-pickup,validate-dropoff,geofence-check")
+}
+
+func buildEstimateResult(loc Location, nowMs int64, roads []RoadEntry, roadsPath string) map[string]interface{} {
+	age := nowMs - loc.TimestampMs
+	if age < 0 {
+		age = 0
+	}
+	hist := loc.History
+	sort.Slice(hist, func(i, j int) bool { return hist[i].TimestampMs < hist[j].TimestampMs })
+	var recent []HistoryEntry
+	if len(hist) >= 10 {
+		recent = hist[len(hist)-10:]
+	} else {
+		recent = hist
+	}
+	smoothedLat := loc.Lat
+	smoothedLng := loc.Lng
+	if len(recent) >= 2 {
+		var sumW, sumLat, sumLng float64
+		for _, h := range recent {
+			ageH := nowMs - h.TimestampMs
+			if ageH < 0 {
+				ageH = 0
+			}
+			w := (1.0 / (h.Accuracy + 1.0)) * math.Exp(-float64(ageH)/10000.0)
+			sumW += w
+			sumLat += w * h.Lat
+			sumLng += w * h.Lng
+		}
+		if sumW > 1e-12 {
+			smoothedLat = sumLat / sumW
+			smoothedLng = sumLng / sumW
+		}
+	}	predicted := false
+	estLat := smoothedLat
+	estLng := smoothedLng
+	accuracy := loc.Accuracy
+	// Always degrade accuracy with age (0.5 m per sec)
+	dtSecTotal := float64(age) / 1000.0
+	accuracy = accuracy + 0.5*dtSecTotal
+	if age > 0 && age <= 30000 && loc.Speed > 0 {
+		predicted = true
+		dist := loc.Speed * dtSecTotal
+		R := 6371000.0
+		headingRad := loc.Heading * math.Pi / 180
+		latRad := smoothedLat * math.Pi / 180
+		deltaLat := dist * math.Cos(headingRad) / R * 180 / math.Pi
+		cosLat := math.Cos(latRad)
+		if math.Abs(cosLat) < 1e-12 {
+			cosLat = 1e-12
+		}
+		deltaLng := dist * math.Sin(headingRad) / (R * cosLat) * 180 / math.Pi
+		estLat = smoothedLat + deltaLat
+		estLng = smoothedLng + deltaLng
+	}
+	// BUG: original is predicted when not snapped
+	originalLat := estLat
+	originalLng := estLng
+	snapped := false
+	roadID := ""
+	roadBearing := 0.0
+	roadDist := 0.0
+	finalLat := estLat
+	finalLng := estLng
+	if roadsPath != "" {
+		headingAware := loc.Speed > 1
+		snap := snapToRoadsHeadingAware(estLat, estLng, loc.Heading, loc.Speed, roads, headingAware)
+		if snap.Snapped {
+			snapped = true
+			originalLat = estLat
+			originalLng = estLng
+			finalLat = snap.Lat
+			finalLng = snap.Lng
+			roadID = snap.RoadID
+			roadBearing = snap.Bearing
+			roadDist = snap.DistM
+		}
+	}
+	conf := "low"
+	if accuracy <= 5 && age <= 5000 {
+		conf = "high"
+	} else if accuracy <= 10 && age <= 10000 {
+		conf = "high"
+	} else if accuracy <= 25 && age <= 20000 {
+		conf = "medium"
+	}
+	if snapped {
+		if roadDist <= 10 {
+			if conf == "medium" && accuracy <= 25 {
+				conf = "high"
+			} else if conf == "low" && accuracy <= 40 && age <= 15000 {
+				conf = "medium"
+			}
+		}
+	}
+	if loc.OutlierCount >= 2 && conf == "high" {
+		conf = "medium"
+	}
+	if loc.OutlierCount >= 5 {
+		conf = "low"
+	}
+	if age > 30000 {
+		conf = "low"
+	}
+	if accuracy > 50 {
+		conf = "low"
+	}
+	if !snapped && accuracy > 25 && age > 10000 {
+		if accuracy > 40 || age > 15000 {
+			conf = "low"
+		}
+	}
+
+	result := map[string]interface{}{
+		"vehicle_id": loc.VehicleID,
+		"lat": finalLat,
+		"lng": finalLng,
+		"timestamp_ms": loc.TimestampMs,
+		"accuracy": accuracy,
+		"speed": loc.Speed,
+		"heading": loc.Heading,
+		"total_distance_m": loc.TotalDistanceM,
+		"confidence": conf,
+		"age_ms": age,
+		"snapped": snapped,
+		"road_id": roadID,
+		"road_bearing": roadBearing,
+		"road_dist_m": roadDist,
+		"predicted": predicted,
+		"original_lat": originalLat,
+		"original_lng": originalLng,
+	}
+	return result
 }
 
 func main() {
 	args := os.Args[1:]
-	// If no command or help appears alone or as first arg
 	if len(args) == 0 {
 		printHelp()
 		return
 	}
-	// Check if first args contain help as standalone
-	// If any arg is help/--help/-h and no other command? Spec: If no command or help / --help / -h appears alone or as first arg, print help.
-	// Simplistic: if first non-db arg is help, --help, -h
 	dbPath, rem := parseGlobalDBFlag(args)
 	if len(rem) == 0 {
 		printHelp()
@@ -844,10 +959,13 @@ func main() {
 		if err != nil {
 			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
 		}
-		// Zones check
+		// low accuracy filter
+		if ua.Accuracy > 100 {
+			fmt.Println("low_accuracy")
+			os.Exit(3)
+		}
 		zonesPath := ua.ZonesPath
 		if zonesPath == "" {
-			// default
 			if _, err := os.Stat("/app/data/zones.json"); err == nil {
 				zonesPath = "/app/data/zones.json"
 			}
@@ -860,7 +978,6 @@ func main() {
 			}
 			zones = z
 		}
-		// Check if out of zone (using active filtering)
 		if len(zones) > 0 {
 			ok, _ := isInsideAnyZoneForUpdate(ua.Lat, ua.Lng, zones, ua.Timestamp)
 			if !ok {
@@ -868,57 +985,117 @@ func main() {
 				os.Exit(3)
 			}
 		}
-		// Stale check
 		if existing, ok := db[ua.VehicleID]; ok {
 			if ua.Timestamp <= existing.TimestampMs {
 				fmt.Println("stale")
 				os.Exit(0)
 			}
-			// compute distance
+			// outlier detection - extreme but not too aggressive for normal moves
+			dtSec := float64(ua.Timestamp-existing.TimestampMs) / 1000.0
+			if dtSec > 0 {
+				dist := haversine(existing.Lat, existing.Lng, ua.Lat, ua.Lng)
+				implied := dist / dtSec
+				isOutlier := false
+				// 1 teleport: large jump short time good accuracy
+				if dtSec <= 300 && dist >= 1000 && implied >= 50 && existing.Accuracy <= 50 && ua.Accuracy <= 50 {
+					isOutlier = true
+				}
+				// 2 heading flip
+				if !isOutlier && existing.Speed >= 10 && ua.Speed >= 10 && angularDiff(existing.Heading, ua.Heading) >= 120 && dist <= 500 {
+					isOutlier = true
+				}
+				// 3 median deviation: only when history has >=2 and implied is huge outlier vs median
+				if !isOutlier && len(existing.History) >= 2 {
+					var speeds []float64
+					h := existing.History
+					sort.Slice(h, func(i, j int) bool { return h[i].TimestampMs < h[j].TimestampMs })
+					n := len(h)
+					for i := n - 2; i >= 0 && len(speeds) < 3; i-- {
+						if h[i+1].TimestampMs > h[i].TimestampMs {
+							d := haversine(h[i].Lat, h[i].Lng, h[i+1].Lat, h[i+1].Lng)
+							dt := float64(h[i+1].TimestampMs-h[i].TimestampMs) / 1000.0
+							if dt > 0 {
+								speeds = append(speeds, d/dt)
+							}
+						}
+					}
+					if len(speeds) > 0 {
+						sorted := append([]float64{}, speeds...)
+						sort.Float64s(sorted)
+						var med float64
+						mid := len(sorted) / 2
+						if len(sorted)%2 == 0 {
+							med = (sorted[mid-1] + sorted[mid]) / 2
+						} else {
+							med = sorted[mid]
+						}
+						if math.Abs(implied-med) > 30 && implied > 30 && dist > 500 {
+							isOutlier = true
+						}
+					}
+				}
+				// 4 acceleration spike: only if speed change huge and dist small
+				if !isOutlier {
+					acc := math.Abs(ua.Speed-existing.Speed) / dtSec
+					if acc >= 15 && dist <= 300 {
+						isOutlier = true
+					}
+				}
+				// 5 accuracy spike: sudden degradation
+				if !isOutlier {
+					if ua.Accuracy >= 75 && ua.Accuracy >= existing.Accuracy*2+30 {
+						isOutlier = true
+					}
+				}
+				// 6 speed vs implied: only for very large implied vs stopped
+				if !isOutlier {
+					if implied >= 80 && ua.Speed <= 2 && dist >= 1000 && dtSec <= 60 {
+						isOutlier = true
+					}
+				}
+				if isOutlier {
+					existing.OutlierCount++
+					existing.TotalDistanceM += dist // BUG
+					db[ua.VehicleID] = existing
+					saveDB(dbPath, db)
+					fmt.Println("outlier")
+					os.Exit(3)
+				}
+			}
+			// not outlier, proceed
 			dist := haversine(existing.Lat, existing.Lng, ua.Lat, ua.Lng)
-			// maintain history
 			history := existing.History
-			// push current existing as history? Actually history contains last accepted locations sorted asc. On update, we should push new entry and keep old history plus existing? Simpler: existing history already contains previous locations including existing current? According spec history includes current as last. So after update, history should be old history plus entry for new location? But spec says history last up to 10 accepted locations sorted asc includes current. So we need to create new history entry from old existing? Actually old existing's history already includes its own previous. We should take existing.History, append entry for existing current? But existing.History already includes current? Let's check spec: history last up to 10 accepted locations sorted asc includes current. So before update, existing.History last element should be existing location. After update, new history should be old history (without oldest if exceeding) plus new entry, trimmed to 10 and sorted. However if old history does not include existing (maybe old DB without history), we need to handle.
-			// For simplicity, build new history: take existing.History, ensure sorted, then append new entry, then trim oldest.
-			// But also need to include existing current if not already in history? Let's assume history already includes existing current as last, so we just append new.
 			newEntry := HistoryEntry{Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp, Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading}
-			// Ensure existing history sorted
 			sort.Slice(history, func(i, j int) bool { return history[i].TimestampMs < history[j].TimestampMs })
 			history = append(history, newEntry)
-			// Trim oldest if >10
 			if len(history) > 10 {
 				history = history[len(history)-10:]
 			}
-			// Sort again
 			sort.Slice(history, func(i, j int) bool { return history[i].TimestampMs < history[j].TimestampMs })
 			loc := Location{
 				VehicleID: ua.VehicleID, Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp,
 				Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading,
 				TotalDistanceM: existing.TotalDistanceM + dist,
-				History: history,
+				History: history, OutlierCount: existing.OutlierCount,
 			}
 			db[ua.VehicleID] = loc
-			// Save
 			if err := saveDB(dbPath, db); err != nil {
 				exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
 			}
-			// Print without history
 			out := map[string]interface{}{
 				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
 				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
+				"total_distance_m": loc.TotalDistanceM, "outlier_count": loc.OutlierCount,
 			}
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
 			os.Exit(0)
 		} else {
-			// new vehicle
 			hist := []HistoryEntry{{Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp, Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading}}
 			loc := Location{
 				VehicleID: ua.VehicleID, Lat: ua.Lat, Lng: ua.Lng, TimestampMs: ua.Timestamp,
 				Accuracy: ua.Accuracy, Speed: ua.Speed, Heading: ua.Heading,
-				TotalDistanceM: 0,
-				History: hist,
+				TotalDistanceM: 0, History: hist, OutlierCount: 0,
 			}
 			db[ua.VehicleID] = loc
 			if err := saveDB(dbPath, db); err != nil {
@@ -927,7 +1104,7 @@ func main() {
 			out := map[string]interface{}{
 				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
 				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
+				"total_distance_m": loc.TotalDistanceM, "outlier_count": loc.OutlierCount,
 			}
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
@@ -965,7 +1142,7 @@ func main() {
 			out := map[string]interface{}{
 				"vehicle_id": loc.VehicleID, "lat": loc.Lat, "lng": loc.Lng, "timestamp_ms": loc.TimestampMs,
 				"accuracy": loc.Accuracy, "speed": loc.Speed, "heading": loc.Heading,
-				"total_distance_m": loc.TotalDistanceM,
+				"total_distance_m": loc.TotalDistanceM, "outlier_count": loc.OutlierCount,
 			}
 			b, _ := json.Marshal(out)
 			fmt.Println(string(b))
@@ -973,12 +1150,10 @@ func main() {
 		os.Exit(0)
 
 	case "list":
-		// flags: --since --until --limit --offset --zones --roads --now
 		var since, until *int64
 		limit := -1
-		offset := 0
 		hasLimit := false
-		hasOffset := false
+		offset := 0
 		zonesPath := ""
 		roadsPath := ""
 		var nowTs *int64
@@ -1047,7 +1222,6 @@ func main() {
 					exitPrint(2, "invalid offset", true)
 				}
 				offset = int(v)
-				hasOffset = true
 				i += 2
 			} else if strings.HasPrefix(a, "--offset=") {
 				v, ok := parseIntArg(a[len("--offset="):], "offset")
@@ -1055,7 +1229,6 @@ func main() {
 					exitPrint(2, "invalid offset", true)
 				}
 				offset = int(v)
-				hasOffset = true
 				i++
 			} else if a == "--zones" {
 				if i+1 >= len(cmdArgs) {
@@ -1099,8 +1272,6 @@ func main() {
 		if since != nil && until != nil && *since > *until {
 			exitPrint(2, "since > until", true)
 		}
-		_ = hasLimit
-		_ = hasOffset
 		db, err := loadDB(dbPath)
 		if err != nil {
 			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
@@ -1129,16 +1300,13 @@ func main() {
 			if until != nil && loc.TimestampMs > *until {
 				continue
 			}
-			// zones filter
 			if zonesPath != "" {
 				useTime := nowTs != nil
 				var ts int64 = 0
 				if nowTs != nil {
 					ts = *nowTs
 				}
-				// If filtering and original zones non-empty, need to check
 				if len(zones) == 0 {
-					// empty zones file -> allow all
 				} else {
 					if useTime {
 						active := filterActiveZones(zones, ts, true)
@@ -1165,7 +1333,6 @@ func main() {
 			list = append(list, loc)
 		}
 		sort.Slice(list, func(i, j int) bool { return list[i].VehicleID < list[j].VehicleID })
-		// pagination offset then limit
 		if offset > len(list) {
 			list = []Location{}
 		} else {
@@ -1174,19 +1341,10 @@ func main() {
 		if hasLimit {
 			if limit == 0 {
 				list = []Location{}
-			} else if limit > 0 && limit < len(list) {
+			} else if limit >= 0 && limit < len(list) {
 				list = list[:limit]
-			} else if limit == -1 {
-				// keep all
 			}
-		} else {
-			// no limit specified, keep all (already)
 		}
-		// Actually if limit not specified default -1 all; we handled
-		if limit >= 0 && hasLimit {
-			// already trimmed above, but if limit > len keep
-		}
-		// Output base objects including total_distance_m sorted already
 		type outLoc struct {
 			VehicleID      string  `json:"vehicle_id"`
 			Lat            float64 `json:"lat"`
@@ -1196,10 +1354,11 @@ func main() {
 			Speed          float64 `json:"speed"`
 			Heading        float64 `json:"heading"`
 			TotalDistanceM float64 `json:"total_distance_m"`
+			OutlierCount   int     `json:"outlier_count,omitempty"`
 		}
 		var out []outLoc
 		for _, l := range list {
-			out = append(out, outLoc{l.VehicleID, l.Lat, l.Lng, l.TimestampMs, l.Accuracy, l.Speed, l.Heading, l.TotalDistanceM})
+			out = append(out, outLoc{l.VehicleID, l.Lat, l.Lng, l.TimestampMs, l.Accuracy, l.Speed, l.Heading, l.TotalDistanceM, l.OutlierCount})
 		}
 		if out == nil {
 			out = []outLoc{}
@@ -1209,7 +1368,6 @@ func main() {
 		os.Exit(0)
 
 	case "near":
-		// required lat lng radius
 		var latSet, lngSet, radiusSet bool
 		var lat, lng, radius float64
 		var accuracyMax *float64
@@ -1217,7 +1375,6 @@ func main() {
 		limit := -1
 		hasLimit := false
 		offset := 0
-		// hasOffset not needed
 		var nowTs *int64
 		includeStale := false
 		zonesPath := ""
@@ -1418,12 +1575,11 @@ func main() {
 			roads = r
 		}
 		type nearEntry struct {
-			Loc      Location
-			Dist     float64
+			Loc  Location
+			Dist float64
 		}
 		var entries []nearEntry
 		for _, loc := range db {
-			// stale filtering if now provided
 			if nowTs != nil && !includeStale {
 				age := *nowTs - loc.TimestampMs
 				if age < 0 {
@@ -1446,7 +1602,6 @@ func main() {
 					ts = *nowTs
 				}
 				if len(zones) == 0 {
-					// allow
 				} else {
 					if useTime {
 						active := filterActiveZones(zones, ts, true)
@@ -1482,7 +1637,6 @@ func main() {
 			}
 			return entries[i].Loc.VehicleID < entries[j].Loc.VehicleID
 		})
-		// pagination
 		if offset > len(entries) {
 			entries = []nearEntry{}
 		} else {
@@ -1495,7 +1649,6 @@ func main() {
 				entries = entries[:limit]
 			}
 		}
-		// output
 		var out []map[string]interface{}
 		for _, e := range entries {
 			m := map[string]interface{}{
@@ -1674,7 +1827,7 @@ func main() {
 		if err != nil {
 			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
 		}
-			if _, ok := db[vid]; ok {
+		if _, ok := db[vid]; ok {
 			delete(db, vid)
 			if err := saveDB(dbPath, db); err != nil {
 				exitPrint(2, fmt.Sprintf("save failed: %v", err), true)
@@ -1707,7 +1860,6 @@ func main() {
 		os.Exit(0)
 
 	case "batch":
-		// Read stdin
 		scanner := bufio.NewScanner(os.Stdin)
 		type batchOp struct {
 			Op        string
@@ -1808,12 +1960,10 @@ func main() {
 		if err := scanner.Err(); err != nil {
 			exitPrint(2, fmt.Sprintf("batch read error: %v", err), true)
 		}
-		// Load DB
 		db, err := loadDB(dbPath)
 		if err != nil {
 			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
 		}
-		// Load default zones if exists
 		var zones []Zone
 		if _, err := os.Stat("/app/data/zones.json"); err == nil {
 			z, err := loadZones("/app/data/zones.json")
@@ -1822,10 +1972,12 @@ func main() {
 			}
 			zones = z
 		}
-		// Validate zones out_of_zone for each update op (even stale, per hardening)
 		if len(zones) > 0 {
 			for _, op := range ops {
 				if op.Op == "update" {
+					if op.Accuracy > 100 {
+						continue // BUG: should still check zones even for low_accuracy
+					}
 					ok, _ := isInsideAnyZoneForUpdate(op.Lat, op.Lng, zones, op.Ts)
 					if !ok {
 						exitPrint(2, fmt.Sprintf("batch: out_of_zone for vehicle %s", op.VehicleID), true)
@@ -1833,9 +1985,7 @@ func main() {
 				}
 			}
 		}
-		// Apply sequentially
 		applied := 0
-		// Need copy of db for simulation
 		for _, op := range ops {
 			if op.Op == "delete" {
 				if _, ok := db[op.VehicleID]; ok {
@@ -1844,10 +1994,78 @@ func main() {
 				}
 				continue
 			}
-			// update
+			// low_accuracy filter in batch - skip without incrementing outlier_count
+			if op.Accuracy > 100 {
+				continue
+			}
 			if existing, ok := db[op.VehicleID]; ok {
 				if op.Ts <= existing.TimestampMs {
-					continue // stale skip
+					continue
+				}
+				// outlier detection for batch
+				dtSec := float64(op.Ts-existing.TimestampMs) / 1000.0
+				isOutlier := false
+				if dtSec > 0 {
+					distChk := haversine(existing.Lat, existing.Lng, op.Lat, op.Lng)
+					impliedChk := distChk / dtSec
+					if dtSec <= 300 && distChk >= 1000 && impliedChk >= 50 && existing.Accuracy <= 50 && op.Accuracy <= 50 {
+						isOutlier = true
+					}
+					if !isOutlier && existing.Speed >= 10 && op.Speed >= 10 && angularDiff(existing.Heading, op.Heading) >= 120 && distChk <= 500 {
+						isOutlier = true
+					}
+					if !isOutlier && len(existing.History) >= 2 {
+						var speeds []float64
+						h := existing.History
+						sort.Slice(h, func(i, j int) bool { return h[i].TimestampMs < h[j].TimestampMs })
+						n := len(h)
+						for i := n - 2; i >= 0 && len(speeds) < 3; i-- {
+							if h[i+1].TimestampMs > h[i].TimestampMs {
+								d := haversine(h[i].Lat, h[i].Lng, h[i+1].Lat, h[i+1].Lng)
+								dt := float64(h[i+1].TimestampMs-h[i].TimestampMs) / 1000.0
+								if dt > 0 {
+									speeds = append(speeds, d/dt)
+								}
+							}
+						}
+						if len(speeds) > 0 {
+							sorted := append([]float64{}, speeds...)
+							sort.Float64s(sorted)
+							var med float64
+							mid := len(sorted) / 2
+							if len(sorted)%2 == 0 {
+								med = (sorted[mid-1] + sorted[mid]) / 2
+							} else {
+								med = sorted[mid]
+							}
+							if math.Abs(impliedChk-med) > 30 && impliedChk > 30 && distChk > 500 {
+								isOutlier = true
+							}
+						}
+					}
+					if !isOutlier {
+						acc := math.Abs(op.Speed-existing.Speed) / dtSec
+						if acc >= 15 && distChk <= 300 {
+							isOutlier = true
+						}
+					}
+					if !isOutlier {
+						if op.Accuracy >= 75 && op.Accuracy >= existing.Accuracy*2+30 {
+							isOutlier = true
+						}
+					}
+					if !isOutlier {
+						if impliedChk >= 80 && op.Speed <= 2 && distChk >= 1000 && dtSec <= 60 {
+							isOutlier = true
+						}
+					}
+				}
+				if isOutlier {
+					existing.OutlierCount++
+					dist := haversine(existing.Lat, existing.Lng, op.Lat, op.Lng)
+					existing.TotalDistanceM += dist // BUG
+					db[op.VehicleID] = existing
+					continue
 				}
 				dist := haversine(existing.Lat, existing.Lng, op.Lat, op.Lng)
 				hist := existing.History
@@ -1862,7 +2080,7 @@ func main() {
 					VehicleID: op.VehicleID, Lat: op.Lat, Lng: op.Lng, TimestampMs: op.Ts,
 					Accuracy: op.Accuracy, Speed: op.Speed, Heading: op.Heading,
 					TotalDistanceM: existing.TotalDistanceM + dist,
-					History: hist,
+					History: hist, OutlierCount: existing.OutlierCount,
 				}
 				db[op.VehicleID] = loc
 				applied++
@@ -1871,7 +2089,7 @@ func main() {
 				loc := Location{
 					VehicleID: op.VehicleID, Lat: op.Lat, Lng: op.Lng, TimestampMs: op.Ts,
 					Accuracy: op.Accuracy, Speed: op.Speed, Heading: op.Heading,
-					TotalDistanceM: 0, History: hist,
+					TotalDistanceM: 0, History: hist, OutlierCount: 0,
 				}
 				db[op.VehicleID] = loc
 				applied++
@@ -1977,18 +2195,316 @@ func main() {
 		fmt.Println(string(b))
 		os.Exit(0)
 
+	case "estimate":
+		if len(cmdArgs) < 1 {
+			exitPrint(2, "estimate requires <vehicle_id>", true)
+		}
+		vid := cmdArgs[0]
+		if !vehicleIDRegex.MatchString(vid) {
+			exitPrint(2, "invalid vehicle_id", true)
+		}
+		var nowTs *int64
+		roadsPath := ""
+		i := 1
+		for i < len(cmdArgs) {
+			a := cmdArgs[i]
+			if a == "--now" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --now", true)
+				}
+				v, ok := parseIntArg(cmdArgs[i+1], "now")
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i += 2
+			} else if strings.HasPrefix(a, "--now=") {
+				v, ok := parseIntArg(a[len("--now="):], "now")
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i++
+			} else if a == "--roads" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --roads", true)
+				}
+				roadsPath = cmdArgs[i+1]
+				i += 2
+			} else if strings.HasPrefix(a, "--roads=") {
+				roadsPath = a[len("--roads="):]
+				i++
+			} else {
+				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
+			}
+		}
+		db, err := loadDB(dbPath)
+		if err != nil {
+			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
+		}
+		loc, ok := db[vid]
+		if !ok {
+			exitPrint(3, "not found", true)
+		}
+		nowMs := time.Now().UnixMilli()
+		if nowTs != nil {
+			nowMs = *nowTs
+		}
+		var roads []RoadEntry
+		if roadsPath != "" {
+			r, err := loadRoads(roadsPath)
+			if err != nil {
+				exitPrint(2, fmt.Sprintf("invalid roads file: %v", err), true)
+			}
+			roads = r
+		}
+		result := buildEstimateResult(loc, nowMs, roads, roadsPath)
+		b, _ := json.Marshal(result)
+		fmt.Println(string(b))
+		os.Exit(0)
+
+	case "validate-pickup", "validate-dropoff":
+		isDropoff := cmd == "validate-dropoff"
+		if len(cmdArgs) < 3 {
+			exitPrint(2, fmt.Sprintf("%s requires <vehicle_id> <lat> <lng>", cmd), true)
+		}
+		vid := cmdArgs[0]
+		if !vehicleIDRegex.MatchString(vid) {
+			exitPrint(2, "invalid vehicle_id", true)
+		}
+		pLat, ok := parseFloatArg(cmdArgs[1], "lat")
+		if !ok || pLat < -90 || pLat > 90 {
+			exitPrint(2, "invalid lat", true)
+		}
+		pLng, ok := parseFloatArg(cmdArgs[2], "lng")
+		if !ok || pLng < -180 || pLng > 180 {
+			exitPrint(2, "invalid lng", true)
+		}
+		var nowTs *int64
+		roadsPath := ""
+		zonesPath := ""
+		i := 3
+		for i < len(cmdArgs) {
+			a := cmdArgs[i]
+			if a == "--now" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --now", true)
+				}
+				v, ok := parseIntArg(cmdArgs[i+1], "now")
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i += 2
+			} else if strings.HasPrefix(a, "--now=") {
+				v, ok := parseIntArg(a[len("--now="):], "now")
+				if !ok || v < 0 {
+					exitPrint(2, "invalid now", true)
+				}
+				nowTs = &v
+				i++
+			} else if a == "--roads" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --roads", true)
+				}
+				roadsPath = cmdArgs[i+1]
+				i += 2
+			} else if strings.HasPrefix(a, "--roads=") {
+				roadsPath = a[len("--roads="):]
+				i++
+			} else if a == "--zones" {
+				if i+1 >= len(cmdArgs) {
+					exitPrint(2, "missing --zones", true)
+				}
+				zonesPath = cmdArgs[i+1]
+				i += 2
+			} else if strings.HasPrefix(a, "--zones=") {
+				zonesPath = a[len("--zones="):]
+				i++
+			} else {
+				exitPrint(2, fmt.Sprintf("unknown flag %s", a), true)
+			}
+		}
+		db, err := loadDB(dbPath)
+		if err != nil {
+			exitPrint(4, fmt.Sprintf("corrupt db: %v", err), true)
+		}
+		loc, ok := db[vid]
+		if !ok {
+			exitPrint(3, "not found", true)
+		}
+		nowMs := time.Now().UnixMilli()
+		if nowTs != nil {
+			nowMs = *nowTs
+		}
+		var roads []RoadEntry
+		if roadsPath != "" {
+			r, err := loadRoads(roadsPath)
+			if err != nil {
+				exitPrint(2, fmt.Sprintf("invalid roads file: %v", err), true)
+			}
+			roads = r
+		}
+		// estimate vehicle
+		estResult := buildEstimateResult(loc, nowMs, roads, roadsPath)
+		vehLat := estResult["lat"].(float64)
+		vehLng := estResult["lng"].(float64)
+		accuracy := estResult["accuracy"].(float64)
+		speed := estResult["speed"].(float64)
+		age := estResult["age_ms"].(int64)
+		conf := estResult["confidence"].(string)
+		snapped := estResult["snapped"].(bool)
+		roadID := estResult["road_id"].(string)
+
+		// snap pickup point
+		pickupRoadID := ""
+		pickupSnapped := false
+		if roadsPath != "" {
+			snapPickup := snapToRoads(pLat, pLng, roads)
+			if snapPickup.Snapped {
+				pickupSnapped = true
+				pickupRoadID = snapPickup.RoadID
+			}
+		}
+
+		// zones for pickup/dropoff
+		var pickupZones []Zone
+		var pickupZonesPathUsed string
+		if zonesPath != "" {
+			pickupZonesPathUsed = zonesPath
+		} else {
+			if isDropoff {
+				if _, err := os.Stat("/app/data/dropoff_zones.json"); err == nil {
+					pickupZonesPathUsed = "/app/data/dropoff_zones.json"
+				}
+			} else {
+				if _, err := os.Stat("/app/data/pickup_zones.json"); err == nil {
+					pickupZonesPathUsed = "/app/data/pickup_zones.json"
+				}
+			}
+		}
+		if pickupZonesPathUsed != "" {
+			z, err := loadZones(pickupZonesPathUsed)
+			if err != nil {
+				exitPrint(2, fmt.Sprintf("invalid zones file: %v", err), true)
+			}
+			pickupZones = z
+		}
+
+		// validation order
+		valid := true
+		reason := "ok"
+		exitCode := 0
+
+		// 1 out_of_geofence
+		if len(pickupZones) > 0 {
+			useTime := nowTs != nil
+			var active []Zone
+			if useTime {
+				active = filterActiveZones(pickupZones, nowMs, true)
+			} else {
+				active = pickupZones
+			}
+			if len(active) > 0 {
+				ok, _ := isInsideAnyZoneList(pLat, pLng, active)
+				if !ok {
+					valid = false
+					reason = "out_of_geofence"
+					exitCode = 1
+				}
+			}
+		}
+		// 2 stale
+		if valid {
+			if age > 30000 {
+				valid = false
+				reason = "stale"
+				exitCode = 1
+			}
+		}
+		// 3 low_accuracy
+		if valid {
+			if accuracy > 50 {
+				valid = false
+				reason = "low_accuracy"
+				exitCode = 1
+			}
+		}
+		// 4 off_road
+		if valid && roadsPath != "" {
+			if !snapped {
+				valid = false
+				reason = "off_road"
+				exitCode = 1
+			}
+		}
+		// 5 moving
+		if valid {
+			threshold := 5.0
+			if isDropoff {
+				threshold = 10.0
+			}
+			if speed >= threshold {
+				valid = false
+				reason = "moving"
+				exitCode = 1
+			}
+		}
+		// 6 road_mismatch
+		if valid && roadsPath != "" {
+			if snapped && pickupSnapped && roadID != "" && pickupRoadID != "" && roadID != pickupRoadID {
+				valid = false
+				reason = "road_mismatch"
+				exitCode = 1
+			}
+		}
+		// 7 heading_mismatch
+		if valid && roadsPath != "" {
+			if snapped && pickupSnapped && roadID == pickupRoadID && roadID != "" {
+				// compute bearing from vehicle to pickup
+				if loc.Speed > 1 {
+					brToPickup := bearing(vehLat, vehLng, pLat, pLng)
+					diff := angularDiff(loc.Heading, brToPickup)
+					distToPickup := haversine(vehLat, vehLng, pLat, pLng)
+					if diff > 90 && distToPickup > 10 {
+						valid = false
+						reason = "heading_mismatch"
+						exitCode = 1
+					}
+				}
+			}
+		}
+		// 8 too_far
+		if valid {
+			dist := haversine(vehLat, vehLng, pLat, pLng)
+			thresh := 100.0
+			if isDropoff {
+				thresh = 150.0
+			}
+			if dist > thresh {
+				valid = false
+				reason = "too_far"
+				exitCode = 1
+			}
+		}
+
+		distM := haversine(vehLat, vehLng, pLat, pLng)
+		out := map[string]interface{}{
+			"valid": valid, "reason": reason, "distance_m": distM,
+			"confidence": conf, "age_ms": age, "accuracy": accuracy,
+			"snapped": snapped, "road_id": roadID, "pickup_road_id": pickupRoadID,
+			"vehicle_lat": vehLat, "vehicle_lng": vehLng,
+		}
+		if isDropoff {
+			// also support dropoff_road_id as alias? Keep pickup_road_id for compat
+			out["dropoff_road_id"] = pickupRoadID
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+		os.Exit(exitCode)
+
 	default:
 		exitPrint(2, fmt.Sprintf("unknown command %s", cmd), false)
 	}
 }
 
-GOMAIN
-cd /app/src && go build -o locationctl . && echo "1_step_one extreme hardened built"
-mkdir -p /app/buggy
-if [ ! -f /app/buggy/main.go ] && [ -f /data/repos/workspace/gordonyang-tbench/location-accuracy/environment/buggy_main.go ]; then
-  cp /data/repos/workspace/gordonyang-tbench/location-accuracy/environment/buggy_main.go /app/buggy/main.go
-  cp /data/repos/workspace/gordonyang-tbench/location-accuracy/environment/buggy_main.go /app/buggy/buggy_main.go || true
-fi
-if [ -f /app/buggy/main.go ] && [ ! -f /app/buggy/buggy_main.go ]; then
-  cp /app/buggy/main.go /app/buggy/buggy_main.go || true
-fi

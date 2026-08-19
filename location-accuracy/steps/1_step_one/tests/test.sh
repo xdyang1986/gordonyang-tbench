@@ -22,3 +22,8 @@ else
 fi
 
 if [ $EXIT -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi
+# Isolation: remove test files so Step-2 trajectory cannot read /tests/
+rm -rf /tests/test_outputs.py /tests/test.sh || true
+rm -rf /tests/test_outputs.py /tests/test.sh 2>/dev/null || true
+# Also clean possible copies in working dir
+rm -rf ./test_outputs.py ./test.sh 2>/dev/null || true

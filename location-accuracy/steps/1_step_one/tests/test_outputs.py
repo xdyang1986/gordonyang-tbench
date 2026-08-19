@@ -264,6 +264,28 @@ def test_delete(binary):
     run_cli(binary, db, ["get", "veh1"], expect_code=3)
 
 
+def test_delete_nonexist_prints_deleted(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    p = run_cli(binary, db, ["delete", "veh_nonexist"], expect_code=0)
+    assert "deleted" in p.stdout.lower(), (
+        f"delete nonexist should print deleted, got {p.stdout!r}"
+    )
+
+
+def test_saveDB_best_effort_fsync_present():
+    # Source inspection: saveDB must contain best-effort fsync (Sync)
+    # This is required by spec: Use best-effort fsync
+    found = False
+    for root, _, files in os.walk(SRC_DIR):
+        for fn in files:
+            if fn.endswith(".go"):
+                content = open(os.path.join(root, fn)).read()
+                if "func saveDB" in content and ".Sync()" in content:
+                    found = True
+    assert found, "saveDB should implement best-effort fsync via File.Sync()"
+
+
 def test_list_sorted_and_filter(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")

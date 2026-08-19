@@ -140,6 +140,26 @@ def test_help_contains_all(binary):
         assert cmd in out, f"help missing {cmd}"
 
 
+def test_delete_nonexist_prints_deleted_step2(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    p = run_cli(binary, db, ["delete", "veh_nonexist"], expect_code=0)
+    assert "deleted" in p.stdout.lower(), (
+        f"delete nonexist should print deleted, got {p.stdout!r}"
+    )
+
+
+def test_saveDB_best_effort_fsync_present_step2():
+    found = False
+    for root, _, files in os.walk(SRC_DIR):
+        for fn in files:
+            if fn.endswith(".go"):
+                content = open(os.path.join(root, fn)).read()
+                if "func saveDB" in content and ".Sync()" in content:
+                    found = True
+    assert found, "saveDB should implement best-effort fsync via File.Sync()"
+
+
 def test_whitespace_db_empty(binary):
     tmp = tempfile.mkdtemp()
     db = os.path.join(tmp, "db.json")
@@ -8766,13 +8786,37 @@ def test_outlier_acceleration_spike_exact_15_boundary_isolated_step2_b3(binary):
     run_cli(
         binary,
         db,
-        ["update", "veh1", "0", "0", "1000", "--accuracy", "5", "--speed", "0", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     p = run_cli(
         binary,
         db,
-        ["update", "veh1", "0.00005", "0", "2000", "--accuracy", "5", "--speed", "15", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.00005",
+            "0",
+            "2000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "15",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     assert p.returncode == 0
@@ -8781,13 +8825,37 @@ def test_outlier_acceleration_spike_exact_15_boundary_isolated_step2_b3(binary):
     run_cli(
         binary,
         db2,
-        ["update", "veh1", "0", "0", "1000", "--accuracy", "5", "--speed", "0", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "0",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     p2 = run_cli(
         binary,
         db2,
-        ["update", "veh1", "0.00005", "0", "2000", "--accuracy", "5", "--speed", "15.1", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.00005",
+            "0",
+            "2000",
+            "--accuracy",
+            "5",
+            "--speed",
+            "15.1",
+            "--heading",
+            "0",
+        ],
         expect_code=3,
     )
     assert "outlier" in p2.stdout.lower()
@@ -8868,13 +8936,37 @@ def test_outlier_speed_vs_implied_exact_80_boundary_isolated_step2_b3(binary):
     run_cli(
         binary,
         db,
-        ["update", "veh1", "0", "0", "1000", "--accuracy", "60", "--speed", "10", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     p = run_cli(
         binary,
         db,
-        ["update", "veh1", "0.00719", "0", "11000", "--accuracy", "10", "--speed", "1", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.00719",
+            "0",
+            "11000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "1",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     assert p.returncode == 0
@@ -8883,13 +8975,37 @@ def test_outlier_speed_vs_implied_exact_80_boundary_isolated_step2_b3(binary):
     run_cli(
         binary,
         db2,
-        ["update", "veh1", "0", "0", "1000", "--accuracy", "60", "--speed", "10", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "60",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     p2 = run_cli(
         binary,
         db2,
-        ["update", "veh1", "0.01", "0", "14000", "--accuracy", "10", "--speed", "1", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.01",
+            "0",
+            "14000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "1",
+            "--heading",
+            "0",
+        ],
         expect_code=3,
     )
     assert "outlier" in p2.stdout.lower()
@@ -8907,7 +9023,19 @@ def test_outlier_teleport_implied_50_exact_step2_b3(binary):
     p = run_cli(
         binary,
         db,
-        ["update", "veh1", "0.00899", "0", "23000", "--accuracy", "10", "--speed", "10", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.00899",
+            "0",
+            "23000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     assert p.returncode == 0
@@ -8916,13 +9044,37 @@ def test_outlier_teleport_implied_50_exact_step2_b3(binary):
     run_cli(
         binary,
         db2,
-        ["update", "veh1", "0", "0", "1000", "--accuracy", "10", "--speed", "10", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0",
+            "0",
+            "1000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     p2 = run_cli(
         binary,
         db2,
-        ["update", "veh1", "0.00989", "0", "23000", "--accuracy", "10", "--speed", "10", "--heading", "0"],
+        [
+            "update",
+            "veh1",
+            "0.00989",
+            "0",
+            "23000",
+            "--accuracy",
+            "10",
+            "--speed",
+            "10",
+            "--heading",
+            "0",
+        ],
         expect_code=0,
     )
     assert p2.returncode == 0
@@ -8934,7 +9086,10 @@ def test_validate_pickup_priority_chain_full_9_steps_step2_b3(binary):
     roads_path = os.path.join(tmp, "roads.json")
     roads = [
         {"id": "road_a", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]},
-        {"id": "road_b", "points": [{"lat": 0.001, "lng": 0}, {"lat": 0.001, "lng": 10}]},
+        {
+            "id": "road_b",
+            "points": [{"lat": 0.001, "lng": 0}, {"lat": 0.001, "lng": 10}],
+        },
     ]
     with open(roads_path, "w") as f:
         json.dump(roads, f)
@@ -8947,7 +9102,16 @@ def test_validate_pickup_priority_chain_full_9_steps_step2_b3(binary):
     p = run_cli(
         binary,
         db,
-        ["validate-pickup", "veh1", "20.0001", "20.0001", "--now", "1000", "--roads", roads_path],
+        [
+            "validate-pickup",
+            "veh1",
+            "20.0001",
+            "20.0001",
+            "--now",
+            "1000",
+            "--roads",
+            roads_path,
+        ],
         expect_code=1,
     )
     assert json.loads(p.stdout.strip())["reason"] == "off_road"
@@ -8969,14 +9133,32 @@ def test_validate_pickup_too_far_101m_vs_99m_step2_b3(binary):
     p_ok = run_cli(
         binary,
         db,
-        ["validate-pickup", "veh1", "0.00089", "5", "--now", "1000", "--roads", roads_path],
+        [
+            "validate-pickup",
+            "veh1",
+            "0.00089",
+            "5",
+            "--now",
+            "1000",
+            "--roads",
+            roads_path,
+        ],
         expect_code=0,
     )
     assert json.loads(p_ok.stdout.strip())["valid"] is True
     p_far = run_cli(
         binary,
         db,
-        ["validate-pickup", "veh1", "0.001", "5", "--now", "1000", "--roads", roads_path],
+        [
+            "validate-pickup",
+            "veh1",
+            "0.001",
+            "5",
+            "--now",
+            "1000",
+            "--roads",
+            roads_path,
+        ],
         expect_code=1,
     )
     assert json.loads(p_far.stdout.strip())["reason"] == "too_far"
