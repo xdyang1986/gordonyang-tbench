@@ -951,28 +951,25 @@ func (s *Server) handleGeofencesSingle(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 		}
-		delete(s.db, id)
-		delete(s.bboxes, id)
-		if hasBBox {
-			s.cache.InvalidateByBBox(oldBBox)
-		} else {
-			s.cache.Clear()
-		}
-		// persist
-		dbCopy := make(DB, len(s.db))
-		for k, v := range s.db {
-			dbCopy[k] = v
-		}
-		s.mu.Unlock()
-		if err := atomicWriteDBErr(s.dbPath, dbCopy); err != nil {
+			delete(s.db, id)
+			delete(s.bboxes, id)
+			if hasBBox {
+				s.cache.InvalidateByBBox(oldBBox)
+			} else {
+				s.cache.Clear()
+			}
+			// persist while holding lock to avoid file race
+			if err := atomicWriteDBErr(s.dbPath, s.db); err != nil {
+				s.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(500)
+				json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to persist: %v", err)})
+				return
+			}
+			s.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to persist: %v", err)})
+			json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"deleted": id})
-		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(405)
@@ -1043,28 +1040,26 @@ func (s *Server) handleGeofencesPost(w http.ResponseWriter, r *http.Request) {
 		s.grid[key] = append(s.grid[key], g.ID)
 		sort.Strings(s.grid[key])
 	}
-	// selective invalidation: only entries whose point lies within affected bbox(es)
-	if hadOld {
-		s.cache.InvalidateByBBox(oldBBox)
-		s.cache.InvalidateByBBox(bbox)
-	} else {
-		s.cache.InvalidateByBBox(bbox)
-	}
-	dbCopy := make(DB, len(s.db))
-	for k, v := range s.db {
-		dbCopy[k] = v
-	}
-	s.mu.Unlock()
-	if err := atomicWriteDBErr(s.dbPath, dbCopy); err != nil {
+		// selective invalidation: only entries whose point lies within affected bbox(es)
+		if hadOld {
+			s.cache.InvalidateByBBox(oldBBox)
+			s.cache.InvalidateByBBox(bbox)
+		} else {
+			s.cache.InvalidateByBBox(bbox)
+		}
+		// persist while holding lock to avoid last-writer-wins file race with concurrent POSTs
+		if err := atomicWriteDBErr(s.dbPath, s.db); err != nil {
+			s.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to persist: %v", err)})
+			return
+		}
+		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("failed to persist: %v", err)})
-		return
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(g)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	json.NewEncoder(w).Encode(g)
-}
 
 func (s *Server) handleGeofences(w http.ResponseWriter, r *http.Request) {
 	// router for /geofences
