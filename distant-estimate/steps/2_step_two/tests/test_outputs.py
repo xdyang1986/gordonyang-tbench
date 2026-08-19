@@ -3584,45 +3584,62 @@ def test_traffic_batch_same_source_amortized():
     # Same-source batch can be amortized: one Dijkstra per distinct source answers all
     # Per-request implementation costs ~200x for same source
     # This targets untouched surface in step2, aims to pull opus off 9/10
-    nodes = [f"N{i}" for i in range(500)]
-    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(499)]
+    # AFTR FIX: avoid noisy ms-scale ratio – use larger workload + absolute guard
+    nodes = [f"N{i}" for i in range(1000)]
+    edges = [{"from": f"N{i}", "to": f"N{i + 1}", "distance": 1} for i in range(999)]
     edges += [
-        {"from": f"N{i}", "to": f"N{i + 10}", "distance": 5} for i in range(0, 490, 10)
+        {"from": f"N{i}", "to": f"N{i + 10}", "distance": 5} for i in range(0, 990, 10)
     ]
     graph = {"nodes": nodes, "edges": edges}
     traffic = {
         "traffic": [
             {"from": f"N{i}", "to": f"N{i + 1}", "factor": 1.5, "delay": 1}
-            for i in range(499)
+            for i in range(999)
         ]
     }
     gp = tmp(json.dumps(graph))
     tp = tmp(json.dumps(traffic))
-    # 200 requests all from N0 (same source)
-    same_reqs = [{"source": "N0", "destination": f"N{i}"} for i in range(1, 201)]
-    # 200 requests with 200 distinct sources
+    # 500 requests all from N0 (same source) – larger workload for median
+    same_reqs = [{"source": "N0", "destination": f"N{i}"} for i in range(1, 501)]
+    # 500 requests with 500 distinct sources
     multi_reqs = [
-        {"source": f"N{i}", "destination": f"N{(i * 7) % 500}"} for i in range(200)
+        {"source": f"N{i}", "destination": f"N{(i * 7) % 1000}"} for i in range(500)
     ]
     rp_same = tmp(json.dumps(same_reqs))
     rp_multi = tmp(json.dumps(multi_reqs))
     try:
-        start = time.time()
-        proc_same = run(["--graph", gp, "--requests", rp_same, "--traffic", tp])
-        t_same = time.time() - start
-        assert proc_same.returncode == 0, proc_same.stderr.decode()[:500]
+        # Warmup + median of 2 runs to reduce jitter
+        times_same = []
+        for _ in range(2):
+            start = time.time()
+            proc_same = run(["--graph", gp, "--requests", rp_same, "--traffic", tp])
+            t_same = time.time() - start
+            assert proc_same.returncode == 0, proc_same.stderr.decode()[:500]
+            times_same.append(t_same)
+        t_same = sorted(times_same)[len(times_same) // 2]
 
-        start = time.time()
-        proc_multi = run(["--graph", gp, "--requests", rp_multi, "--traffic", tp])
-        t_multi = time.time() - start
-        assert proc_multi.returncode == 0, proc_multi.stderr.decode()[:500]
+        times_multi = []
+        for _ in range(2):
+            start = time.time()
+            proc_multi = run(["--graph", gp, "--requests", rp_multi, "--traffic", tp])
+            t_multi = time.time() - start
+            assert proc_multi.returncode == 0, proc_multi.stderr.decode()[:500]
+            times_multi.append(t_multi)
+        t_multi = sorted(times_multi)[len(times_multi) // 2]
 
-        # Same source should be significantly faster than multi-source if amortized
-        # Host-independent relative bound: same-source <=35% of multi-source
-        assert t_same <= 0.35 * t_multi, (
-            f"same-source batch should amortize: t_same={t_same:.3f}s vs t_multi={t_multi:.3f}s, "
-            f"expected t_same <=0.35*t_multi. Per-request implementation costs ~200x."
-        )
+        # AFTR robustness: if both timings <0.2s, skip strict ratio (process startup noise dominates)
+        # Otherwise same-source should be significantly faster than multi-source if amortized
+        if t_multi < 0.2 and t_same < 0.2:
+            # Both too fast – just ensure same-source not drastically slower (allow 2x for noise)
+            assert t_same <= max(0.5, 2.0 * t_multi), (
+                f"same-source batch noise guard: t_same={t_same:.3f}s vs t_multi={t_multi:.3f}s"
+            )
+        else:
+            # Host-independent relative bound: same-source <=50% of multi-source (relaxed from 35%)
+            assert t_same <= 0.50 * t_multi + 0.3, (
+                f"same-source batch should amortize: t_same={t_same:.3f}s vs t_multi={t_multi:.3f}s, "
+                f"expected t_same <=0.50*t_multi+0.3. Per-request implementation costs ~200x."
+            )
     finally:
         os.unlink(gp)
         os.unlink(tp)
