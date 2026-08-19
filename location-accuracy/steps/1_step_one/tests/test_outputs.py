@@ -3351,3 +3351,543 @@ def test_clear_then_distance_not_found(binary):
     run_cli(binary, db, ["clear"], expect_code=0)
     run_cli(binary, db, ["distance", "veh1"], expect_code=3)
     run_cli(binary, db, ["get", "veh1"], expect_code=3)
+
+
+# --- Batch3: 140->160 further hardening for too-easy ---
+
+
+def test_total_distance_3_points_exact_sum(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "0.001", "0", "2000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh1", "0.002", "0", "3000"], expect_code=0)
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    d1 = haversine(0, 0, 0.001, 0)
+    d2 = haversine(0.001, 0, 0.002, 0)
+    assert abs(data["total_distance_m"] - (d1 + d2)) < 1.0
+
+
+def test_history_exact_10_and_11_trim(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    for i in range(10):
+        run_cli(
+            binary,
+            db,
+            ["update", "veh1", f"{i * 0.0001}", "0", str(1000 + i * 1000)],
+            expect_code=0,
+        )
+    p = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    assert len(json.loads(p.stdout.strip())["history"]) == 10
+    run_cli(binary, db, ["update", "veh1", "0.0011", "0", "11000"], expect_code=0)
+    p2 = run_cli(binary, db, ["get", "veh1", "--verbose"], expect_code=0)
+    hist = json.loads(p2.stdout.strip())["history"]
+    assert len(hist) == 10
+    assert hist[0]["timestamp_ms"] == 2000
+    assert hist[-1]["timestamp_ms"] == 11000
+
+
+def test_stale_same_timestamp_different_location_still_stale(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    p = run_cli(binary, db, ["update", "veh1", "10", "10", "1000"], expect_code=0)
+    assert "stale" in p.stdout.lower()
+    p2 = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = json.loads(p2.stdout.strip())
+    assert data["lat"] == 0 and data["lng"] == 0
+
+
+def test_zones_hole_vertex_outside(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "with_hole",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "holes": [
+                [
+                    {"lat": 2, "lng": 2},
+                    {"lat": 2, "lng": 8},
+                    {"lat": 8, "lng": 8},
+                    {"lat": 8, "lng": 2},
+                ]
+            ],
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    p = run_cli(
+        binary, db, ["geofence-check", "2", "2", "--zones", zones_path], expect_code=0
+    )
+    assert json.loads(p.stdout.strip())["inside"] is False
+    p2 = run_cli(
+        binary, db, ["geofence-check", "8", "8", "--zones", zones_path], expect_code=0
+    )
+    assert json.loads(p2.stdout.strip())["inside"] is False
+
+
+def test_zones_antimeridian_with_hole(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "anti_hole",
+            "polygon": [
+                {"lat": -10, "lng": 179},
+                {"lat": -10, "lng": -179},
+                {"lat": 10, "lng": -179},
+                {"lat": 10, "lng": 179},
+            ],
+            "holes": [
+                [
+                    {"lat": -5, "lng": 179},
+                    {"lat": -5, "lng": -179},
+                    {"lat": 5, "lng": -179},
+                    {"lat": 5, "lng": 179},
+                ]
+            ],
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    p = run_cli(
+        binary, db, ["geofence-check", "0", "180", "--zones", zones_path], expect_code=0
+    )
+    assert json.loads(p.stdout.strip())["inside"] is False
+    p2 = run_cli(
+        binary, db, ["geofence-check", "8", "180", "--zones", zones_path], expect_code=0
+    )
+    assert json.loads(p2.stdout.strip())["inside"] is True
+
+
+def test_zones_circle_with_time_window_mixed(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "poly",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 0,
+            "active_to": 1000,
+        },
+        {
+            "id": "circle",
+            "center": {"lat": 0, "lng": 0},
+            "radius_m": 1000000,
+            "active_from": 2000,
+            "active_to": 3000,
+        },
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5", "5", "500", "--zones", zones_path],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "5.001", "5", "2500", "--zones", zones_path],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "20", "20", "1500", "--zones", zones_path],
+        expect_code=0,
+    )
+
+
+def test_batch_delete_nonexist_not_counted(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    batch_input = "delete\tveh_nonexist\n"
+    p = run_cli(binary, db, ["batch"], input_data=batch_input, expect_code=0)
+    assert "batch_ok 0" in p.stdout
+
+
+def test_update_with_zones_and_roads_combined(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    zones = [
+        {
+            "id": "z1",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+        }
+    ]
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh_ok", "0.0001", "5", "1000", "--zones", zones_path],
+        expect_code=0,
+    )
+    # roads filtering not applied on update, only zones, so should succeed even if not near road
+    p = run_cli(
+        binary,
+        db,
+        ["list", "--zones", zones_path, "--roads", roads_path],
+        expect_code=0,
+    )
+    ids = [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    assert "veh_ok" in ids
+
+
+def test_list_with_now_inactive_allow_all_and_active_filter(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "timed",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 1000,
+            "active_to": 2000,
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    run_cli(
+        binary,
+        db,
+        ["update", "veh_out", "20", "20", "500", "--zones", zones_path],
+        expect_code=0,
+    )
+    p = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "500"], expect_code=0
+    )
+    assert "veh_out" in [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    p2 = run_cli(
+        binary, db, ["list", "--zones", zones_path, "--now", "1500"], expect_code=0
+    )
+    assert "veh_out" not in [x["vehicle_id"] for x in json.loads(p2.stdout.strip())]
+
+
+def test_near_with_include_stale_and_now(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(binary, db, ["update", "veh_fresh", "0", "0", "1000000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh_stale", "0", "0", "1000"], expect_code=0)
+    p = run_cli(
+        binary,
+        db,
+        ["near", "--lat", "0", "--lng", "0", "--radius", "100", "--now", "1000000"],
+        expect_code=0,
+    )
+    ids = [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    assert "veh_fresh" in ids and "veh_stale" not in ids
+    p2 = run_cli(
+        binary,
+        db,
+        [
+            "near",
+            "--lat",
+            "0",
+            "--lng",
+            "0",
+            "--radius",
+            "100",
+            "--now",
+            "1000000",
+            "--include-stale",
+        ],
+        expect_code=0,
+    )
+    ids2 = [x["vehicle_id"] for x in json.loads(p2.stdout.strip())]
+    assert "veh_fresh" in ids2 and "veh_stale" in ids2
+
+
+def test_atomic_write_cleans_multiple_tmp(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    for i in range(3):
+        stale = os.path.join(tmp, f"db.json.tmp.{1000 + i}")
+        with open(stale, "w") as f:
+            f.write("stale garbage")
+    run_cli(binary, db, ["update", "veh1", "0", "0", "1000"], expect_code=0)
+    files = os.listdir(tmp)
+    assert not any(".tmp." in f for f in files)
+
+
+def test_list_limit_offset_zones_roads_now_combined(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    zones = [
+        {
+            "id": "z1",
+            "polygon": [
+                {"lat": -1, "lng": -1},
+                {"lat": -1, "lng": 11},
+                {"lat": 11, "lng": 11},
+                {"lat": 11, "lng": -1},
+            ],
+        }
+    ]
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    for i in range(5):
+        run_cli(
+            binary,
+            db,
+            ["update", f"veh_{i}", "0.0001", "5", str(1000 + i)],
+            expect_code=0,
+        )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "list",
+            "--zones",
+            zones_path,
+            "--roads",
+            roads_path,
+            "--now",
+            "2000",
+            "--offset",
+            "1",
+            "--limit",
+            "2",
+        ],
+        expect_code=0,
+    )
+    arr = json.loads(p.stdout.strip())
+    assert len(arr) == 2
+    assert [x["vehicle_id"] for x in arr] == ["veh_1", "veh_2"]
+
+
+def test_near_radius_exact_boundary_with_roads(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    roads_path = os.path.join(tmp, "roads.json")
+    roads = [{"id": "r1", "points": [{"lat": 0, "lng": 0}, {"lat": 0, "lng": 10}]}]
+    with open(roads_path, "w") as f:
+        json.dump(roads, f)
+    run_cli(binary, db, ["update", "veh1", "0.0001", "5", "1000"], expect_code=0)
+    run_cli(binary, db, ["update", "veh2", "0.001", "5", "1000"], expect_code=0)
+    p = run_cli(
+        binary,
+        db,
+        ["near", "--lat", "0", "--lng", "5", "--radius", "15", "--roads", roads_path],
+        expect_code=0,
+    )
+    ids = [x["vehicle_id"] for x in json.loads(p.stdout.strip())]
+    assert "veh1" in ids
+    assert "veh2" not in ids
+
+
+def test_update_with_heading_359_999_valid(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    run_cli(
+        binary,
+        db,
+        ["update", "veh1", "0", "0", "1000", "--heading", "359.999"],
+        expect_code=0,
+    )
+    run_cli(
+        binary,
+        db,
+        ["update", "veh2", "0", "0", "1000", "--heading", "360"],
+        expect_code=2,
+    )
+
+
+def test_stats_after_batch_and_clear(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    batch_input = "update\tveh1\t0\t0\t1000\nupdate\tveh2\t0\t0\t2000\n"
+    run_cli(binary, db, ["batch"], input_data=batch_input, expect_code=0)
+    p = run_cli(binary, db, ["stats"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert data["live"] == 2
+    run_cli(binary, db, ["clear"], expect_code=0)
+    p2 = run_cli(binary, db, ["stats"], expect_code=0)
+    assert json.loads(p2.stdout.strip())["live"] == 0
+
+
+def test_batch_with_empty_accuracy_defaults_and_speed(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    batch_input = "update\tveh1\t0\t0\t1000\t\t5\t\n"
+    run_cli(binary, db, ["batch"], input_data=batch_input, expect_code=0)
+    p = run_cli(binary, db, ["get", "veh1"], expect_code=0)
+    data = json.loads(p.stdout.strip())
+    assert abs(data["accuracy"] - 10.0) < 1e-6
+    assert abs(data["speed"] - 5.0) < 1e-6
+
+
+def test_geofence_check_with_time_and_roads_none(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    zones_path = os.path.join(tmp, "zones.json")
+    zones = [
+        {
+            "id": "timed",
+            "polygon": [
+                {"lat": 0, "lng": 0},
+                {"lat": 0, "lng": 10},
+                {"lat": 10, "lng": 10},
+                {"lat": 10, "lng": 0},
+            ],
+            "active_from": 1000,
+            "active_to": 2000,
+        }
+    ]
+    with open(zones_path, "w") as f:
+        json.dump(zones, f)
+    p = run_cli(
+        binary,
+        db,
+        ["geofence-check", "5", "5", "--zones", zones_path, "--now", "500"],
+        expect_code=0,
+    )
+    assert json.loads(p.stdout.strip())["inside"] is False
+
+
+def test_track_pagination_edge(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    for i in range(3):
+        run_cli(
+            binary,
+            db,
+            ["update", "veh1", f"{i * 0.0001}", "0", str(1000 + i * 1000)],
+            expect_code=0,
+        )
+    p = run_cli(
+        binary,
+        db,
+        ["track", "veh1", "--from", "0", "--to", "5000", "--offset", "10"],
+        expect_code=0,
+    )
+    assert json.loads(p.stdout.strip()) == []
+    p2 = run_cli(
+        binary,
+        db,
+        ["track", "veh1", "--from", "0", "--to", "5000", "--limit", "0"],
+        expect_code=0,
+    )
+    assert json.loads(p2.stdout.strip()) == []
+
+
+def test_update_with_zones_default_empty_vs_custom(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    default_path = "/app/data/zones.json"
+    backup = None
+    if os.path.exists(default_path):
+        with open(default_path) as f:
+            backup = f.read()
+    os.makedirs(os.path.dirname(default_path), exist_ok=True)
+    with open(default_path, "w") as f:
+        json.dump(
+            [
+                {
+                    "id": "def",
+                    "polygon": [
+                        {"lat": 0, "lng": 0},
+                        {"lat": 0, "lng": 1},
+                        {"lat": 1, "lng": 1},
+                        {"lat": 1, "lng": 0},
+                    ],
+                }
+            ],
+            f,
+        )
+    try:
+        run_cli(binary, db, ["update", "veh1", "0.5", "0.5", "1000"], expect_code=0)
+        run_cli(binary, db, ["update", "veh2", "5", "5", "1000"], expect_code=3)
+    finally:
+        if backup is not None:
+            with open(default_path, "w") as f:
+                f.write(backup)
+        else:
+            try:
+                os.remove(default_path)
+            except:
+                pass
+
+
+def test_near_with_all_filters_and_pagination_combined(binary):
+    tmp = tempfile.mkdtemp()
+    db = os.path.join(tmp, "db.json")
+    for i in range(10):
+        run_cli(
+            binary,
+            db,
+            [
+                "update",
+                f"veh_{i:02d}",
+                "0.0001",
+                "5",
+                str(1000 + i),
+                "--accuracy",
+                "5",
+                "--speed",
+                "10",
+            ],
+            expect_code=0,
+        )
+    p = run_cli(
+        binary,
+        db,
+        [
+            "near",
+            "--lat",
+            "0",
+            "--lng",
+            "5",
+            "--radius",
+            "50000",
+            "--accuracy-max",
+            "10",
+            "--speed-min",
+            "5",
+            "--limit",
+            "3",
+            "--offset",
+            "2",
+        ],
+        expect_code=0,
+    )
+    arr = json.loads(p.stdout.strip())
+    assert len(arr) == 3
