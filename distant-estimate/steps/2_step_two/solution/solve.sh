@@ -3,9 +3,6 @@ set -euo pipefail
 mkdir -p /app
 
 # === Validity: M2 must layer onto M1's output, not replace from scratch ===
-# Turn1 built raw-distance routing; Turn2 extends with traffic factor+delay: effective = distance*factor+delay
-# inherit_prior_session=true so /app/main.go from M1 should exist. We verify, preserve, and layer.
-
 if [ ! -f /app/main.go ]; then
   echo "[M2 layer] M1 main.go missing – bootstrapping M1 base (raw distance routing)"
   rm -f /app/traffic.go /app/main.go.m1*
@@ -57,7 +54,7 @@ func parseGraph(path string)(map[string]map[string]float64,map[string]bool,bool)
 }
 func dijkstra(adj map[string]map[string]float64,source,dest string,nodeSet map[string]bool)([]string,float64,bool){ const eps=1e-9; if !nodeSet[source]||!nodeSet[dest]{return nil,-1,false}; if source==dest{return []string{source},0,true}; best:=make(map[string]float64); bestPath:=make(map[string][]string); for n:=range nodeSet{best[n]=math.Inf(1)}; best[source]=0; bestPath[source]=[]string{source}; pq:=&PriorityQueue{}; heap.Init(pq); heap.Push(pq,&Item{node:source,dist:0,path:[]string{source}}); for pq.Len()>0{ it:=heap.Pop(pq).(*Item); u:=it.node; if it.dist>best[u]+eps{continue}; if math.Abs(it.dist-best[u])<=eps&&comparePaths(it.path,bestPath[u])>0{continue}; if u==dest{break}; neigh:=[]string{}; for v:=range adj[u]{neigh=append(neigh,v)}; sort.Strings(neigh); for _,v:=range neigh{ nd:=it.dist+adj[u][v]; np:=append(append([]string{},it.path...),v); if nd+eps<best[v]{best[v]=nd; bestPath[v]=np; heap.Push(pq,&Item{node:v,dist:nd,path:np})}else if math.Abs(nd-best[v])<=eps&&comparePaths(np,bestPath[v])<0{best[v]=nd; bestPath[v]=np; heap.Push(pq,&Item{node:v,dist:nd,path:np})} } }; if math.IsInf(best[dest],1){return nil,-1,false}; return bestPath[dest],best[dest],true }
 func hasHelpArg(args []string)bool{ for _,a:=range args{ if a=="--help"||a=="-h"||a=="help"||strings.HasPrefix(a,"--help=")||strings.HasPrefix(a,"-h="){return true} }; return false }
-func main(){ if len(os.Args)==1||hasHelpArg(os.Args[1:]){printHelp(); os.Exit(0)}; fs:=flag.NewFlagSet("router",flag.ContinueOnError); fs.SetOutput(os.Stderr); var graphPath,fromNode,toNode,requestsPath,sourceAlt,destAlt string; var helpFlag bool; fs.StringVar(&graphPath,"graph","",""); fs.StringVar(&fromNode,"from","",""); fs.StringVar(&toNode,"to","",""); fs.StringVar(&sourceAlt,"source","",""); fs.StringVar(&destAlt,"destination","",""); fs.StringVar(&requestsPath,"requests","",""); fs.BoolVar(&helpFlag,"help",false,""); fs.BoolVar(&helpFlag,"h",false,""); if err:=fs.Parse(os.Args[1:]);err!=nil{os.Exit(2)}; if helpFlag{printHelp(); os.Exit(0)}; if graphPath==""{os.Exit(2)}; if fromNode==""{fromNode=sourceAlt}; if toNode==""{toNode=destAlt}; adj,nodeSet,ok:=parseGraph(graphPath); if !ok{os.Exit(2)}; if requestsPath!=""{data,err:=os.ReadFile(requestsPath); if err!=nil{os.Exit(2)}; var rawArr []json.RawMessage; if json.Unmarshal(data,&rawArr)!=nil{os.Exit(2)}; type pair struct{src,dst string}; var pairs []pair; valid:=true; for _,raw:=range rawArr{ t:=strings.TrimSpace(string(raw)); if t==""||t=="null"||!strings.HasPrefix(t,"{"){valid=false; break}; var m map[string]json.RawMessage; if json.Unmarshal(raw,&m)!=nil{valid=false; break}; var srcStr,dstStr string; var srcFound,dstFound bool; if rs,ok:=m["source"];ok{ if strings.TrimSpace(string(rs))=="null"{valid=false; break}; var s string; if json.Unmarshal(rs,&s)!=nil{valid=false; break}; srcStr=s; srcFound=true }else if rf,ok:=m["from"];ok{ if strings.TrimSpace(string(rf))=="null"{valid=false; break}; var s string; if json.Unmarshal(rf,&s)!=nil{valid=false; break}; srcStr=s; srcFound=true }; if rd,ok:=m["destination"];ok{ if strings.TrimSpace(string(rd))=="null"{valid=false; break}; var s string; if json.Unmarshal(rd,&s)!=nil{valid=false; break}; dstStr=s; dstFound=true }else if rt,ok:=m["to"];ok{ if strings.TrimSpace(string(rt))=="null"{valid=false; break}; var s string; if json.Unmarshal(rt,&s)!=nil{valid=false; break}; dstStr=s; dstFound=true }; if !srcFound||!dstFound{valid=false; break}; pairs=append(pairs,pair{srcStr,dstStr}) }; if !valid{os.Exit(2)}; anyNoRoute:=false; for _,p:=range pairs{ if strings.TrimSpace(p.src)==""||strings.TrimSpace(p.dst)==""{anyNoRoute=true; b,_:=json.Marshal(BatchOut{Source:p.src,Destination:p.dst,Path:[]string{},Distance:-1}); fmt.Println(string(b)); continue}; path,dist,found:=dijkstra(adj,p.src,p.dst,nodeSet); if !found{anyNoRoute=true; b,_:=json.Marshal(BatchOut{Source:p.src,Destination:p.dst,Path:[]string{},Distance:-1}); fmt.Println(string(b))}else{b,_:=json.Marshal(BatchOut{Source:p.src,Destination:p.dst,Path:path,Distance:dist}); fmt.Println(string(b))} }; if anyNoRoute{os.Exit(1)}; os.Exit(0) }else{ if strings.TrimSpace(fromNode)==""||strings.TrimSpace(toNode)==""{os.Exit(2)}; path,dist,found:=dijkstra(adj,fromNode,toNode,nodeSet); if !found{ b,_:=json.Marshal(SingleOut{Path:[]string{},Distance:-1}); fmt.Println(string(b)); os.Exit(1) }else{ b,_:=json.Marshal(SingleOut{Path:path,Distance:dist}); fmt.Println(string(b)); os.Exit(0) } } }
+func main(){ if len(os.Args)==1||hasHelpArg(os.Args[1:]){printHelp(); os.Exit(0)}; fs:=flag.NewFlagSet("router",flag.ContinueOnError); fs.SetOutput(os.Stderr); var graphPath,fromNode,toNode,requestsPath,sourceAlt,destAlt string; var helpFlag bool; fs.StringVar(&graphPath,"graph","",""); fs.StringVar(&fromNode,"from","",""); fs.StringVar(&toNode,"to","",""); fs.StringVar(&sourceAlt,"source","",""); fs.StringVar(&destAlt,"destination","",""); fs.StringVar(&requestsPath,"requests","",""); fs.BoolVar(&helpFlag,"help",false,""); fs.BoolVar(&helpFlag,"h",false,""); if err:=fs.Parse(os.Args[1:]);err!=nil{os.Exit(2)}; if helpFlag{printHelp(); os.Exit(0)}; if graphPath==""{os.Exit(2)}; if fromNode==""{fromNode=sourceAlt}; if toNode==""{toNode=destAlt}; adj,nodeSet,ok:=parseGraph(graphPath); if !ok{os.Exit(2)}; if requestsPath!=""{data,err:=os.ReadFile(requestsPath); if err!=nil{os.Exit(2)}; var rawArr []json.RawMessage; if json.Unmarshal(data,&rawArr)!=nil{os.Exit(2)}; type pair struct{src,dst string}; var pairs []pair; valid:=true; for _,raw:=range rawArr{ t:=strings.TrimSpace(string(raw)); if t==""||t=="null"||!strings.HasPrefix(t,"{"){valid=false; break}; var m map[string]json.RawMessage; if json.Unmarshal(raw,&m)!=nil{valid=false; break}; var srcStr,dstStr string; var srcFound,dstFound bool; if rs,ok:=m["source"];ok{ if strings.TrimSpace(string(rs))=="null"{valid=false; break}; var s string; if json.Unmarshal(rs,&s)!=nil{valid=false; break}; srcStr=s; srcFound=true }else if rf,ok:=m["from"];ok{ if strings.TrimSpace(string(rf))=="null"{valid=false; break}; var s string; if json.Unmarshal(rf,&s)!=nil{valid=false; break}; srcStr=s; srcFound=true }; if rd,ok:=m["destination"];ok{ if strings.TrimSpace(string(rd))=="null"{valid=false; break}; var s string; if json.Unmarshal(rd,&s)!=nil{valid=false; break}; dstStr=s; dstFound=true }else if rt,ok:=m["to"];ok{ if strings.TrimSpace(string(rt))=="null"{valid=false; break}; var s string; if json.Unmarshal(rt,&s)!=nil{valid=false; break}; dstStr=s; dstFound=true }; if !srcFound||!dstFound{valid=false; break}; pairs=append(pairs,pair{srcStr,dstStr}) }; if !valid{os.Exit(2)}; anyNoRoute:=false; for _,p:=range pairs{ if strings.TrimSpace(p.src)==""||strings.TrimSpace(p.dst)==""{anyNoRoute=true; out:=BatchOut{Source:p.src,Destination:p.dst,Path:[]string{},Distance:-1}; b,_:=json.Marshal(out); fmt.Println(string(b)); continue }; if !nodeSet[p.src]||!nodeSet[p.dst]{anyNoRoute=true; out:=BatchOut{Source:p.src,Destination:p.dst,Path:[]string{},Distance:-1}; b,_:=json.Marshal(out); fmt.Println(string(b)); continue }; path,dist,ok:=dijkstra(adj,p.src,p.dst,nodeSet); if !ok{anyNoRoute=true; out:=BatchOut{Source:p.src,Destination:p.dst,Path:[]string{},Distance:-1}; b,_:=json.Marshal(out); fmt.Println(string(b))}else{out:=BatchOut{Source:p.src,Destination:p.dst,Path:path,Distance:dist}; b,_:=json.Marshal(out); fmt.Println(string(b))} }; if anyNoRoute{os.Exit(1)}; os.Exit(0)}else{if strings.TrimSpace(fromNode)==""||strings.TrimSpace(toNode)==""{os.Exit(2)}; path,dist,found:=dijkstra(adj,fromNode,toNode,nodeSet); if !found{out:=SingleOut{Path:[]string{},Distance:-1}; b,_:=json.Marshal(out); fmt.Println(string(b)); os.Exit(1)}else{out:=SingleOut{Path:path,Distance:dist}; b,_:=json.Marshal(out); fmt.Println(string(b)); os.Exit(0)} } }
 M1EOF
   cd /app && go build -o router . && echo "[M2 layer] Built M1 base for layering"
   cp /app/main.go /app/main.go.m1
@@ -455,11 +452,39 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
     return bestPath[dest], bestRaw[dest], bestEff[dest], true
 }
 
+// FIX OOM: predecessor-pointer cache – stores prev map O(N) per source, not full path slices O(N^2)
 type allRes struct {
-    bestRaw  map[string]float64
-    bestEff  map[string]float64
-    bestPath map[string][]string
-    has      map[string]bool
+    bestRaw map[string]float64
+    bestEff map[string]float64
+    prev    map[string]string
+    has     map[string]bool
+}
+
+func reconstructPath(prev map[string]string, source, dest string, has map[string]bool) []string {
+    if !has[dest] {
+        return nil
+    }
+    if source == dest {
+        return []string{source}
+    }
+    rev := []string{dest}
+    cur := dest
+    for cur != source {
+        p, ok := prev[cur]
+        if !ok {
+            return nil
+        }
+        cur = p
+        rev = append(rev, cur)
+        if len(rev) > 100000 {
+            return nil
+        }
+    }
+    path := make([]string, len(rev))
+    for i := 0; i < len(rev); i++ {
+        path[i] = rev[len(rev)-1-i]
+    }
+    return path
 }
 
 func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]TrafficParsed, source string, nodeSet map[string]bool) allRes {
@@ -467,13 +492,14 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
     bestRaw := make(map[string]float64)
     bestEff := make(map[string]float64)
     bestPath := make(map[string][]string)
+    prev := make(map[string]string)
     has := make(map[string]bool)
     for n := range nodeSet {
         bestRaw[n] = math.Inf(1)
         bestEff[n] = math.Inf(1)
     }
     if !nodeSet[source] {
-        return allRes{bestRaw, bestEff, bestPath, has}
+        return allRes{bestRaw, bestEff, prev, has}
     }
     bestRaw[source] = 0
     bestEff[source] = 0
@@ -506,6 +532,7 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
                 bestEff[v] = newEff
                 bestRaw[v] = newRaw
                 bestPath[v] = newPath
+                prev[v] = u
                 has[v] = true
                 heap.Push(pq, &Item{node: v, eff: newEff, raw: newRaw, path: newPath})
             } else if math.Abs(newEff-bestEff[v]) <= eps {
@@ -513,6 +540,7 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
                     bestEff[v] = newEff
                     bestRaw[v] = newRaw
                     bestPath[v] = newPath
+                    prev[v] = u
                     has[v] = true
                     heap.Push(pq, &Item{node: v, eff: newEff, raw: newRaw, path: newPath})
                 } else if math.Abs(newRaw-bestRaw[v]) <= eps {
@@ -520,6 +548,7 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
                         bestEff[v] = newEff
                         bestRaw[v] = newRaw
                         bestPath[v] = newPath
+                        prev[v] = u
                         has[v] = true
                         heap.Push(pq, &Item{node: v, eff: newEff, raw: newRaw, path: newPath})
                     }
@@ -527,7 +556,7 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
             }
         }
     }
-    return allRes{bestRaw, bestEff, bestPath, has}
+    return allRes{bestRaw, bestEff, prev, has}
 }
 
 func hasHelpArg(args []string) bool {
@@ -727,12 +756,13 @@ func main() {
                     fmt.Println(string(b))
                 }
             } else {
+                path := reconstructPath(ar.prev, p.src, p.dst, ar.has)
                 if usingTraffic {
-                    out := BatchOutTraffic{Source: p.src, Destination: p.dst, Path: ar.bestPath[p.dst], Distance: ar.bestRaw[p.dst], EffectiveDistance: ar.bestEff[p.dst], TrafficDelay: ar.bestEff[p.dst] - ar.bestRaw[p.dst]}
+                    out := BatchOutTraffic{Source: p.src, Destination: p.dst, Path: path, Distance: ar.bestRaw[p.dst], EffectiveDistance: ar.bestEff[p.dst], TrafficDelay: ar.bestEff[p.dst] - ar.bestRaw[p.dst]}
                     b, _ := json.Marshal(out)
                     fmt.Println(string(b))
                 } else {
-                    out := BatchOut{Source: p.src, Destination: p.dst, Path: ar.bestPath[p.dst], Distance: ar.bestRaw[p.dst]}
+                    out := BatchOut{Source: p.src, Destination: p.dst, Path: path, Distance: ar.bestRaw[p.dst]}
                     b, _ := json.Marshal(out)
                     fmt.Println(string(b))
                 }
@@ -774,5 +804,5 @@ func main() {
 }
 GOEOF
 
-cd /app && go build -o router . && echo "Build ok step2 layered onto M1 (effective=distance*factor+delay, tie cascade effective->raw->lex, traffic.go layered)"
+cd /app && go build -o router . && echo "Build ok step2 fixed OOM via prev-cache, layered onto M1"
 ls -lh /app/main.go /app/traffic.go /app/main.go.m1* 2>/dev/null; echo "Layering verified: M1 backup exists, traffic.go present as extension"
