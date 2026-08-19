@@ -279,12 +279,8 @@ func loadZones(path string) ([]Zone, error) {
 	if err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(string(data))
-	if len(trimmed) == 0 {
+	if len(strings.TrimSpace(string(data))) == 0 {
 		return []Zone{}, nil
-	}
-	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil, fmt.Errorf("zones top-level must be array")
 	}
 	var zones []Zone
 	if err := json.Unmarshal(data, &zones); err != nil {
@@ -946,7 +942,7 @@ func main() {
 		return
 	}
 	first := rem[0]
-	if first == "help" || strings.HasPrefix(first, "help=") || first == "--help" || strings.HasPrefix(first, "--help=") || first == "-h" || strings.HasPrefix(first, "-h=") {
+	if first == "help" || first == "--help" || first == "-h" {
 		printHelp()
 		return
 	}
