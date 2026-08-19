@@ -4,7 +4,7 @@ Multi-turn Go task for ride-sharing vehicle location tracking (Uber-like) with e
 
 ## Overview
 
-### Step 1: Vehicle Location Tracking Service (1_step_one, 150 tests, extreme-hard – balanced batch4, hole-edge clarified, help= true strict, 150 middle-ground)
+### Step 1: Vehicle Location Tracking Service (1_step_one, 150 tests, extreme-hard – balanced batch5, hole-edge clarified, help= true strict, 150 middle-ground relaxed delete counting)
 
 Build `locationctl` in Go at `/app/src`, module `locationservice`, stdlib only.
 
@@ -19,7 +19,7 @@ Core features (hardened from 58 too-easy to 95 extreme-hard):
 
 Additional hard edge cases for too-easy: multiple holes, overlapping first match, circle with time, hole edge outside, interior vs endpoint snapping, closest among segments, all filters combined, accuracy-max+speed-min together, track pagination, stats after clear, batch 100 ops, corrupt extra garbage, zones default vs custom precedence, antimeridian with hole, deeply nested parent dirs 6 levels, etc.
 
-### Step 2: Improve Location Accuracy (2_step_two, 224 tests, extreme-hard – balanced middle-ground batch4, original_lat clarified per feedback + positive outlier cases, heading-aware 46 filtered, north prediction exact, inherit_prior_session true)
+### Step 2: Improve Location Accuracy (2_step_two, 240 tests, extreme-hard – balanced batch5 150/240 middle between too-easy 7/10 and too-hard 0/10, original_lat clarified + south/west prediction + confidence upgrade + accel/accl boundary + teleport exact + priority chain)
 
 Backward compatible with Step1, adds:
 
@@ -140,8 +140,8 @@ Optional (non-blocking) improvements the AFTR suggested:
 ## Structure
 
 - `environment/Dockerfile` – ubuntu:24.04 installs golang-go, python3/pip, pytest 8.4.1, creates /app/src, /app/data/roads.json sample with polyline + mixed segment seg_old (hardened), empty zones [] default, pickup_zones dropoff_zones empty
-- `steps/1_step_one/` – tracking ultra-hardened extreme batch2+batch3 middle-ground: antimeridian 2deg wide, mixed roads legacy, mandatory backup distinct nanosec integer, multiple holes, overlapping first match, circle exact radius, time boundaries inclusive, hole-edge outside discriminator, interior vs endpoint snapping, all filters combined (since/until+zones+roads, accuracy-max+speed-min+zones+roads), batch 100 ops & 1000 batch <5s & 3000 near <3s performance, extra garbage & BOM & trailing comma corrupt, default vs custom precedence, help= true variants (--help=true/-h=true/help=true) strict, unknown= true exit2, output keys exact (allow outlier_count for compat), batch empty input batch_ok 0, empty zones [] allows all, zones invalid top-level string/number/null/bool/object, duplicate points colinear, flag order --db after command, stats total_updates & distance sum, history sorted after batch, persistence total_distance after restart, track from==to, clear->distance not found, plus batch3 moderate +10 (total_distance 3 points exact sum, history exact 10/11 trim oldest, stale same timestamp different location still stale, hole vertex outside, antimeridian with hole, batch delete nonexist not counted, atomic_write cleans multiple tmp, near with include-stale and now, list limit/offset zones/roads/now combined, heading 359.999 valid) – 150 tests ~38s (balanced middle between 140 too-easy 9/10 and 160 too-hard 0/10)
-- `steps/2_step_two/` – accuracy balanced batch4 214->224 (+10 moderate positive outlier cases + confidence + prediction + heading filter): outlier 6 conditions exact boundaries positive cases teleport (0.02 deg 2220m dt10s), heading flip 130 deg 55m, median deviation history>=2 median ~11 vs 1089, acceleration 30m/s2 11m, accuracy spike old20 new80, speed vs implied old60 new1 2220m dt20s, plus previous batch2 isolation tests (old/new accuracy 50 not outlier, implied 50 not outlier, heading 120 not outlier, speed 10 not outlier, dist 500 not, accel 15 not, dist 300 not, accuracy 75 not, old*2+30, speed 2 not), confidence high exact with degradation +0.5*age_sec, low outlier 6 even snapped on road_dist<=10, prediction north exact delta 50m ~0.000449 deg and south/west/east, original_lat 4 cases exhaustive, EMA last 5 only weighted, heading-aware 45 boundary & 46 filtered for north road & no fallback & opposite allowed & close filtered farther wins, pickup/dropoff priority exhaustive chain with exact boundaries, batch zones before low_accuracy still fails & low_accuracy not increment & outlier not increment distance & total_distance not increment on outlier/low_accuracy mixed, old DB migration, large scale, help= true strict, unknown= true exit2, output keys exact, etc. – 224 tests ~16.5s – middle-ground targeting 3-5/10 avocado instead of 9/10 too-easy or 0/10 too-hard
+- `steps/1_step_one/` – tracking ultra-hardened extreme batch2+batch3+batch5: antimeridian 2deg wide, mixed roads legacy, mandatory backup distinct nanosec integer, multiple holes, overlapping first match, circle exact radius, time boundaries inclusive, hole-edge outside discriminator, interior vs endpoint snapping, all filters combined, batch 100 ops & 1000 batch <5s & 3000 near <3s perf, extra garbage & BOM & trailing comma corrupt, default vs custom precedence, help= true variants (--help=true/-h=true/help=true) strict, unknown= true exit2, output keys exact (allow outlier_count), batch empty input batch_ok 0, empty zones [] allows all, zones invalid top-level string/number/null/bool/object, duplicate points colinear, flag order --db after command, stats sum, history sorted, persistence total_distance, track from==to, clear->distance not found, plus batch3 +10 (total_distance 3pts exact sum, history 10/11 trim, stale same ts, hole vertex outside, antimeridian with hole, batch delete nonexist relaxed 0/1 (was strict blocker 149/150->0/10), multiple tmp clean, near include-stale+now, list limit/offset+zones/roads+now, heading 359.999) – 150 tests ~38s (balanced middle 140 9/10 too-easy vs 160 0/10 too-hard, relaxed to 7/10)
+- `steps/2_step_two/` – accuracy balanced batch5 224->240 (+16 harder from 250 set, middle between 224 too-easy 7/10 and 250 too-hard 0/10): adds confidence high age0 acc0, low age30001 even snapped road_dist 0, medium upgrade low->medium dist5, no upgrade dist15, accuracy degradation 10 sec exact, prediction south heading180 lat<original, west heading270 lng<original, outlier acceleration 16 outlier and exact 15 boundary isolated, accuracy 76 outlier and old20 new70 boundary, speed vs implied 1.9 outlier and exact 80 boundary isolated, teleport implied 50 exact, pickup priority chain full off_road beats moving, too_far 101m vs 99m, plus previous 224 positives (teleport 0.02deg 2220m dt10s, heading flip 130 deg 55m, median deviation, acceleration 30m/s2, accuracy spike old20 new80, speed vs implied old60 new1 2220m dt20s, confidence low outlier 6 even snapped, north prediction exact 0.000449 deg, heading 46 filtered, batch distance not increment) plus batch2 isolation tests – 240 tests ~26.5s – aiming 3-5/10 down from 7/10 too-easy
 
 ## Run Locally
 
@@ -303,17 +303,45 @@ Online job 5128215 (metacode avocado 10 trials) for 150/224 middle-ground showed
 - Expected `batch_ok 0` for `delete\tveh_nonexist`
 - Agent returned `batch_ok 1` (counts delete as applied even if not_found)
 
-Root cause: Batch delete semantics ambiguous – single delete prints "deleted" even if exists and "not_found" otherwise (exit0), but batch_ok counting of applied ops unclear. Our reference counted only existing deletes as applied (batch_ok 0), while many agents count delete API call as applied regardless (batch_ok 1). This single discriminator blocked all avocado from reaching Step2, making it 0/10 too-hard, similar to previous 160/250.
+Root cause: Batch delete semantics ambiguous – single delete prints "deleted" even if exists and "not_found" otherwise (exit0), but batch_ok counting unclear. Reference counted only existing deletes as applied (batch_ok 0), many agents count delete API call as applied regardless (batch_ok 1). Single discriminator blocked all avocado from reaching Step2, making it 0/10 too-hard, similar to 160/250.
 
 Fix applied:
 - Relaxed `test_batch_delete_nonexist_not_counted_b3` to accept **either `batch_ok 0` OR `batch_ok 1`** plus verify list empty unchanged.
-- Keeps test as discriminator for batch parsing but not for exact counting semantics.
-- Effective Step1 remains 150 tests but with tolerant counting, allowing avocado to progress to Step2 where real difficulty lives (positive outlier cases, heading-aware 46 filtered, north prediction exact, etc.).
+- Effective Step1 remains 150 tests but tolerant, allowing avocado to progress to Step2.
 
 Oracle after fix:
-- Step1: 150/150 PASS 37.42s (relaxed test passes both semantics)
-- Step2: 224/224 PASS 16.54s + Step1 compat 150/150 PASS 41.05s
+- Step1: 150/150 PASS 37.42s
+- Step2: 224/224 PASS 16.54s + compat 150/150 PASS 41.05s
 
-This should bring avocado from 0/10 (blocked at Step1) to balanced 3-5/10 (able to attempt Step2, where 224 tests will discriminate). If still 0/10 after, further easing of Step2 positive cases (remove 5 hardest) to 219 may be needed.
+Online after fix commit 90ea8d4 (150/224 relaxed):
+- Oracle 3/3, Codex 7/10 (0.75), Avocado 5/6 running mean 0.833, Opus 3/5 running mean 0.7 – **too easy** (7/10), confirming Step2 needs hardening.
 
 Timestamp: 2026-08-19T01:53Z (epoch 1787104380)
+
+## Hardening Step2 too easy 7/10 -> target 3-5/10 (2026-08-19)
+
+Latest online for relaxed 150/224 (90ea8d4) shows too-easy:
+- Codex 7/10, Avocado 5/6 (83%), Opus 3/5 (70%)
+Previous baseline 114/182 was GOOD 3/10, 140/214 was too-easy 9/10, 150/224 relaxed was too-easy 7/10, 160/250 was too-hard 0/10.
+
+To harden Step2 while keeping Step1 at 150 tolerant, added 16 harder tests from previous 250 batch (which caused 0/10) to reach middle 150/240 (between 224 too-easy and 250 too-hard):
+
+Added from missing 36:
+- confidence high age0 acc0, low age30001 even snapped road_dist 0, medium upgrade low->medium dist5, no upgrade dist15
+- accuracy degradation 10 sec exact (10 sec *0.5=5 => acc 15)
+- prediction south heading180 lat < original, west heading270 lng < original
+- outlier acceleration 16 outlier, acceleration exact 15 boundary isolated (15 not outlier, 15.1 outlier)
+- outlier accuracy 76 outlier, accuracy old20 new70 boundary (70 not outlier, 76 outlier)
+- outlier speed vs implied 1.9 outlier, exact 80 boundary isolated (80 not outlier, 81+ outlier with dist>1000)
+- outlier teleport implied 50 exact (1100m dt22 sec =50 exactly not outlier)
+- validate pickup priority chain full 9 steps off_road beats moving, too_far 101m vs 99m (0.00089 valid, 0.001 too_far)
+
+Total Step2 224->240 (+16). Reference still passes.
+
+Oracle after hardening:
+- Step1: 150/150 PASS 38.82s (backward compat with Step2 binary)
+- Step2: 240/240 PASS 26.46s
+
+Targets healthy spread 3-5/10 avocado, down from 7/10 too-easy.
+
+Timestamp: 2026-08-19T04:30Z
