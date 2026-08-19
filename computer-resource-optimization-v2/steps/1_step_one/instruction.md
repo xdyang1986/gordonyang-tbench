@@ -20,7 +20,13 @@ where `checksum = MD5( json.dumps(data, sort_keys=True, separators=(',',':'), en
 
 Build binary via `go build -o <binary> .` in `/app`, module `cluster-manager`, stdlib only (`go list` shows no dotted imports).
 
-Global flags: `--data <path>` default `/app/data/cluster.json`. Help: bare binary, `--help`, `-h`, `help` must print help containing `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `data`, `checksum` and exit 0. Unknown command → exit 2, missing args → exit 2, extra args → exit 2, empty or whitespace-only ID → exit 2, non-int or invalid resources (cpu<=0 mem<=0 gpu<0 or float like `4.0`) → exit 2.
+Global flags: `--data <path>` default `/app/data/cluster.json`. Help: bare binary, `--help`, `-h`, `help` must print help containing `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `data`, `checksum` and exit 0. Unknown command → exit 2, missing args → exit 2, extra args → exit 2, empty or whitespace-only ID → exit 2, non-int or invalid resources (cpu<=0 mem<=0 gpu<0 or float like `4.0` → exit 2; leading zeros and a leading + are valid (0004 == +4 == 4)) → exit 2.
+
+**Numeric parsing contract (exact, Go `strconv.Atoi` semantics):**
+- Numeric parsing (limit, offset, cpu, memory, gpu) uses plain decimal integer parsing — Go `strconv.Atoi` semantics, no extra validation:
+  - ACCEPTED: leading zeros (`00`, `00002`, `0004` → 0, 2, 4); explicit sign (`+4`, `-0` → 4, 0).
+  - REJECTED (exit 2): non-numeric (`abc`), hex (`0x10`), float (`2.0`, `4.0`), empty string, any surrounding whitespace (`" 2 "`), and out-of-range values (limit < 0, offset < 0, cpu <= 0, memory <= 0, gpu < 0).
+  - `-0` parses to 0 and is therefore valid wherever 0 is valid (gpu, limit, offset). Do NOT special-case the sign character.
 
 Commands:
 ```
@@ -48,7 +54,7 @@ Node JSON: `{"id":...,"total":{"cpu":...,"memory":...,"gpu":...},"used":{...},"f
 - Jobs array must be `[]` not `null` after add-node, deallocate, remove-job (Go nil slice bug).
 - Idempotent: re-adding existing node/job with different resources must keep old values and existing allocation.
 - First-fit semantics: sorted ID asc first that fits wins even if wasteful (tested vs best-fit).
-- Pagination: `list-nodes 2 1` → items 1,2 not 0,1. Limit/offset as float, negative, plus sign, hex, spaces, zero-padded → validation.
+- Pagination: `list-nodes 2 1` → items 1,2 not 0,1. Limit/offset validation per numeric parsing contract: float (`2.0`), negative (`-1`), hex (`0x10`), whitespace (`" 2 "`), non-numeric → exit 2; leading zeros (`00`, `00002`) and explicit plus (`+4`, `+0`, `-0`) are ACCEPTED and parsed as decimal (see contract).
 - Special chars: IDs containing `<>&`, `-_ . :`, `/`, `=;`, `[]`, `%&`, `$*+@`, `` ` `` must be preserved, raw `<` in file (no `\u003c`), and jobs sorted.
 - Unicode: `node-🌍`, `job-🌍🚀😀` preserved raw UTF-8 in file and API.
 - Large IDs: 10KB IDs with mixed special chars must work for add/get/allocate.

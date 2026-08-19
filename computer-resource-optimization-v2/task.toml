@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/computer-resource-optimization-v2"
-description = "Bioinformatics HPC fleet: Go CLI for Illumina NovaSeq/PacBio Revio sequencers running CRISPR L1000, FASTQ/BAM variant calling pipelines. Unique vs ci-scheduler-target-sharded/container-resource-allocator: genomics lab IDs <>& 🌍, 10KB barcodes, MD5 canonical sort_keys ensure_ascii=False raw, stale tmp.12345 cleanup, corrupt null/[]/truncated .corrupt.<nanosec>, [] not null nil-slice, idempotent keep old alloc, substring node1 vs node10, max-int 2^31-1, random pagination 0=all, unicode é vs e+combining bytewise distinct, exact fit fragmentation, 50-way alloc/dealloc stress, presence TTL, token-bucket per-sequencer 1/s burst2 refill 1.6s no-consume on insufficient, snapshot/restore dir/file exact, ops-log >=50 allocate entries (fix BAD_GRADING_WRONG), best-fit defrag cpu->mem->gpu->id lex vs first-fit."
+description = "Go CLI cluster manager for genomics HPC fleet: durable MD5-checksummed JSON with atomic writes, first-fit (core) and best-fit (sharded) scheduling with cpu->mem->gpu->id lex tie-break, weighted MD5 sharding, per-node token-bucket rate limiting (allocations_per_second, burst, refill, no-consume on insufficient, persistence), presence TTL heartbeats, snapshot/restore dir+file, ops-log with invalid-line skipping and 10MB scanner, optimize defrag."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "genomics", "hpc", "bioinformatics", "sequencer", "crispr", "illumina", "pacbio", "dna-pipeline", "resource-orchestration"]
 format = "terminal_bench_multi_turn"
@@ -11,8 +11,8 @@ workstream = "swe_public_repo"
 [metadata]
 difficulty = "hard"
 category = "software-engineering"
-category_usecase = "bioinformatics_infra"
-category_subdomain = "genomics_hpc"
+category_usecase = "resource_optimization"
+category_subdomain = "scientific_computing"
 tags = ["genomics", "hpc", "bioinformatics", "sequencer", "crispr", "dna-pipeline", "resource-orchestration", "go"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"

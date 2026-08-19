@@ -19,7 +19,12 @@ Build at `/app/` module `cluster-manager`, `go build -o cluster-manager .`, stdl
 
 **Corrupt data file:** On unparseable JSON or checksum mismatch: copy raw bytes to `<data-path>.corrupt.<unix-nanos>`, warn stderr containing `corrupt` or `checksum`, continue EMPTY store exit 0 so `list-nodes` prints `[]`.
 
-**Core:** add-node idempotent preserve old, remove-node true/false fails exit2 if has jobs, list-nodes pagination sorted asc, get-node, add-job, remove-job deallocates first jobs [] not null, list-jobs, get-job, allocate insufficient exit2, deallocate, schedule first-fit sorted IDs asc (first that fits), no fit exit1, status sums. Node jobs sorted [] not null.
+**Numeric parsing (limit, offset, cpu, memory, gpu) uses plain decimal integer parsing — Go `strconv.Atoi` semantics, no extra validation:**
+  - ACCEPTED: leading zeros (`00`, `00002`, `0004` → 0, 2, 4); explicit sign (`+4`, `-0` → 4, 0).
+  - REJECTED (exit 2): non-numeric (`abc`), hex (`0x10`), float (`2.0`, `4.0`), empty string, any surrounding whitespace (`" 2 "`), and out-of-range values (limit < 0, offset < 0, cpu <= 0, memory <= 0, gpu < 0).
+  - `-0` parses to 0 and is therefore valid wherever 0 is valid (gpu, limit, offset). Do NOT special-case the sign character.
+
+**Core:** add-node idempotent preserve old, remove-node true/false fails exit2 if has jobs, list-nodes pagination sorted asc (limit 0 means all, leading zeros and + valid e.g. 0004==+4==4), get-node, add-job, remove-job deallocates first jobs [] not null, list-jobs, get-job, allocate insufficient exit2, deallocate, schedule first-fit sorted IDs asc (first that fits), no fit exit1, status sums. Node jobs sorted [] not null. Resources cpu<=0 mem<=0 gpu<0 or float like 4.0 → exit2; leading zeros and a leading + are valid.
 
 Difficulty: After publishing exact contracts, task would swing too-easy. Put difficulty in prior-violating semantic: debug-in-place over subtly wrong allocator (e.g. schedule picks last-fit missing break, limit 0 returns 0 not all, corrupt exit2). Naive baseline with obvious implementations (null node_id, exit2 on corrupt, limit0=0) should give ~22/30.
 

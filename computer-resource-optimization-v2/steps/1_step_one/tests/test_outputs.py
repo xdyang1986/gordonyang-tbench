@@ -1522,9 +1522,11 @@ def test_remove_node_has_jobs_even_after_failed_allocate():
 
 def test_invalid_resources_with_plus_and_leading_zeros():
     clean_data()
-    # plus sign should be allowed per Go ParseInt? Actually spec says cpu>0 int, plus sign may be considered valid – but we test leading zeros valid
+    # plus sign and leading zeros valid per Go Atoi semantics (P0 fix)
     r = run_cli("add-node", "nodePlus", "+4", "1024", "0")
-    # Go ParseInt allows +, so plus should be ok (not exit2) – we check not crash, either 0 or 2 acceptable? For hardening, require leading zeros valid
+    assert r.returncode == 0, "plus sign should be valid per Atoi contract"
+    node_plus = json.loads(run_cli("get-node", "nodePlus").stdout)
+    assert node_plus["total"]["cpu"] == 4
     # Leading zeros valid
     assert run_cli("add-node", "nodeLeadZero", "0004", "01024", "0001").returncode == 0
     node = json.loads(run_cli("get-node", "nodeLeadZero").stdout)
@@ -3657,12 +3659,11 @@ def test_list_nodes_with_negative_zero_and_plus_zero():
     clean_data()
     for i in range(3):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    # -0 should be treated as 0 valid, +0 as 0 valid (Go ParseInt allows +)
+    # -0 parses to 0 valid, +0 valid, leading zeros valid per Atoi contract
     for lim in ["-0", "+0", "00", "000"]:
         r = run_cli("list-nodes", lim, "0")
-        assert r.returncode in (0, 2)
-        if r.returncode == 0:
-            assert len(json.loads(r.stdout)) == 3
+        assert r.returncode == 0, f"{lim} should be valid per Atoi contract"
+        assert len(json.loads(r.stdout)) == 3
 
 
 def test_list_jobs_with_negative_zero_and_plus_zero():
@@ -3672,7 +3673,7 @@ def test_list_jobs_with_negative_zero_and_plus_zero():
         run_cli("add-job", f"job-{i}", "1", "256", "0")
     for lim in ["-0", "+0"]:
         r = run_cli("list-jobs", lim, "0")
-        assert r.returncode in (0, 2)
+        assert r.returncode == 0, f"{lim} should be valid per Atoi contract"
 
 
 def test_status_total_used_exact_after_alloc_dealloc_cycle():
@@ -3830,11 +3831,15 @@ def test_list_nodes_with_limit_offset_with_spaces_and_zero_padded():
     clean_data()
     for i in range(5):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    # spaces and zero-padded should be valid after trim
+    # per Atoi contract, surrounding whitespace is REJECTED (exit 2)
     r = run_cli("list-nodes", " 02 ", " 01 ")
-    assert r.returncode in (0, 2)
-    if r.returncode == 0:
-        assert len(json.loads(r.stdout)) == 2
+    assert r.returncode == 2, (
+        "whitespace-surrounded numbers should be rejected per contract"
+    )
+    # zero-padded without spaces remains valid
+    r2 = run_cli("list-nodes", "02", "01")
+    assert r2.returncode == 0
+    assert len(json.loads(r2.stdout)) == 2
 
 
 def test_add_node_id_with_10kb_mixed_and_allocate_many():
@@ -4053,9 +4058,8 @@ def test_list_nodes_with_limit_as_plus_sign():
     for i in range(3):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
     r = run_cli("list-nodes", "+2", "0")
-    assert r.returncode in (0, 2)
-    if r.returncode == 0:
-        assert len(json.loads(r.stdout)) == 2
+    assert r.returncode == 0, "plus sign should be valid per Atoi contract"
+    assert len(json.loads(r.stdout)) == 2
 
 
 def test_list_jobs_with_limit_as_plus_sign():
@@ -4064,7 +4068,8 @@ def test_list_jobs_with_limit_as_plus_sign():
     for i in range(3):
         run_cli("add-job", f"job-{i}", "1", "256", "0")
     r = run_cli("list-jobs", "+2", "0")
-    assert r.returncode in (0, 2)
+    assert r.returncode == 0, "plus sign should be valid per Atoi contract"
+    assert len(json.loads(r.stdout)) == 2
 
 
 def test_concurrent_add_node_with_brackets():
@@ -4250,8 +4255,8 @@ def test_status_with_negative_zero_and_plus_zero_limit():
     clean_data()
     for i in range(5):
         run_cli("add-node", f"node-{i}", "4", "1024", "0")
-    # -0 and +0 already tested for list, but status should be ok regardless of previous invalid list attempts
-    assert run_cli("list-nodes", "-0", "0").returncode in (0, 2)
+    # -0 valid per Atoi contract -> parses to 0 returns all
+    assert run_cli("list-nodes", "-0", "0").returncode == 0
     st = json.loads(run_cli("status").stdout)
     assert st["total_nodes"] == 5
 

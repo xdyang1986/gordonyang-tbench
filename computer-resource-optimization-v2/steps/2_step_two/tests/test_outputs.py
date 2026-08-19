@@ -1,5 +1,5 @@
 """
-Turn2 extra hard 46 tests for efficient cluster management.
+Turn2 extra hard 78 tests for efficient cluster management.
 
 Discriminators:
 - best-fit tie-break cascade cpu→mem→gpu→id lexicographic
