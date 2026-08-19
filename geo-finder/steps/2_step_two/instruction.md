@@ -41,7 +41,8 @@ Implement a cache for point lookups:
 
 #### 4. Concurrency Safety
 - HTTP server handles concurrent requests.
-- Shared data `db`, `bboxes`, `grid` are mutable via HTTP CRUD, so must be protected for concurrent reads and writes. Cache has its own synchronization.
+- Shared mutable state — db, bboxes, grid, and the DB file on disk — must be protected for concurrent reads and writes. Cache has its own synchronization.
+- Every POST/DELETE that returns success must be durable: concurrent mutations must not lose, corrupt, or fail each other's writes, and after the server exits the DB file must contain every acknowledged mutation.
 - Must not have data race.
 
 ## HTTP API (All JSON)
