@@ -111,9 +111,7 @@ type RateLimitBucket struct {
 	LastRefill int64   `json:"last_refill"`
 }
 
-type RateLimitData struct {
-	Buckets map[string]RateLimitBucket `json:"buckets"`
-}
+type RateLimitData map[string]RateLimitBucket
 
 type PresenceData map[string]int64
 
@@ -130,6 +128,9 @@ func marshalCanonical(v interface{}) ([]byte, error) {
 	if len(b) > 0 && b[len(b)-1] == '\n' {
 		b = b[:len(b)-1]
 	}
+	// Compensate for Go escaping U+2028/U+2029 even with SetEscapeHTML(false) – Python keeps them raw
+	b = bytes.ReplaceAll(b, []byte("\\u2028"), []byte{0xE2, 0x80, 0xA8})
+	b = bytes.ReplaceAll(b, []byte("\\u2029"), []byte{0xE2, 0x80, 0xA9})
 	return b, nil
 }
 
@@ -206,7 +207,7 @@ func emptyPresence() PresenceData {
 	return PresenceData{}
 }
 func emptyRateLimit() RateLimitData {
-	return RateLimitData{Buckets: map[string]RateLimitBucket{}}
+	return RateLimitData(map[string]RateLimitBucket{})
 }
 
 func backupCorrupt(path string, raw []byte) {
@@ -476,14 +477,26 @@ func readRateLimitFile(path string) (RateLimitData, error) {
 	if err != nil {
 		return empty, err
 	}
-	var data RateLimitData
-	if err := json.Unmarshal(rawData, &data); err != nil {
-		return empty, nil
+	// Try flat map format {"nodeA": {"tokens":..}} – spec format
+	var flat map[string]RateLimitBucket
+	if err := json.Unmarshal(rawData, &flat); err == nil {
+		// flat may be empty object {} -> valid empty
+		if flat == nil {
+			flat = map[string]RateLimitBucket{}
+		}
+		return RateLimitData(flat), nil
 	}
-	if data.Buckets == nil {
-		data.Buckets = map[string]RateLimitBucket{}
+	// Fallback legacy format {"buckets": {"nodeA": {...}}}
+	var legacy struct {
+		Buckets map[string]RateLimitBucket `json:"buckets"`
 	}
-	return data, nil
+	if err := json.Unmarshal(rawData, &legacy); err == nil {
+		if legacy.Buckets == nil {
+			legacy.Buckets = map[string]RateLimitBucket{}
+		}
+		return RateLimitData(legacy.Buckets), nil
+	}
+	return empty, nil
 }
 
 // ---------- config ----------
@@ -1791,7 +1804,7 @@ func main() {
 		rl, _ := readRateLimitFile(ratePath)
 		rate, burst := getRateLimitParams(cfg)
 		now := time.Now().UnixNano()
-		bucket, exists := rl.Buckets[nodeID]
+		bucket, exists := rl[nodeID]
 		if !exists {
 			bucket = RateLimitBucket{Tokens: burst, LastRefill: now}
 		}
@@ -1801,7 +1814,7 @@ func main() {
 		bucket.LastRefill = now
 		if bucket.Tokens < 1 {
 			// persist refilled
-			rl.Buckets[nodeID] = bucket
+			rl[nodeID] = bucket
 			_ = writeRateLimitAtomic(ratePath, rl)
 			releaseLock(globalLock)
 			exitRateLimit("rate limit exceeded for node")
@@ -1819,7 +1832,7 @@ func main() {
 		}
 		// consume token
 		bucket.Tokens -= 1
-		rl.Buckets[nodeID] = bucket
+		rl[nodeID] = bucket
 		// allocate
 		// need to update node in its shard
 		if isGlobalKey(nodeID) {
@@ -2007,7 +2020,7 @@ func main() {
 		rl, _ := readRateLimitFile(ratePath)
 		rate, burst := getRateLimitParams(cfg)
 		now := time.Now().UnixNano()
-		bucket, exists := rl.Buckets[nodeID]
+		bucket, exists := rl[nodeID]
 		if !exists {
 			bucket = RateLimitBucket{Tokens: burst, LastRefill: now}
 		}
@@ -2015,13 +2028,13 @@ func main() {
 		bucket.Tokens = math.Min(burst, bucket.Tokens+elapsed*rate)
 		bucket.LastRefill = now
 		if bucket.Tokens < 1 {
-			rl.Buckets[nodeID] = bucket
+			rl[nodeID] = bucket
 			_ = writeRateLimitAtomic(ratePath, rl)
 			releaseLock(globalLock)
 			exitRateLimit("rate limit exceeded for node")
 		}
 		bucket.Tokens -= 1
-		rl.Buckets[nodeID] = bucket
+		rl[nodeID] = bucket
 
 		// allocate to chosen
 		if isGlobalKey(nodeID) {

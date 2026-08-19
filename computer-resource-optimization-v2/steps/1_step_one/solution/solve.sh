@@ -69,6 +69,10 @@ func marshalCanonical(v interface{}) ([]byte, error) {
 	if len(b) > 0 && b[len(b)-1] == '\n' {
 		b = b[:len(b)-1]
 	}
+	// Go's encoder escapes U+2028/U+2029 even with SetEscapeHTML(false).
+	// Python's json.dumps(ensure_ascii=False) keeps them raw, so we must unescape to match Python canonical for checksum.
+	b = bytes.ReplaceAll(b, []byte("\\u2028"), []byte{0xE2, 0x80, 0xA8})
+	b = bytes.ReplaceAll(b, []byte("\\u2029"), []byte{0xE2, 0x80, 0xA9})
 	return b, nil
 }
 func computeChecksumGeneric(data interface{}) (string, error) {

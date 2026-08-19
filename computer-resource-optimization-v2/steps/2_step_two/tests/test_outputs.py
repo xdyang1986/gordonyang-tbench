@@ -194,7 +194,11 @@ def checksum_valid_generic(path):
         return False
     if "data" not in obj or "checksum" not in obj or not obj["checksum"]:
         return False
-    canonical = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
+    # Spec requires Python canonical: sort_keys, separators (',',':'), ensure_ascii=False, raw UTF-8
+    # Go must unescape U+2028/U+2029 to match Python
+    canonical = json.dumps(
+        obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     return obj["checksum"] == hashlib.md5(canonical.encode()).hexdigest()
 
 
@@ -658,6 +662,35 @@ def test_rate_limit_corruption():
     assert r.returncode == 0
 
 
+def test_rate_limit_file_shape_flat_map():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 10, "burst": 10}
+    write_config(cfg)
+    run_config("add-node", "nodeA", "10", "10240", "0")
+    run_config("add-job", "jobA", "1", "256", "0")
+    assert run_config("allocate", "jobA", "nodeA").returncode == 0
+    rl_path = cfg["rate_limit_path"]
+    assert os.path.exists(rl_path)
+    raw = open(rl_path, "r", encoding="utf-8").read()
+    obj = json.loads(raw)
+    assert "data" in obj and "checksum" in obj, "wrapper must contain data and checksum"
+    data = obj["data"]
+    # Spec says flat map {"nodeA": {"tokens": float, "last_refill": int}}, not nested under buckets
+    assert "nodeA" in data, (
+        f"rate_limit data should directly contain node id, got keys {list(data.keys())}"
+    )
+    assert "buckets" not in data, (
+        "rate_limit data should NOT contain buckets key – spec is flat map"
+    )
+    bucket = data["nodeA"]
+    assert "tokens" in bucket and "last_refill" in bucket, (
+        f"bucket should have tokens and last_refill, got {bucket}"
+    )
+    assert isinstance(bucket["tokens"], (int, float))
+    assert isinstance(bucket["last_refill"], int)
+
+
 # ---------- concurrency, checksum, locks ----------
 
 
@@ -787,6 +820,8 @@ def test_optimize_no_overcommit_preserve():
     for nid in ["node1", "node2"]:
         n = json.loads(run_config("get-node", nid).stdout)
         assert n["used"]["cpu"] <= n["total"]["cpu"]
+        assert n["used"]["memory"] <= n["total"]["memory"]
+        assert n["used"]["gpu"] <= n["total"]["gpu"]
 
 
 def test_optimize_fragmentation_reduction():
@@ -794,35 +829,62 @@ def test_optimize_fragmentation_reduction():
     cfg = default_config()
     cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
     write_config(cfg)
-    # fragmented placement: 1 job per node on 3 nodes
+    # fragmented: 1 job per node on 3 nodes, each node 4 CPU, each job 1 CPU -> all 3 fit on 1 node
     for i in range(3):
         run_config("add-node", f"node{i}", "4", "1024", "0")
         run_config("add-job", f"job{i}", "1", "256", "0")
         run_config("allocate", f"job{i}", f"node{i}")
-    # used_nodes should be 3
+    # used_nodes = 3 before
+    before_nodes = [
+        json.loads(run_config("get-node", f"node{i}").stdout) for i in range(3)
+    ]
+    assert all(n["used"]["cpu"] > 0 for n in before_nodes)
     r = run_config("optimize")
     assert r.returncode == 0
     out = json.loads(r.stdout)
-    assert (
-        out["fragmentation_after"] <= out["fragmentation_before"] + 1e-9
-        or out["used_nodes"] <= 3
+    # Must actually consolidate: 3 jobs fit on 1 node of 4 CPU, so used_nodes should strictly decrease from 3 to 1
+    assert out["used_nodes"] < 3, (
+        f"optimize should reduce used_nodes from 3, got {out['used_nodes']}"
     )
-    assert out["used_nodes"] >= 1
-    # jobs still preserved
+    assert out["used_nodes"] == 1, (
+        f"expected 1 used node after consolidating 3x1-CPU jobs onto 4-CPU nodes, got {out['used_nodes']}"
+    )
+    assert out["fragmentation_after"] <= out["fragmentation_before"] + 1e-9
+    # moves should be >=2 to consolidate
+    assert out["moves"] >= 2, (
+        f"expected at least 2 moves to consolidate, got {out['moves']}"
+    )
+    # jobs preserved and no overcommit
     assert len(json.loads(run_config("list-jobs", "0", "0").stdout)) == 3
+    for i in range(3):
+        n = json.loads(run_config("get-node", f"node{i}").stdout)
+        assert n["used"]["cpu"] <= n["total"]["cpu"]
 
 
 def test_optimize_moves_valid():
     clean_all()
-    run_config("add-node", "node1", "4", "1024", "0")
-    run_config("add-node", "node2", "4", "1024", "0")
-    run_config("add-job", "job1", "1", "256", "0")
-    run_config("allocate", "job1", "node1")
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    # Fragmented: 2 nodes, 2 jobs on separate nodes, both fit on 1 node -> need 1 move
+    run_config("add-node", "nodeA", "4", "1024", "0")
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    for i in range(2):
+        run_config("add-job", f"jobM{i}", "1", "256", "0")
+        run_config("allocate", f"jobM{i}", f"node{'A' if i == 0 else 'B'}")
     r = run_config("optimize")
+    assert r.returncode == 0
     out = json.loads(r.stdout)
     assert isinstance(out["moves"], int) and out["moves"] >= 0
     assert isinstance(out["fragmentation_before"], float)
     assert isinstance(out["fragmentation_after"], float)
+    # For fragmented placement, should need at least 1 move to consolidate
+    assert out["moves"] >= 1, (
+        f"fragmented 2 nodes should need >=1 move, got {out['moves']}"
+    )
+    assert out["used_nodes"] == 1, (
+        f"2 jobs should consolidate to 1 node, got {out['used_nodes']}"
+    )
 
 
 # ---------- snapshot / restore ----------
@@ -1091,14 +1153,23 @@ def test_optimize_used_nodes_reduction_strict():
         run_config("add-node", f"node{i}", "4", "1024", "0")
         run_config("add-job", f"job{i}", "1", "256", "0")
         run_config("allocate", f"job{i}", f"node{i}")
-    # 5 used nodes
+    # 5 used nodes, each 1 CPU job on 4 CPU node -> all 5 fit on ceil(5/4)=2 nodes
     r = run_config("optimize")
     assert r.returncode == 0
     out = json.loads(r.stdout)
-    # After optimize, should be <=5 used nodes and no overcommit and all jobs preserved
     assert out["total_nodes"] == 5
-    assert out["used_nodes"] <= 5
+    # Must strictly decrease and consolidate to <=2
+    assert out["used_nodes"] < 5, (
+        f"should strictly reduce from 5, got {out['used_nodes']}"
+    )
+    assert out["used_nodes"] <= 2, (
+        f"5x1-CPU jobs on 4-CPU nodes should fit on 2 nodes, got {out['used_nodes']}"
+    )
     assert out["used_nodes"] >= 1
+    assert out["moves"] >= 3, (
+        f"need at least 3 moves to consolidate 5 nodes to 2, got {out['moves']}"
+    )
+    assert out["fragmentation_after"] <= out["fragmentation_before"] + 1e-9
     jobs = json.loads(run_config("list-jobs", "0", "0").stdout)
     assert len(jobs) == 5
     for i in range(5):

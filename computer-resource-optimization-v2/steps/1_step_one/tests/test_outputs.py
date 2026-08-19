@@ -143,19 +143,13 @@ def checksum_valid(path=DATA_FILE):
         return False
     if "data" not in obj or "checksum" not in obj or not obj["checksum"]:
         return False
-    # Go uses SetEscapeHTML(false) and raw UTF-8, so must not escape unicode, but Go still escapes U+2028/U+2029
+    # Spec requires Python canonical: raw UTF-8, no escaping of U+2028/U+2029, ensure_ascii=False
+    # Go must unescape \u2028/\u2029 to match Python – so only Python canonical is valid
     canonical = json.dumps(
         obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    # Go escapes U+2028/U+2029 even with SetEscapeHTML(false); handle both
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
-        "\u2029", "\\u2029"
-    )
     checksum = obj["checksum"]
-    return checksum in (
-        hashlib.md5(canonical.encode()).hexdigest(),
-        hashlib.md5(canonical_escaped.encode()).hexdigest(),
-    )
+    return checksum == hashlib.md5(canonical.encode()).hexdigest()
 
 
 def test_help_contains_keywords():
@@ -367,22 +361,16 @@ def test_checksum_and_atomic():
     files = os.listdir(os.path.dirname(DATA_FILE))
     assert not any(".tmp." in f for f in files), f"tmp leftover {files}"
     assert not os.path.exists(LOCK_FILE)
-    # Verify raw file uses raw UTF-8 and contains checksum
+    # Verify raw file uses raw UTF-8 and contains checksum matching Python canonical
     raw = read_wrapper_raw()
     obj = json.loads(raw)
     canonical = json.dumps(
         obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    # Handle U+2028/U+2029 special escaping that Go does even with SetEscapeHTML(false)
-    # Go escapes \u2028 and \u2029, Python with ensure_ascii=False does not, so we need to
-    # normalize by escaping them for checksum comparison if present
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
-        "\u2029", "\\u2029"
-    )
     computed = hashlib.md5(canonical.encode()).hexdigest()
-    computed_escaped = hashlib.md5(canonical_escaped.encode()).hexdigest()
-    assert obj["checksum"] in (computed, computed_escaped), (
-        f"checksum mismatch: file {obj['checksum']} vs {computed} or {computed_escaped}"
+    assert obj["checksum"] == computed, (
+        f"checksum mismatch: file {obj['checksum']} vs Python canonical {computed} – "
+        f"Go must unescape U+2028/U+2029 to match Python"
     )
 
 
@@ -4429,26 +4417,23 @@ def test_canonicalization_id_with_lt_gt_amp_and_emoji_same_key():
 def test_canonicalization_keys_with_u2028_u2029():
     clean_data()
     # Keys containing U+2028 / U+2029. Go's encoder escapes these even with SetEscapeHTML(false); Python with ensure_ascii=False does not.
-    # Correct implementation must special-case it to match checksum
+    # Correct implementation must special-case it to match Python canonical (checksum must match Python, raw char preserved)
     # U+2028 = \u2028, U+2029 = \u2029
     nid = f"node\u2028with\u2029separator"
     run_cli("add-node", nid, "4", "1024", "0")
     raw = open(DATA_FILE, "r", encoding="utf-8").read()
-    # Go will escape U+2028/U+2029 as \u2028 and \u2029 even with SetEscapeHTML(false)
-    # So raw file should contain escaped form OR raw char? Actually Go escapes them, so file should contain \u2028
-    # Our verifier must accept both raw and escaped checksum computation
+    # After fix, raw file should contain raw U+2028/U+2029 characters, not escaped \u2028, to match Python ensure_ascii=False
     obj = json.loads(raw)
     canonical = json.dumps(
         obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
-        "\u2029", "\\u2029"
-    )
     checksum = obj["checksum"]
-    assert checksum in (
-        hashlib.md5(canonical.encode()).hexdigest(),
-        hashlib.md5(canonical_escaped.encode()).hexdigest(),
-    ), f"U+2028/U+2029 checksum handling required: {checksum} not in computed"
+    expected = hashlib.md5(canonical.encode()).hexdigest()
+    assert checksum == expected, (
+        f"U+2028/U+2029 checksum must match Python canonical (raw, not escaped): "
+        f"got {checksum}, expected {expected}. "
+        f"Go must replace \\u2028/\\u2029 with raw chars before hashing and writing."
+    )
     assert checksum_valid()
 
 
@@ -4473,13 +4458,7 @@ def test_canonicalization_mixed_scripts_byte_vs_codepoint_ordering():
     canonical = json.dumps(
         obj["data"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    canonical_escaped = canonical.replace("\u2028", "\\u2028").replace(
-        "\u2029", "\\u2029"
-    )
-    assert obj["checksum"] in (
-        hashlib.md5(canonical.encode()).hexdigest(),
-        hashlib.md5(canonical_escaped.encode()).hexdigest(),
-    )
+    assert obj["checksum"] == hashlib.md5(canonical.encode()).hexdigest()
     arr = json.loads(run_cli("list-nodes").stdout)
     assert len(arr) == len(ids)
     assert [n["id"] for n in arr] == sorted([n["id"] for n in arr])

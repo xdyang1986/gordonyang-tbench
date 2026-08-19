@@ -17,7 +17,7 @@ RUN printf '{\n  "shard_count": 4,\n  "shards": [\n    {"id": 0, "path": "/app/d
 RUN python3 << 'PY'
 import json, hashlib, os
 def write_wrapper(p, data):
-    canonical = json.dumps(data, sort_keys=True, separators=(',', ':'))
+    canonical = json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
     cs = hashlib.md5(canonical.encode()).hexdigest()
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p,'w').write(json.dumps({"data": data, "checksum": cs}, indent=2))
@@ -34,8 +34,8 @@ PY
 
 RUN printf 'module cluster-manager\n\ngo 1.22\n' > /app/go.mod
 
-# Debug-in-place: subtly wrong allocator with 7-8 obvious bugs, gives ~23/30 naive baseline
-# Agent must fix to 30/30 (or 361/361). Difficulty is in prior-violating semantic (first-fit sorted IDs, limit0, corrupt exit0, null vs "" etc) not in unstated contracts
+# Debug-in-place: subtly wrong allocator with 7-8 obvious bugs from obvious implementation
+# Agent must fix to pass all core checks (361). Difficulty is in prior-violating semantic (first-fit sorted IDs, limit0, corrupt exit0, null vs "" etc) not in unstated contracts
 COPY main.go.buggy /app/main.go
 RUN go build -o /app/cluster-manager . && chmod +x /app/cluster-manager && /app/cluster-manager --help | head -20
 
@@ -51,7 +51,7 @@ Current binary has 7 subtle bugs from obvious implementation:
 - concurrent allocate stress may overcommit (missing lock or exact arithmetic)
 - allocate exact fit then fragmented no fit may fail
 
-Fix these to go from naive 23/30 to 30/30. For Turn2, best-fit tie-break is terse: infer waste cpu→mem→gpu→id lex.
+Fix these to pass all core checks. For Turn2, best-fit tie-break is terse: infer waste cpu→mem→gpu→id lex from tests.
 OBS
 
 RUN ls -lh /app/ && cat /app/config.json
