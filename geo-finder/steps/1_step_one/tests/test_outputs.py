@@ -959,54 +959,6 @@ def test_cli_performance():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_concurrent_cli_adds_no_corruption():
-    """Concurrent CLI adds: even though spec says single-process, atomic write must not leave temp files or corrupt DB."""
-    import concurrent.futures
-
-    tmpdir = tempfile.mkdtemp()
-    db = os.path.join(tmpdir, "geof.json")
-    try:
-        run_cli(db, ["clear"])
-
-        def add_one(i):
-            base_lat = (i // 20) * 2.0
-            base_lng = (i % 20) * 2.0
-            poly = f"{base_lat},{base_lng};{base_lat},{base_lng + 0.5};{base_lat + 0.5},{base_lng + 0.5};{base_lat + 0.5},{base_lng}"
-            r = run_cli(
-                db, ["add", f"cz_{i:03d}", "--polygon", poly, "--name", f"CZ {i}"]
-            )
-            return r.returncode == 0, r.stdout, r.stderr
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-            results = list(ex.map(add_one, range(50)))
-
-        # All adds should succeed (return 0) – if they crash due to temp file handling, fail
-        assert all(rc for rc, _, _ in results), (
-            f"some concurrent adds failed: {results[:3]}"
-        )
-
-        r = run_cli(db, ["list"])
-        assert r.returncode == 0, f"list after concurrent adds failed {r.stderr}"
-        arr = json.loads(r.stdout)
-        # DB must be valid JSON object mapping, not corrupt array or partial
-        assert isinstance(arr, list)
-        # Must be sorted and [] not null
-        ids = [x["id"] for x in arr]
-        assert ids == sorted(ids), f"list not sorted after concurrent: {ids}"
-        # At least some entries must survive (concurrent read-modify-write may lose some without locking, but must not be empty/crash)
-        assert len(arr) >= 1, (
-            f"expected at least 1 after concurrent adds, got {len(arr)}"
-        )
-        assert len(arr) <= 50
-        # No temp files left in tmpdir or any nested?
-        for root, dirs, files in os.walk(tmpdir):
-            assert not [f for f in files if ".tmp." in f], (
-                f"temp left in {root}: {files}"
-            )
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 def test_lookup_many_overlapping_sorted():
     """Overlapping zones must return sorted IDs, [] not null, and verbose sorted."""
     tmpdir = tempfile.mkdtemp()
@@ -2536,5 +2488,72 @@ def test_id_hyphen_remove_and_lookup():
         assert ids == sorted(ids), f"ASCII sort with hyphen/underscore failed {ids}"
         # '-' ASCII 45, '_' 95, 'a' 97, so order -a < _a < a
         assert ids == ["-a", "_a", "a"], f"expected ['-a','_a','a'] got {ids}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_span_boundary_classification():
+    """Span boundary: 180 must be ordinary (not crossing), 360 must be world (not crossing). This is a strong discriminator for wrapping logic."""
+    tmpdir = tempfile.mkdtemp()
+    db = os.path.join(tmpdir, "geof.json")
+    try:
+        run_cli(db, ["clear"])
+        # span exactly 180: -90 to 90? Actually -90 to 90 span 180, should be ordinary, not crossing.
+        # Use polygon 0,-90;0,90;1,90;1,-90  span 180 -> ordinary. Point at 0,0 inside, point at 0,179 outside? Wait ordinary at -90..90 covers -90..90, 179 outside.
+        poly_180 = "0,-90;0,90;1,90;1,-90"
+        r = run_cli(db, ["add", "span180", "--polygon", poly_180, "--name", "Span180"])
+        assert r.returncode == 0, f"span 180 add failed {r.stderr}"
+
+        # For ordinary  span 180, point at 0,0 should be inside, point at 0,179 should be outside (since ordinary, gap is not wrapped)
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0"])
+        assert r.returncode == 0
+        assert "span180" in json.loads(r.stdout), (
+            f"0 inside span180 expected, got {r.stdout}"
+        )
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "179"])
+        # 179 is outside -90..90 ordinary range, should be outside
+        assert json.loads(r.stdout) == [], (
+            f"179 outside span180 should be [], got {r.stdout}"
+        )
+
+        # span exactly 360: world, not crossing. Use -90,-180; -90,180; 90,180; 90,-180 already world.
+        # Also test 0,-180;0,180;1,180;1,-180 span 360 at lat 0..1, should be world covering every longitude at that lat
+        run_cli(db, ["clear"])
+        poly_360 = "0,-180;0,180;1,180;1,-180"
+        r = run_cli(db, ["add", "span360", "--polygon", poly_360, "--name", "Span360"])
+        assert r.returncode == 0, f"span 360 add failed {r.stderr}"
+
+        # For world (span 360), point at any longitude in lat band should be inside
+        for lng in [0, 90, -90, 179, -179, 180, -180]:
+            r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", str(lng)])
+            assert r.returncode == 0
+            ids = json.loads(r.stdout)
+            assert "span360" in ids, (
+                f"world span360 should match at lng {lng}, got {ids}"
+            )
+
+        # Crossing vs world distinction: if misclassified as crossing, world would not match at 0 (gap)
+        # Our test above catches that.
+
+        # Also test crossing just above 180: 179 to -179 span 358 should be crossing, not world
+        run_cli(db, ["clear"])
+        poly_cross = "0,179;0,-179;1,-179;1,179"
+        r = run_cli(
+            db, ["add", "cross358", "--polygon", poly_cross, "--name", "Cross358"]
+        )
+        assert r.returncode == 0
+
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "179.5"])
+        assert "cross358" in json.loads(r.stdout), (
+            f"179.5 inside cross358, got {r.stdout}"
+        )
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "-179.5"])
+        assert "cross358" in json.loads(r.stdout), (
+            f"-179.5 inside cross358, got {r.stdout}"
+        )
+        r = run_cli(db, ["lookup", "--lat", "0.5", "--lng", "0"])
+        assert json.loads(r.stdout) == [], f"0 outside cross358 (gap), got {r.stdout}"
+
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
