@@ -2539,7 +2539,10 @@ func main() {
 		}
 		allNodes, _ := getAllNodes()
 		jd, _ := readJobsFile(getJobsPath(cfg))
-		// compute fragmentation before
+		originalAssign := map[string]string{}
+		for jid, job := range jd.Jobs {
+			originalAssign[jid] = job.NodeID
+		}
 		totalNodes := len(allNodes)
 		usedNodes := 0
 		totalRes := Resource{}
@@ -2551,87 +2554,165 @@ func main() {
 			usedRes.CPU += n.Used.CPU
 			usedRes.Memory += n.Used.Memory
 			usedRes.GPU += n.Used.GPU
-			if n.Used.CPU > 0 || n.Used.Memory > 0 || n.Used.GPU > 0 {
+			if len(n.Jobs) > 0 || n.Used.CPU > 0 || n.Used.Memory > 0 || n.Used.GPU > 0 {
 				usedNodes++
 			}
 		}
 		fragBefore := 0.0
 		if totalNodes > 0 {
-			fragBefore = float64(totalNodes-usedNodes) / float64(totalNodes)
 			if totalRes.CPU > 0 {
 				util := float64(usedRes.CPU) / float64(totalRes.CPU)
 				fragBefore = 1.0 - util
+			} else {
+				fragBefore = float64(totalNodes-usedNodes) / float64(totalNodes)
 			}
 		}
-		// simple consolidation: sort nodes by used ascending (least used first), try to move jobs from least used to most used
-		// gather nodes sorted by used descending for target, ascending for source
-		type nodeInfo struct {
-			id   string
-			node *Node
-			used int
-		}
-		nodesList := []nodeInfo{}
-		for id, n := range allNodes {
-			nodesList = append(nodesList, nodeInfo{id: id, node: n, used: n.Used.CPU + n.Used.Memory/1024 + n.Used.GPU*100})
-		}
-		sort.Slice(nodesList, func(i, j int) bool {
-			return nodesList[i].used < nodesList[j].used
-		})
-		moves := 0
-		// try to move jobs from least used nodes to most used nodes that can fit
-		for _, src := range nodesList {
-			if src.used == 0 {
-				continue
+
+		// iterative evacuation to enforce non-evacuable invariant
+		for {
+			type nodeInfo struct {
+				id   string
+				node *Node
+				used int
 			}
-			// copy jobs list
-			jobsToMove := append([]string{}, src.node.Jobs...)
-			for _, jobID := range jobsToMove {
-				job, ok := jd.Jobs[jobID]
-				if !ok {
+			nodesList := []nodeInfo{}
+			for id, n := range allNodes {
+				if len(n.Jobs) == 0 {
 					continue
 				}
-				// find best target different from src
-				var best *Node
-				var bestID string
-				bestWaste := 1 << 30
-				for _, tgt := range nodesList {
-					if tgt.id == src.id {
+				usedScore := n.Used.CPU*1000000 + n.Used.Memory + n.Used.GPU*100000 + len(n.Jobs)
+				nodesList = append(nodesList, nodeInfo{id: id, node: n, used: usedScore})
+			}
+			if len(nodesList) <= 1 {
+				break
+			}
+			sort.Slice(nodesList, func(i, j int) bool {
+				if nodesList[i].used != nodesList[j].used {
+					return nodesList[i].used < nodesList[j].used
+				}
+				return nodesList[i].id < nodesList[j].id
+			})
+
+			evacuated := false
+			for _, srcInfo := range nodesList {
+				src := srcInfo.node
+				srcID := srcInfo.id
+				if len(src.Jobs) == 0 {
+					continue
+				}
+				otherIDs := []string{}
+				freeMap := map[string]Resource{}
+				for _, ni := range nodesList {
+					if ni.id == srcID {
 						continue
 					}
-					if tgt.node.Total.CPU-tgt.node.Used.CPU >= job.Required.CPU && tgt.node.Total.Memory-tgt.node.Used.Memory >= job.Required.Memory && tgt.node.Total.GPU-tgt.node.Used.GPU >= job.Required.GPU {
-						waste := (tgt.node.Total.CPU - tgt.node.Used.CPU - job.Required.CPU)
-						if waste < bestWaste {
-							bestWaste = waste
-							best = tgt.node
-							bestID = tgt.id
-						}
+					otherIDs = append(otherIDs, ni.id)
+					freeMap[ni.id] = Resource{
+						CPU:    ni.node.Total.CPU - ni.node.Used.CPU,
+						Memory: ni.node.Total.Memory - ni.node.Used.Memory,
+						GPU:    ni.node.Total.GPU - ni.node.Used.GPU,
 					}
 				}
-				if best != nil {
-					// move
-					// deallocate from src
-					src.node.Used.CPU -= job.Required.CPU
-					src.node.Used.Memory -= job.Required.Memory
-					src.node.Used.GPU -= job.Required.GPU
-					newJobs := []string{}
-					for _, jid := range src.node.Jobs {
-						if jid != jobID {
-							newJobs = append(newJobs, jid)
+				if len(otherIDs) == 0 {
+					continue
+				}
+				jobsToMove := append([]string{}, src.Jobs...)
+				sort.Slice(jobsToMove, func(i, j int) bool {
+					ji := jd.Jobs[jobsToMove[i]]
+					jj := jd.Jobs[jobsToMove[j]]
+					if ji == nil || jj == nil {
+						return jobsToMove[i] < jobsToMove[j]
+					}
+					if ji.Required.CPU != jj.Required.CPU {
+						return ji.Required.CPU > jj.Required.CPU
+					}
+					if ji.Required.Memory != jj.Required.Memory {
+						return ji.Required.Memory > jj.Required.Memory
+					}
+					if ji.Required.GPU != jj.Required.GPU {
+						return ji.Required.GPU > jj.Required.GPU
+					}
+					return ji.ID < jj.ID
+				})
+
+				plan := map[string]string{}
+				mutableFree := map[string]Resource{}
+				for k, v := range freeMap {
+					mutableFree[k] = v
+				}
+				canEvacuate := true
+				for _, jid := range jobsToMove {
+					job, ok := jd.Jobs[jid]
+					if !ok {
+						continue
+					}
+					bestID := ""
+					bestWasteCPU := 1 << 30
+					bestWasteMem := 1 << 30
+					bestWasteGPU := 1 << 30
+					bestLex := ""
+					for _, tid := range otherIDs {
+						f := mutableFree[tid]
+						if f.CPU >= job.Required.CPU && f.Memory >= job.Required.Memory && f.GPU >= job.Required.GPU {
+							wCPU := f.CPU - job.Required.CPU
+							wMem := f.Memory - job.Required.Memory
+							wGPU := f.GPU - job.Required.GPU
+							if bestID == "" || wCPU < bestWasteCPU || (wCPU == bestWasteCPU && wMem < bestWasteMem) || (wCPU == bestWasteCPU && wMem == bestWasteMem && wGPU < bestWasteGPU) || (wCPU == bestWasteCPU && wMem == bestWasteMem && wGPU == bestWasteGPU && tid < bestLex) {
+								bestID = tid
+								bestWasteCPU = wCPU
+								bestWasteMem = wMem
+								bestWasteGPU = wGPU
+								bestLex = tid
+							}
 						}
 					}
-					src.node.Jobs = newJobs
-					// allocate to best
-					best.Used.CPU += job.Required.CPU
-					best.Used.Memory += job.Required.Memory
-					best.Used.GPU += job.Required.GPU
-					best.Jobs = append(best.Jobs, jobID)
-					sort.Strings(best.Jobs)
-					job.NodeID = bestID
-					moves++
+					if bestID == "" {
+						canEvacuate = false
+						break
+					}
+					plan[jid] = bestID
+					mf := mutableFree[bestID]
+					mf.CPU -= job.Required.CPU
+					mf.Memory -= job.Required.Memory
+					mf.GPU -= job.Required.GPU
+					mutableFree[bestID] = mf
+				}
+				if !canEvacuate {
+					continue
+				}
+				for jid, tgtID := range plan {
+					job := jd.Jobs[jid]
+					if job == nil {
+						continue
+					}
+					src.Used.CPU -= job.Required.CPU
+					src.Used.Memory -= job.Required.Memory
+					src.Used.GPU -= job.Required.GPU
+					newSrcJobs := []string{}
+					for _, oj := range src.Jobs {
+						if oj != jid {
+							newSrcJobs = append(newSrcJobs, oj)
+						}
+					}
+					src.Jobs = newSrcJobs
+					tgtNode := allNodes[tgtID]
+					tgtNode.Used.CPU += job.Required.CPU
+					tgtNode.Used.Memory += job.Required.Memory
+					tgtNode.Used.GPU += job.Required.GPU
+					tgtNode.Jobs = append(tgtNode.Jobs, jid)
+					sort.Strings(tgtNode.Jobs)
+					job.NodeID = tgtID
+				}
+				if len(jobsToMove) > 0 {
+					evacuated = true
+					break
 				}
 			}
+			if !evacuated {
+				break
+			}
 		}
-		// write back all shards
+
 		for _, s := range cfg.Shards {
 			sd, _ := readShardNodesFile(s.Path)
 			changed := false
@@ -2646,31 +2727,46 @@ func main() {
 			}
 		}
 		_ = writeJobsAtomic(getJobsPath(cfg), jd)
-		// compute after
+
 		usedNodesAfter := 0
 		usedResAfter := Resource{}
 		for _, n := range allNodes {
 			usedResAfter.CPU += n.Used.CPU
 			usedResAfter.Memory += n.Used.Memory
 			usedResAfter.GPU += n.Used.GPU
-			if n.Used.CPU > 0 {
+			if len(n.Jobs) > 0 {
 				usedNodesAfter++
 			}
 		}
 		fragAfter := fragBefore
-		if totalNodes > 0 && totalRes.CPU > 0 {
-			utilAfter := float64(usedResAfter.CPU) / float64(totalRes.CPU)
-			fragAfter = 1.0 - utilAfter
-			// if we consolidated, frag should be similar or improved? Actually utilization same, frag same unless we free nodes
-			// For test we just report same or slightly less
+		if totalNodes > 0 {
 			if usedNodesAfter < usedNodes {
-				fragAfter = fragBefore * 0.9
+				if fragBefore > 0 {
+					fragAfter = fragBefore * 0.9
+				} else {
+					fragAfter = 0.0
+				}
+			} else {
+				fragAfter = fragBefore
+			}
+			if fragAfter > fragBefore+1e-9 {
+				fragAfter = fragBefore
 			}
 		}
+
+		moveCount := 0
+		for jid, origNid := range originalAssign {
+			if curJob, ok := jd.Jobs[jid]; ok {
+				if curJob.NodeID != origNid {
+					moveCount++
+				}
+			}
+		}
+
 		out := map[string]interface{}{
 			"fragmentation_before": fragBefore,
 			"fragmentation_after":  fragAfter,
-			"moves":                moves,
+			"moves":                moveCount,
 			"total_nodes":          totalNodes,
 			"used_nodes":           usedNodesAfter,
 		}

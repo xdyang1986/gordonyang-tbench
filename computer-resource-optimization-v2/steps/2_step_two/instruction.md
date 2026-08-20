@@ -1,4 +1,4 @@
-# Turn 2: Genomics Fleet at Scale – Sharded, Rate-Limited, Health-Aware (Go, 78 tests)
+# Turn 2: Genomics Fleet at Scale – Sharded, Rate-Limited, Health-Aware
 
 Turn1 built durable single-file core. Now fleet is 10k sequencers, 100k pipeline jobs. Single file and first-fit are too slow/fragmented. We implement sharded storage, best-fit defrag, per-sequencer token buckets, health TTLs, snapshot/restore, ops-log, optimize.
 
@@ -13,7 +13,7 @@ Turn1 binary present via `inherit_prior_session`; must keep Turn1 working in fal
 - Corrupt data file handling same as Turn1: copy to `<path>.corrupt.<unix-nanos>`, warn stderr containing `corrupt` or `checksum`, continue EMPTY store exit 0 so `list-nodes` prints `[]`
 
 ## Help contract (exact)
-`--help` / bare argument or `help` subcommand must print help containing ALL of these keywords (checked lowercased): `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-node-health`, `list-healthy`, `snapshot`, `restore`, `ops-log`, `optimize`, `data`, `checksum`, `shard`, `weight`. Exit 0. Note: help output must contain the full literal command names – tests assert substring presence, so do not use abbreviated forms. Extra aliases `get-presence` (alias for `get-node-health`) and `list-online` (alias for `list-healthy`) are allowed but not required for help test.
+`--help` / bare argument or `help` subcommand must print help containing ALL of these keywords (checked lowercased): `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-node-health`, `list-healthy`, `snapshot`, `restore`, `ops-log`, `optimize`, `data`, `checksum`, `shard`, `weight`. Exit 0. Note: help output must contain the full literal command names – substring presence is checked, so do not use abbreviated forms. Extra aliases `get-presence` (alias for `get-node-health`) and `list-online` (alias for `list-healthy`) are allowed but not required for help test.
 
 ## Rate-limit contract – full token bucket spec
 Token bucket throttles `allocate` and `schedule` per sequencer node, not globally:
@@ -30,12 +30,12 @@ Token bucket throttles `allocate` and `schedule` per sequencer node, not globall
 ## Snapshot/restore contract – exact signatures and exit codes
 
 - `snapshot <backup_path>` – signature: exactly 1 arg (backup path), extra/missing → exit 2. Exit 0 on success, exit 2 if path is unwritable or otherwise fails. Must not leave `.lock`/`.tmp.*` after.
-  - Dir mode: if `<backup_path>` does NOT end with `.json` OR path exists and is a directory OR path has no extension and does not exist -> treat as directory: `mkdir -p <backup_path>`, then copy each sharded file: shards (`shard_0.json` etc from config), jobs file (`jobs_path`), presence (`presence_path`), rate_limit (`rate_limit_path`), counter (`counter_path`), ops_log (`ops_log`), config file (`/app/config.json` itself) into directory. File names preserved as basenames? Actually dir snapshot must create files inside dir with same basenames as sources, allowing restore to locate. Implementation may copy full container: each shard's raw bytes, jobs, presence, rate_limit, counter, ops_log, config. Must be recursive mkdir.
-  - File mode: if `<backup_path>` ends with `.json` and does not exist as directory -> single file combined JSON: `{"shards": {"0": <shard_0 wrapper obj or raw data>, "1": ...}, "jobs": <jobs wrapper>, "presence": <presence wrapper>, "rate_limit": <rate_limit wrapper>, "counter": <counter>, "ops_log": <ops log array or raw>, "config": <config json>}` – structure must contain at least shards, jobs, presence, rate_limit keys so restore can reconstruct exactly. Tests only check that restore brings back nodes/jobs exact and post-snapshot mutations are gone, and that snapshot file exists.
+  - Dir mode: if `<backup_path>` does NOT end with `.json` OR path exists and is a directory OR path has no extension and does not exist -> treat as directory: `mkdir -p <backup_path>`, then copy each sharded file: shards (`shard_0.json` etc from config), jobs file (`jobs_path`), presence (`presence_path`), rate_limit (`rate_limit_path`), counter (`counter_path`), ops_log (`ops_log`), config file (`/app/config.json` itself) into directory. File names preserved as basenames inside the backup directory, recursive mkdir required.
+  - File mode: if `<backup_path>` ends with `.json` and does not exist as directory -> single file combined JSON: `{"shards": {"0": <shard_0 wrapper obj or raw data>, "1": ...}, "jobs": <jobs wrapper>, "presence": <presence wrapper>, "rate_limit": <rate_limit wrapper>, "counter": <counter>, "ops_log": <ops log array or raw>, "config": <config json>}` – structure must contain at least shards, jobs, presence, rate_limit keys so restore can reconstruct exactly. Snapshot file must exist on success; after restore the state must match exactly what was snapshotted, and mutations after snapshot must be gone from live DB.
   - After snapshot, further mutations (add-node/add-job) must not appear in snapshot file, but must appear in live DB.
 
 - `restore <backup_path>` – signature: exactly 1 arg, extra/missing → exit 2. Exit 0 on success, exit 2 if backup missing/invalid/ unparseable, no stdout on invalid (per config invalid rule). Must restore EXACT state:
-  - Dir mode: if path is directory (exists and is dir, or path without .json suffix that was previously snapshot dir) → read each file inside that dir and write back to original shard paths/jobs/presence/rate_limit/counter/ops_log/config locations, overwriting. Must be atomic (write temp then rename) and checksum-valid after. Post-restore, list-nodes must not contain nodes added after snapshot. All original files (shards, jobs, presence, rate_limit, ops_log) must be bit-exact restored (checksum valid).
+  - Dir mode: if path is directory (exists and is dir, or path without .json suffix that was previously snapshot dir) → read each file inside that dir and write back to original shard paths/jobs/presence/rate_limit/counter/ops_log/config locations, overwriting. Must be atomic (write temp then rename) and checksum-valid after. Post-restore, nodes added after snapshot must not appear. All original files (shards, jobs, presence, rate_limit, ops_log) must be restored with valid checksums.
   - File mode: if path ends with .json and file exists -> parse combined JSON, extract shards/jobs/presence/rate_limit/etc and write each to original locations. After restore, allocation must work (next allocate succeeds if resources).
   - After restore, global lock must be cleaned.
 
@@ -44,11 +44,10 @@ Token bucket throttles `allocate` and `schedule` per sequencer node, not globall
 
 ## Ops-log contract – exact signature and output
 - `ops-log` → signature: no args, extra → exit 2, exit 0 success. Prints JSON array of log entries order preserved as appended.
-  - Each entry JSON object must contain at least `{"op": "<operation>"}` where op is string like `allocate`, `schedule`, `add-node`, `add-job`. For allocate entries, additional fields may include `job_id`, `node_id`. Spec REQUIRES allocate (and schedule) to be logged, but add-node/add-job logging is optional – `test_ops_log_large_100_ops` expects >=50 entries after 50 add-node/add-job/allocate triplets and checks that allocate appears, not that add-node appears. Therefore allocate-only logging (50 entries) must pass.
+  - Each entry JSON object must contain at least `{"op": "<operation>"}` where op is string like `allocate`, `schedule`, `add-node`, `add-job`. For allocate entries, additional fields may include `job_id`, `node_id`. The implementation must log successful `allocate` and `schedule` operations. Logging of `add-node` and `add-job` is optional. If only allocate/schedule are logged, the log must contain at least as many entries as successful allocations, and entries with `op` == `allocate` must be present after performing allocations.
   - Log file path from config `ops_log`. Append on each allocate/schedule (and optionally other ops). File may contain one JSON object per line (JSONL) or JSON array – but `ops-log` command must output JSON array (not JSONL) of all valid entries parsed from file in order.
   - Invalid lines handling: file may contain invalid JSON lines (injected). Command must skip invalid lines, not exit 2, and print warning to stderr containing `corrupt` or `skip` or `warning` substring. After skipping, output array must contain only valid entries in preserved order.
-  - Large line handling: test `test_ops_log_single_200kb_line_big_buffer` writes a 200KB single JSON line; implementation must be able to read it. Go's `bufio.Scanner` default 64k must be increased to at least 10MB buffer (`scanner.Buffer(make([]byte, 0, 10*1024*1024), 10*1024*1024)`).
-  - After 50 triplets, expects >=50 entries containing allocate.
+  - Large line handling: implementation must support large single JSON lines (e.g., >=200KB). Input reading must be configured with a buffer large enough to handle at least 10MB lines.
 
 ## Optimize contract – exact signature and output
 - `optimize` → signature: no args, extra → exit 2, exit 0 success. Prints JSON object with exact keys: `{"fragmentation_before": float, "fragmentation_after": float, "moves": int, "total_nodes": int, "used_nodes": int}`. All keys must be present, types as specified (floats may be JSON number, but must decode as float, not string).
@@ -56,11 +55,9 @@ Token bucket throttles `allocate` and `schedule` per sequencer node, not globall
   - `total_nodes`: total number of nodes in cluster (including empty).
   - `used_nodes`: number of nodes that have at least one allocated job after optimize.
   - `moves`: number of job relocations performed (>=0).
-  - `fragmentation_before` / `fragmentation_after`: float metric of fragmentation; implementation may compute as average waste or similar. Requirement: `fragmentation_after <= fragmentation_before + 1e-9` OR `used_nodes` after <= used before (so either fragmentation improves or uses fewer nodes).
+  - `fragmentation_before` / `fragmentation_after`: float metric of fragmentation; implementation may compute as average waste or similar. `fragmentation_after <= fragmentation_before + 1e-9` always.
+  - Consolidation requirement: `optimize` must leave no evacuable node. After `optimize`, there must be no used node whose entire job set could be relocated onto the free capacity of the other used nodes without overcommitting cpu/memory/gpu. `moves` is the number of jobs whose `node_id` changed. `moves == 0` is only correct when the placement already satisfies this invariant.
   - Must be atomic under global lock, no leftover lock/tmp files, checksum valid.
-
-## Difficulty re-balance
-After publishing exact contracts, difficulty in prior-violating semantic: best-fit tie-break chain terse (must infer waste cpu→mem→gpu→id lex), not unstated contracts or scale.
 
 ## Flags & Config
 
@@ -122,8 +119,9 @@ get-presence <nodeID> / get-node-health -> see presence spec.
 list-healthy / list-online -> sorted online nodes within TTL, no args.
 snapshot <backup_path>     -> dir mode (no .json suffix or existing dir): mkdir -p copy shards+jobs+presence+rate_limit+counter+ops_log+config; file mode (.json): combined JSON {shards:{id:fileData},jobs,presence,rate_limit,counter,ops_log,config}. 1 arg, exit 0 success else 2.
 restore <backup_path>      -> dir/file modes restore exactly, post-snapshot mutations gone, next allocate works. 1 arg, exit0/2.
-ops-log                    -> prints ops log as JSON array, skips invalid JSON lines with warning stderr containing corrupt/skip/warning, order preserved, needs big bufio.Scanner 10MB buffer. No args, exit0 success. After 50 add-node/add-job/allocate triplets, expects >=50 entries containing allocate.
-optimize                   -> {"fragmentation_before":float,"fragmentation_after":float,"moves":int,"total_nodes":int,"used_nodes":int} – consolidates jobs onto fewer nodes, no overcommit, preserves all jobs, fragmentation_after <= before OR used_nodes_after <= before. No args, exit0 success.
+ops-log                    -> prints ops log as JSON array, skips invalid JSON lines with warning stderr containing corrupt/skip/warning, order preserved, supports large lines. No args, exit0 success. Must contain at least as many entries as successful allocate operations performed, with allocate entries present.
+optimize -> {"fragmentation_before":float,"fragmentation_after":float,"moves":int,"total_nodes":int,"used_nodes":int}
+  – consolidates jobs so that no used node is evacuable onto the others (see Optimize contract), no overcommit, preserves all jobs, fragmentation_after <= fragmentation_before. No args, exit0 success.
 ```
 
 Help must contain keywords (lowercased) `add-node`, `remove-node`, `list-nodes`, `get-node`, `add-job`, `remove-job`, `list-jobs`, `get-job`, `allocate`, `deallocate`, `schedule`, `status`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-node-health`, `list-healthy`, `snapshot`, `restore`, `ops-log`, `optimize`, `data`, `checksum`, `shard`, `weight`.
@@ -136,12 +134,5 @@ Help must contain keywords (lowercased) `add-node`, `remove-node`, `list-nodes`,
 - weighted_index = hashInt % totalWeight
 - Iterate shards sorted by id asc subtracting weight.
 - global: prefix → -1 broadcast.
-
-### Ops-log contract clarification (fix for previous BAD_GRADING_WRONG)
-
-- `ops-log` prints JSON array of logged operations.
-- Spec requires **allocate** (and schedule) to be logged. `add-node`/`add-job` logging is NOT required for correctness (see `test_ops_log_and_skip_invalid` comment).
-- Therefore `test_ops_log_large_100_ops` after 50 triplets must expect `>=50` entries (allocate-only), not `>=100`. It checks allocate presence, not count of add-node.
-- Invalid lines in ops log file must be skipped with warning.
 
 Implement at `/app` – Turn2 efficient scale.
