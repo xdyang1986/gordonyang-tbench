@@ -61,81 +61,92 @@ Backward compatible with Step1, adds:
 
 ## Latest online validation result
 
-**Commit `ca823003` (HEAD, v0.39) · run 2026-08-17 · jobs 4937724 / 4937725 / 4937726 / 4937727 · AFTR run 9157610**
+**Commit `d0f4427` ("apply 4 ordered fixes round 2") · run 2026-08-19/20 · jobs
+5200255 / 5200256 / 5200258 / 5200259 · AFTR job 5224905 (trial 26586475)**
 
-> **All gates green.** Validation passing, Agentic Full-Task Review **GOOD**, TBR
-> 18/18 with no quality concerns. Status is `draft` — no revision is outstanding.
+> **All gates green — ready to submit.** Validation `passing` on all 5 gates,
+> Agentic Full-Task Review **GOOD** (`GENUINELY_HARD`, all 13 rubrics PASS,
+> secondary issues NONE), TBR **pass 16/18**. The task's `reviewStatus` still reads
+> `needs_revision`, but that verdict is from the human review on 2026-08-17
+> (yenjungw@) which predates this commit and whose feedback is applied — see
+> *Decision Feedback Fix* below.
 
 | Field | Value |
 | --- | --- |
 | `validationStatus` | **passing** — all 5 gates |
 | Agentic Full-Task Review | **GOOD** — difficulty `GENUINELY_HARD`, all 13 rubrics PASS, secondary issues NONE |
-| `tbdReviewStatus` | pass — **TBR 18/18**, all six axes 3, `quality_concern_titles` null |
-| Difficulty classification | GOOD — Opus 150/384 tests (39%), oracle 114/120 (95%) |
-| Quality dimensions | depth **3** / realism **3** / originality **3** |
-| Novelty risk | **LOW** |
-| Contamination | Not checked — repo not yet covered by the pipeline |
-| Provenance | CLEAN |
+| `tbdReviewStatus` | pass — **TBR 16/18**; instruction_clarity **2**, other five axes **3** |
+| Difficulty classification | GOOD — Opus 205/504 tests (41%), oracle 150/156 (96%) |
+| Novelty risk | **LOW** — both checks (public-source availability, algorithm memorization) LOW |
+| Contamination | Not checked — repo not yet covered by the pipeline (reported as MEDIUM = `NOT_SUPPORTED`) |
+| Provenance | CLEAN — classifier `p_3p` 0.0049, LLM stylometry CLEAN, agent-write check CLEAN |
+| Embedding dedup | max similarity 0.780 vs 78,174 tasks (threshold 0.80) — no matches |
 | Structural checks | 10/10 PASS |
-| `status` / `reviewStatus` | draft |
+| Quality dimensions | not scored — all three scoring jobs errored server-side (`PROCESSED_FAILED`) |
+| `status` / `reviewStatus` | `needs_revision` (stale, from the 2026-08-17 human review) |
 
 | Stage | Job | Result | Reward split |
 | --- | --- | --- | --- |
-| oracle | 4937726 | **3/3** | 3 × 1.00 |
-| codex (`gpt-5.5`) | 4937725 | **7/10** | 7 × 1.00, 1 × 0.50, 2 × 0.00 |
-| agent (opus `claude-opus-4-8`) | 4937727 | **3/10** | 3 × 1.00, 7 × 0.00 |
-| metacode (avocado `avocado-5.14-code`) | 4937724 | **3/10** | 3 × 1.00, 6 × 0.50, 1 × 0.00 |
+| oracle | 5200256 | **3/3** | 3 × 1.00 |
+| metacode (avocado `avocado-code-flex`) | 5200255 | **6/10** | 6 × 1.00, 2 × 0.50, 2 × 0.00 |
+| agent (opus `claude-opus-4-8`) | 5200259 | **1/10** | 1 × 1.00, 3 × 0.50, 6 × 0.00 |
+| codex (`gpt-5.5`) | 5200258 | **0/10** | 9 × 0.50, 1 × 0.00 |
 
-Pass/fail balance gate: **passed** — avocado not trivial (3/10) and ≥1 agent solved.
+Pass/fail balance gate: **passed** — "avocado not trivial and ≥1 agent solved"
+(avocado 6/10, opus 1/10, gpt 0/10).
 
-### Failure spread (all 17 non-1.00 trials, from downloaded `ctrf.json`)
+### Per-step reading of the reward split
 
-| Test | Step | Count | opus | avocado | codex |
-| --- | --- | --- | --- | --- | --- |
-| `test_geofence_check_on_hole_edge_outside_v2` | **1** | 7 | 6 | 1 | 0 |
-| `test_estimate_prediction_exact_delta_north_v2` | **2** | 7 | 0 | 6 | 1 |
-| `test_zones_antimeridian` | 1 | 4 | 2 | 0 | 2 |
-| `test_zones_out_of_zone_rejection` | 1 | 3 | 2 | 0 | 1 |
-| `test_zones_holes` | 1 | 3 | 2 | 0 | 1 |
-| `test_zones_circle` | 1 | 3 | 2 | 0 | 1 |
-| `test_zones_default_file` | 1 | 3 | 2 | 0 | 1 |
-| `test_geofence_check_antimeridian` | 1 | 1 | 0 | 0 | 1 |
+Reward is binary per step over two steps, and step 2 inherits step 1, so
+`0.50` ⇒ step 1 solved / step 2 failed, and `0.00` ⇒ step 1 failed.
 
-Reading:
-- **Both steps discriminate, each through its own narrow test.** Step 1 is carried by
-  `test_geofence_check_on_hole_edge_outside_v2` (hole-edge points must count as
-  outside the zone); step 2 by `test_estimate_prediction_exact_delta_north_v2`
-  (`original_lat`/`original_lng` must be the pre-prediction smoothed value). Neither
-  step is load-bearing on a timing or hardware-dependent assertion.
-- **Failures are surgical, not "ran out of time".** 13 of the 17 failing trials fail
-  **exactly one test** out of 95 (step 1) or 152 (step 2). The other 4 fail a
-  correlated 2–6 test cluster in the zones/antimeridian family — one wrong
-  zones-file decision cascading, not independent misses.
-- **The two models fail in mirror-image ways.** Opus never scores 0.50: it either
-  solves both steps or fails step 1 outright (7/10). Avocado clears step 1 in 9/10
-  and then stalls on step-2 prediction (6 × 0.50).
+| Model | Step 1 solved | Step 2 solved |
+| --- | --- | --- |
+| metacode (avocado) | 8/10 | 6/10 |
+| codex (`gpt-5.5`) | 9/10 | **0/10** |
+| agent (opus) | 4/10 | 1/10 |
+
+- **Both steps still discriminate, and they discriminate differently per model.**
+  Step 2 is a hard wall for codex (9/10 reach it, none clear it) and a partial wall
+  for avocado; step 1 is what stops opus (6/10 never get past it).
+- **Difficulty moved in the intended direction from the previous run.** The
+  round-2 fixes cut opus from 3/10 → 1/10 while avocado rose 3/10 → 6/10; the
+  balance gate is satisfied from the *opposite* side than before (avocado is now
+  the strong solver rather than the weak one), and no model is anywhere near
+  trivial on the composite.
 
 ### AFTR: GOOD — no blockers
 
 > "All 13 required rubrics PASS and trajectory analysis clean -> GOOD."
 >
-> "The grading is sound. The oracle baseline records reward 0.0 for the empty
-> starting state, while the reference solution and all three oracle trials pass every
-> test… The hidden tests are broad and discriminating: failed rollouts were rejected
-> for real behavioral defects such as treating antimeridian polygons as covering
-> longitude 0, counting hole-edge points as inside the zone, or setting `original_lat`
-> equal to the predicted latitude. I did not find false-positive evidence, reward
-> hacking, grading crashes, or timeouts."
+> "The grading is sound overall. The golden solution passes all oracle runs, while
+> empty or partial Step 1 submissions fail broadly and the buggy/partial Step 2
+> submissions fail specifically on documented production behaviors. The tests are
+> behavior-focused and discriminating: near-complete attempts can fail just four to
+> ten precise boundary tests, while incomplete attempts fail large swaths of the
+> suite. I did not find false-positive passes, reward-file shortcuts, hidden-test
+> leakage, or systemic grading crashes."
 
-Optional (non-blocking) improvements the AFTR suggested:
+Optional (non-blocking) improvements still open:
 
-1. Add small tests for no-command, `--help`/`-h`, unknown command exit 2, and a
-   practical observable check around temp-file/fsync behaviour.
-2. Slightly clarify the Step 2 road-snapping sentence about `original_lat`/
-   `original_lng` after prediction — several models made the same mistake even though
-   the prediction section already defines the expected behaviour. Note this is the
-   task's top step-2 discriminator (7 failures), so clarifying it would likely raise
-   the avocado pass rate; weigh that against the balance gate before acting.
+1. **AFTR:** state the median-deviation numeric thresholds explicitly in the Step 2
+   instruction — it is the one outlier condition less pinned by the observations than
+   the other five (currently recoverable from the buggy starter plus the tests).
+2. **AFTR:** trim repeated boundary prose so the instruction is easier to navigate,
+   without changing tested behavior.
+3. **TBR (the 2/3 on instruction_clarity):** the instruction is very long/dense and
+   names specific verifier tests (e.g. `test_geofence_check_on_hole_edge_outside_v2`),
+   and `steps/1_step_one/solution/solve.sh` carries a dead host-specific path
+   fallback. Both are flagged as minor; neither blocks.
+
+### Previous run (commit `ca823003`, 2026-08-17) — for comparison
+
+Also all-green: validation passing, AFTR GOOD, TBR 18/18, oracle 3/3, codex 7/10,
+opus 3/10, avocado 3/10; Opus 150/384 tests (39%), oracle 114/120 (95%). The
+step-2 discriminator then was `test_estimate_prediction_exact_delta_north_v2`
+(`original_lat`/`original_lng` must be the pre-prediction smoothed value) and the
+step-1 discriminator `test_geofence_check_on_hole_edge_outside_v2` (hole-edge
+points count as outside).
 
 ## Structure
 
