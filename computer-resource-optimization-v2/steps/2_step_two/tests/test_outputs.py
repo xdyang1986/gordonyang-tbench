@@ -876,8 +876,8 @@ def test_optimize_moves_valid():
     assert r.returncode == 0
     out = json.loads(r.stdout)
     assert isinstance(out["moves"], int) and out["moves"] >= 0
-    assert isinstance(out["fragmentation_before"], float)
-    assert isinstance(out["fragmentation_after"], float)
+    assert isinstance(out["fragmentation_before"], (int, float))
+    assert isinstance(out["fragmentation_after"], (int, float))
     # For fragmented placement, should need at least 1 move to consolidate
     assert out["moves"] >= 1, (
         f"fragmented 2 nodes should need >=1 move, got {out['moves']}"

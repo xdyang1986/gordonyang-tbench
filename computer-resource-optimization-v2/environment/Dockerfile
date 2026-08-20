@@ -51,7 +51,7 @@ Current binary has 7 subtle bugs from obvious implementation:
 - concurrent allocate stress may overcommit (missing lock or exact arithmetic)
 - allocate exact fit then fragmented no fit may fail
 
-Fix these to pass all core checks. For Turn2, best-fit tie-break is terse: infer waste cpu→mem→gpu→id lex from tests.
+Fix these to pass all core checks. For Turn2, best-fit tie-break is terse: waste cpu→mem→gpu→id lex.
 OBS
 
 RUN ls -lh /app/ && cat /app/config.json

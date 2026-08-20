@@ -7,6 +7,7 @@ Turn1 binary present via `inherit_prior_session`; must keep Turn1 working in fal
 ## General CLI rules (applies to all commands below)
 - Exact argument count as documented; missing or extra → exit 2, no stdout.
 - Empty or whitespace-only IDs, non-integer or out-of-range numeric args → exit 2.
+  Exception: `get-flowcell-id` and `get-flowcell-path` accept an empty-string node ID and hash it normally (MD5 of the empty string, d41d8cd98f00b204e9800998ecf8427e).
 - On success exit 0 unless otherwise noted. No `.lock` or `.tmp.*` left after success or failure.
 - Specific failures: `allocate` insufficient → exit 2 stderr `insufficient`; `schedule` no fit → exit 1 stderr `no fit`; rate-limit throttling → exit 1 stderr contains `rate limit`, no stdout.
 
