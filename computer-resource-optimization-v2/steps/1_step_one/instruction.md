@@ -2,7 +2,7 @@
 
 You are building the core of a genomics HPC fleet manager that schedules DNA sequencing pipeline jobs onto sequencer nodes. The initial single-file version must survive crashes, concurrent invocations, and hostile IDs while preserving exact JSON fidelity.
 
-This is **not** a generic resource allocator – it intentionally mirrors the failure modes of `container-resource-allocator` and `ci-scheduler-target-sharded` but adds genomics-specific durability: pipeline IDs contain `<>&` lab symbols and 🌍🚀 emoji sample tags, and node IDs are 10KB barcodes.
+Sequencer IDs are 10KB instrument barcodes and pipeline IDs carry `<>&` lab symbols and 🌍🚀 emoji sample tags, so durability and canonicalization must hold for arbitrary UTF-8.
 
 ## Persistence contract (behavioral, implementation-agnostic)
 

@@ -71,12 +71,12 @@ def write_config(cfg, path=CONFIG_PATH):
 
 def default_config():
     return {
-        "shard_count": 4,
-        "shards": [
-            {"id": 0, "path": "/app/data/shard_0.json", "weight": 1},
-            {"id": 1, "path": "/app/data/shard_1.json", "weight": 2},
-            {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},
-            {"id": 3, "path": "/app/data/shard_3.json", "weight": 1},
+        "flowcell_count": 4,
+        "flowcells": [
+            {"id": 0, "path": "/app/data/flowcell_0.json", "weight": 1},
+            {"id": 1, "path": "/app/data/flowcell_1.json", "weight": 2},
+            {"id": 2, "path": "/app/data/flowcell_2.json", "weight": 1},
+            {"id": 3, "path": "/app/data/flowcell_3.json", "weight": 1},
         ],
         "rate_limit": {"allocations_per_second": 1000, "burst": 10000},
         "node_heartbeat_ttl_seconds": 60,
@@ -93,10 +93,10 @@ def clean_all():
         "/app/data/cluster.json",
         "/app/data/cluster.json.lock",
         "/app/data/global.lock",
-        "/app/data/shard_0.json",
-        "/app/data/shard_1.json",
-        "/app/data/shard_2.json",
-        "/app/data/shard_3.json",
+        "/app/data/flowcell_0.json",
+        "/app/data/flowcell_1.json",
+        "/app/data/flowcell_2.json",
+        "/app/data/flowcell_3.json",
         "/app/data/jobs.json",
         "/app/data/presence.json",
         "/app/data/rate_limit.json",
@@ -205,15 +205,15 @@ def checksum_valid_generic(path):
 # ---------- basic help / config ----------
 
 
-def test_help_sharded():
+def test_help_flowcell():
     clean_all()
     r = run_config()
     assert r.returncode == 0
     out = r.stdout.lower()
     for kw in [
         "add-node",
-        "get-shard-id",
-        "get-shard-path",
+        "get-flowcell-id",
+        "get-flowcell-path",
         "distribution",
         "heartbeat",
         "get-node-health",
@@ -224,7 +224,7 @@ def test_help_sharded():
         "optimize",
         "data",
         "checksum",
-        "shard",
+        "flowcell",
         "weight",
     ]:
         assert kw in out
@@ -233,19 +233,19 @@ def test_help_sharded():
 def test_config_validation():
     clean_all()
     bad = default_config()
-    bad["shard_count"] = 0
+    bad["flowcell_count"] = 0
     write_config(bad)
     r = run_config("list-nodes")
     assert r.returncode == 2 and r.stdout.strip() == ""
     bad = default_config()
-    bad["shards"] = [
-        {"id": 0, "path": "/app/data/shard_0.json"},
-        {"id": 0, "path": "/app/data/shard_1.json"},
+    bad["flowcells"] = [
+        {"id": 0, "path": "/app/data/flowcell_0.json"},
+        {"id": 0, "path": "/app/data/flowcell_1.json"},
     ]
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
     bad = default_config()
-    bad["shards"][0]["path"] = ""
+    bad["flowcells"][0]["path"] = ""
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
     with open(CONFIG_PATH, "w") as f:
@@ -258,7 +258,7 @@ def test_unknown_fields_tolerance():
     clean_all()
     cfg = default_config()
     cfg["future_field"] = 123
-    cfg["shards"][0]["future_shard_field"] = "x"
+    cfg["flowcells"][0]["future_flowcell_field"] = "x"
     write_config(cfg)
     assert run_config("add-node", "node1", "4", "1024", "0").returncode == 0
 
@@ -281,43 +281,43 @@ def test_config_missing_vs_invalid():
     # invalid config (exists but bad) should exit2
     clean_all()
     bad = {
-        "shards": [{"id": 0, "path": "/app/data/shard_0.json"}]
-    }  # missing shard_count
+        "flowcells": [{"id": 0, "path": "/app/data/flowcell_0.json"}]
+    }  # missing flowcell_count
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
-    bad = {"shard_count": 2, "shards": []}
+    bad = {"flowcell_count": 2, "flowcells": []}
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
     clean_all()
 
 
-# ---------- sharding ----------
+# ---------- flowcelling ----------
 
 
-def test_weighted_sharding():
+def test_weighted_flowcell_partitioning():
     clean_all()
 
-    def hash_weighted(key, shards):
+    def hash_weighted(key, flowcells):
         import hashlib
 
-        tot = sum(s.get("weight", 1) for s in shards)
+        tot = sum(s.get("weight", 1) for s in flowcells)
         if key.startswith("global:"):
             return -1
         h = int(hashlib.md5(key.encode()).hexdigest(), 16)
         idx = h % tot
-        for s in sorted(shards, key=lambda s: s["id"]):
+        for s in sorted(flowcells, key=lambda s: s["id"]):
             w = s.get("weight", 1)
             if idx < w:
                 return s["id"]
             idx -= w
-        return sorted(shards, key=lambda s: s["id"])[-1]["id"]
+        return sorted(flowcells, key=lambda s: s["id"])[-1]["id"]
 
     cfg = default_config()
     for key in [f"node-{i}" for i in range(15)]:
-        assert int(run_config("get-shard-id", key).stdout.strip()) == hash_weighted(
-            key, cfg["shards"]
+        assert int(run_config("get-flowcell-id", key).stdout.strip()) == hash_weighted(
+            key, cfg["flowcells"]
         )
-    assert int(run_config("get-shard-id", "global:cfg1").stdout.strip()) == -1
+    assert int(run_config("get-flowcell-id", "global:cfg1").stdout.strip()) == -1
 
 
 def test_distribution():
@@ -330,7 +330,7 @@ def test_distribution():
     assert len(dist) == 4
 
 
-def test_turn1_works_in_sharded():
+def test_turn1_works_in_flowcelled():
     clean_all()
     assert run_config("add-node", "nodeA", "4", "1024", "1").returncode == 0
     assert run_config("add-job", "jobA", "1", "256", "0").returncode == 0
@@ -694,7 +694,7 @@ def test_rate_limit_file_shape_flat_map():
 # ---------- concurrency, checksum, locks ----------
 
 
-def test_concurrent_sharded():
+def test_concurrent_flowcelled():
     clean_all()
     cfg = default_config()
     cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
@@ -721,10 +721,10 @@ def test_checksum_all():
     run_config("add-job", "job1", "1", "256", "0")
     run_config("heartbeat", "node1")
     for p in [
-        "/app/data/shard_0.json",
-        "/app/data/shard_1.json",
-        "/app/data/shard_2.json",
-        "/app/data/shard_3.json",
+        "/app/data/flowcell_0.json",
+        "/app/data/flowcell_1.json",
+        "/app/data/flowcell_2.json",
+        "/app/data/flowcell_3.json",
         "/app/data/jobs.json",
         "/app/data/presence.json",
         "/app/data/rate_limit.json",
@@ -737,7 +737,7 @@ def test_raw_unescaped_and_unicode():
     clean_all()
     run_config("add-node", "node<>&", "4", "1024", "0")
     found = False
-    for s in default_config()["shards"]:
+    for s in default_config()["flowcells"]:
         if os.path.exists(s["path"]) and "node<>&" in open(s["path"]).read():
             assert "<" in open(s["path"]).read()
             found = True
@@ -747,13 +747,13 @@ def test_raw_unescaped_and_unicode():
     assert "🌍" in json.loads(run_config("get-node", "node-🌍").stdout)["id"]
 
 
-def test_config_missing_count_empty_shards():
+def test_config_missing_count_empty_flowcells():
     clean_all()
-    bad = {"shards": [{"id": 0, "path": "/app/data/shard_0.json"}]}
+    bad = {"flowcells": [{"id": 0, "path": "/app/data/flowcell_0.json"}]}
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
     assert run_config("list-nodes").stdout.strip() == ""
-    bad = {"shard_count": 2, "shards": []}
+    bad = {"flowcell_count": 2, "flowcells": []}
     write_config(bad)
     assert run_config("list-nodes").returncode == 2
     assert run_config("list-nodes").stdout.strip() == ""
@@ -763,29 +763,29 @@ def test_config_missing_count_empty_shards():
 # ---------- empty string handling ----------
 
 
-def test_get_shard_id_empty_string():
+def test_get_flowcell_id_empty_string():
     clean_all()
-    r = run_config("get-shard-id", "")
+    r = run_config("get-flowcell-id", "")
     assert r.returncode == 0
     sid = int(r.stdout.strip())
     assert sid in [0, 1, 2, 3]
 
 
-def test_get_shard_path_normal():
+def test_get_flowcell_path_normal():
     clean_all()
     run_config("add-node", "nodeA", "4", "1024", "0")
-    sid = int(run_config("get-shard-id", "nodeA").stdout.strip())
-    r = run_config("get-shard-path", "nodeA")
+    sid = int(run_config("get-flowcell-id", "nodeA").stdout.strip())
+    r = run_config("get-flowcell-path", "nodeA")
     assert r.returncode == 0
     cfg = default_config()
-    for s in cfg["shards"]:
+    for s in cfg["flowcells"]:
         if s["id"] == sid:
             assert r.stdout.strip() == s["path"]
 
 
-def test_get_shard_path_global():
+def test_get_flowcell_path_global():
     clean_all()
-    r = run_config("get-shard-path", "global:mycfg")
+    r = run_config("get-flowcell-path", "global:mycfg")
     assert r.returncode == 0
     # comma-separated sorted list
     parts = r.stdout.strip().split(",")
@@ -960,7 +960,7 @@ def test_ops_log_and_skip_invalid():
 # ---------- file locks, idempotent, edge ----------
 
 
-def test_file_lock_cleanup_sharded():
+def test_file_lock_cleanup_flowcelled():
     clean_all()
     run_config("add-node", "node1", "4", "1024", "0")
     assert not os.path.exists("/app/data/global.lock")
@@ -970,17 +970,17 @@ def test_file_lock_cleanup_sharded():
     assert not os.path.exists("/app/data/global.lock")
 
 
-def test_idempotent_sharded():
+def test_idempotent_flowcelled():
     clean_all()
     run_config("add-node", "node1", "4", "1024", "0")
     assert run_config("add-node", "node1", "8", "2048", "0").returncode == 0
     assert json.loads(run_config("get-node", "node1").stdout)["total"]["cpu"] == 4
 
 
-def test_edge_validation_sharded():
+def test_edge_validation_flowcelled():
     clean_all()
     assert run_config("add-node", "", "4", "1024", "0").returncode == 2
-    assert run_config("get-node", "nonexist-shard-node").returncode == 2
+    assert run_config("get-node", "nonexist-flowcell-node").returncode == 2
     assert run_config("list-nodes", "-1", "0").returncode == 2
     assert run_config("heartbeat", "noexist").returncode == 2
     assert run_config("list-jobs", "-1", "0").returncode == 2
@@ -989,9 +989,9 @@ def test_edge_validation_sharded():
 def test_global_broadcast():
     clean_all()
     run_config("add-node", "global:cfg1", "4", "1024", "0")
-    assert int(run_config("get-shard-id", "global:cfg1").stdout.strip()) == -1
+    assert int(run_config("get-flowcell-id", "global:cfg1").stdout.strip()) == -1
     dist = json.loads(run_config("distribution").stdout)
-    # global node should be counted in each shard
+    # global node should be counted in each flowcell
     for v in dist.values():
         assert v >= 1
 
@@ -1244,9 +1244,9 @@ def test_distribution_tolerance_50_and_100():
         run_config("add-node", f"node-{i}", "4", "1024", "0")
     dist = json.loads(run_config("distribution").stdout)
     assert sum(dist.values()) == 50
-    # shard 1 has weight 2 vs others 1, so should have ~40% of nodes
+    # flowcell 1 has weight 2 vs others 1, so should have ~40% of nodes
     total = sum(dist.values())
-    # shard 1 should have approx 20 (50*2/5=20) tolerance 30%
+    # flowcell 1 should have approx 20 (50*2/5=20) tolerance 30%
     assert dist["1"] >= 10 and dist["1"] <= 30
 
 
@@ -1257,7 +1257,7 @@ def test_global_broadcast_allocate_from_any_copy():
     write_config(cfg)
     run_config("add-node", "global:shared", "4", "1024", "0")
     run_config("add-job", "job1", "1", "256", "0")
-    # Allocate job1 to global:shared – should succeed even though get-shard-id returns -1
+    # Allocate job1 to global:shared – should succeed even though get-flowcell-id returns -1
     r = run_config("allocate", "job1", "global:shared")
     assert r.returncode == 0
     assert (
@@ -1265,12 +1265,12 @@ def test_global_broadcast_allocate_from_any_copy():
     )
 
 
-def test_weighted_sharding_empty_string_key_valid():
+def test_weighted_flowcell_partitioning_empty_string_key_valid():
     clean_all()
-    r = run_config("get-shard-id", "")
+    r = run_config("get-flowcell-id", "")
     assert r.returncode == 0
     assert int(r.stdout.strip()) in [0, 1, 2, 3]
-    r2 = run_config("get-shard-path", "")
+    r2 = run_config("get-flowcell-path", "")
     assert r2.returncode == 0
     assert r2.stdout.strip() != ""
 
@@ -1301,7 +1301,7 @@ def test_optimize_preserves_all_jobs_and_no_overcommit_many():
         assert n["used"]["memory"] <= n["total"]["memory"]
 
 
-def test_pagination_sharded_large_scale_o_n_log_n():
+def test_pagination_flowcelled_large_scale_o_n_log_n():
     clean_all()
     cfg = default_config()
     cfg["rate_limit"] = {"allocations_per_second": 10000, "burst": 10000}
@@ -1370,23 +1370,23 @@ def test_distribution_includes_zero_when_no_nodes():
     assert len(dist) == 4
 
 
-def test_get_shard_path_sorted_for_global():
+def test_get_flowcell_path_sorted_for_global():
     clean_all()
-    r = run_config("get-shard-path", "global:test")
+    r = run_config("get-flowcell-path", "global:test")
     assert r.returncode == 0
     parts = r.stdout.strip().split(",")
     assert parts == sorted(parts)
     assert len(parts) == 4
 
 
-def test_weighted_sharding_with_future_field_ignored():
+def test_weighted_flowcell_partitioning_with_future_field_ignored():
     clean_all()
     cfg = default_config()
     cfg["future_field"] = 999
-    cfg["shards"][0]["future_shard_field"] = "abc"
+    cfg["flowcells"][0]["future_flowcell_field"] = "abc"
     write_config(cfg)
     assert run_config("add-node", "node1", "4", "1024", "0").returncode == 0
-    assert run_config("get-shard-id", "node1").returncode == 0
+    assert run_config("get-flowcell-id", "node1").returncode == 0
 
 
 def test_snapshot_restore_dir_with_many_nodes():
@@ -1533,12 +1533,12 @@ def test_snapshot_restore_with_10_nodes():
 def test_distribution_weighted_50_nodes():
     clean_all()
     cfg = {
-        "shard_count": 4,
-        "shards": [
-            {"id": 0, "path": "/app/data/shard_0.json", "weight": 1},
-            {"id": 1, "path": "/app/data/shard_1.json", "weight": 2},
-            {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},
-            {"id": 3, "path": "/app/data/shard_3.json", "weight": 1},
+        "flowcell_count": 4,
+        "flowcells": [
+            {"id": 0, "path": "/app/data/flowcell_0.json", "weight": 1},
+            {"id": 1, "path": "/app/data/flowcell_1.json", "weight": 2},
+            {"id": 2, "path": "/app/data/flowcell_2.json", "weight": 1},
+            {"id": 3, "path": "/app/data/flowcell_3.json", "weight": 1},
         ],
         "rate_limit": {"allocations_per_second": 1000, "burst": 10000},
     }
@@ -1566,7 +1566,7 @@ def test_ops_log_order_simple():
     assert any(e.get("op") == "allocate" for e in arr)
 
 
-def test_concurrent_sharded_allocate_20():
+def test_concurrent_flowcelled_allocate_20():
     clean_all()
     cfg = default_config()
     cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}

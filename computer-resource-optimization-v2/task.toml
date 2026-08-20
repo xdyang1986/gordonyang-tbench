@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/computer-resource-optimization-v2"
-description = "Go CLI cluster manager for genomics HPC fleet: durable MD5-checksummed JSON with atomic writes, first-fit (core) and best-fit (sharded) scheduling with cpu->mem->gpu->id lex tie-break, weighted MD5 sharding, per-node token-bucket rate limiting (allocations_per_second, burst, refill, no-consume on insufficient, persistence), presence TTL heartbeats, snapshot/restore dir+file, ops-log with invalid-line skipping and 10MB scanner, optimize defrag."
+description = "Sequencing lab fleet orchestrator for NovaSeq flowcells: instruments stream 10k barcoded flowcells, 100k pipeline jobs flow through a durable MD5-checksummed JSON store with atomic writes; the CLI reports placement status, schedules jobs with best-fit cpu→mem→gpu→id tie-break, throttles per-sequencer allocations with token-bucket refill and no-consume on insufficient, tracks rig health via heartbeat TTL, snapshots and restores lab state, preserves an ops-log robust to 200KB lines and corrupt entries, and defragments via optimize that evacuates until no flowcell is relocatable."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "genomics", "hpc", "bioinformatics", "sequencer", "crispr", "illumina", "pacbio", "dna-pipeline", "resource-orchestration"]
 format = "terminal_bench_multi_turn"

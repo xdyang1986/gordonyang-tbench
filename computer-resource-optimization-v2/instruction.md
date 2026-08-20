@@ -1,6 +1,6 @@
-# Computer Resource Optimization – Multi-Turn Go Task (Hard – 361+78 tests)
+# Computer Resource Optimization – Multi-Turn Go Task (Hard)
 
-Two-turn Terminal-Bench task with full output contracts published (don't shrink tests).
+Implements a genomics lab fleet orchestrator: Turn1 builds durable single-file core, Turn2 scales to flowcell-partitioned storage with rate-limiting and health.
 
 ## Turn 1: Core (361 tests, hard – difficulty in debug-in-place subtle allocator)
 
@@ -30,22 +30,23 @@ Difficulty: After publishing exact contracts, task would swing too-easy. Put dif
 
 See `steps/1_step_one/instruction.md` for full 400+ checks.
 
-## Turn 2: Sharded (78 tests, hard – difficulty terse best-fit)
+## Turn 2: Flowcell-Partitioned (hard – difficulty terse best-fit)
 
 Extends Turn1 via `inherit_prior_session`, keep first-fit working when config missing.
 
 **Flags:** --data default, --config default /app/config.json. Missing → fallback single-file, invalid → exit2 no stdout.
 
-**Contracts for help test:** Must contain (lowercased): add-node, get-shard-id, get-shard-path, distribution, heartbeat, get-node-health, list-healthy, snapshot, restore, ops-log, optimize, data, checksum, shard, weight plus Turn1 core. Note get-presence/list-online are extra aliases not required by help test.
+**Contracts for help test:** Must contain (lowercased): add-node, get-flowcell-id, get-flowcell-path, distribution, heartbeat, get-node-health, list-healthy, snapshot, restore, ops-log, optimize, data, checksum, flowcell, weight plus Turn1 core. Note get-presence/list-online are extra aliases not required by help test. Legacy partition aliases allowed.
 
 - Rate-limit rejection → exit 1 not 2, no stdout, stderr rate limit, per-node independent, no-consume on insufficient
-- Snapshot/restore: snapshot <dir> dir mode (no .json suffix or existing dir) mkdir -p copy shards+jobs+presence+rate_limit+counter+ops_log+config; file mode .json combined JSON. restore <dir> restores exactly.
-- Distribution → {"0":count,"1":count,...} shard_id string → count including global broadcast
-- Ops-log → array of {"op": ...} entries, order preserved, skip invalid JSON lines warning stderr corrupt/skip/warning, needs big bufio.Scanner 10MB, after 50 triplets >=50 containing allocate
+- Snapshot/restore: snapshot <dir> dir mode (no .json suffix or existing dir) mkdir -p copy flowcells+jobs+presence+rate_limit+counter+ops_log+config; file mode .json combined JSON with flowcells key. restore <dir> restores exactly.
+- Distribution → {"0":count,"1":count,...} flowcell_id string → count including global broadcast
+- Ops-log → array of {"op": ...} entries, order preserved, skip invalid JSON lines warning stderr corrupt/skip/warning, handles large lines, must contain at least as many entries as allocations with allocate present
+- Optimize → consolidates until no flowcell is evacuable onto other used flowcells, no overcommit, preserves jobs, fragmentation_after <= before
 
 **Best-fit:** Spec says only "best-fit" terse – tie-break chain intentionally not fully specified (must infer waste cpu→mem→gpu→id lex from tests/calibration) to keep difficulty in inferred semantic, not unstated contracts.
 
-See `steps/2_step_two/instruction.md` for full spec (78 tests).
+See `steps/2_step_two/instruction.md` for full spec.
 
 ## Build
 `go build -o ./cluster-manager .`

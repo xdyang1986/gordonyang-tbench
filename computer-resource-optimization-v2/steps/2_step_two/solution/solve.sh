@@ -67,16 +67,19 @@ type Wrapper struct {
 	Checksum string      `json:"checksum"`
 }
 
-// sharded types
-type Shard struct {
+// flowcelled types
+type Flowcell struct {
 	ID     int    `json:"id"`
 	Path   string `json:"path"`
 	Weight *int   `json:"weight,omitempty"`
 }
 
 type Config struct {
-	ShardCount     int               `json:"shard_count"`
-	Shards         []Shard           `json:"shards"`
+	FlowcellCount     int               `json:"flowcell_count"`
+	Flowcells         []Flowcell        `json:"flowcells"`
+	// legacy aliases for backward compatibility
+	LegacyCount  int               `json:"shard_count"`
+	LegacyList   []Flowcell        `json:"shards"`
 	RateLimit      *RateLimitConfig  `json:"rate_limit,omitempty"`
 	PresenceTTL    *int              `json:"node_heartbeat_ttl_seconds,omitempty"`
 	OpsLog         *string           `json:"ops_log,omitempty"`
@@ -88,12 +91,25 @@ type Config struct {
 	// unknown fields ignored
 }
 
+func (c *Config) effectiveCount() int {
+	if c.FlowcellCount > 0 {
+		return c.FlowcellCount
+	}
+	return c.LegacyCount
+}
+func (c *Config) effectiveFlowcells() []Flowcell {
+	if len(c.Flowcells) > 0 {
+		return c.Flowcells
+	}
+	return c.LegacyList
+}
+
 type RateLimitConfig struct {
 	Rate  float64 `json:"allocations_per_second"`
 	Burst float64 `json:"burst"`
 }
 
-type ShardNodesData struct {
+type FlowcellNodesData struct {
 	Nodes map[string]*Node `json:"nodes"`
 }
 
@@ -157,7 +173,7 @@ func computeChecksum(data ClusterData) (string, error) {
 	return computeChecksumGeneric(data)
 }
 
-func computeChecksumShardNodes(data ShardNodesData) (string, error) {
+func computeChecksumFlowcellNodes(data FlowcellNodesData) (string, error) {
 	return computeChecksumGeneric(data)
 }
 func computeChecksumJobs(data JobsData) (string, error) {
@@ -197,8 +213,8 @@ func releaseLock(lockPath string) {
 func emptyClusterData() ClusterData {
 	return ClusterData{Nodes: map[string]*Node{}, Jobs: map[string]*Job{}}
 }
-func emptyShardNodes() ShardNodesData {
-	return ShardNodesData{Nodes: map[string]*Node{}}
+func emptyFlowcellNodes() FlowcellNodesData {
+	return FlowcellNodesData{Nodes: map[string]*Node{}}
 }
 func emptyJobsData() JobsData {
 	return JobsData{Jobs: map[string]*Job{}}
@@ -274,7 +290,7 @@ func writeWrapperAtomicGeneric(path string, data interface{}) error {
 func writeDataAtomic(path string, data ClusterData) error {
 	return writeWrapperAtomicGeneric(path, data)
 }
-func writeShardNodesAtomic(path string, data ShardNodesData) error {
+func writeFlowcellNodesAtomic(path string, data FlowcellNodesData) error {
 	return writeWrapperAtomicGeneric(path, data)
 }
 func writeJobsAtomic(path string, data JobsData) error {
@@ -344,7 +360,7 @@ func readDataFile(path string) (ClusterData, error) {
 	return w.Data, nil
 }
 
-// generic read with corruption handling for sharded files
+// generic read with corruption handling for flowcell files
 func readGenericWrapper(path string, emptyData interface{}) (json.RawMessage, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -414,13 +430,13 @@ func readGenericWrapper(path string, emptyData interface{}) (json.RawMessage, er
 	return gw.Data, nil
 }
 
-func readShardNodesFile(path string) (ShardNodesData, error) {
-	empty := emptyShardNodes()
+func readFlowcellNodesFile(path string) (FlowcellNodesData, error) {
+	empty := emptyFlowcellNodes()
 	rawData, err := readGenericWrapper(path, empty)
 	if err != nil {
 		return empty, err
 	}
-	var data ShardNodesData
+	var data FlowcellNodesData
 	if err := json.Unmarshal(rawData, &data); err != nil {
 		// try raw map? if empty file case we already handled
 		return empty, nil
@@ -500,7 +516,7 @@ func readRateLimitFile(path string) (RateLimitData, error) {
 }
 
 // ---------- config ----------
-func getWeight(s Shard) int {
+func getWeight(s Flowcell) int {
 	if s.Weight == nil {
 		return 1
 	}
@@ -508,33 +524,41 @@ func getWeight(s Shard) int {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.ShardCount <= 0 {
-		return fmt.Errorf("shard_count must be >0")
+	effCount := cfg.effectiveCount()
+	effFlowcells := cfg.effectiveFlowcells()
+	if effCount <= 0 {
+		return fmt.Errorf("flowcell_count must be >0")
 	}
-	if len(cfg.Shards) == 0 {
-		return fmt.Errorf("shards empty")
+	if len(effFlowcells) == 0 {
+		return fmt.Errorf("flowcells empty")
 	}
 	seen := map[int]bool{}
-	for _, s := range cfg.Shards {
+	for _, s := range effFlowcells {
 		if s.ID < 0 {
-			return fmt.Errorf("negative shard id %d", s.ID)
+			return fmt.Errorf("negative flowcell id %d", s.ID)
 		}
-		// id may be >= shard_count? In some tasks id>=count invalid; we enforce
-		// but for tolerance we check duplicate and negative and empty path only per spec
-		// For this task spec says id non-negative, duplicate, empty path, weight<=0
-		// We'll also check <shard_count lenient? Spec says shard_count mismatch lenient, so don't check >=.
 		if strings.TrimSpace(s.Path) == "" {
-			return fmt.Errorf("empty shard path for id %d", s.ID)
+			return fmt.Errorf("empty flowcell path for id %d", s.ID)
 		}
 		if seen[s.ID] {
-			return fmt.Errorf("duplicate shard id %d", s.ID)
+			return fmt.Errorf("duplicate flowcell id %d", s.ID)
 		}
 		seen[s.ID] = true
 		if s.Weight != nil && *s.Weight <= 0 {
-			return fmt.Errorf("weight must be >0 for shard %d", s.ID)
+			return fmt.Errorf("weight must be >0 for flowcell %d", s.ID)
 		}
 	}
 	return nil
+}
+
+func (c *Config) normalized() Config {
+	if c.FlowcellCount == 0 {
+		c.FlowcellCount = c.LegacyCount
+	}
+	if len(c.Flowcells) == 0 {
+		c.Flowcells = c.LegacyList
+	}
+	return *c
 }
 
 func loadConfig(path string) (Config, error) {
@@ -546,6 +570,8 @@ func loadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
 	}
+	// normalize legacy to primary
+	cfg = cfg.normalized()
 	if err := validateConfig(cfg); err != nil {
 		return cfg, err
 	}
@@ -553,12 +579,13 @@ func loadConfig(path string) (Config, error) {
 }
 
 func totalWeight(cfg Config) int {
+	eff := cfg.effectiveFlowcells()
 	tot := 0
-	for _, s := range cfg.Shards {
+	for _, s := range eff {
 		tot += getWeight(s)
 	}
 	if tot <= 0 {
-		return len(cfg.Shards)
+		return len(eff)
 	}
 	return tot
 }
@@ -572,21 +599,22 @@ func hashKeyWeighted(key string, cfg Config) int {
 		return -1
 	}
 	totW := totalWeight(cfg)
+	eff := cfg.effectiveFlowcells()
 	h := md5.Sum([]byte(key))
 	bi := new(big.Int).SetBytes(h[:])
 	mod := new(big.Int).Mod(bi, big.NewInt(int64(totW)))
 	idx := int(mod.Int64())
-	shardsSorted := make([]Shard, len(cfg.Shards))
-	copy(shardsSorted, cfg.Shards)
-	sort.Slice(shardsSorted, func(i, j int) bool { return shardsSorted[i].ID < shardsSorted[j].ID })
-	for _, s := range shardsSorted {
+	flowcellsSorted := make([]Flowcell, len(eff))
+	copy(flowcellsSorted, eff)
+	sort.Slice(flowcellsSorted, func(i, j int) bool { return flowcellsSorted[i].ID < flowcellsSorted[j].ID })
+	for _, s := range flowcellsSorted {
 		w := getWeight(s)
 		if idx < w {
 			return s.ID
 		}
 		idx -= w
 	}
-	return shardsSorted[len(shardsSorted)-1].ID
+	return flowcellsSorted[len(flowcellsSorted)-1].ID
 }
 
 func getRateLimitParams(cfg Config) (rate float64, burst float64) {
@@ -720,14 +748,14 @@ Examples:
 	fmt.Print(help)
 }
 
-func printHelpSharded() {
+func printHelpFlowcell() {
 	help := `Computer Cluster Management System - Large Scale Efficient
 
 Usage:
   cluster-manager [--data <path>] [--config <path>] <command> [args]
 
 Commands:
-  add-node <nodeID> <cpu> <memory> <gpu>     Add a compute node (weighted sharding)
+  add-node <nodeID> <cpu> <memory> <gpu>     Add a compute node (weighted flowcell partitioning)
   remove-node <nodeID>                        Remove a node
   list-nodes [limit] [offset]                 List nodes with pagination
   get-node <nodeID>                           Get node details
@@ -739,9 +767,9 @@ Commands:
   deallocate <jobID>                          Deallocate job from its node
   schedule <jobID>                            Schedule job using best-fit efficient
   status                                      Show cluster status
-  get-shard-id <nodeID>                       Get shard id via weighted hash, -1 for global:
-  get-shard-path <nodeID>                     Get shard path, comma-separated sorted for global:
-  distribution                                Show per-shard node count
+  get-flowcell-id <nodeID>                    Get flowcell id via weighted hash, -1 for global:
+  get-flowcell-path <nodeID>                  Get flowcell path, comma-separated sorted for global:
+  distribution                                Show per-flowcell node count
   heartbeat <nodeID>                          Update node heartbeat presence
   get-presence <nodeID>                       Get node presence health
   get-node-health <nodeID>                    Alias for get-presence
@@ -756,11 +784,11 @@ Flags:
   --data <path>       Data file path (default /app/data/cluster.json)
   --config <path>     Config file path (default /app/config.json)
   --help, -h, help    Show help
-  data, checksum, shard, weight, global, shard_id, nodes_index, presence, rate_limit
+  data, checksum, flowcell, weight, global, flowcell_id, nodes_index, presence, rate_limit
 
-Sharding:
-  Weighted hash: MD5 big-endian mod totalWeight, iterate shards sorted by id
-  global: prefix returns -1 and broadcast to all shards
+Flowcell partitioning:
+  Weighted hash: MD5 big-endian mod totalWeight, iterate flowcells sorted by id
+  global: prefix returns -1 and broadcast to all flowcells
 
 Efficiency:
   Best-fit scheduling minimizes fragmentation vs first-fit
@@ -771,7 +799,7 @@ Efficiency:
 
 Examples:
   cluster-manager --config /app/config.json add-node node1 4 1024 1
-  cluster-manager --config /app/config.json get-shard-id node1
+  cluster-manager --config /app/config.json get-flowcell-id node1
   cluster-manager --config /app/config.json schedule job1
   cluster-manager --config /app/config.json heartbeat node1
   cluster-manager --config /app/config.json optimize
@@ -834,9 +862,9 @@ func main() {
 	}
 
 	if len(remaining) == 0 {
-		// if config exists try sharded help else single
+		// if config exists try flowcelled help else single
 		if _, err := os.Stat(configPath); err == nil {
-			printHelpSharded()
+			printHelpFlowcell()
 		} else {
 			printHelpSingle()
 		}
@@ -847,9 +875,9 @@ func main() {
 
 	if cmd == "--help" || cmd == "-h" || cmd == "help" {
 		if _, err := os.Stat(configPath); err == nil {
-			// try load to see if valid, if valid show sharded help
+			// try load to see if valid, if valid show flowcelled help
 			if _, err2 := loadConfig(configPath); err2 == nil {
-				printHelpSharded()
+				printHelpFlowcell()
 			} else {
 				printHelpSingle()
 			}
@@ -861,8 +889,8 @@ func main() {
 
 	cleanStaleTmp(dataPath)
 	cleanStaleTmp(configPath)
-	// Determine mode: if config file exists and valid, sharded mode, else single-file
-	shardedMode := false
+	// Determine mode: if config file exists and valid, flowcelled mode, else single-file
+	flowcellMode := false
 	var cfg Config
 	if _, err := os.Stat(configPath); err == nil {
 		c, err := loadConfig(configPath)
@@ -871,10 +899,10 @@ func main() {
 			os.Exit(2)
 		}
 		cfg = c
-		shardedMode = true
+		flowcellMode = true
 	}
 
-	if !shardedMode {
+	if !flowcellMode {
 		// single-file mode (turn1)
 		lockPath := dataPath + ".lock"
 		switch cmd {
@@ -1328,18 +1356,18 @@ func main() {
 				os.Exit(0)
 			}
 		default:
-			// maybe help commands for sharded still expected in single mode? Return unknown
+			// maybe help commands for flowcelled still expected in single mode? Return unknown
 			fmt.Fprintf(os.Stderr, "unknown command %s\n", cmd)
 			os.Exit(2)
 		}
 	}
 
-	// ---------- sharded mode ----------
+	// ---------- flowcelled mode ----------
 	globalLock := "/app/data/global.lock"
-	// clean stale tmp files for all sharded persistence files
+	// clean stale tmp files for all flowcelled persistence files
 	{
 		allPaths := []string{dataPath, globalLock}
-		for _, s := range cfg.Shards {
+		for _, s := range cfg.Flowcells {
 			allPaths = append(allPaths, s.Path)
 		}
 		allPaths = append(allPaths, getJobsPath(cfg), getPresencePath(cfg), getRateLimitPath(cfg), getCounterPath(cfg), getOpsLogPath(cfg))
@@ -1354,11 +1382,11 @@ func main() {
 			}
 		}
 	}
-	// common helpers for sharded
+	// common helpers for flowcelled
 	getAllNodes := func() (map[string]*Node, error) {
 		all := map[string]*Node{}
-		for _, s := range cfg.Shards {
-			sd, err := readShardNodesFile(s.Path)
+		for _, s := range cfg.Flowcells {
+			sd, err := readFlowcellNodesFile(s.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -1375,8 +1403,8 @@ func main() {
 	getNodeAnywhere := func(nodeID string) (*Node, string, int, error) {
 		if isGlobalKey(nodeID) {
 			// search all
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if n, ok := sd.Nodes[nodeID]; ok {
 					return n, s.Path, s.ID, nil
 				}
@@ -1384,9 +1412,9 @@ func main() {
 			return nil, "", -1, fmt.Errorf("not found")
 		}
 		sid := hashKeyWeighted(nodeID, cfg)
-		for _, s := range cfg.Shards {
+		for _, s := range cfg.Flowcells {
 			if s.ID == sid {
-				sd, _ := readShardNodesFile(s.Path)
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if n, ok := sd.Nodes[nodeID]; ok {
 					return n, s.Path, s.ID, nil
 				}
@@ -1450,23 +1478,23 @@ func main() {
 		}
 		newNode := &Node{ID: nodeID, Total: Resource{CPU: cpu, Memory: mem, GPU: gpu}, Used: Resource{}, Jobs: []string{}}
 		if isGlobalKey(nodeID) {
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				sd.Nodes[nodeID] = newNode
-				_ = writeShardNodesAtomic(s.Path, sd)
+				_ = writeFlowcellNodesAtomic(s.Path, sd)
 			}
 		} else {
 			sid := hashKeyWeighted(nodeID, cfg)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
-					sd, _ := readShardNodesFile(s.Path)
+					sd, _ := readFlowcellNodesFile(s.Path)
 					sd.Nodes[nodeID] = newNode
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 					break
 				}
 			}
 		}
-		_ = appendOpsLog(getOpsLogPath(cfg), "add-node", map[string]interface{}{"node_id": nodeID, "shard_id": hashKeyWeighted(nodeID, cfg)})
+		_ = appendOpsLog(getOpsLogPath(cfg), "add-node", map[string]interface{}{"node_id": nodeID, "flowcell_id": hashKeyWeighted(nodeID, cfg)})
 		releaseLock(globalLock)
 		os.Exit(0)
 
@@ -1498,36 +1526,36 @@ func main() {
 		}
 		deleted := false
 		if isGlobalKey(nodeID) {
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if _, ok := sd.Nodes[nodeID]; ok {
 					delete(sd.Nodes, nodeID)
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 					deleted = true
 				}
 			}
 		} else {
 			sid := hashKeyWeighted(nodeID, cfg)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
-					sd, _ := readShardNodesFile(s.Path)
+					sd, _ := readFlowcellNodesFile(s.Path)
 					if _, ok := sd.Nodes[nodeID]; ok {
 						delete(sd.Nodes, nodeID)
-						_ = writeShardNodesAtomic(s.Path, sd)
+						_ = writeFlowcellNodesAtomic(s.Path, sd)
 						deleted = true
 					}
 					break
 				}
 			}
-			// also clean duplicates in other shards (self-healing)
-			for _, s := range cfg.Shards {
+			// also clean duplicates in other flowcells (self-healing)
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
 					continue
 				}
-				sd, _ := readShardNodesFile(s.Path)
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if _, ok := sd.Nodes[nodeID]; ok {
 					delete(sd.Nodes, nodeID)
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 					deleted = true
 				}
 			}
@@ -1664,10 +1692,10 @@ func main() {
 			// find node and deallocate
 			nodeID := job.NodeID
 			sid := hashKeyWeighted(nodeID, cfg)
-			// if global node, need to update all shards containing it
+			// if global node, need to update all flowcells containing it
 			if isGlobalKey(nodeID) {
-				for _, s := range cfg.Shards {
-					sd, _ := readShardNodesFile(s.Path)
+				for _, s := range cfg.Flowcells {
+					sd, _ := readFlowcellNodesFile(s.Path)
 					if n, ok := sd.Nodes[nodeID]; ok {
 						n.Used.CPU -= job.Required.CPU
 						n.Used.Memory -= job.Required.Memory
@@ -1679,13 +1707,13 @@ func main() {
 							}
 						}
 						n.Jobs = newJobs
-						_ = writeShardNodesAtomic(s.Path, sd)
+						_ = writeFlowcellNodesAtomic(s.Path, sd)
 					}
 				}
 			} else {
-				for _, s := range cfg.Shards {
+				for _, s := range cfg.Flowcells {
 					if s.ID == sid {
-						sd, _ := readShardNodesFile(s.Path)
+						sd, _ := readFlowcellNodesFile(s.Path)
 						if n, ok := sd.Nodes[nodeID]; ok {
 							n.Used.CPU -= job.Required.CPU
 							n.Used.Memory -= job.Required.Memory
@@ -1697,7 +1725,7 @@ func main() {
 								}
 							}
 							n.Jobs = newJobs
-							_ = writeShardNodesAtomic(s.Path, sd)
+							_ = writeFlowcellNodesAtomic(s.Path, sd)
 						}
 						break
 					}
@@ -1834,34 +1862,34 @@ func main() {
 		bucket.Tokens -= 1
 		rl[nodeID] = bucket
 		// allocate
-		// need to update node in its shard
+		// need to update node in its flowcell
 		if isGlobalKey(nodeID) {
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if n, ok := sd.Nodes[nodeID]; ok {
-					// avoid double counting if we iterate all shards: we should update only once per shard file containing node
-					// but global nodes are in all shards, so updating all shards would double-count used? Actually each shard maintains its own copy of node's used; they should stay consistent. So we need to update all shards' copies.
-					// Check if this node already has job allocated? If we update all shards, each shard's used will increase, consistent.
+					// avoid double counting if we iterate all flowcells: we should update only once per flowcell file containing node
+					// but global nodes are in all flowcells, so updating all flowcells would double-count used? Actually each flowcell maintains its own copy of node's used; they should stay consistent. So we need to update all flowcells' copies.
+					// Check if this node already has job allocated? If we update all flowcells, each flowcell's used will increase, consistent.
 					n.Used.CPU += job.Required.CPU
 					n.Used.Memory += job.Required.Memory
 					n.Used.GPU += job.Required.GPU
 					n.Jobs = append(n.Jobs, jobID)
 					sort.Strings(n.Jobs)
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 				}
 			}
 		} else {
 			sid := hashKeyWeighted(nodeID, cfg)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
-					sd, _ := readShardNodesFile(s.Path)
+					sd, _ := readFlowcellNodesFile(s.Path)
 					if n, ok := sd.Nodes[nodeID]; ok {
 						n.Used.CPU += job.Required.CPU
 						n.Used.Memory += job.Required.Memory
 						n.Used.GPU += job.Required.GPU
 						n.Jobs = append(n.Jobs, jobID)
 						sort.Strings(n.Jobs)
-						_ = writeShardNodesAtomic(s.Path, sd)
+						_ = writeFlowcellNodesAtomic(s.Path, sd)
 					}
 					break
 				}
@@ -1871,7 +1899,7 @@ func main() {
 		job.Status = "running"
 		_ = writeJobsAtomic(jobsPath, jd)
 		_ = writeRateLimitAtomic(ratePath, rl)
-		_ = appendOpsLog(getOpsLogPath(cfg), "allocate", map[string]interface{}{"job_id": jobID, "node_id": nodeID, "shard_id": hashKeyWeighted(nodeID, cfg)})
+		_ = appendOpsLog(getOpsLogPath(cfg), "allocate", map[string]interface{}{"job_id": jobID, "node_id": nodeID, "flowcell_id": hashKeyWeighted(nodeID, cfg)})
 		releaseLock(globalLock)
 		out := map[string]interface{}{"job_id": jobID, "node_id": nodeID, "allocated": true}
 		b, _ := marshalCanonical(out)
@@ -1904,8 +1932,8 @@ func main() {
 		}
 		nodeID := job.NodeID
 		if isGlobalKey(nodeID) {
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if n, ok := sd.Nodes[nodeID]; ok {
 					n.Used.CPU -= job.Required.CPU
 					n.Used.Memory -= job.Required.Memory
@@ -1917,14 +1945,14 @@ func main() {
 						}
 					}
 					n.Jobs = newJobs
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 				}
 			}
 		} else {
 			sid := hashKeyWeighted(nodeID, cfg)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
-					sd, _ := readShardNodesFile(s.Path)
+					sd, _ := readFlowcellNodesFile(s.Path)
 					if n, ok := sd.Nodes[nodeID]; ok {
 						n.Used.CPU -= job.Required.CPU
 						n.Used.Memory -= job.Required.Memory
@@ -1936,7 +1964,7 @@ func main() {
 							}
 						}
 						n.Jobs = newJobs
-						_ = writeShardNodesAtomic(s.Path, sd)
+						_ = writeFlowcellNodesAtomic(s.Path, sd)
 					}
 					break
 				}
@@ -2038,29 +2066,29 @@ func main() {
 
 		// allocate to chosen
 		if isGlobalKey(nodeID) {
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
 				if n, ok := sd.Nodes[nodeID]; ok {
 					n.Used.CPU += job.Required.CPU
 					n.Used.Memory += job.Required.Memory
 					n.Used.GPU += job.Required.GPU
 					n.Jobs = append(n.Jobs, jobID)
 					sort.Strings(n.Jobs)
-					_ = writeShardNodesAtomic(s.Path, sd)
+					_ = writeFlowcellNodesAtomic(s.Path, sd)
 				}
 			}
 		} else {
 			sid := hashKeyWeighted(nodeID, cfg)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if s.ID == sid {
-					sd, _ := readShardNodesFile(s.Path)
+					sd, _ := readFlowcellNodesFile(s.Path)
 					if n, ok := sd.Nodes[nodeID]; ok {
 						n.Used.CPU += job.Required.CPU
 						n.Used.Memory += job.Required.Memory
 						n.Used.GPU += job.Required.GPU
 						n.Jobs = append(n.Jobs, jobID)
 						sort.Strings(n.Jobs)
-						_ = writeShardNodesAtomic(s.Path, sd)
+						_ = writeFlowcellNodesAtomic(s.Path, sd)
 					}
 					break
 				}
@@ -2070,7 +2098,7 @@ func main() {
 		job.Status = "running"
 		_ = writeJobsAtomic(jobsPath, jd)
 		_ = writeRateLimitAtomic(ratePath, rl)
-		_ = appendOpsLog(getOpsLogPath(cfg), "schedule", map[string]interface{}{"job_id": jobID, "node_id": nodeID, "shard_id": hashKeyWeighted(nodeID, cfg)})
+		_ = appendOpsLog(getOpsLogPath(cfg), "schedule", map[string]interface{}{"job_id": jobID, "node_id": nodeID, "flowcell_id": hashKeyWeighted(nodeID, cfg)})
 		releaseLock(globalLock)
 		out := map[string]interface{}{"job_id": jobID, "node_id": nodeID, "scheduled": true}
 		b, _ := marshalCanonical(out)
@@ -2114,20 +2142,20 @@ func main() {
 		fmt.Println(string(b))
 		os.Exit(0)
 
-	case "get-shard-id":
+	case "get-flowcell-id", "get-shard-id":
 		if len(cmdArgs) != 1 {
-			exitInvalid("get-shard-id requires 1")
+			exitInvalid("get-flowcell-id requires 1")
 		}
 		nodeID := cmdArgs[0]
 		if strings.TrimSpace(nodeID) == "" && nodeID != "" {
-			// empty string is valid? For cluster we treat empty as invalid, but for hash we allow "" as valid for compatibility? Spec says empty ID exit2, but get-shard-id "" should succeed? For turn1 empty exit2, but for sharded we might allow empty as valid per database-sharding? For cluster, spec says empty ID exit2 for add-node etc, but get-shard-id with empty should be exit2 per our spec? Let's allow empty as valid for hash test? We'll require non-empty else exit2 to keep consistent
-			// Actually spec says empty ID exit2 for add-node etc, but get-shard-id empty should also exit2? We'll enforce exit2 for empty to match earlier
+			// empty string is valid? For cluster we treat empty as invalid, but for hash we allow "" as valid for compatibility? Spec says empty ID exit2, but get-flowcell-id "" should succeed? For turn1 empty exit2, but for flowcelled we might allow empty as valid per database-flowcelling? For cluster, spec says empty ID exit2 for add-node etc, but get-flowcell-id with empty should be exit2 per our spec? Let's allow empty as valid for hash test? We'll require non-empty else exit2 to keep consistent
+			// Actually spec says empty ID exit2 for add-node etc, but get-flowcell-id empty should also exit2? We'll enforce exit2 for empty to match earlier
 		}
 		if strings.TrimSpace(nodeID) == "" {
 			// check if it's truly empty string arg vs missing; if arg is "" we should exit2 per spec
-			// but for compatibility with empty string valid in database-sharding, we allow "" as valid for get-shard-id
-			// For cluster, spec says empty ID exit2 for add-node etc, but for get-shard-id we can allow empty as valid to test MD5
-			// We'll treat "" as valid for get-shard-id only, returning weighted hash of empty string
+			// but for compatibility with empty string valid in database-flowcelling, we allow "" as valid for get-flowcell-id
+			// For cluster, spec says empty ID exit2 for add-node etc, but for get-flowcell-id we can allow empty as valid to test MD5
+			// We'll treat "" as valid for get-flowcell-id only, returning weighted hash of empty string
 			if nodeID == "" {
 				// allow empty as valid
 			} else {
@@ -2137,9 +2165,9 @@ func main() {
 		fmt.Println(hashKeyWeighted(nodeID, cfg))
 		os.Exit(0)
 
-	case "get-shard-path":
+	case "get-flowcell-path", "get-shard-path":
 		if len(cmdArgs) != 1 {
-			exitInvalid("get-shard-path requires 1")
+			exitInvalid("get-flowcell-path requires 1")
 		}
 		nodeID := cmdArgs[0]
 		// Empty-string "" is valid and hashed, whitespace invalid
@@ -2148,10 +2176,10 @@ func main() {
 		}
 		if isGlobalKey(nodeID) {
 			paths := []string{}
-			shardsSorted := make([]Shard, len(cfg.Shards))
-			copy(shardsSorted, cfg.Shards)
-			sort.Slice(shardsSorted, func(i, j int) bool { return shardsSorted[i].ID < shardsSorted[j].ID })
-			for _, s := range shardsSorted {
+			flowcellsSorted := make([]Flowcell, len(cfg.Flowcells))
+			copy(flowcellsSorted, cfg.Flowcells)
+			sort.Slice(flowcellsSorted, func(i, j int) bool { return flowcellsSorted[i].ID < flowcellsSorted[j].ID })
+			for _, s := range flowcellsSorted {
 				paths = append(paths, s.Path)
 			}
 			sort.Strings(paths)
@@ -2159,13 +2187,13 @@ func main() {
 			os.Exit(0)
 		}
 		sid := hashKeyWeighted(nodeID, cfg)
-		for _, s := range cfg.Shards {
+		for _, s := range cfg.Flowcells {
 			if s.ID == sid {
 				fmt.Println(s.Path)
 				os.Exit(0)
 			}
 		}
-		fmt.Fprintln(os.Stderr, "shard not found")
+		fmt.Fprintln(os.Stderr, "flowcell not found")
 		os.Exit(1)
 
 	case "distribution":
@@ -2174,14 +2202,14 @@ func main() {
 		}
 		dist := map[string]int{}
 		// include zeros
-		for _, s := range cfg.Shards {
+		for _, s := range cfg.Flowcells {
 			dist[fmt.Sprintf("%d", s.ID)] = 0
 		}
-		for _, s := range cfg.Shards {
-			sd, _ := readShardNodesFile(s.Path)
+		for _, s := range cfg.Flowcells {
+			sd, _ := readFlowcellNodesFile(s.Path)
 			dist[fmt.Sprintf("%d", s.ID)] = len(sd.Nodes)
 		}
-		// if global nodes replicated, distribution counts them in each shard, which our loop already does
+		// if global nodes replicated, distribution counts them in each flowcell, which our loop already does
 		b, _ := marshalCanonical(dist)
 		fmt.Println(string(b))
 		os.Exit(0)
@@ -2281,10 +2309,10 @@ func main() {
 		}
 		if isFileMode {
 			// file mode: combined JSON
-			shardsMap := map[string]interface{}{}
-			for _, s := range cfg.Shards {
-				sd, _ := readShardNodesFile(s.Path)
-				shardsMap[fmt.Sprintf("%d", s.ID)] = sd
+			flowcellsMap := map[string]interface{}{}
+			for _, s := range cfg.Flowcells {
+				sd, _ := readFlowcellNodesFile(s.Path)
+				flowcellsMap[fmt.Sprintf("%d", s.ID)] = sd
 			}
 			jobsData, _ := readJobsFile(getJobsPath(cfg))
 			presData, _ := readPresenceFile(getPresencePath(cfg))
@@ -2308,7 +2336,7 @@ func main() {
 			}
 			opsEntries, _ := readOpsLog(getOpsLogPath(cfg))
 			combined := map[string]interface{}{
-				"shards":     shardsMap,
+				"flowcells":     flowcellsMap,
 				"jobs":       jobsData,
 				"presence":   presData,
 				"rate_limit": rlData,
@@ -2328,7 +2356,7 @@ func main() {
 		} else {
 			// dir mode
 			_ = os.MkdirAll(backupPath, 0755)
-			for _, s := range cfg.Shards {
+			for _, s := range cfg.Flowcells {
 				if _, err := os.Stat(s.Path); err == nil {
 					b, _ := os.ReadFile(s.Path)
 					_ = os.WriteFile(filepath.Join(backupPath, filepath.Base(s.Path)), b, 0644)
@@ -2369,8 +2397,8 @@ func main() {
 					backupFiles[f.Name()] = b
 				}
 			}
-			// restore shards: for each configured shard, if backup has it restore, else write empty
-			for _, s := range cfg.Shards {
+			// restore flowcells: for each configured flowcell, if backup has it restore, else write empty
+			for _, s := range cfg.Flowcells {
 				base := filepath.Base(s.Path)
 				dest := s.Path
 				dir := filepath.Dir(dest)
@@ -2383,7 +2411,7 @@ func main() {
 					_ = os.Rename(tmpPath, dest)
 				} else {
 					// reset to empty
-					_ = writeShardNodesAtomic(dest, emptyShardNodes())
+					_ = writeFlowcellNodesAtomic(dest, emptyFlowcellNodes())
 				}
 			}
 			// jobs
@@ -2465,15 +2493,15 @@ func main() {
 				fmt.Fprintln(os.Stderr, "invalid snapshot file")
 				os.Exit(1)
 			}
-			// shards
-			if shardsRaw, ok := combined["shards"]; ok {
-				var shardsMap map[string]ShardNodesData
-				_ = json.Unmarshal(shardsRaw, &shardsMap)
-				for sidStr, data := range shardsMap {
+			// flowcells
+			if flowcellsRaw, ok := combined["flowcells"]; ok {
+				var flowcellsMap map[string]FlowcellNodesData
+				_ = json.Unmarshal(flowcellsRaw, &flowcellsMap)
+				for sidStr, data := range flowcellsMap {
 					sid, _ := strconv.Atoi(sidStr)
-					for _, s := range cfg.Shards {
+					for _, s := range cfg.Flowcells {
 						if s.ID == sid {
-							_ = writeShardNodesAtomic(s.Path, data)
+							_ = writeFlowcellNodesAtomic(s.Path, data)
 							break
 						}
 					}
@@ -2713,8 +2741,8 @@ func main() {
 			}
 		}
 
-		for _, s := range cfg.Shards {
-			sd, _ := readShardNodesFile(s.Path)
+		for _, s := range cfg.Flowcells {
+			sd, _ := readFlowcellNodesFile(s.Path)
 			changed := false
 			for id, n := range allNodes {
 				if _, ok := sd.Nodes[id]; ok {
@@ -2723,7 +2751,7 @@ func main() {
 				}
 			}
 			if changed {
-				_ = writeShardNodesAtomic(s.Path, sd)
+				_ = writeFlowcellNodesAtomic(s.Path, sd)
 			}
 		}
 		_ = writeJobsAtomic(getJobsPath(cfg), jd)
