@@ -2034,7 +2034,7 @@ func main() {
 				return cands[i].wasteCPU < cands[j].wasteCPU
 			}
 			if cands[i].wasteMem != cands[j].wasteMem {
-				return cands[i].wasteMem < cands[j].wasteMem
+				return cands[i].wasteMem > cands[j].wasteMem
 			}
 			if cands[i].wasteGPU != cands[j].wasteGPU {
 				return cands[i].wasteGPU < cands[j].wasteGPU

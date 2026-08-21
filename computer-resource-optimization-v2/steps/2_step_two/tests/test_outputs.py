@@ -394,14 +394,16 @@ def test_best_fit_efficient_cpu():
 
 def test_best_fit_tie_break_mem():
     clean_all()
-    # equal CPU waste, different MEM waste -> smaller MEM waste wins
+    # equal CPU waste, different MEM waste -> larger MEM waste wins (basecalling buffer headroom)
     # nodeA: 4 CPU 2048 MEM, nodeB: 4 CPU 1024 MEM, job: 2 CPU 512 MEM
-    # free CPU both 4, waste CPU both 2, mem waste A 1536 vs B 512 → B wins
+    # free CPU both 4, waste CPU both 2, mem waste A 1536 vs B 512 → A wins (mem descending)
     run_config("add-node", "nodeA", "4", "2048", "0")
     run_config("add-node", "nodeB", "4", "1024", "0")
     run_config("add-job", "job1", "2", "512", "0")
     nid = json.loads(run_config("schedule", "job1").stdout)["node_id"]
-    assert nid == "nodeB", f"expected nodeB best-fit mem tie-break, got {nid}"
+    assert nid == "nodeA", (
+        f"expected nodeA best-fit mem tie-break (mem desc), got {nid}"
+    )
 
 
 def test_best_fit_tie_break_gpu():
@@ -1001,18 +1003,46 @@ def test_global_broadcast():
 
 def test_best_fit_tie_break_mem_gpu_id_comprehensive():
     clean_all()
-    # 4 nodes with varying waste: cpu waste equal, mem waste equal for some, gpu differs
+    # cpu asc -> mem DESC -> gpu asc -> id asc
     # nodeA: free cpu 5 mem 1000 gpu 2, nodeB: free cpu 5 mem 1000 gpu 1, nodeC: free cpu 5 mem 800 gpu 1, nodeD: free cpu 5 mem 800 gpu 1 id lex
     # req cpu1 mem100 gpu0
-    # cpu waste all 4, mem waste A,B 900, C,D 700 -> C,D better than A,B
-    # among C,D gpu waste both 1, id lex C vs D -> C wins
+    # cpu waste all 4 equal, mem waste A,B 900 > C,D 700 -> A,B better (mem descending prefers larger)
+    # among A,B gpu waste B=1 < A=2 -> B wins
     run_config("add-node", "nodeA", "5", "1000", "2")
     run_config("add-node", "nodeB", "5", "1000", "1")
     run_config("add-node", "nodeC", "5", "800", "1")
     run_config("add-node", "nodeD", "5", "800", "1")
     run_config("add-job", "jobTie", "1", "100", "0")
     nid = json.loads(run_config("schedule", "jobTie").stdout)["node_id"]
-    assert nid == "nodeC", f"expected nodeC best-fit comprehensive tie-break, got {nid}"
+    assert nid == "nodeB", (
+        f"expected nodeB best-fit comprehensive tie-break (cpu asc, mem desc, gpu asc, id asc), got {nid}"
+    )
+
+
+def test_best_fit_tie_break_mem_desc_isolated():
+    clean_all()
+    # Isolated mem-desc pin: equal CPU waste, GPU waste equal, larger MEM waste must win
+    # nodeBigMem: 4/4096/0, nodeSmallMem: 4/1024/0, job 2/512/0
+    # CPU waste both 2, GPU waste both 0, MEM waste Big=3584 vs Small=512 → Big wins
+    run_config("add-node", "nodeBigMem", "4", "4096", "0")
+    run_config("add-node", "nodeSmallMem", "4", "1024", "0")
+    run_config("add-job", "jobMemIso", "2", "512", "0")
+    nid = json.loads(run_config("schedule", "jobMemIso").stdout)["node_id"]
+    assert nid == "nodeBigMem", f"mem-desc isolated expected nodeBigMem got {nid}"
+
+
+def test_best_fit_tie_break_mem_desc_over_gpu_asc():
+    clean_all()
+    # Ordering pin: mem-desc must be evaluated before gpu-asc
+    # nodeA: 4 CPU 2048 MEM 10 GPU, nodeB: 4 CPU 1024 MEM 0 GPU, job 2/512/0
+    # CPU waste both 2 equal, MEM waste A=1536 > B=512 so A wins if mem desc is before gpu asc
+    # If gpu asc were before mem desc, B would win because gpu waste 0 < 10
+    # Therefore this test pins mem-desc ordering ahead of gpu-asc
+    run_config("add-node", "nodeA", "4", "2048", "10")
+    run_config("add-node", "nodeB", "4", "1024", "0")
+    run_config("add-job", "jobOrder", "2", "512", "0")
+    nid = json.loads(run_config("schedule", "jobOrder").stdout)["node_id"]
+    assert nid == "nodeA", f"mem-desc over gpu-asc ordering expected nodeA got {nid}"
 
 
 def test_best_fit_after_many_allocations_fragmented():

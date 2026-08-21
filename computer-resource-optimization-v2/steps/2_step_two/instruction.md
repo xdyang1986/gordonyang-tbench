@@ -95,7 +95,15 @@ Config format (weights are explicit per-sequencer throughput):
 - `get-node`: finds across flowcells.
 - Jobs: `add-job` idempotent preserve old and allocation, `remove-job` true/false deallocates first (jobs becomes [] not null), `list-jobs` same pagination, `get-job`.
 - `allocate`, `deallocate`, `schedule`, `status` work across flowcells under global lock `/app/data/global.lock`.
-- `schedule`: BEST-FIT for scale – most efficient packing (tie-break chain terse, must be inferred: waste cpu → mem → gpu → id lex). If already allocated → exit 2, no fit → exit 1 stderr `no fit` no stdout.
+- `schedule`: BEST-FIT for scale. Among sequencers that can host the job, pick the one that packs CPU tightest; remaining ties are broken by criteria you must derive from the cases below. Already allocated → exit 2; no fit → exit 1 stderr `no fit`, no stdout.
+
+  Worked cases — free capacity as cpu/mem/gpu, job requires 2/512/0:
+    nodeA 10/10240/0, nodeB 4/1024/0   → nodeB
+    nodeA  4/ 2048/0, nodeB 4/1024/0   → nodeA
+    nodeX  4/ 1024/1, nodeY 4/1024/0   → nodeY
+    nodeB  4/ 1024/0, nodeA 4/1024/0   → nodeA
+
+  Those cases uniquely determine the tie-break chain; sequencers reserve basecalling buffer, so memory headroom is preferred where CPU and GPU are not.
 - Node JSON `jobs` always `[]` not `null`.
 
 ### Presence – sequencer health TTL
