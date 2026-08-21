@@ -1,4 +1,4 @@
-# Turn 2: Traffic-Aware Routing – Directed Traffic (GIGA HARD EXTRA)
+# Turn 2: Traffic-Aware Routing – Directed Traffic
 
 Turn1 built raw-distance routing: undirected edges collapsed to one min-raw entry per unordered pair, minimizing sum raw. You must extend same binary with traffic-aware routing where best route minimizes effective distance, but traffic is **directional** – this breaks the Step-1 undirected adjacency invariant.
 
@@ -40,7 +40,7 @@ Same validation: must be JSON array, each element object, needs source/destinati
 
 Any violation → exit2.
 
-## Traffic factor+delay manifest – directed (GIGA HARD EXTRA)
+## Traffic factor+delay manifest – directed
 
 Forms (both accepted):
 
@@ -49,12 +49,7 @@ Forms (both accepted):
 
 Directed semantics:
 
-- Each entry defines a **directed arc** `from -> to` with factor and optional delay.
-- Graph edge A-B is undirected with raw distance `d`. Its two directed arcs A->B and B->A have independent effective weights:
-  - `effective(A->B) = raw(A-B)*factor(A->B) + delay(A->B)` if traffic entry for A->B exists, else `raw*1 + 0`.
-  - `effective(B->A) = raw(A-B)*factor(B->A) + delay(B->A)` if entry for B->A exists, else default.
-- Therefore reverse is **distinct**. Traffic `A->B factor2` does NOT apply to `B->A`. If only A->B defined, traversing B->A uses default 1.0/0.
-- This means Step-1 adjacency that collapsed an unordered pair to one entry is now insufficient and must be split into two directed arcs with potentially different effective costs, while raw-only mode must still collapse undirected.
+- Traffic entries are directional.
 
 Validation:
 

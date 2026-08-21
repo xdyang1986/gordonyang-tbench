@@ -1,4 +1,4 @@
-# Turn 1: Logistics Route Planning – Raw Distance Routing (GIGA HARD)
+# Turn 1: Logistics Route Planning – Raw Distance Routing
 
 Logistics platform picks best route by physical road length (raw). You build phase-1 router: raw-distance only. Phase-2 will add traffic multipliers with directed semantics that breaks the undirected adjacency assumption established here.
 

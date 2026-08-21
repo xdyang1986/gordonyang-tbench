@@ -1,7 +1,7 @@
 #!/bin/bash
 mkdir -p /logs/verifier
 set +e
-pip3 install --quiet --break-system-packages pytest-json-ctrf==0.3.5 2>&1 | head -n 5 || true
+# pip install removed – Dockerfile already pins pytest-json-ctrf==0.3.5, offline grading breaks on pip install
 
 # AFTR fix: ensure Go binary is built fresh, not a stale script. Force build before tests.
 if [ -f /app/go.mod ]; then

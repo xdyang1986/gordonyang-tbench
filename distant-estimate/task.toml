@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/distant-estimate"
-description = "Multi-turn Go router GIGA HARD EXTRA v4 – Turn1 (~81 tests) raw-distance Dijkstra undirected min duplicate unordered including reverse. Turn2 (~70 tests) extends with DIRECTED traffic breaking Step1 invariant: traffic A->B factor != B->A factor. Raw graph remains undirected collapsed to one min-raw per unordered pair, but traffic adjacency must be split into directed arcs. Routing: effective = raw*factor+delay per directed edge, raw = sum raw along effective-best path, traffic_delay=effective-raw may be negative when factor<1. Worked example discriminates per-edge formula: A-B raw10 factor2 delay5 + B-C raw10 factor1 delay0 =35 vs alternative grouping 40. Duplicate handling: same ORDERED pair last-wins including delay reset to 0, reverse is distinct (A->B vs B->A). Traffic forms: {\"traffic\":[...]} or direct array [...]; null vs [] distinct, BOM/trailing comma/comment must not crash, leading/trailing spaces exact no trim, case-sensitive, factor>0 delay>=0 default 1/0, top-level string/number/null invalid, entries must be objects, missing from/to/factor invalid, etc. Tie-break cascade 3-level effective 1e-9 -> raw 1e-9 -> lex smallest ASCII '-'<'.'<'_' 'A'<'a'. Output strict: single no-traffic 2 keys, with traffic 4 keys, batch 4/6 keys, -1 for no-route. Perf trimmed: 500 nodes <2s, 2000 <3.5s, 5000 <4.5s, batch relative bound 25*base+1, same-source amortization. Help precedence any help token wins, flag equals and order independence. OOM fix via prev-pointer cache. Timeout 1800 to fix fairness."
+description = "Multi-turn Go CLI router. Turn1 builds raw-distance Dijkstra over undirected graph with strict JSON validation, leading-space-sensitive exact IDs, and lexicographic tie-breaking. Turn2 extends same binary with optional directed traffic manifest where each entry maps a directed arc to factor+delay, requiring splitting undirected adjacency into directed arcs and routing by effective distance while reporting raw along effective-best path."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "routing", "dijkstra", "shortest-path", "traffic-aware", "graph", "cli", "lexicographic-tie-break", "multi-turn"]
 format = "terminal_bench_multi_turn"
@@ -18,8 +18,6 @@ languages = ["go"]
 tags = ["go", "routing", "effective-distance", "traffic-factor", "traffic-delay", "tie-break-cascade", "road-network", "logistics"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
-expert_time_estimate_min = 120.0
-junior_time_estimate_min = 240.0
 
 [environment]
 build_timeout_sec = 600.0
