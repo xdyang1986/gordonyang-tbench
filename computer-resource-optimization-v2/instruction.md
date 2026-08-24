@@ -26,9 +26,7 @@ Build at `/app/` module `cluster-manager`, `go build -o cluster-manager .`, stdl
 
 **Core:** add-node idempotent preserve old, remove-node true/false fails exit2 if has jobs, list-nodes pagination sorted asc (limit 0 means all, leading zeros and + valid e.g. 0004==+4==4), get-node, add-job, remove-job deallocates first jobs [] not null, list-jobs, get-job, allocate insufficient exit2, deallocate, schedule first-fit sorted IDs asc (first that fits), no fit exit1, status sums. Node jobs sorted [] not null. Resources cpu<=0 mem<=0 gpu<0 or float like 4.0 → exit2; leading zeros and a leading + are valid.
 
-Difficulty: After publishing exact contracts, task would swing too-easy. Put difficulty in prior-violating semantic: debug-in-place over subtly wrong allocator (e.g. schedule picks last-fit missing break, limit 0 returns 0 not all, corrupt exit2). Naive baseline with obvious implementations (null node_id, exit2 on corrupt, limit0=0) should give ~22/30.
-
-See `steps/1_step_one/instruction.md` for full 400+ checks.
+See `steps/1_step_one/instruction.md` for full checks.
 
 ## Turn 2: Flowcell-Partitioned (hard – difficulty terse best-fit)
 
