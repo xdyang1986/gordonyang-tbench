@@ -71,7 +71,7 @@ On read:
   - Write to stderr a warning containing case-insensitive "corrupt" or "checksum"
   - Recreate empty valid wrapper with correct checksum
 
-Concurrency: The file must never be observed as invalid JSON during concurrent operations. Parallel sends to same room and to different rooms, as well as parallel joins, must preserve all messages/users with unique IDs.
+Concurrency: The file must never be observed as invalid JSON during concurrent operations. Must handle at least 20 concurrent operations: 20 parallel sends to the same room must preserve all 20 messages with unique IDs, 20 parallel sends to 20 different rooms must preserve all 20, and 20 concurrent joins of different users to the same room must preserve all 20 sorted. File lock must be cleaned after each operation.
 
 Edge handling:
 - Empty roomID or userID after TrimSpace → exit2

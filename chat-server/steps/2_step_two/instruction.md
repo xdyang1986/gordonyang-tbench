@@ -85,7 +85,8 @@ Token bucket per user, single bucket shared across all message sends (`send` and
 - Per-user independent (bob succeeds when alice limited)
 - Persistence in `rate_limit_path` wrapper checksum, atomic via CreateTemp+Rename, corruption handling: invalid JSON or checksum mismatch → reset bucket (allow next send to succeed)
 - Exit semantics: if rate-limited, exit code 1, stderr must contain case-insensitive "rate limit", no stdout, must NOT increment global `next_id` (counter) and must NOT append to ops log
-- Config: `rate_limit.messages_per_second` may be fractional (e.g., 0.05 means 1 token per 20s), so Go struct should use float64. Using a low rate like 0.05/s with burst 2 should never refill during a burst of fast CLI invocations, which avoids flakiness. Only the dedicated refill test should use rate=1/s.
+- Config: `rate_limit.messages_per_second` may be fractional (e.g., 0.05 means 1 token per 20s), so Go struct should use float64 for this field.
+- Global broadcast cost and atomicity: A send to a `global:` room consumes exactly one token from the per-user bucket, not one per shard. The operation is atomic under the global lock: if the send is rate-limited (exit1), all shard files must remain byte-identical to before the attempt – no partial replication is allowed.
 
 ### Presence
 
@@ -114,7 +115,7 @@ Each line is a JSON object (JSON-lines, not JSON array), with at least:
 
 - `snapshot <backup_path>`:
   - Dir mode: if path does not end with `.json` or is an existing directory, `mkdir -p` and copy all shard files (if exist), private, presence, counter, users, rate_limit, ops_log, and config.json into backup dir preserving basename
-  - File mode: if path ends with `.json`, writes combined JSON file with keys `shards` (map shard_id string → ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log` (raw log content or parsed? reference writes parsed arrays). Must include counter exact value
+  - File mode: if path ends with `.json`, writes combined JSON file with keys `shards` (map shard_id string → ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log` where `ops_log` is a JSON array of the parsed valid log entries. Must include counter exact value so that restore can set `next_id` precisely.
 - `restore <backup_path>`:
   - Dir mode: copy files back, overwriting, via atomic writes
   - File mode: reads combined JSON and restores each component via atomic writes
