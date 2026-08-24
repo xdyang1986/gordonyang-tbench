@@ -1224,3 +1224,62 @@ def test_stdlib_only_go_mod_no_require():
                 assert False, (
                     f"go.mod must not have require block for stdlib-only: {content}"
                 )
+
+
+def test_duplicate_edge_last_record_wins_when_larger():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 3},
+            {"from": "A", "to": "B", "distance": 10},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)
+
+
+def test_duplicate_reverse_edge_last_record_wins_when_larger():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 3},
+            {"from": "B", "to": "A", "distance": 10},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)
+
+
+def test_duplicate_edge_larger_last_record_flips_chosen_route():
+    graph = {
+        "nodes": ["A", "B", "C"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 1},
+            {"from": "B", "to": "C", "distance": 1},
+            {"from": "A", "to": "C", "distance": 10},
+            {"from": "A", "to": "B", "distance": 100},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "C"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "C"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)

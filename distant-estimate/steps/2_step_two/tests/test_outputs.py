@@ -1792,3 +1792,236 @@ def test_raw_regression_stdlib_only():
                 assert False, (
                     f"go.mod must not have require block for stdlib-only: {content}"
                 )
+
+
+def test_raw_duplicate_edge_last_record_wins_when_larger():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 3},
+            {"from": "A", "to": "B", "distance": 10},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)
+
+
+def test_raw_duplicate_reverse_edge_last_record_wins_when_larger():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 3},
+            {"from": "B", "to": "A", "distance": 10},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)
+
+
+def test_raw_duplicate_edge_larger_last_record_flips_chosen_route():
+    graph = {
+        "nodes": ["A", "B", "C"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 1},
+            {"from": "B", "to": "C", "distance": 1},
+            {"from": "A", "to": "C", "distance": 10},
+            {"from": "A", "to": "B", "distance": 100},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "C"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "C"]
+        assert out["distance"] == 10
+    finally:
+        os.unlink(gp)
+
+
+def test_traffic_same_factor_run_charges_zone_delay_once():
+    graph = {
+        "nodes": ["A", "B", "C"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "C", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2, "delay": 5},
+            {"from": "B", "to": "C", "factor": 2, "delay": 5},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "C", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "C"]
+        assert out["distance"] == 20
+        assert math.isclose(out["effective_distance"], 45, abs_tol=1e-6)
+        assert math.isclose(out["traffic_delay"], 25, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_factor_boundary_recharges_zone_delay():
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "C", "distance": 10},
+            {"from": "C", "to": "D", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2, "delay": 5},
+            {"from": "B", "to": "C", "factor": 2, "delay": 5},
+            {"from": "C", "to": "D", "factor": 1, "delay": 3},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "C", "D"]
+        assert out["distance"] == 30
+        assert math.isclose(out["effective_distance"], 58, abs_tol=1e-6)
+        assert math.isclose(out["traffic_delay"], 28, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_explicit_factor_one_shares_default_zone():
+    graph = {
+        "nodes": ["A", "B", "C"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "C", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "B", "to": "C", "factor": 1, "delay": 10},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "C", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "C"]
+        assert out["distance"] == 20
+        assert math.isclose(out["effective_distance"], 20, abs_tol=1e-6)
+        assert math.isclose(out["traffic_delay"], 0, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_path_state_preserves_expensive_arrival_zone():
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "A", "to": "C", "distance": 5},
+            {"from": "C", "to": "B", "distance": 5},
+            {"from": "B", "to": "D", "distance": 10},
+        ],
+    }
+    # arrival-zone trap: cheaper arrival to B (via C, eff 20 zone f2) loses to
+    # costlier arrival (direct A-B eff 110 zone f1) because B->D shares zone f1
+    # and avoids its 100 toll. Pin reverse arcs to f2 to block cheap cycles.
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 1, "delay": 100},
+            {"from": "B", "to": "A", "factor": 2, "delay": 0},
+            {"from": "A", "to": "C", "factor": 2, "delay": 0},
+            {"from": "C", "to": "A", "factor": 2, "delay": 0},
+            {"from": "C", "to": "B", "factor": 2, "delay": 0},
+            {"from": "B", "to": "C", "factor": 2, "delay": 0},
+            {"from": "B", "to": "D", "factor": 1, "delay": 100},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "D"]
+        assert out["distance"] == 20
+        assert math.isclose(out["effective_distance"], 120, abs_tol=1e-6)
+        assert math.isclose(out["traffic_delay"], 100, abs_tol=1e-6)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_batch_matches_single_on_arrival_zone_trap():
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "A", "to": "C", "distance": 5},
+            {"from": "C", "to": "B", "distance": 5},
+            {"from": "B", "to": "D", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 1, "delay": 100},
+            {"from": "B", "to": "A", "factor": 2, "delay": 0},
+            {"from": "A", "to": "C", "factor": 2, "delay": 0},
+            {"from": "C", "to": "A", "factor": 2, "delay": 0},
+            {"from": "C", "to": "B", "factor": 2, "delay": 0},
+            {"from": "B", "to": "C", "factor": 2, "delay": 0},
+            {"from": "B", "to": "D", "factor": 1, "delay": 100},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    rp = tmp(json.dumps([{"source": "A", "destination": "D"}]))
+    try:
+        single_proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        batch_proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert single_proc.returncode == 0, single_proc.stderr.decode()
+        assert batch_proc.returncode == 0, batch_proc.stderr.decode()
+        single = json.loads(single_proc.stdout.decode().strip())
+        batch = json.loads(batch_proc.stdout.decode().strip())
+        assert batch["source"] == "A" and batch["destination"] == "D"
+        assert batch["path"] == single["path"] == ["A", "B", "D"]
+        assert batch["distance"] == single["distance"] == 20
+        assert math.isclose(batch["effective_distance"], 120, abs_tol=1e-6)
+        assert math.isclose(
+            batch["effective_distance"], single["effective_distance"], abs_tol=1e-6
+        )
+        assert math.isclose(
+            batch["traffic_delay"], single["traffic_delay"], abs_tol=1e-6
+        )
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rp)

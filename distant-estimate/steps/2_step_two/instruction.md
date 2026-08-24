@@ -28,8 +28,8 @@ router --help | -h | help | (no args) -> help containing graph, from, to, reques
 
 Same validation as Turn1 including survey-log override:
 
-- `edges` is an append-ordered survey log. When the same unordered pair appears more than once — including reverse B-A — the later record replaces the earlier, longer or shorter, last-wins. Exactly one raw length per unordered pair: the last written.
-- Example: A-B 3 then A-B 10 → raw 10 survives (not min).
+- `edges` is an append-ordered survey log: later records are authoritative for the same undirected segment, superseding earlier ones even in reverse orientation (B-A superseding A-B). Only last per unordered pair survives.
+- Example: log `[A->B distance 10, B->A distance 2]` → segment at distance 2 both ways.
 
 Any violation → exit2 no stdout.
 

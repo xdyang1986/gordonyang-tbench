@@ -14,7 +14,7 @@ router (no args) -> help
 ```
 
 - `--graph` required, road network manifest.
-- `--from`/`--to` origin/dest single; fallback `--source`/`--destination` (both documented aliases must be accepted). Documented aliases must work with and without `--traffic` (Turn2 adds traffic, but alias handling is validated in both turns).
+- `--from`/`--to` origin/dest single; fallback `--source`/`--destination` (both documented aliases must be accepted).
 - `--requests` batch file; if present, ignores `--from`/`--to`.
 - `--help`, `-h`, positional `help` prints help stdout containing `graph, from, to, requests, help` and exits 0. Help precedence: any help token anywhere → help wins even with unknown/missing flags. Turn1 help must NOT contain `traffic` (only Turn2 adds it). Equals form `--help=true`, `--help=1`, `-h=true` also help.
 - Bare no args → help 0. Unknown flag (`-x`, `--unknown`, `--unknown=foo`) or missing required or flag with missing value (`--graph` alone) → exit 2 no stdout.
@@ -32,10 +32,8 @@ router (no args) -> help
   - `distance`: JSON number >0 finite, int/float/scientific (`2.5`, `1e3`, `1e-3`, `1e+3`, `1E+3`, `2.5e+2`). Zero, negative, `-0`, missing, null, string, bool, object/array → invalid. `+5` invalid JSON (explicit plus).
   - Extra nested fields inside leg ignored.
 - File: top-level must be object with `nodes`+`edges`; otherwise invalid. `nodes`/`edges` missing or not array → invalid. Invalid JSON trailing comma `{"edges":[...,]}`, comments `//`, BOM `\xEF\xBB\xBF`, unreadable → exit 2 no crash. Duplicate exact nodes invalid.
-- Survey-log override (append-ordered): `edges` is an append-ordered survey log. When the same unordered pair appears more than once — including when the later record is written in the reverse orientation (B-A after A-B) — the later record replaces the earlier one, whether it is longer or shorter. Exactly one raw length survives per pair: the last one written. This is the Step-1 invariant inherited by Step-2.
-  - Example: `[{"from":"A","to":"B","distance":10},{"from":"A","to":"B","distance":3}]` → raw 3 survives.
-  - Example: `[{"from":"A","to":"B","distance":3},{"from":"A","to":"B","distance":10}]` → raw 10 survives (last wins, not min).
-  - Example: `[{"from":"A","to":"B","distance":10},{"from":"B","to":"A","distance":2}]` → raw 2 survives, reverse orientation still counts as same unordered pair.
+- Survey log: `edges` is an append-ordered survey log. If the log contains multiple records for the same undirected road segment, the later record is authoritative – the earlier measurements are superseded by the later entry, even when later entry is written in reverse orientation (B-A superseding A-B). Only the last record per unordered pair survives.
+  - Example: log `[A->B distance 10, B->A distance 2]` → that segment travels at distance 2 in both directions.
 
 Any violation → exit 2 no stdout.
 
@@ -54,7 +52,7 @@ Any violation → exit 2 no stdout.
   - Extra and nested fields ignored.
 - Order preserved. Empty array `[]` valid exit 0 no lines. All no-route → exit 1 with N lines each `[] -1`.
 - Non-existing location with non-empty value → no route (includes `" A"` leading space distinct from `"A"`). Single mode: empty/whitespace `--from`/`--to` invalid exit 2 (distinct from batch no-route); leading space `" A"` in single → no-route exit1 if not a node.
-- Type validation: `distance`/`factor`/`delay` style invalid-type matrix – null, bool true/false, object `{}`, array `[]` for distance/factor/delay are invalid (exit 2). Applies to both steps.
+- Type validation: `distance` invalid-type matrix – null, bool true/false, object `{}`, array `[]` for distance are invalid (exit 2).
 
 ## Routing contract – raw distance + tie-break
 
