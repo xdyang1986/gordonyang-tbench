@@ -14,7 +14,7 @@ router (no args) -> help
 ```
 
 - `--graph` required, road network manifest.
-- `--from`/`--to` origin/dest single; fallback `--source`/`--destination`.
+- `--from`/`--to` origin/dest single; fallback `--source`/`--destination` (both documented aliases must be accepted). Documented aliases must work with and without `--traffic` (Turn2 adds traffic, but alias handling is validated in both turns).
 - `--requests` batch file; if present, ignores `--from`/`--to`.
 - `--help`, `-h`, positional `help` prints help stdout containing `graph, from, to, requests, help` and exits 0. Help precedence: any help token anywhere → help wins even with unknown/missing flags. Turn1 help must NOT contain `traffic` (only Turn2 adds it). Equals form `--help=true`, `--help=1`, `-h=true` also help.
 - Bare no args → help 0. Unknown flag (`-x`, `--unknown`, `--unknown=foo`) or missing required or flag with missing value (`--graph` alone) → exit 2 no stdout.
@@ -31,7 +31,11 @@ router (no args) -> help
   - `from`/`to` must be string, presence required, empty/whitespace-only → invalid, `from==to` exact → self-loop invalid, must exist exactly in nodes no trim (`" A"` ≠ `"A"` → missing → invalid).
   - `distance`: JSON number >0 finite, int/float/scientific (`2.5`, `1e3`, `1e-3`, `1e+3`, `1E+3`, `2.5e+2`). Zero, negative, `-0`, missing, null, string, bool, object/array → invalid. `+5` invalid JSON (explicit plus).
   - Extra nested fields inside leg ignored.
-- File: top-level must be object with `nodes`+`edges`; otherwise invalid. `nodes`/`edges` missing or not array → invalid. Invalid JSON trailing comma `{"edges":[...,]}`, comments `//`, BOM `\xEF\xBB\xBF`, unreadable → exit 2 no crash. Duplicate exact nodes invalid. Network undirected: leg A-B both ways, duplicate same unordered pair including reverse B-A → keep smallest raw. This undirected collapse to a single min-raw entry per unordered pair is the Step-1 invariant.
+- File: top-level must be object with `nodes`+`edges`; otherwise invalid. `nodes`/`edges` missing or not array → invalid. Invalid JSON trailing comma `{"edges":[...,]}`, comments `//`, BOM `\xEF\xBB\xBF`, unreadable → exit 2 no crash. Duplicate exact nodes invalid.
+- Survey-log override (append-ordered): `edges` is an append-ordered survey log. When the same unordered pair appears more than once — including when the later record is written in the reverse orientation (B-A after A-B) — the later record replaces the earlier one, whether it is longer or shorter. Exactly one raw length survives per pair: the last one written. This is the Step-1 invariant inherited by Step-2.
+  - Example: `[{"from":"A","to":"B","distance":10},{"from":"A","to":"B","distance":3}]` → raw 3 survives.
+  - Example: `[{"from":"A","to":"B","distance":3},{"from":"A","to":"B","distance":10}]` → raw 10 survives (last wins, not min).
+  - Example: `[{"from":"A","to":"B","distance":10},{"from":"B","to":"A","distance":2}]` → raw 2 survives, reverse orientation still counts as same unordered pair.
 
 Any violation → exit 2 no stdout.
 
@@ -50,14 +54,16 @@ Any violation → exit 2 no stdout.
   - Extra and nested fields ignored.
 - Order preserved. Empty array `[]` valid exit 0 no lines. All no-route → exit 1 with N lines each `[] -1`.
 - Non-existing location with non-empty value → no route (includes `" A"` leading space distinct from `"A"`). Single mode: empty/whitespace `--from`/`--to` invalid exit 2 (distinct from batch no-route); leading space `" A"` in single → no-route exit1 if not a node.
+- Type validation: `distance`/`factor`/`delay` style invalid-type matrix – null, bool true/false, object `{}`, array `[]` for distance/factor/delay are invalid (exit 2). Applies to both steps.
 
-## Routing contract – raw distance + tie-break cascade
+## Routing contract – raw distance + tie-break
 
 - Minimize sum raw road length (float, scientific plus). Source == destination exact → path `[source]`, distance 0 even if isolated.
 - No route → `{"path":[],"distance":-1}` exit1.
-- Tie-break cascade: total raw equal within 1e-9 → lexicographically smallest route:
-  - Element ASCII case-sensitive: `'-'45<'.'46<'_'95`, `'A'65<'a'97`, `B<C`, `A10<A2` because `'1'<'2'`.
-  - Prefix shorter wins. Deterministic – sort neighbor locations, priority queue ordered by (raw, path lex).
+- Tie-break: when total raw equal within 1e-9, pick lexicographically smallest route.
+  - Examples: `["A","B","D"]` < `["A","C","D"]` because `B<C`.
+  - ASCII order matters: `'-'45 < '.'46 < '_'95`, `'A'65 < 'a'97`, and numeric chars by ASCII so `A10 < A2` because `'1'<'2'`.
+  - Deterministic across runs.
 
 ## Output – raw routing contract
 
@@ -77,6 +83,7 @@ Any violation → exit 2 no stdout.
 go build -o router .
 ./router --graph network.json --from A --to C
 ./router --graph=network.json --from=A --to=C
+./router --graph network.json --source A --destination C
 ./router --from A --graph network.json --to B
 ./router --help --unknown
 ./router help

@@ -10,7 +10,13 @@ def find_bin():
     except Exception:
         pass
     if os.path.exists("/app/go.mod"):
-        result = subprocess.run(["go", "build", "-o", "router", "."], cwd="/app", timeout=90, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(
+            ["go", "build", "-o", "router", "."],
+            cwd="/app",
+            timeout=90,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         if result.returncode != 0:
             # build must succeed for valid task
             pass
@@ -993,10 +999,14 @@ def test_traffic_directional_secondary_raw_tie():
             {"from": "C", "to": "D", "distance": 2},
         ],
     }
+    # zone-entry toll semantics: same factor shares zone, toll charged once at entry.
+    # To keep effective tie 12 under zone model, put delay on first arc A->B, not second B->D.
+    # Old per-arc: A-B 10+0 + B-D 1+1 =12, new zone: A-B entry 10+1=11 + B-D 1 =12 (same)
+    # A-C-D: 2*2 + 2*4 =12 raw 4, so raw tie-break still picks C.
     traffic = {
         "traffic": [
-            {"from": "A", "to": "B", "factor": 1, "delay": 0},
-            {"from": "B", "to": "D", "factor": 1, "delay": 1},
+            {"from": "A", "to": "B", "factor": 1, "delay": 1},
+            {"from": "B", "to": "D", "factor": 1, "delay": 0},
             {"from": "A", "to": "C", "factor": 2, "delay": 0},
             {"from": "C", "to": "D", "factor": 4, "delay": 0},
         ]

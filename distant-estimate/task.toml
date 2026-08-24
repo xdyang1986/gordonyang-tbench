@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/distant-estimate"
-description = "Multi-turn Go CLI router. Turn1 builds raw-distance Dijkstra over undirected graph with strict JSON validation, leading-space-sensitive exact IDs, and lexicographic tie-breaking. Turn2 extends same binary with optional directed traffic manifest where each entry maps a directed arc to factor+delay, requiring splitting undirected adjacency into directed arcs and routing by effective distance while reporting raw along effective-best path."
+description = "Multi-turn Go CLI router. Turn1 builds raw-distance Dijkstra over undirected graph with last-wins survey-log override semantics (not min), strict JSON validation, leading-space-sensitive exact IDs, and lexicographic tie-breaking. Turn2 extends same binary with optional directed traffic manifest where factor names a congestion zone and delay is zone-entry toll (charged once per contiguous same-factor run, origin always pays, factor-1 shares zone with missing entries), requiring stateful search over (node,zone) and routing by effective distance while reporting raw along effective-best path."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "routing", "dijkstra", "shortest-path", "traffic-aware", "graph", "cli", "lexicographic-tie-break", "multi-turn"]
 format = "terminal_bench_multi_turn"

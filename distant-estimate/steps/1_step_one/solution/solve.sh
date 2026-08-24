@@ -197,16 +197,9 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if distVal <= 0 || math.IsNaN(distVal) || math.IsInf(distVal, 0) {
             return nil, nil, false
         }
-        // undirected min
-        if existing, ok := adj[fromStr][toStr]; ok {
-            if distVal < existing {
-                adj[fromStr][toStr] = distVal
-                adj[toStr][fromStr] = distVal
-            }
-        } else {
-            adj[fromStr][toStr] = distVal
-            adj[toStr][fromStr] = distVal
-        }
+        // survey-log override: last record wins (including reverse orientation)
+        adj[fromStr][toStr] = distVal
+        adj[toStr][fromStr] = distVal
     }
     return adj, nodeSet, true
 }
