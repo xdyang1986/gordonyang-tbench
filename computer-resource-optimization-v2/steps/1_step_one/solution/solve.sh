@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -104,21 +105,18 @@ func acquireLock(lockPath string) error {
 			return nil
 		}
 		if !os.IsExist(err) {
-			// if dir missing, try mkdir and continue retry
 			_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
-			// for other errors (e.g., not exist due to dir), treat as retryable once
-			// but if still not IsExist after mkdir, return
-			if !os.IsNotExist(err) {
-				// return for unexpected errors except IsExist
-				// but to keep retry for stale lock, only retry if IsExist
-				// For IsNotExist we already mkdir and will retry next iteration
-			}
 		}
 		tries++
-		if tries >= 2000 {
+		if tries >= 6000 {
 			return fmt.Errorf("lock")
 		}
-		time.Sleep(5 * time.Millisecond)
+		jitter := time.Duration(rand.Intn(20)) * time.Millisecond
+		backoff := time.Duration(tries/200) * time.Millisecond
+		if backoff > 50*time.Millisecond {
+			backoff = 50 * time.Millisecond
+		}
+		time.Sleep(5*time.Millisecond + jitter + backoff)
 	}
 }
 func releaseLock(p string) { _ = os.Remove(p) }

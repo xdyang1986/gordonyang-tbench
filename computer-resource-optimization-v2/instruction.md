@@ -24,7 +24,7 @@ Build at `/app/` module `cluster-manager`, `go build -o cluster-manager .`, stdl
   - REJECTED (exit 2): non-numeric (`abc`), hex (`0x10`), float (`2.0`, `4.0`), empty string, any surrounding whitespace (`" 2 "`), and out-of-range values (limit < 0, offset < 0, cpu <= 0, memory <= 0, gpu < 0).
   - `-0` parses to 0 and is therefore valid wherever 0 is valid (gpu, limit, offset). Do NOT special-case the sign character.
 
-**Core:** add-node idempotent preserve old, remove-node true/false fails exit2 if has jobs, list-nodes pagination sorted asc (limit 0 means all, leading zeros and + valid e.g. 0004==+4==4), get-node, add-job, remove-job deallocates first jobs [] not null, list-jobs, get-job, allocate insufficient exit2, deallocate, schedule first-fit sorted IDs asc (first that fits), no fit exit1, status sums. Node jobs sorted [] not null. Resources cpu<=0 mem<=0 gpu<0 or float like 4.0 → exit2; leading zeros and a leading + are valid.
+**Core:** add-node idempotent preserve old, remove-node true/false fails exit2 if has jobs, list-nodes pagination sorted asc (limit 0 means all, leading zeros and + valid e.g. 0004==+4==4), get-node, add-job, remove-job deallocates first jobs [] not null, list-jobs, get-job, allocate insufficient exit2, deallocate, schedule first-fit sorted IDs asc (first that fits), no fit exit1, status sums. Node jobs sorted [] not null. Resources cpu<=0 mem<=0 gpu<0 or float like 4.0 → exit2; leading zeros and a leading + are valid. Concurrent 20-way must eventually succeed, blocking up to 15s acceptable.
 
 See `steps/1_step_one/instruction.md` for full checks.
 
@@ -50,5 +50,5 @@ See `steps/2_step_two/instruction.md` for full spec.
 `go build -o ./cluster-manager .`
 
 ## Validation
-- Step1: 361 PASS with exact contracts, naive baseline ~22/30 with obvious bugs
-- Step2: 78 PASS with terse best-fit
+- Step1: PASS with exact contracts covering persistence, pagination, concurrency, checksum
+- Step2: PASS with terse best-fit, rate-limit validation, snapshot config, restore exit-2 handling

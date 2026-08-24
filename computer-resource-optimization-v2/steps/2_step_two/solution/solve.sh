@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -199,10 +200,15 @@ func acquireLock(lockPath string) error {
 			_ = os.MkdirAll(filepath.Dir(lockPath), 0755)
 		}
 		tries++
-		if tries >= 2000 {
+		if tries >= 6000 {
 			return fmt.Errorf("failed to acquire lock")
 		}
-		time.Sleep(5 * time.Millisecond)
+		jitter := time.Duration(rand.Intn(20)) * time.Millisecond
+		backoff := time.Duration(tries/200) * time.Millisecond
+		if backoff > 50*time.Millisecond {
+			backoff = 50 * time.Millisecond
+		}
+		time.Sleep(5*time.Millisecond + jitter + backoff)
 	}
 }
 

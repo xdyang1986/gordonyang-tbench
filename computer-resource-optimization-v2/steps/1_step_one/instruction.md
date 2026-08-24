@@ -89,6 +89,3 @@ Implement at `/app` – Turn1 core.
 
 ## Corrupt data file
 On unparseable JSON or checksum mismatch: copy the raw bytes to `<data-path>.corrupt.<unix-nanos>`, warn on stderr containing `corrupt` or `checksum`, continue with an EMPTY store, and **exit 0** (so `list-nodes` prints `[]`).
-
-## Difficulty note
-After publishing exact contracts, difficulty is intentionally in prior-violating semantic the model must infer (e.g. best-fit tie-break terse in Turn2, or debug-in-place with subtly wrong allocator). Do not add more unstated contracts or scale as difficulty source. Naive baseline with obvious implementations (null node_id, exit2 on corrupt, limit0=0 items) should give ~22/30.

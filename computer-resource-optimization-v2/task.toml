@@ -22,7 +22,7 @@ languages = ["go"]
 
 [environment]
 build_timeout_sec = 600.0
-cpus = 2
+cpus = 4
 memory_mb = 4096
 storage_mb = 10240
 gpus = 0
