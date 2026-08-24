@@ -1,8 +1,8 @@
-# Computer Resource Optimization – Multi-Turn Go Task (Hard)
+# Computer Resource Optimization – Multi-Turn Go Task
 
 Implements a genomics lab fleet orchestrator: Turn1 builds durable single-file core, Turn2 scales to flowcell-partitioned storage with rate-limiting and health.
 
-## Turn 1: Core (361 tests, hard – difficulty in debug-in-place subtle allocator)
+## Turn 1: Core
 
 Build at `/app/` module `cluster-manager`, `go build -o cluster-manager .`, stdlib only.
 
@@ -28,7 +28,7 @@ Build at `/app/` module `cluster-manager`, `go build -o cluster-manager .`, stdl
 
 See `steps/1_step_one/instruction.md` for full checks.
 
-## Turn 2: Flowcell-Partitioned (hard – difficulty terse best-fit)
+## Turn 2: Flowcell-Partitioned
 
 Extends Turn1 via `inherit_prior_session`, keep first-fit working when config missing.
 
@@ -37,12 +37,12 @@ Extends Turn1 via `inherit_prior_session`, keep first-fit working when config mi
 **Contracts for help test:** Must contain (lowercased): add-node, get-flowcell-id, get-flowcell-path, distribution, heartbeat, get-node-health, list-healthy, snapshot, restore, ops-log, optimize, data, checksum, flowcell, weight plus Turn1 core. Note get-presence/list-online are extra aliases not required by help test. Legacy partition aliases allowed.
 
 - Rate-limit rejection → exit 1 not 2, no stdout, stderr rate limit, per-node independent, no-consume on insufficient
-- Snapshot/restore: snapshot <dir> dir mode (no .json suffix or existing dir) mkdir -p copy flowcells+jobs+presence+rate_limit+counter+ops_log+config; file mode .json combined JSON with flowcells key. restore <dir> restores exactly.
+- Snapshot/restore: snapshot <dir> dir mode (no .json suffix or existing dir) mkdir -p copy flowcells+jobs+presence+rate_limit+counter+ops_log+config; file mode .json combined JSON with flowcells key containing config. restore <dir> restores exactly, overwriting config.
 - Distribution → {"0":count,"1":count,...} flowcell_id string → count including global broadcast
 - Ops-log → array of {"op": ...} entries, order preserved, skip invalid JSON lines warning stderr corrupt/skip/warning, handles large lines, must contain at least as many entries as allocations with allocate present
 - Optimize → consolidates until no flowcell is evacuable onto other used flowcells, no overcommit, preserves jobs, fragmentation_after <= before
 
-**Best-fit:** Spec says only "best-fit" terse – tie-break chain intentionally not fully specified (must infer waste cpu→mem→gpu→id lex from tests/calibration) to keep difficulty in inferred semantic, not unstated contracts.
+**Best-fit:** Among nodes that can host the job, pick the one that packs CPU tightest; ties are determined by worked cases in `steps/2_step_two/instruction.md` where memory headroom is preferred where CPU and GPU are not (cpu waste asc → mem desc → gpu asc → id lex).
 
 See `steps/2_step_two/instruction.md` for full spec.
 
@@ -51,4 +51,4 @@ See `steps/2_step_two/instruction.md` for full spec.
 
 ## Validation
 - Step1: PASS with exact contracts covering persistence, pagination, concurrency, checksum
-- Step2: PASS with terse best-fit, rate-limit validation, snapshot config, restore exit-2 handling
+- Step2: PASS covering best-fit tie-break, rate-limit validation, snapshot config, restore exit-2 handling
