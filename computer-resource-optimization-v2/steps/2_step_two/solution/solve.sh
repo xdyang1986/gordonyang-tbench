@@ -105,8 +105,8 @@ func (c *Config) effectiveFlowcells() []Flowcell {
 }
 
 type RateLimitConfig struct {
-	Rate  float64 `json:"allocations_per_second"`
-	Burst float64 `json:"burst"`
+	Rate  *float64 `json:"allocations_per_second"`
+	Burst *float64 `json:"burst"`
 }
 
 type FlowcellNodesData struct {
@@ -548,6 +548,14 @@ func validateConfig(cfg Config) error {
 			return fmt.Errorf("weight must be >0 for flowcell %d", s.ID)
 		}
 	}
+	if cfg.RateLimit != nil {
+		if cfg.RateLimit.Rate != nil && *cfg.RateLimit.Rate <= 0 {
+			return fmt.Errorf("rate_limit.allocations_per_second must be >0")
+		}
+		if cfg.RateLimit.Burst != nil && *cfg.RateLimit.Burst <= 0 {
+			return fmt.Errorf("rate_limit.burst must be >0")
+		}
+	}
 	return nil
 }
 
@@ -621,11 +629,11 @@ func getRateLimitParams(cfg Config) (rate float64, burst float64) {
 	rate = 5
 	burst = 10
 	if cfg.RateLimit != nil {
-		if cfg.RateLimit.Rate > 0 {
-			rate = cfg.RateLimit.Rate
+		if cfg.RateLimit.Rate != nil {
+			rate = *cfg.RateLimit.Rate
 		}
-		if cfg.RateLimit.Burst > 0 {
-			burst = cfg.RateLimit.Burst
+		if cfg.RateLimit.Burst != nil {
+			burst = *cfg.RateLimit.Burst
 		}
 	}
 	return
@@ -2335,13 +2343,15 @@ func main() {
 				}
 			}
 			opsEntries, _ := readOpsLog(getOpsLogPath(cfg))
+			// config snapshot - include live config for restoration fidelity
 			combined := map[string]interface{}{
 				"flowcells":     flowcellsMap,
-				"jobs":       jobsData,
-				"presence":   presData,
-				"rate_limit": rlData,
-				"counter":    counterData,
-				"ops_log":    opsEntries,
+				"jobs":          jobsData,
+				"presence":      presData,
+				"rate_limit":    rlData,
+				"counter":       counterData,
+				"ops_log":       opsEntries,
+				"config":        cfg,
 			}
 			dir := filepath.Dir(backupPath)
 			_ = os.MkdirAll(dir, 0755)
@@ -2381,12 +2391,27 @@ func main() {
 			fmt.Fprintln(os.Stderr, "lock")
 			os.Exit(1)
 		}
-		// check if backupPath is dir
-		if info, err := os.Stat(backupPath); err == nil && info.IsDir() {
+		// existence check before mode split – nonexistent must be exit 2, not 1
+		info, err := os.Stat(backupPath)
+		if err != nil {
+			releaseLock(globalLock)
+			if os.IsNotExist(err) {
+				fmt.Fprintln(os.Stderr, "backup path does not exist")
+			} else {
+				fmt.Fprintln(os.Stderr, err)
+			}
+			os.Exit(2)
+		}
+		if info.IsDir() {
 			// dir mode: restore configured files, reset others to empty if not in backup
 			// first, read backup dir files into map basename->content
 			backupFiles := map[string][]byte{}
-			files, _ := os.ReadDir(backupPath)
+			files, rerr := os.ReadDir(backupPath)
+			if rerr != nil {
+				releaseLock(globalLock)
+				fmt.Fprintln(os.Stderr, "cannot read backup dir")
+				os.Exit(2)
+			}
 			for _, f := range files {
 				if f.IsDir() {
 					continue
@@ -2396,6 +2421,40 @@ func main() {
 				if err == nil {
 					backupFiles[f.Name()] = b
 				}
+			}
+			// detect no restorable files – empty dir or dir with unrelated files only
+			if len(backupFiles) == 0 {
+				releaseLock(globalLock)
+				fmt.Fprintln(os.Stderr, "backup dir has no restorable files")
+				os.Exit(2)
+			}
+			// Check if at least one expected file is present to avoid treating random dir as valid
+			expectedBases := map[string]bool{}
+			for _, s := range cfg.Flowcells {
+				expectedBases[filepath.Base(s.Path)] = true
+			}
+			expectedBases[filepath.Base(getJobsPath(cfg))] = true
+			expectedBases[filepath.Base(getPresencePath(cfg))] = true
+			expectedBases[filepath.Base(getRateLimitPath(cfg))] = true
+			expectedBases[filepath.Base(getCounterPath(cfg))] = true
+			expectedBases[filepath.Base(getOpsLogPath(cfg))] = true
+			expectedBases[filepath.Base(configPath)] = true
+			hasRestorable := false
+			for base := range backupFiles {
+				if expectedBases[base] {
+					hasRestorable = true
+					break
+				}
+				// also consider flowcell files by pattern flowcell_*.json
+				if strings.HasPrefix(base, "flowcell_") && strings.HasSuffix(base, ".json") {
+					hasRestorable = true
+					break
+				}
+			}
+			if !hasRestorable {
+				releaseLock(globalLock)
+				fmt.Fprintln(os.Stderr, "backup dir has no restorable files")
+				os.Exit(2)
 			}
 			// restore flowcells: for each configured flowcell, if backup has it restore, else write empty
 			for _, s := range cfg.Flowcells {
@@ -2479,19 +2538,45 @@ func main() {
 			} else {
 				_ = os.WriteFile(opsPath, []byte{}, 0644)
 			}
+			// config - restore if present, overwriting live config per instruction.md:39
+			if b, ok := backupFiles[filepath.Base(configPath)]; ok {
+				dir := filepath.Dir(configPath)
+				_ = os.MkdirAll(dir, 0755)
+				tmp, _ := os.CreateTemp(dir, "restore-*.json")
+				tmpPath := tmp.Name()
+				_, _ = tmp.Write(b)
+				tmp.Close()
+				_ = os.Rename(tmpPath, configPath)
+			}
 		} else {
 			// file mode
 			raw, err := os.ReadFile(backupPath)
 			if err != nil {
 				releaseLock(globalLock)
 				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
+				os.Exit(2)
+			}
+			trimmed := bytes.TrimSpace(raw)
+			if len(trimmed) == 0 {
+				releaseLock(globalLock)
+				fmt.Fprintln(os.Stderr, "invalid snapshot file: empty")
+				os.Exit(2)
+			}
+			// Reject structurally invalid snapshots: top-level [], string, number -> json.Unmarshal into map fails
+			// We also explicitly check first byte to give exit 2 not exit 1
+			// Valid snapshot must be a JSON object
+			if !(len(trimmed) > 0 && trimmed[0] == '{') {
+				// Could be [] , "string" , number, etc. Try to detect array as well with whitespace
+				// Attempt unmarshal into generic to see type, but we want exit 2 for all non-object
+				releaseLock(globalLock)
+				fmt.Fprintln(os.Stderr, "invalid snapshot file: not an object")
+				os.Exit(2)
 			}
 			var combined map[string]json.RawMessage
-			if err := json.Unmarshal(raw, &combined); err != nil {
+			if err := json.Unmarshal(trimmed, &combined); err != nil {
 				releaseLock(globalLock)
 				fmt.Fprintln(os.Stderr, "invalid snapshot file")
-				os.Exit(1)
+				os.Exit(2)
 			}
 			// flowcells
 			if flowcellsRaw, ok := combined["flowcells"]; ok {
@@ -2543,6 +2628,22 @@ func main() {
 				var cd interface{}
 				_ = json.Unmarshal(counterRaw, &cd)
 				_ = writeWrapperAtomicGeneric(counterPath, cd)
+			}
+			// config - restore if present, overwriting live config per instruction.md:39
+			if cfgRaw, ok := combined["config"]; ok {
+				// Validate that saved config is valid JSON object before overwriting
+				var savedCfg Config
+				if err := json.Unmarshal(cfgRaw, &savedCfg); err == nil {
+					// Write raw config bytes to configPath atomically
+					dir := filepath.Dir(configPath)
+					_ = os.MkdirAll(dir, 0755)
+					tmp, _ := os.CreateTemp(dir, "restore-*.json")
+					tmpPath := tmp.Name()
+					_, _ = tmp.Write(cfgRaw)
+					tmp.Close()
+					_ = os.Rename(tmpPath, configPath)
+				}
+				// If config within snapshot is invalid, we ignore it (don't crash) – other data already restored
 			}
 		}
 		releaseLock(globalLock)

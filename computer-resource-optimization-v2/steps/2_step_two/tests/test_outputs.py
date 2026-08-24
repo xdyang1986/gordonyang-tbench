@@ -1617,3 +1617,202 @@ def test_concurrent_flowcelled_allocate_20():
         t.join()
     st = json.loads(run_config("status").stdout)
     assert st["allocated_jobs"] == 20
+
+
+# ---------- new tests for rate-limit validation, snapshot config key, restore error handling ----------
+
+
+def test_rate_limit_zero_and_negative_exit2():
+    clean_all()
+    # control: omitting rate_limit entirely still exits 0 with defaults 5/10
+    cfg = default_config()
+    del cfg["rate_limit"]
+    write_config(cfg)
+    r = run_config("add-node", "node1", "4", "1024", "0")
+    assert r.returncode == 0, (
+        f"omitting rate_limit should be valid, got {r.returncode} {r.stderr}"
+    )
+    # Verify defaults still work: add job and allocate should succeed (defaults 5/10)
+    run_config("add-job", "jobCtrl", "1", "256", "0")
+    r = run_config("allocate", "jobCtrl", "node1")
+    assert r.returncode == 0, "allocate with default rate limit should succeed"
+
+    # now test zero values -> exit 2 empty stdout
+    for bad_rate in [0, 0.0, -1, -0.5]:
+        clean_all()
+        cfg = default_config()
+        cfg["rate_limit"] = {"allocations_per_second": bad_rate, "burst": 10}
+        write_config(cfg)
+        r = run_config("list-nodes")
+        assert r.returncode == 2, (
+            f"rate {bad_rate} should be invalid config exit 2, got {r.returncode}"
+        )
+        assert r.stdout.strip() == "", (
+            f"invalid config should have empty stdout, got {r.stdout!r}"
+        )
+
+    for bad_burst in [0, 0.0, -1, -5]:
+        clean_all()
+        cfg = default_config()
+        cfg["rate_limit"] = {"allocations_per_second": 5, "burst": bad_burst}
+        write_config(cfg)
+        r = run_config("list-nodes")
+        assert r.returncode == 2, (
+            f"burst {bad_burst} should be invalid config exit 2, got {r.returncode}"
+        )
+        assert r.stdout.strip() == "", (
+            f"invalid config should have empty stdout for burst {bad_burst}"
+        )
+
+
+def test_rate_limit_omits_entirely_defaults():
+    clean_all()
+    cfg = default_config()
+    cfg.pop("rate_limit", None)
+    write_config(cfg)
+    # Should not exit 2
+    assert run_config("list-nodes").returncode == 0
+    assert run_config("add-node", "n1", "4", "1024", "0").returncode == 0
+    run_config("add-job", "j1", "1", "256", "0")
+    r = run_config("allocate", "j1", "n1")
+    assert r.returncode == 0, (
+        f"with omitted rate_limit, allocate should succeed with defaults 5/10, got {r.returncode} {r.stderr}"
+    )
+    # Also verify no stdout empty on success
+    assert r.stdout.strip() != ""
+
+
+def _assert_no_lock_tmp_left():
+    # Helper: after success or failure, no .lock or .tmp.* files left
+    for fname in os.listdir(DATA_DIR):
+        assert not fname.endswith(".lock"), f"leftover lock file {fname}"
+        assert ".tmp." not in fname, f"leftover tmp file {fname}"
+    assert not os.path.exists("/app/data/global.lock")
+
+
+def test_snapshot_file_contains_config_key():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    run_config("add-job", "job1", "1", "256", "0")
+    snap_path = "/tmp/backup.json"
+    try:
+        os.remove(snap_path)
+    except FileNotFoundError:
+        pass
+    r = run_config("snapshot", snap_path)
+    assert r.returncode == 0, f"snapshot file mode should succeed: {r.stderr}"
+    assert os.path.exists(snap_path)
+    data = json.loads(open(snap_path, "r", encoding="utf-8").read())
+    assert "config" in data, (
+        f"file snapshot should contain config key, got keys {list(data.keys())}"
+    )
+    # config key should match live config at least in flowcell_count and flowcells length
+    live_cfg = json.loads(open(CONFIG_PATH, "r", encoding="utf-8").read())
+    assert data["config"]["flowcell_count"] == live_cfg["flowcell_count"]
+    assert len(data["config"]["flowcells"]) == len(live_cfg["flowcells"])
+    # Also must contain at least flowcells, jobs, presence, rate_limit
+    for k in ["flowcells", "jobs", "presence", "rate_limit"]:
+        assert k in data, f"snapshot file mode missing {k}"
+    _assert_no_lock_tmp_left()
+
+
+def test_restore_nonexistent_path_exit2():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    # Ensure path does not exist
+    bad_path = "/tmp/nonexistent_restore_path_xyz/restore.json"
+    try:
+        if os.path.isdir(bad_path):
+            shutil.rmtree(bad_path)
+        else:
+            os.remove(bad_path)
+    except FileNotFoundError:
+        pass
+    r = run_config("restore", bad_path)
+    assert r.returncode == 2, (
+        f"restore nonexistent should exit 2, got {r.returncode} {r.stderr}"
+    )
+    assert r.stdout.strip() == "", (
+        f"restore nonexistent should have empty stdout, got {r.stdout!r}"
+    )
+    _assert_no_lock_tmp_left()
+
+
+def test_restore_not_json_exit2():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    bad_file = "/tmp/bad_not_json.json"
+    with open(bad_file, "w") as f:
+        f.write("not json at all {{{")
+    r = run_config("restore", bad_file)
+    assert r.returncode == 2, (
+        f"restore not json should exit 2, got {r.returncode} {r.stderr}"
+    )
+    assert r.stdout.strip() == ""
+    _assert_no_lock_tmp_left()
+
+
+def test_restore_empty_array_exit2():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    bad_file = "/tmp/bad_array.json"
+    with open(bad_file, "w") as f:
+        f.write("[]")
+    r = run_config("restore", bad_file)
+    assert r.returncode == 2, f"restore [] should exit 2, got {r.returncode} {r.stderr}"
+    assert r.stdout.strip() == ""
+    _assert_no_lock_tmp_left()
+    # also test string and number top-level
+    for content, name in [
+        ('"just a string"', "/tmp/bad_string.json"),
+        ("12345", "/tmp/bad_number.json"),
+    ]:
+        with open(name, "w") as f:
+            f.write(content)
+        r = run_config("restore", name)
+        assert r.returncode == 2, f"restore {content} should exit 2, got {r.returncode}"
+        assert r.stdout.strip() == ""
+        _assert_no_lock_tmp_left()
+
+
+def test_restore_dir_no_restorable_files_exit2():
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    empty_dir = "/tmp/empty_backup_dir_test"
+    if os.path.exists(empty_dir):
+        shutil.rmtree(empty_dir)
+    os.makedirs(empty_dir, exist_ok=True)
+    r = run_config("restore", empty_dir)
+    assert r.returncode == 2, (
+        f"restore empty dir should exit 2, got {r.returncode} {r.stderr}"
+    )
+    assert r.stdout.strip() == ""
+    _assert_no_lock_tmp_left()
+    # also directory with unrelated file
+    unrelated_dir = "/tmp/unrelated_backup_dir_test"
+    if os.path.exists(unrelated_dir):
+        shutil.rmtree(unrelated_dir)
+    os.makedirs(unrelated_dir, exist_ok=True)
+    with open(os.path.join(unrelated_dir, "random.txt"), "w") as f:
+        f.write("hello")
+    r = run_config("restore", unrelated_dir)
+    assert r.returncode == 2, (
+        f"restore dir with no restorable files should exit 2, got {r.returncode}"
+    )
+    assert r.stdout.strip() == ""
+    _assert_no_lock_tmp_left()
