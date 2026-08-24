@@ -2025,3 +2025,165 @@ def test_traffic_batch_matches_single_on_arrival_zone_trap():
         os.unlink(gp)
         os.unlink(tp)
         os.unlink(rp)
+
+
+def test_duplicate_keys_inside_traffic_object_invalid():
+    # T1: duplicate keys inside traffic entry invalid – duplicate factor same value would be valid old but must be invalid
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+        )
+    )
+    tp = tmp('{"traffic":[{"from":"A","to":"B","factor":2,"factor":2}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_node_id_with_replacement_char_fffd_invalid_traffic():
+    # Graph itself contains FFFD node, even if traffic empty, should be invalid (exit2)
+    # Old oracle would accept A->B_FFFD as valid path (exit0), new rejects.
+    content = (
+        '{"nodes":["A","B\\uD800"],"edges":[{"from":"A","to":"B\\uD800","distance":5}]}'
+    )
+    gp = tmp(content)
+    tp = tmp('{"traffic":[]}')
+    try:
+        fffd_node = "B\ufffd"
+        proc = run(["--graph", gp, "--from", "A", "--to", fffd_node, "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_from_with_replacement_char_invalid():
+    # Traffic entry itself contains FFFD – should be invalid even though graph has that node
+    # Old oracle would accept (node exists, edge exists), new rejects.
+    gp_content = (
+        '{"nodes":["A","B\\uD800"],"edges":[{"from":"A","to":"B\\uD800","distance":5}]}'
+    )
+    gp = tmp(gp_content)
+    tp_content = '{"traffic":[{"from":"B\\uD800","to":"A","factor":1}]}'
+    tp = tmp(tp_content)
+    try:
+        fffd_node = "B\ufffd"
+        proc = run(["--graph", gp, "--from", "A", "--to", fffd_node, "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_from_direct_fffd_literal_invalid():
+    fffd = "\ufffd"
+    graph = {
+        "nodes": ["A", f"B{fffd}"],
+        "edges": [{"from": "A", "to": f"B{fffd}", "distance": 5}],
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps({"traffic": [{"from": f"B{fffd}", "to": "A", "factor": 1}]}))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", f"B{fffd}", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_superseded_traffic_malformed_still_invalidates():
+    # T2 applied to traffic log's last-wins too
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+        )
+    )
+    tp = tmp(
+        '{"traffic":[{"from":"A","to":"B","factor":"bad"},{"from":"A","to":"B","factor":2}]}'
+    )
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_batch_mixing_families_invalid_traffic_mode():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp(json.dumps([{"source": "A", "to": "B"}]))
+    tp = tmp('{"traffic":[]}')
+    try:
+        proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rp)
+
+
+def test_toll_count_tie_break_fewer_tolls_wins():
+    # T5: effective -> raw -> fewer tolls -> lex
+    # Two competing routes: same eff 45 raw20, but 1 toll vs 2 tolls
+    # A-B-D: A->B f2 d5 (toll1), B->D f2 d5 (same zone, no new toll) => eff 45 tolls=1
+    # A-C-D: A->C f2 d5 (toll1), C->D f1 d10 (different zone, second toll) => eff 45 tolls=2
+    # Fewer tolls (1) should win => A-B-D, under per-arc old oracle A-B-D eff 50 vs 45 old picks A-C-D
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "D", "distance": 10},
+            {"from": "A", "to": "C", "distance": 10},
+            {"from": "C", "to": "D", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2, "delay": 5},
+            {"from": "B", "to": "D", "factor": 2, "delay": 5},
+            {"from": "A", "to": "C", "factor": 2, "delay": 5},
+            {"from": "C", "to": "D", "factor": 1, "delay": 10},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "D"], (
+            f"fewer tolls should win, got {out['path']}"
+        )
+        assert math.isclose(out["effective_distance"], 45, abs_tol=1e-6)
+        assert out["distance"] == 20
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_duplicate_keys_inside_edge_invalid_step2():
+    gp = tmp(
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"distance":5}]}'
+    )
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_superseded_edge_malformed_still_invalid_step2():
+    raw = '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":"bad"},{"from":"A","to":"B","distance":5}]}'
+    gp = tmp(raw)
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)

@@ -11,21 +11,18 @@ cat > /app/main.go <<'GOEOF'
 package main
 
 import (
+    "bytes"
     "container/heap"
     "encoding/json"
     "flag"
     "fmt"
+    "io"
     "math"
     "os"
     "sort"
     "strings"
 )
 
-type Edge struct {
-    From     string  `json:"from"`
-    To       string  `json:"to"`
-    Distance float64 `json:"distance"`
-}
 type SingleOut struct {
     Path     []string `json:"path"`
     Distance float64  `json:"distance"`
@@ -101,14 +98,86 @@ func (pq *PriorityQueue) Pop() interface{} {
     return it
 }
 
-// parseGraph extra hard: validates nodes are strings only, edges are objects only, exact match, leading/trailing spaces, BOM etc must not crash.
+// T1: Duplicate keys inside any edge / request / traffic object → invalid
+// Go's Unmarshal silently keeps last, need Token streaming.
+func hasDuplicateKeys(data []byte) bool {
+    dec := json.NewDecoder(bytes.NewReader(data))
+    type objCtx struct {
+        keys      map[string]struct{}
+        expectKey bool
+    }
+    type elem struct {
+        isObject bool
+        ctx      *objCtx
+    }
+    var stack []elem
+    for {
+        t, err := dec.Token()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            return false
+        }
+        if delim, ok := t.(json.Delim); ok {
+            switch delim {
+            case '{':
+                if len(stack) > 0 && stack[len(stack)-1].isObject {
+                    if p := stack[len(stack)-1].ctx; p != nil && !p.expectKey {
+                        p.expectKey = true
+                    }
+                }
+                stack = append(stack, elem{isObject: true, ctx: &objCtx{keys: make(map[string]struct{}), expectKey: true}})
+            case '}':
+                if len(stack) > 0 && stack[len(stack)-1].isObject {
+                    stack = stack[:len(stack)-1]
+                } else if len(stack) > 0 {
+                    stack = stack[:len(stack)-1]
+                }
+            case '[':
+                if len(stack) > 0 && stack[len(stack)-1].isObject {
+                    if p := stack[len(stack)-1].ctx; p != nil && !p.expectKey {
+                        p.expectKey = true
+                    }
+                }
+                stack = append(stack, elem{isObject: false, ctx: nil})
+            case ']':
+                if len(stack) > 0 && !stack[len(stack)-1].isObject {
+                    stack = stack[:len(stack)-1]
+                }
+            }
+        } else {
+            if len(stack) > 0 && stack[len(stack)-1].isObject {
+                ctx := stack[len(stack)-1].ctx
+                if ctx.expectKey {
+                    if key, ok := t.(string); ok {
+                        if _, exists := ctx.keys[key]; exists {
+                            return true
+                        }
+                        ctx.keys[key] = struct{}{}
+                        ctx.expectKey = false
+                    }
+                } else {
+                    ctx.expectKey = true
+                }
+            }
+        }
+    }
+    return false
+}
+
+func containsFFFD(s string) bool {
+    return strings.ContainsRune(s, '\uFFFD')
+}
+
 func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bool) {
     data, err := os.ReadFile(path)
     if err != nil {
         return nil, nil, false
     }
-    // Check for BOM - json.Unmarshal will fail, which we treat as invalid
-    // Top level must be object
+    if hasDuplicateKeys(data) {
+        return nil, nil, false
+    }
     var top map[string]json.RawMessage
     if err := json.Unmarshal(data, &top); err != nil {
         return nil, nil, false
@@ -121,7 +190,6 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     if !ok {
         return nil, nil, false
     }
-    // nodes must be array
     var nodesArr []json.RawMessage
     if err := json.Unmarshal(nodesRaw, &nodesArr); err != nil {
         return nil, nil, false
@@ -132,9 +200,11 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     nodes := make([]string, 0, len(nodesArr))
     nodeSet := make(map[string]bool)
     for _, raw := range nodesArr {
-        // each element must be string
         var s string
         if err := json.Unmarshal(raw, &s); err != nil {
+            return nil, nil, false
+        }
+        if containsFFFD(s) {
             return nil, nil, false
         }
         if strings.TrimSpace(s) == "" {
@@ -146,12 +216,10 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         nodeSet[s] = true
         nodes = append(nodes, s)
     }
-    // edges must be array
     var edgesArr []json.RawMessage
     if err := json.Unmarshal(edgesRaw, &edgesArr); err != nil {
         return nil, nil, false
     }
-    // edges can be empty
     adj := make(map[string]map[string]float64)
     for _, nd := range nodes {
         adj[nd] = make(map[string]float64)
@@ -181,6 +249,9 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if err := json.Unmarshal(toRaw, &toStr); err != nil {
             return nil, nil, false
         }
+        if containsFFFD(fromStr) || containsFFFD(toStr) {
+            return nil, nil, false
+        }
         var distVal float64
         if err := json.Unmarshal(distRaw, &distVal); err != nil {
             return nil, nil, false
@@ -197,7 +268,9 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if distVal <= 0 || math.IsNaN(distVal) || math.IsInf(distVal, 0) {
             return nil, nil, false
         }
-        // survey-log override: last record wins (including reverse orientation)
+        // T2: superseded records still validated – we validate each record
+        // as we go, so malformed earlier still invalidates, even if later
+        // would overwrite. Last wins.
         adj[fromStr][toStr] = distVal
         adj[toStr][fromStr] = distVal
     }
@@ -274,7 +347,6 @@ func hasHelpArg(args []string) bool {
 }
 
 func main() {
-    // Help precedence: if any help arg present anywhere, print help exit0 immediately
     if len(os.Args) == 1 {
         printHelp()
         os.Exit(0)
@@ -320,6 +392,9 @@ func main() {
         if err != nil {
             os.Exit(2)
         }
+        if hasDuplicateKeys(data) {
+            os.Exit(2)
+        }
         var rawArr []json.RawMessage
         if err := json.Unmarshal(data, &rawArr); err != nil {
             os.Exit(2)
@@ -344,9 +419,17 @@ func main() {
                 valid = false
                 break
             }
+            // T4: mixing key families within one request object invalid
+            _, hasSource := m["source"]
+            _, hasDest := m["destination"]
+            _, hasFrom := m["from"]
+            _, hasTo := m["to"]
+            if (hasSource || hasDest) && (hasFrom || hasTo) {
+                valid = false
+                break
+            }
             var srcStr, dstStr string
             var srcFound, dstFound bool
-            // source / from
             if rawSrc, ok := m["source"]; ok {
                 if strings.TrimSpace(string(rawSrc)) == "null" {
                     valid = false
@@ -354,6 +437,10 @@ func main() {
                 }
                 var s string
                 if err := json.Unmarshal(rawSrc, &s); err != nil {
+                    valid = false
+                    break
+                }
+                if containsFFFD(s) {
                     valid = false
                     break
                 }
@@ -369,10 +456,13 @@ func main() {
                     valid = false
                     break
                 }
+                if containsFFFD(s) {
+                    valid = false
+                    break
+                }
                 srcStr = s
                 srcFound = true
             }
-            // destination / to
             if rawDst, ok := m["destination"]; ok {
                 if strings.TrimSpace(string(rawDst)) == "null" {
                     valid = false
@@ -380,6 +470,10 @@ func main() {
                 }
                 var s string
                 if err := json.Unmarshal(rawDst, &s); err != nil {
+                    valid = false
+                    break
+                }
+                if containsFFFD(s) {
                     valid = false
                     break
                 }
@@ -392,6 +486,10 @@ func main() {
                 }
                 var s string
                 if err := json.Unmarshal(rawTo, &s); err != nil {
+                    valid = false
+                    break
+                }
+                if containsFFFD(s) {
                     valid = false
                     break
                 }
@@ -436,6 +534,9 @@ func main() {
         if strings.TrimSpace(fromNode) == "" || strings.TrimSpace(toNode) == "" {
             os.Exit(2)
         }
+        if containsFFFD(fromNode) || containsFFFD(toNode) {
+            os.Exit(2)
+        }
         path, dist, found := dijkstra(adj, fromNode, toNode, nodeSet)
         if !found {
             out := SingleOut{Path: []string{}, Distance: -1}
@@ -451,4 +552,4 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok step1 EXTRA HARD"
+cd /app && go build -o router . && echo "Build ok step1 T1-T4"

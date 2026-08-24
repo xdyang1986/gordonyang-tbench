@@ -10,7 +10,13 @@ def find_bin():
     except Exception:
         pass
     if os.path.exists("/app/go.mod"):
-        result = subprocess.run(["go", "build", "-o", "router", "."], cwd="/app", timeout=90, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = subprocess.run(
+            ["go", "build", "-o", "router", "."],
+            cwd="/app",
+            timeout=90,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         if result.returncode != 0:
             # build must succeed for valid task
             pass
@@ -879,6 +885,8 @@ def test_whitespace_source_in_batch_no_route():
 
 
 def test_both_keys_prefer_source():
+    # T4: mixing key families within one batch request object -> invalid
+    # Previous spec preferred source/destination, now mixing is invalid (exit2)
     graph = {
         "nodes": ["A", "B", "C"],
         "edges": [
@@ -891,9 +899,7 @@ def test_both_keys_prefer_source():
     rp = tmp(json.dumps([{"source": "A", "destination": "C", "from": "A", "to": "B"}]))
     try:
         proc = run(["--graph", gp, "--requests", rp])
-        assert proc.returncode == 0
-        out = json.loads(proc.stdout.decode().strip().splitlines()[0])
-        assert out["path"] == ["A", "B", "C"]
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
     finally:
         os.unlink(gp)
         os.unlink(rp)
@@ -1283,3 +1289,113 @@ def test_duplicate_edge_larger_last_record_flips_chosen_route():
         assert out["distance"] == 10
     finally:
         os.unlink(gp)
+
+
+def test_duplicate_keys_inside_edge_object_invalid():
+    # T1: json.Unmarshal silently keeps last – duplicate distance same value would be valid after last-wins but must be invalid
+    gp = tmp(
+        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"distance":5}]}'
+    )
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_duplicate_keys_inside_request_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+        )
+    )
+    rp = tmp('[{"source":"A","source":"A","destination":"B"}]')
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+
+
+def test_node_id_with_replacement_char_fffd_invalid():
+    # T3: lone surrogate \uD800 decodes to U+FFFD (efbfbd) silently, utf8.ValidString true
+    content = (
+        '{"nodes":["A","B\\uD800"],"edges":[{"from":"A","to":"B\\uD800","distance":5}]}'
+    )
+    gp = tmp(content)
+    try:
+        fffd_node = "B\ufffd"
+        proc = run(["--graph", gp, "--from", "A", "--to", fffd_node])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == "", (
+            f"expected FFFD invalid exit2, got {proc.returncode} {proc.stdout.decode()[:100]}"
+        )
+    finally:
+        os.unlink(gp)
+
+
+def test_node_id_fffd_direct_literal_invalid():
+    # Also literal FFFD bytes in JSON string should be invalid
+    # Build JSON with actual utf8 FFFD rune inside string (not escape)
+    fffd = "\ufffd"
+    graph = {
+        "nodes": ["A", f"B{fffd}"],
+        "edges": [{"from": "A", "to": f"B{fffd}", "distance": 5}],
+    }
+    gp = tmp(json.dumps(graph))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", f"B{fffd}"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_superseded_edge_malformed_still_invalidates():
+    # T2: earlier malformed record for same pair that later re-surveys still invalidates
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": "bad"},
+            {"from": "A", "to": "B", "distance": 5},
+        ],
+    }
+    # Need raw with duplicate same pair but first has string distance -> invalid whole manifest even though second would overwrite
+    # Build raw JSON manually to have first invalid type
+    raw = '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":"bad"},{"from":"A","to":"B","distance":5}]}'
+    gp = tmp(raw)
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_batch_mixing_key_families_invalid():
+    # T4: mixing source/to or from/destination within one object invalid
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp(json.dumps([{"source": "A", "to": "B"}]))
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+
+
+def test_batch_from_destination_mixing_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp(json.dumps([{"from": "A", "destination": "B"}]))
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)

@@ -26,9 +26,11 @@ router --help | -h | help | (no args) -> help containing graph, from, to, reques
 {"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"extra":"ignore"}]}
 ```
 
-Same validation as Turn1 including survey-log override:
+Same validation as Turn1 including survey-log override, duplicate-key detection, FFFD guard, and superseded validation:
 
-- `edges` is an append-ordered survey log: later records are authoritative for the same undirected segment, superseding earlier ones even in reverse orientation (B-A superseding A-B). Only last per unordered pair survives.
+- `edges` is an append-ordered survey log: later records are authoritative for the same undirected segment, superseding earlier ones even in reverse orientation (B-A superseding A-B). Only last per unordered pair survives. Superseded records are still validated – a malformed earlier record for a pair that a later valid record re-surveys still invalidates the whole manifest.
+- Duplicate keys inside any edge object (e.g. `{"from":"A","from":"B","to":"C","distance":5}` or `{"distance":5,"distance":5}`) → whole file invalid (exit2). Go's `Unmarshal` keeps last silently.
+- Node ID that decodes to U+FFFD (e.g. lone surrogate `"\uD800"` → Go decodes to replacement char) → invalid manifest exit2, not no-route. Applies to nodes and edge from/to.
 - Example: log `[A->B distance 10, B->A distance 2]` → segment at distance 2 both ways.
 
 Any violation → exit2 no stdout.
@@ -39,7 +41,11 @@ Any violation → exit2 no stdout.
 [{"source":"A","destination":"C"}, {"from":"B","to":"D"}]
 ```
 
-Same validation: must be JSON array, each element object, needs source/destination or from/to, missing key entirely → invalid, value must be string (null literal invalid via RawMessage check), empty/whitespace → no-route not invalid with `[] -1`, non-existing location → no-route, order preserved, empty array valid.
+Same validation as Turn1 plus:
+- duplicate keys inside any request object → invalid exit2
+- node ID containing U+FFFD → invalid exit2 (whole file, not no-route)
+- mixing key families within one object is invalid: e.g. `{"source":"A","to":"B"}`, `{"from":"A","destination":"B"}`, or having both families `{"source":"A","destination":"C","from":"A","to":"B"}` → invalid exit2 (previous spec preferred, now rejected)
+- otherwise: must be JSON array, each element object, needs source/destination or from/to from single family, missing key → invalid, value must be string (null literal invalid via RawMessage), empty/whitespace → no-route not invalid with `[] -1`, non-existing location → no-route, order preserved, empty valid.
 
 Any violation → exit2.
 
@@ -106,35 +112,40 @@ Validation:
 
 - Top-level: Must be object containing `traffic` array OR direct array. If object: `traffic` key must exist and be array; `{"traffic":null}`, `{"traffic":{}}`, `{"traffic":"x"}` → invalid. Missing key `{"foo":[]}` invalid. If direct: top-level must be JSON array. Empty `[]` and `{"traffic":[]}` valid empty → default factor 1 delay 0 for all arcs.
 - Invalid JSON trailing comma, `//` comment, BOM → invalid exit2 no crash.
+- Duplicate keys: any traffic entry object containing duplicate keys (e.g. `{"from":"A","to":"B","factor":2,"factor":2}`) → invalid exit2.
 - Array elements: Each element must be object (null/string/number/array → invalid whole file). Empty object `{}` invalid. Raw null element invalid.
 - Each entry required fields: `from` string required, `to` string required, `factor` number >0 required. `delay` optional >=0 default 0.
-  - `from`/`to`: must be string, non-empty after TrimSpace? Empty/whitespace-only invalid, leading/trailing spaces exact no trim: `" A"` vs `"A"` distinct, must exist exactly in nodes, must correspond to existing undirected road leg (unordered pair must exist in graph edges after last-wins collapse). Self-loop `from==to` invalid.
+  - `from`/`to`: must be string, non-empty after TrimSpace? Empty/whitespace-only invalid, leading/trailing spaces exact no trim: `" A"` vs `"A"` distinct, must exist exactly in nodes, must correspond to existing undirected road leg (unordered pair must exist in graph edges after last-wins collapse), must not contain U+FFFD (lone surrogate `"\uD800"` → FFFD) → invalid exit2. Self-loop `from==to` invalid.
   - `factor`: JSON number >0 finite int/float/scientific (`2.5`, `1e3`, `1e+3`, `1E+3`). Zero, negative, `-0`, missing, null, string, bool, object/array → invalid. `+5` invalid JSON. `1e+2` valid.
   - `delay`: optional default 0, number >=0 finite scientific valid (`1e2`, `1e+2`). Negative, null, string, bool, object/array → invalid.
   - Extra fields ignored.
-- Duplicate handling directed: same **ordered** pair exact (from==from && to==to) → last wins factor+delay including delay reset to 0 when second entry missing delay. Reverse B->A is distinct, does NOT overwrite A->B.
-  - Example: `A->B f2 d5` then `A->B f3` (no delay) → effective per entry: if that arc is first, `raw*3+0` reset.
+- Duplicate handling directed: same **ordered** pair exact (from==from && to==to) → last wins factor+delay including delay reset to 0 when second entry missing delay. Reverse B->A is distinct, does NOT overwrite A->B. Superseded traffic records still validated – malformed earlier entry for same ordered pair that later re-surveys still invalidates whole manifest.
+  - Example: `A->B f2 d5` then `A->B f3` (no delay) → if that arc is first, `raw*3+0` reset.
   - `A->B f2` then `B->A f3 d10` → A->B stays f2, B->A f3 d10.
 - Missing entry for an arc → default factor 1.0 delay 0, zone = factor 1.
 
 Any violation → exit2 no stdout.
 
-## Routing contract – effective + tie-break cascade
+## Routing contract – effective + tie-break
 
 - Source == dest → path `[source]`, raw 0, effective 0, traffic_delay 0. With traffic: 4 keys all 0. Without: 2 keys 0.
 - No route → with traffic `{"path":[],"distance":-1,"effective_distance":-1,"traffic_delay":-1}` exit1, without `{"path":[],"distance":-1}`.
-- Tie-break cascade 3-level:
+- Tie-break cascade 4-level:
   1. Total effective equal within 1e-9 → smaller raw wins.
-  2. Raw equal within 1e-9 → lexicographically smallest route ASCII case-sensitive with examples: `A,B,D` < `A,C,D` because `B<C`; ASCII order `'-' < '.' < '_'`, `'A'<'a'`, and `A10 < A2` because `'1'<'2'`.
-  - Deterministic.
+  2. Raw equal within 1e-9 → fewer tolls paid (number of zone entries) wins.
+  3. Tolls equal → lexicographically smallest route ASCII case-sensitive with examples: `A,B,D` < `A,C,D` because `B<C`; ASCII order `'-' < '.' < '_'`, `'A'<'a'`, and `A10 < A2` because `'1'<'2'`.
+  - Deterministic. Toll count is not monotone with effective, so state must carry (node, zone) and toll count for comparison.
+  - Example where expensive arrival wins (node-level Dijkstra fails): A-B 10 f1 100, A-C 5 f2 0, C-B 5 f2 0, B-D 10 f1 100 plus reverse arcs pinned to f2 to block cheap cycle: cheaper arrival to B via C (20 zone f2) vs direct 110 zone f1, but B-D shares f1 so direct arrival total 120 beats via C total 130 (costlier prefix wins).
 
-Directional worked example (asymmetric):
+Worked examples for zone:
 
-Graph: `A-B raw10`. Traffic: `A->B factor3, B->A factor1`.
-Routing A->B: effective `raw*factor + toll_at_entry = 10*3+0=30` raw10 delay20.
-Routing B->A: effective 10 raw10 delay0 (default factor 1 no toll or factor1 no delay). Same undirected edge, different effective per direction.
+1) Same zone once: A-B 10 f2 d5, B-C 10 f2 d5 same factor → effective 45 (toll once) not 50 per-arc.
 
-Zone sharing example: see f-1 sharing discussion above.
+2) Boundary recharge: A-B f2 d5, B-C f2 d5, C-D f1 d3 → 58 total (25+20+13).
+
+3) Factor-1 sharing: implicit default f1 shares zone with explicit f1, so no re-charge.
+
+Directional: A-B raw10 traffic A->B factor3, B->A factor1 → A->B eff 30 raw10 delay20, B->A eff 10 raw10 delay0.
 
 ## Output – effective routing contract strict
 

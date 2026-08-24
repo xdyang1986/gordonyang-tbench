@@ -32,8 +32,12 @@ router (no args) -> help
   - `distance`: JSON number >0 finite, int/float/scientific (`2.5`, `1e3`, `1e-3`, `1e+3`, `1E+3`, `2.5e+2`). Zero, negative, `-0`, missing, null, string, bool, object/array → invalid. `+5` invalid JSON (explicit plus).
   - Extra nested fields inside leg ignored.
 - File: top-level must be object with `nodes`+`edges`; otherwise invalid. `nodes`/`edges` missing or not array → invalid. Invalid JSON trailing comma `{"edges":[...,]}`, comments `//`, BOM `\xEF\xBB\xBF`, unreadable → exit 2 no crash. Duplicate exact nodes invalid.
-- Survey log: `edges` is an append-ordered survey log. If the log contains multiple records for the same undirected road segment, the later record is authoritative – the earlier measurements are superseded by the later entry, even when later entry is written in reverse orientation (B-A superseding A-B). Only the last record per unordered pair survives.
+- Survey log: `edges` is an append-ordered survey log. If the log contains multiple records for the same undirected road segment, the later record is authoritative – the earlier measurements are superseded by the later entry, even when later entry is written in reverse orientation (B-A superseding A-B). Only the last record per unordered pair survives. Superseded records are still validated – a malformed earlier record for a pair that a later valid record re-surveys still invalidates the whole manifest.
   - Example: log `[A->B distance 10, B->A distance 2]` → that segment travels at distance 2 in both directions.
+
+- Duplicate keys: JSON objects must not contain duplicate keys. If any edge object or batch request object contains the same key twice (e.g. `{"from":"A","from":"B","to":"C","distance":5}` or `{"distance":5,"distance":5}`), the whole file is invalid (exit 2). `encoding/json` silently keeps last, so you must detect duplicates explicitly.
+
+- Node ID encoding: a node ID that decodes to the Unicode replacement character U+FFFD (e.g. lone surrogate escape `"\uD800"` which Go decodes to FFFD) is invalid. Any graph containing such a node, or any edge/request referencing it, is invalid exit 2 (not no-route).
 
 Any violation → exit 2 no stdout.
 
@@ -52,6 +56,7 @@ Any violation → exit 2 no stdout.
   - Extra and nested fields ignored.
 - Order preserved. Empty array `[]` valid exit 0 no lines. All no-route → exit 1 with N lines each `[] -1`.
 - Non-existing location with non-empty value → no route (includes `" A"` leading space distinct from `"A"`). Single mode: empty/whitespace `--from`/`--to` invalid exit 2 (distinct from batch no-route); leading space `" A"` in single → no-route exit1 if not a node.
+- Mixing families: within a single batch request object, mixing key families is invalid. E.g. `{"source":"A","to":"B"}` (source from one family, to from another) or `{"from":"A","destination":"B"}` or having both families `{"source":"A","destination":"C","from":"A","to":"B"}` → whole file invalid exit 2.
 - Type validation: `distance` invalid-type matrix – null, bool true/false, object `{}`, array `[]` for distance are invalid (exit 2).
 
 ## Routing contract – raw distance + tie-break
