@@ -1,20 +1,20 @@
-# Turn 2: Large-Scale Chat Server Support (Go) – Extra Hard (60 tests)
+# Turn 2: Large-Scale Chat Server Support (Go)
 
-Turn1 implemented core chat communication. Now we need to scale to many rooms and users with production-grade distributed systems requirements. This turn is extra hard: 60 tests, 20 concurrent all 20, weighted sharding 20/50/100, global broadcast replication dedup, rate limiting with refill multiple cycles and no side effects, presence TTL multi-user, pagination 1000/2000 offset, snapshot dir+file all files with counter exact restore, checksum all files strict, corruption handling all files.
+Turn1 implemented core chat communication with single-file persistence. Now extend to sharded, production-grade distributed behavior while keeping Turn1 functionality working when `--config` is used.
 
-Turn1 code is present via `inherit_prior_session`.
+Turn1 code is present via `inherit_prior_session`. You must keep Turn1 commands working in both single-file and sharded modes (create-room, delete-room, list-rooms sorted, join, leave, list-users sorted, send via Join, get-messages with limit/offset, send-private via Join, get-private, list-all-users sorted, checksum strict, atomic behavior, spaces, global ID, edge validation).
 
 ## Task – Extend Go Chat Server at `/app/` (same module), built via `go build -o <binary> .`
 
-Must keep Turn1 functionality working (create-room, delete-room, list-rooms sorted, join, leave idempotent, list-users sorted, send via Join, get-messages latest N + limit/offset, send-private via Join, get-private, list-all-users sorted, checksum strict, atomic all 10/20, lock cleanup, spaces, global ID, edge validation, 100/200 rooms, large history).
+Stdlib only.
 
 ### Flags
-- `--data` default `/app/data/chat.json` – single-file mode (Turn1 compat)
-- `--config` default `/app/config.json` – sharded mode config path. If config file exists and valid, sharded mode active, else fallback to single-file.
+- `--data` default `/app/data/chat.json` – single-file mode (Turn1 compatibility)
+- `--config` default `/app/config.json` – sharded mode config path. If config file exists and is valid JSON, sharded mode is active; otherwise fallback to single-file behavior.
 
-### Config File Format (for sharding, MUST - Extra Hard)
+### Config File Format
 
-`/app/config.json`:
+`/app/config.json` example:
 ```json
 {
   "shard_count": 4,
@@ -24,7 +24,7 @@ Must keep Turn1 functionality working (create-room, delete-room, list-rooms sort
     {"id": 2, "path": "/app/data/shard_2.json", "weight": 1},
     {"id": 3, "path": "/app/data/shard_3.json", "weight": 1}
   ],
-  "rate_limit": {"messages_per_second": 1000, "burst": 10000},
+  "rate_limit": {"messages_per_second": 5, "burst": 10},
   "presence_ttl_seconds": 60,
   "ops_log": "/app/data/chat_ops.log",
   "private_path": "/app/data/private.json",
@@ -34,99 +34,139 @@ Must keep Turn1 functionality working (create-room, delete-room, list-rooms sort
   "users_path": "/app/data/users.json"
 }
 ```
-- `shard_count` >0 else exit2, shards unique id, path non-empty, weight>0 else exit2, negative id exit2, duplicate id exit2, empty path exit2. shard_count mismatch with len(shards) lenient not crash (may allow).
-- `rate_limit` optional default `{"messages_per_second":5,"burst":10}`
+
+Validation rules (must exit 2 on violation):
+- `shard_count` must be >0
+- `shards` must be non-empty array
+- Each shard: `id` must be >=0 and < shard_count, unique; `path` must be non-empty string; `weight` if present must be >0, default 1 if missing
+- `rate_limit` optional default `{"messages_per_second":5,"burst":10}` where messages_per_second may be float or int, positive; burst positive
 - `presence_ttl_seconds` optional default 60
-- `ops_log`, `private_path`, `presence_path`, `rate_limit_path`, `counter_path`, `users_path` optional defaults as above
-- **Unknown fields must be ignored** – tolerant: extra fields top-level and inside shards must be ignored, still allow `create-room` succeed. Tests verify `future_field`, `unknown_top_level`, `future_shard_field` ignored.
+- All path fields optional with defaults as shown above
+- Unknown fields at top-level or inside shard objects must be ignored (tolerant parsing): extra fields must not cause failure
+- `shard_count` mismatch with `len(shards)` is lenient (must not crash, may allow)
+- Invalid JSON in config file → exit 2
 
-Validation: bad config (invalid JSON, shard_count≤0, duplicate id, empty path, weight≤0, negative id) → exit2.
+### Sharded Mode Data Files
 
-### Sharded Mode Semantics
-- Rooms sharded via weighted hash of roomID
-- `create-room <roomID>`: idempotent, creates in designated shard, if `global:` prefix creates in ALL shards (broadcast), must handle empty ID exit2
-- `delete-room`, `join`, `leave`, `list-users`, `send`, `get-messages` work across shards: `list-rooms` unions all shards sorted deduped (must handle 200 rooms), `join`/`leave` idempotent even if room not exist in that shard? Actually for normal rooms fail exit2 if room not exist; for global rooms join/leave in all shards. Must handle empty IDs exit2, 20 concurrent joins preserve all 20 sorted, leave all → [] and send after leave fails. `send` requires member else exit2, message via Join, missing message exit2, large message 10KB, special chars `<>&` no escape, Unicode emoji preserved. `get-messages` sorted id asc, nonexist → [] not error, limit latest N? For sharded, pagination is offset: `get-messages <room> [limit] [offset]` limit 0/omit=all, offset 0 default, returns `sorted[offset:offset+limit]` if limit>0 else `[offset:]`, invalid limit/offset exit2, limit zero returns all, performance 1000 and 2000 msgs <2s.
+All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where canonical = `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping, using `SetEscapeHTML(false)` in Go.
 
-- Private messages stored in file at `private_path` wrapper checksum, atomic, global lock, corruption handling, must handle spaces via Join, special chars `<>&` and Unicode, large message 10KB, isolation, both directions, limit/offset pagination, invalid limit exit2.
+- Each shard file (e.g., `/app/data/shard_0.json`): `Data = {"next_id": int64, "rooms": {roomID: {users: []string, messages: []Message}}, "seen_users": {userID: bool}}`
+  - Room object identical to Turn1: must have keys `users` (sorted array) and `messages` (array sorted by id asc)
+- `private_path`: `{"private_messages": []Message}`
+- `presence_path`: `{"<userID>": last_seen_nano}` where map value is int64 nanoseconds from `UnixNano()`, or empty object `{}`
+- `rate_limit_path`: token-bucket map per user. Implementations may store as flat map `{"alice": {"tokens": float, "last_refill": int64}}` or nested; persistence is verified behaviorally and format-agnostically, but file must still use wrapper checksum and atomic writes
+- `counter_path`: `{"next_id": int64}` global counter shared across shards and private messages
+- `users_path`: `{"alice": true, ...}` global seen users
+- `ops_log`: append-only JSON-lines file (not wrapper), each line is a JSON object
 
-### Rate Limiting (extra hard)
+All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command.
 
-- Token-bucket per-user: tokens=burst initially, last_refill=now nano
-- Refill: elapsed=(now - last_refill)/1e9, tokens=min(burst, tokens+elapsed*rate), last_refill=now
-- Consume: if tokens≥1, tokens-=1 allow, persist; else fail rate limited, persist refilled tokens
-- Per-user independent
-- Persistence path `rate_limit_path` wrapper checksum, atomic via CreateTemp+Rename, corruption handling same as other files, global lock `/app/data/global.lock` with cleanup
-- Exit code / stderr: if rate-limited exit1 stderr contains "rate limit" case-insensitive no stdout, must NOT increment message IDs and must NOT append to ops log
-- Tests extra hard: burst2 rate1, 2 succeed, 3rd fails exit1 no side effects, per-user independent (bob succeeds when alice limited), **refill after 1.6s** succeeds, **multiple cycles** 2 succeed fail sleep 1.2s succeed fail sleep 1.2s succeed, persistence across invocations (file contains bucket), corruption handling for rate_limit.json (invalid JSON → bucket reset → send succeeds)
+### Sharded Semantics
 
-### Presence (extra hard)
+- Rooms are assigned to a shard via weighted consistent hashing of roomID. Global rooms with prefix `global:` are broadcast rooms with special handling.
+- `create-room <roomID>`: idempotent exit0, fail exit2 if empty after TrimSpace. For normal rooms, creates entry in designated shard only. For `global:` prefix, creates room in ALL shards (replicated). Must handle empty ID exit2.
+- `delete-room <roomID>`: removes room from its designated shard, or from all shards if global. Prints `true` if existed, `false` otherwise.
+- `join <roomID> <userID>`: For normal rooms, fails exit2 if room does not exist in its shard. For global rooms, operates on all shards (creates membership in each). Idempotent exit0 otherwise. Empty IDs exit2. Tracks global seen_users.
+- `leave <roomID> <userID>`: Idempotent exit0 even if room or user does not exist. For normal rooms, removes from its shard; for global, removes from all shards. After leaving all users, `list-users` must return `[]`. `send` after leaving all must fail exit2.
+- `list-rooms`: unions all shards, deduplicated, sorted lexicographically. Must handle many rooms sorted.
+- `list-users <roomID>`: for normal room, returns users from its shard; for global, unions across shards (since room replicated in all shards) sorted. Exit2 if room does not exist.
+- `send <roomID> <userID> <message>`: Requires membership (user in room) else exit2. Message obtained via `strings.Join(remainingArgs, " ")`, requires message else exit2. For normal room, appends to that shard's room with global unique ID from counter; for global, replicates same message (same ID) to all shards. Prints message JSON. Must handle large messages (10KB), special chars `<>&` without HTML escaping, Unicode emoji preservation.
+- `get-messages <roomID> [limit] [offset]`: Returns messages sorted by id asc. Pagination: `offset` default 0, `limit` default 0 meaning all. If `limit>0`, returns `sorted[offset:offset+limit]`; else returns `[offset:]`. Invalid limit/offset (non-int, negative) → exit2. Nonexistent room → `[]` exit0 (not error). For global rooms, must dedupe by ID (since replicated) and return sorted unique list. Must be efficient for large histories (<2s for 1000+ messages).
+- Private messages stored in `private_path` file, with global lock, atomic, checksum, corruption handling. `send-private <from> <to> <msg>` always allowed (no membership requirement), tracks seen users, message via Join, requires message else exit2, handles spaces, special chars, Unicode, large 10KB.
+- `get-private <u1> <u2> [limit] [offset]`: Both directions, sorted asc, same pagination semantics as `get-messages`, limit/offset validation exit2, limit zero all, isolation between conversation pairs.
 
-- `heartbeat <userID>`: updates last_seen nano in `presence.json` wrapper checksum atomic global lock
-- `get-presence <userID>`: `{"user_id","online":bool,"last_seen":nano,"last_seen_seconds_ago":float}` where `online = now - last_seen <= TTL*1e9`, TTL from config default 60, if never heartbeat online false last_seen0 last_seen_seconds_ago0
-- `list-online`: sorted online users within TTL
-- Tests extra hard: heartbeat→online, **TTL expiry 2s→3s sleep** offline and list-online excludes, **unknown user** returns online false last_seen0, **multiple users TTL** 3 users online, 3s sleep → [] empty, heartbeat bob → [bob], corruption handling for presence.json (checksum mismatch → offline), wrapper checksum strict
+### Rate Limiting
 
-### New Commands (MUST)
+Token bucket per user, single bucket shared across all message sends (`send` and `send-private` share the same quota per user). This is intentional: if a user is rate-limited for `send`, their `send-private` must also be rate-limited.
+
+- State: per user `tokens = burst` initially, `last_refill = now nano`
+- Refill: `elapsed = (now - last_refill)/1e9` seconds, `tokens = min(burst, tokens + elapsed*rate)`, update `last_refill=now`
+- Consume: if `tokens >=1`, `tokens -=1`, allow and persist; else fail rate-limited, persist refilled tokens
+- Per-user independent (bob succeeds when alice limited)
+- Persistence in `rate_limit_path` wrapper checksum, atomic via CreateTemp+Rename, corruption handling: invalid JSON or checksum mismatch → reset bucket (allow next send to succeed)
+- Exit semantics: if rate-limited, exit code 1, stderr must contain case-insensitive "rate limit", no stdout, must NOT increment global `next_id` (counter) and must NOT append to ops log
+- Config: `rate_limit.messages_per_second` may be fractional (e.g., 0.05 means 1 token per 20s), so Go struct should use float64. Using a low rate like 0.05/s with burst 2 should never refill during a burst of fast CLI invocations, which avoids flakiness. Only the dedicated refill test should use rate=1/s.
+
+### Presence
+
+- `heartbeat <userID>`: updates `last_seen` to `UnixNano()` in `presence.json` wrapper checksum, atomic with global lock
+- `get-presence <userID>`: returns JSON `{"user_id": string, "online": bool, "last_seen": int64, "last_seen_seconds_ago": float}` where `online = (now - last_seen) <= TTL*1e9`. TTL from config `presence_ttl_seconds` default 60. If never seen, `online=false`, `last_seen=0`, `last_seen_seconds_ago=0`.
+- `list-online`: sorted array of user_ids where online within TTL
+- Corruption handling: checksum mismatch or invalid JSON → treat as empty (offline), backup and warning similar to other files
+- TTL expiry must be testable with short TTL (2s) and sleep.
+
+### Ops Log
+
+Append-only file at `ops_log` path.
+
+Each line is a JSON object (JSON-lines, not JSON array), with at least:
+- `op`: string operation type, e.g., `create-room`, `delete-room`, `join`, `leave`, `send`, `send-private`, `heartbeat`
+- `ts`: int64 nanoseconds timestamp
+- Additional fields (room, user, etc.) may be present
+
+`ops-log` command:
+- Reads the log file, skips invalid JSON lines, prints warning to stderr containing case-insensitive "corrupt" or "skip" or "warning" for each skipped line
+- Prints remaining valid entries as JSON array (preserving original file order) to stdout, exit0
+- Must handle large log (100 entries)
+- Content must preserve order, and must include entries for `create-room`, `join`, `send`, `send-private` in order of execution
+
+### Snapshot / Restore
+
+- `snapshot <backup_path>`:
+  - Dir mode: if path does not end with `.json` or is an existing directory, `mkdir -p` and copy all shard files (if exist), private, presence, counter, users, rate_limit, ops_log, and config.json into backup dir preserving basename
+  - File mode: if path ends with `.json`, writes combined JSON file with keys `shards` (map shard_id string → ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log` (raw log content or parsed? reference writes parsed arrays). Must include counter exact value
+- `restore <backup_path>`:
+  - Dir mode: copy files back, overwriting, via atomic writes
+  - File mode: reads combined JSON and restores each component via atomic writes
+  - After restore, counter `next_id` must be exactly snapshot value so next send gets expected ID, and post-snapshot mutations (new rooms, users, private msgs) must be gone
+
+### New Commands
 
 ```
-get-shard-id <roomID>        -> int, weighted hash, -1 for global:
-get-shard-path <roomID>      -> path single for normal, comma-separated sorted list for global:
-distribution                 -> JSON map shard_id (string) -> count rooms including global in each shard (1 normal+2 global*4=9 for 3 rooms), handles 200 rooms
-get-messages <roomID> [limit] [offset] -> offset pagination, limit0=all, offset0 default, performance 1000 and 2000 <2s
-get-private <u1> <u2> [limit] [offset] -> offset pagination, isolation, both directions, limit0=all, performance 500 privates + large 500 offset250
+get-shard-id <roomID>        -> prints int shard id, -1 for global: rooms, weighted hash defined below
+get-shard-path <roomID>      -> for normal room, single path; for global: returns comma-separated sorted list of all shard paths (sorted lexicographically)
+distribution                 -> JSON map shard_id (as string) -> count rooms including global rooms counted in each shard (e.g., 1 normal + 2 global * 4 shards = 9 total count across shards)
+get-messages <roomID> [limit] [offset] -> offset pagination as defined
+get-private <u1> <u2> [limit] [offset] -> offset pagination
 heartbeat <userID>           -> updates presence
-get-presence <userID>        -> JSON with online per TTL, unknown returns false last_seen0
-list-online                  -> sorted online within TTL, handles multi-user TTL expiry
-snapshot <backup_path>       -> dir mode: mkdir -p and copy shard files+private+presence+counter+users+rate_limit+ops_log+config; file mode: combined JSON file with shards map, private, presence, rate_limit, counter, users, ops_log
-restore <backup_path>        -> dir and file modes restore all files via atomic writes, must restore counter next_id exactly so next send gets expected ID, post-snapshot mutations gone
-ops-log                      -> prints ops.log as JSON array, skips invalid JSON lines with warning stderr "corrupt"/"skip"/"warning", preserves order, content checks op types (create-room, join, send, send-private) order, large 100 ops
+get-presence <userID>        -> JSON with online per TTL, unknown returns false last_seen 0
+list-online                  -> sorted online users within TTL
+snapshot <backup_path>       -> creates backup dir or file
+restore <backup_path>        -> restores from backup
+ops-log                      -> prints ops.log as JSON array, skips invalid lines with warning
 ```
 
-Help must contain: `create-room`, `delete-room`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-presence`, `list-online`, `snapshot`, `restore`, `ops-log`
-Bare no args → help exit0.
+Help must contain keywords: `create-room`, `delete-room`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-presence`, `list-online`, `snapshot`, `restore`, `ops-log`. Bare no args → help exit0.
 
-### Weighted Sharding Algorithm (MUST)
+### Weighted Sharding Algorithm
 
 - Weight default 1 if missing, must be >0 else invalid config exit2
 - Total weight = sum weights
-- Hash: MD5 bytes, big-endian int: Python `int(md5(key.encode()).hexdigest(),16)`
+- Hash: MD5 of roomID bytes, interpreted as big-endian integer: Python `int(hashlib.md5(key.encode()).hexdigest(),16)`, Go equivalent using `math/big` `SetBytes(md5.Sum([]byte(key))[:])`
 - `weighted_index = hashInt % totalWeight`
-- Iterate shards sorted by id asc subtracting weight: if weighted_index < shard.weight → pick that shard id else subtract
-- Example: 0:w1,1:w2,2:w1,3:w1 total5 → 0→0,1→1,2→1,3→2,4→3
-- `global:` prefix → -1 broadcast, `get-shard-path` returns comma-separated sorted list of all shard paths
+- Iterate shards sorted by id asc subtracting weight: if weighted_index < shard.weight → pick that shard id else subtract weight and continue
+- Example: shards [{id0,w1},{id1,w2},{id2,w1},{id3,w1}] total 5 → mapping: index 0→0, 1→1, 2→1, 3→2, 4→3
+- `global:` prefix → shard id -1 broadcast, get-shard-path returns comma-separated sorted list of all shard paths
 
-### Pagination – Extra Hard
+### Pagination
 
-- `get-messages <roomID> [limit] [offset]`: limit0=all, offset0 default, `sorted[offset:offset+limit]` if limit>0 else `[offset:]`
-- Similarly `get-private`
+- `get-messages <roomID> [limit] [offset]`: limit 0 or omitted → all, offset 0 default, returns `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]`
+- Same for `get-private`
 - Must handle spaces via Join
-- Must work for 50, 500, 1000, 2000 messages quickly (<2s) – O(n) slicing not O(n^2), large history tests 1000 bulk500 and 2000 bulk1000
-- Global ID monotonic: pagination preserves global ID order
+- Must be O(n) slicing not O(n²), performance <2s for 1000+ messages
 
-### Snapshot/Restore – Extra Hard
+### Integrity & Concurrency
 
-- `snapshot <backup_path>`: dir mode (no .json suffix or existing dir): mkdir -p, copy each shard file (if exists), private_path, presence_path, counter_path, users_path, rate_limit_path, ops_log into backup dir basename preserved plus config; file mode (path ends with .json): writes combined JSON file with keys shards map (shard_id->ShardFileData), private, presence, rate_limit, counter, users, ops_log
-- `restore <backup_path>`: dir mode copy files back overwrite, file mode reads combined JSON and restores each component via atomic writes; after restore private, presence, counter next_id, users, rate_limit, ops_log must be exactly as snapshot time (tested via exact file content equality and that post-snapshot mutated data gone, list-all-users no dave, list-rooms no newroom, and next send gets expected ID counter_before)
-- Exit0, must handle global lock
-
-### Integrity & Concurrency – Extra Hard (60 tests)
-
-- Persistence files must use wrapper `{"data":..., "checksum":...}` checksum MD5 canonical `json.dumps(data, sort_keys=True, separators=(',',':'))` `SetEscapeHTML(false)`, atomic via CreateTemp+Rename, tests verify checksum for all sharded files strict
-- Corruption handling for all files: invalid JSON → backup `<path>.corrupt.<nanosec>` integer, stderr warning "corrupt" or "checksum", recreate empty valid file. Tests for shard files, private.json, rate_limit.json, presence.json, etc.
-- Missing checksum and mismatch → corruption handling
-- Atomic behavior extra hard:
-  - Same room: 20 concurrent sends, file must remain valid JSON, IDs unique, no partial writes, preserve **all 20 messages** (extra hard), global.lock cleaned
-  - Different rooms: 20 concurrent sends to 20 different rooms hashing to different shards must preserve **all 20** with unique global IDs (multi-shard atomic via global lock)
-- Stdlib-only imports, advisory CreateTemp+Rename
-- Ops-log invalid line skipping with warning, order preserved, content order and large 100 ops
-- Config validation and unknown-field tolerance: malformed configs exit2, unknown fields ignored, defaults for missing optional, shard_count mismatch lenient not crash
-- Weighted distribution 20 exact, 50 tolerance, 100 tolerance (40% weight)
-- Global broadcast: create in all shards, send replicates same ID to all shards, get-messages dedupes by ID (1 msg for global, 5 for multiple), distribution counts global in each shard
-- Spaces handling: message content with spaces via Join remaining args (tested for both room and private sharded, 10KB large message)
-- Edge: empty room/user ID exit2, missing message exit2, invalid limit/offset exit2, nonexist returns [], leave all empty, private special chars `<>&` and Unicode
+- All persistence files must use wrapper checksum MD5 canonical `json.dumps(data, sort_keys=True, separators=(',',':'))` `SetEscapeHTML(false)`
+- Atomic via CreateTemp+Rename, file locking with retry, lock cleanup
+- Corruption handling for all files as described
+- Concurrent behavior:
+  - Same room concurrent sends must preserve all messages with unique global IDs, file must remain valid JSON during concurrent execution, no lock files left
+  - Different rooms concurrent sends hashing to different shards must preserve all with unique IDs using global lock to avoid counter races
+  - Concurrent joins must preserve all users sorted
 
 ### Exit Codes
-0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, empty IDs, invalid limit, missing message). Leave idempotent exit0 even if room not exist.
+0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, empty IDs, invalid limit/offset, missing message). Leave idempotent exit0 even if room not exist.
 
 ### Examples
 ```bash
@@ -143,19 +183,5 @@ go build -o ./chat-server .
 ./chat-server --config /app/config.json list-online
 ./chat-server --config /app/config.json snapshot /tmp/backup
 ./chat-server --config /app/config.json restore /tmp/backup
+./chat-server --config /app/config.json ops-log
 ```
-
-Implement at `/app`.
-
-### Success – Extra Hard (60 tests)
-- Turn1 features still work in sharded mode, including spaces Join, global ID monotonic, checksum strict all files, atomic all 20 concurrent same+diff rooms+20 joins, lock cleanup, 200 rooms, 1000 history, Unicode, special chars
-- Weighted sharding correct, global broadcast replication dedup, distribution counts global*shard_count, 20 exact, 50 and 100 tolerance
-- Pagination extra hard: 50, 500, 1000, 2000 msgs offset for both get-messages and get-private, performance <2s
-- Snapshot/restore dir and file modes all files+counter exact, post-mutation gone
-- Presence: heartbeat online, TTL expiry 3s offline, unknown user false last_seen0, multi-user TTL, wrapper checksum+corruption
-- Rate limiting: burst2 rate1, 2 succeed 3rd fails exit1 no side effects per-user independent, refill 1.6s, multiple cycles 1.2s, persistence, corruption handling
-- Config: invalid JSON, shard_count≤0, duplicate, empty path, weight≤0, negative id → exit2, unknown fields tolerated, defaults, mismatch lenient
-- Ops-log: invalid skipping warning, content order, large 100 ops
-- Help contains all keywords, bare no args → help exit0
-- Concurrent: 20 same room all 20, 20 diff rooms all 20, 20 joins all 20 with unique IDs – extra hard
-- 60 tests extra hard, oracle 100% but low model pass rate

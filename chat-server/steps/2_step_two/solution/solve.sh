@@ -62,8 +62,8 @@ type Shard struct {
 }
 
 type RateLimitConfig struct {
-	Burst             int `json:"burst"`
-	MessagesPerSecond int `json:"messages_per_second"`
+	Burst             int     `json:"burst"`
+	MessagesPerSecond float64 `json:"messages_per_second"`
 }
 
 type Config struct {
@@ -860,7 +860,7 @@ func getShardIDForRoom(roomID string, cfg Config) int {
 
 func checkRateLimit(userID string, cfg Config, rateLimitPath string) (bool, error) {
 	// load rate limit config
-	rate := 5
+	rate := 5.0
 	burst := 10
 	if cfg.RateLimit != nil {
 		if cfg.RateLimit.MessagesPerSecond > 0 {
@@ -887,7 +887,7 @@ func checkRateLimit(userID string, cfg Config, rateLimitPath string) (bool, erro
 	// refill
 	elapsedSec := float64(now-bkt.LastRefill) / 1e9
 	if elapsedSec > 0 {
-		bkt.Tokens += elapsedSec * float64(rate)
+		bkt.Tokens += elapsedSec * rate
 		if bkt.Tokens > float64(burst) {
 			bkt.Tokens = float64(burst)
 		}

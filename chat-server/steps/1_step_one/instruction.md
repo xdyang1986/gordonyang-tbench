@@ -1,6 +1,6 @@
-# Turn 1: Chat Server Core Communication (Go) – Extra Hard (56 tests)
+# Turn 1: Chat Server Core Communication (Go)
 
-We need a production-grade chat server for team collaboration. Build core chat communication functionality in Go with durable persistence and integrity. This turn is extra hard: 56 tests, 20 concurrent all 20, 1000-msg history, 200 rooms, checksum strict, spaces Join, global ID, edge validation, Unicode.
+We need a production-grade chat server for team collaboration. Build core chat communication functionality in Go with durable persistence and integrity.
 
 Data directory `/app/data/` writable, default persistence `/app/data/chat.json`.
 
@@ -8,80 +8,91 @@ Data directory `/app/data/` writable, default persistence `/app/data/chat.json`.
 
 Stdlib only: `go list -f '{{join .Imports " "}}' .` must contain no dotted imports (only stdlib). `go.mod` must have no external require.
 
-### CLI (MUST - Extra Hard)
+### CLI
 
-Global: `--data` default `/app/data/chat.json`
+Global flag: `--data` default `/app/data/chat.json`
 
-Help: bare binary no args must print help containing keywords `create-room`, `delete-room`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `data`, `checksum` exit0. `--help`, `-h`, `help` also help exit0. Unknown command → exit2, missing required args → exit2, empty roomID or userID → exit2, invalid limit → exit2, missing message → exit2.
+Help: bare binary no args must print help containing keywords `create-room`, `delete-room`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `data`, `checksum` exit0. `--help`, `-h`, `help` also help exit0. Unknown command → exit2, missing required args → exit2, empty roomID or userID (after TrimSpace) → exit2, invalid limit → exit2, missing message → exit2.
 
 Commands:
 ```
-create-room <roomID>              -> idempotent exit0, fail exit2 if empty, handles 200 rooms sorted
-delete-room <roomID>              -> prints true/false, removes room and its messages, exit0 even if not exist, join after delete fails exit2, does not clear seen_users nor reset next_id except after corruption reset to 1
-list-rooms                        -> JSON array sorted
-join <roomID> <userID>            -> idempotent exit0, fail exit2 if room not exist or empty args, 20 concurrent joins different users must preserve all 20 sorted, tracks seen_users
-leave <roomID> <userID>           -> idempotent exit0 even if room/user not exist, after leaving all list-users [] and send after leave fails exit2
+create-room <roomID>              -> idempotent exit0, fail exit2 if empty after TrimSpace
+delete-room <roomID>              -> prints true/false, removes room and its messages, exit0 even if not exist, does not clear seen_users nor reset next_id except after corruption recovery
+list-rooms                        -> JSON array sorted lexicographically
+join <roomID> <userID>            -> idempotent exit0, fail exit2 if room not exist or empty args after TrimSpace, tracks seen_users
+leave <roomID> <userID>           -> idempotent exit0 even if room/user not exist
 list-users <roomID>               -> JSON array sorted, exit2 if room not exist
-send <roomID> <userID> <message>  -> sends message, user must be member else exit2, prints JSON, message via strings.Join remaining args (requires message else exit2), special chars <>& no HTML escape (raw file contains "<"), Unicode emoji 🌍🚀😀 preserved, newlines/tabs preserved, large message 10KB handled
-get-messages <roomID> [limit]     -> JSON array oldest first sorted by id asc, limit optional integer ≥0, 0/omit=all, if limit given returns latest N, if room not exist returns [] exit0, invalid limit exit2, limit zero returns all
-send-private <from> <to> <msg>    -> sends private via Join, requires message else exit2, tracks users, special chars and Unicode
-get-private <u1> <u2> [limit]     -> JSON array private both directions sorted asc, limit latest N, invalid limit exit2, limit zero returns all
-list-all-users                    -> JSON array sorted unique ever seen even after delete
+send <roomID> <userID> <message>  -> sends message, user must be member else exit2, prints JSON, message via strings.Join remaining args (requires message else exit2), special chars <>& must not be HTML-escaped in file or output, Unicode preservation required, large messages must be handled
+get-messages <roomID> [limit]     -> JSON array oldest first sorted by id asc, limit optional integer ≥0, 0/omit=all (return all), if limit given returns latest N (suffix), if room not exist returns [] exit0, invalid limit exit2, limit zero returns all
+send-private <from> <to> <msg>    -> sends private message via Join, requires message else exit2, tracks seen users for both parties, special chars and Unicode preserved
+get-private <u1> <u2> [limit]     -> JSON array private messages both directions sorted asc by id, limit latest N, invalid limit exit2, limit zero returns all
+list-all-users                    -> JSON array sorted unique ever seen even after room deletion
 ```
 
-Message JSON room: `{"id":1,"room_id":"general","from":"alice","content":"hi","timestamp":...}`
-Private: `{"id":2,"from":"alice","to":"bob","content":"hi","timestamp":...}`
-- IDs globally incrementing int64 starting at 1 unique across room+private monotonic interleaved 1,2,3,4, persists across restarts (20 room+private → next_id 41) and after many ops, not reset on delete except after corruption reset to 1
-- Timestamp `time.Now().UnixNano()`
+Message JSON:
+- Room: `{"id": int64, "room_id": "general", "from": "alice", "content": "hi", "timestamp": int64}`
+  Timestamp is `time.Now().UnixNano()`.
+- Private: `{"id": int64, "from": "alice", "to": "bob", "content": "hi", "timestamp": int64}`
 
-### Persistence with Integrity – Explicit File Format (MUST - Extra Hard)
+IDs: globally incrementing int64 starting at 1, unique across room and private messages, monotonic interleaved. Example: room1, priv1, room2, priv2 → ids 1,2,3,4. `next_id` persists across restarts and is not reset on delete; only after corruption recovery it resets to 1. The next send after many ops must have id == previous next_id.
 
-File at `--data` must use wrapper `{"data":{rooms, private_messages, next_id, seen_users}, "checksum": md5 canonical}` canonical = `json.dumps(data, sort_keys=True, separators=(',',':'))` no HTML escaping – Go must use `SetEscapeHTML(false)` for checksum and file write. Raw file must contain "<" for special chars and emoji.
+### Persistence with Integrity – Explicit File Format
 
-- On write: atomic via `os.CreateTemp` same dir + `os.Rename` plus file lock `<data>.lock` `O_CREATE|O_EXCL` retry loop 5ms 2000 tries + cleanup after each command (lock file must not remain)
-- Behavioral extra hard (reference gets 20/20):
-  - Same room: 20 concurrent sends, file never invalid JSON during concurrent, must preserve all 20 messages, IDs unique
-  - Different rooms: 20 parallel sends to 20 different rooms must preserve all 20, IDs unique
-  - Concurrent joins: 20 concurrent joins different users same room must preserve all 20 sorted
-  - Concurrent mixed: persistence across restarts with many ops, room IDs with dash/underscore/dot/colon
-- Spaces via Join: must use `strings.Join(remainingArgs, " ")` for send and send-private – tests pass message as multiple separate args (Hello World with spaces)
-- Global ID uniqueness interleaved + large message 10KB + Unicode emoji + newlines/tabs
-- Large history **1000 messages** latest N (`get-messages general 10` → bulk990-999) performance <2s, all 1000 retrievable, plus 200 rooms sorted
-- Edge validation: empty room/user ID exit2, missing message exit2, invalid limit (`-1, abc, -100`) exit2 for both get-messages and get-private, limit zero returns all, nonexist room get-messages [] not error, list-users after leaving all → [], join after delete fails exit2, send after leave fails exit2, large number of rooms 200 sorted, concurrent joins 20, next_id after corruption reset to 1
+File at `--data` must use wrapper `{"data": <StoreData>, "checksum": "<md5 hex>"}` where checksum is MD5 of canonical JSON: `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping. In Go, `json.Encoder.SetEscapeHTML(false)` must be used both for checksum computation and for file write, so raw file must contain literal "<" and emoji characters, not `\u003c` or escaped unicode.
 
-On read: missing file → empty store, empty file → empty store, wrapper missing/empty checksum or mismatch or invalid JSON → corruption: backup `<original>.corrupt.<nanosec>` integer, stderr warning "corrupt" or "checksum", recreate empty valid wrapper.
+StoreData shape (keys sorted for checksum, Go struct tags must match):
+```json
+{
+  "next_id": 1,
+  "private_messages": [],
+  "rooms": {
+    "general": {
+      "users": ["alice", "bob"],
+      "messages": [ { "id":1, "room_id":"general", ... } ]
+    }
+  },
+  "seen_users": { "alice": true, "bob": true }
+}
+```
+- `next_id`: int64
+- `private_messages`: array of private Message objects
+- `rooms`: map from roomID string to object:
+  - `users`: JSON array of strings, sorted and deduplicated
+  - `messages`: JSON array of room messages, sorted by id asc
+- `seen_users`: map/object from userID to true (presence of key indicates user has been seen via join or private message). Must persist even after room deletion.
 
-### Business Rules
-- create-room idempotent, empty ID exit2, handles 200 rooms sorted
-- delete-room true/false, does not clear seen_users nor reset next_id except after corruption, join after delete fails
-- join idempotent, fail exit2 if room not exist or empty args, 20 concurrent joins preserve all 20 sorted, tracks seen_users
-- leave idempotent exit0 even if room/user not exist, leave all → list-users [] and send after leave fails
-- send: member else exit2, message via Join, requires message else exit2, special chars no escape, Unicode, newlines/tabs, 10KB
-- get-messages: sorted asc, nonexist → [], limit latest N, limit zero → all, invalid limit exit2
-- list-rooms, list-users, list-all-users sorted, 200 rooms
-- send-private always allowed, tracks users, Join, special chars, Unicode, 10KB
-- get-private both directions sorted, limit latest N, limit zero all, invalid limit exit2
-- list-all-users union ever seen even after delete
+On write: atomic via `os.CreateTemp` in same directory + `os.Rename` plus file lock `<data>.lock` using `O_CREATE|O_EXCL` retry loop 5ms, 2000 tries, with cleanup after each command (lock file must not remain). Global ordering must be preserved under concurrent execution.
 
-### Integrity Coverage (56 tests extra hard)
-- checksum strict, mismatch/missing/invalid JSON backup integer nanosec, stderr warnings
-- atomic all 20 same room, diff rooms all 20, concurrent joins 20, file lock cleanup
-- stdlib only, advisory CreateTemp/Rename
-- special chars room+private no escape, Unicode emoji, newlines/tabs, large message 10KB
-- global ID uniqueness interleaved, next_id persists, next_id after corruption reset, persistence across many ops 20 room+private → next_id 41
-- large history 1000 perf latest N, 200 rooms sorted, limit zero all, nonexist [], leave all [], join after delete fails, send after leave fails, room ID with dash/underscore/dot/colon
-- edge: empty room/user ID exit2, missing message exit2, invalid limit exit2 (negative, non-int) for room and private
-- 56 tests extra hard: naive WriteFile, per-room counter, args[2] fails
+On read:
+- Missing file → empty store `{"next_id":1,"private_messages":[],"rooms":{},"seen_users":{}}`
+- Empty file (TrimSpace empty) → empty store
+- Wrapper missing `checksum`, or checksum empty, or checksum mismatch, or invalid JSON → corruption recovery:
+  - Backup original file to `<original>.corrupt.<nanosec>` where `<nanosec>` is integer from `time.Now().UnixNano()` (must be digits only)
+  - Write to stderr a warning containing case-insensitive "corrupt" or "checksum"
+  - Recreate empty valid wrapper with correct checksum
+
+Concurrency: The file must never be observed as invalid JSON during concurrent operations. Parallel sends to same room and to different rooms, as well as parallel joins, must preserve all messages/users with unique IDs.
+
+Edge handling:
+- Empty roomID or userID after TrimSpace → exit2
+- `join` fails exit2 if room does not exist, otherwise idempotent
+- `leave` idempotent exit0 even if room or user does not exist; after leaving all users, `list-users` returns `[]`; `send` after leave fails exit2
+- `delete-room` prints `true` if deleted, `false` if not exist; after delete, `join` fails exit2
+- `get-messages` for nonexistent room returns `[]` exit0, not error
+- Invalid limit (non-integer, negative) → exit2 for both `get-messages` and `get-private`
+- Limit zero means return all
+- Message content must be obtained via `strings.Join(remainingArgs, " ")` to support spaces
+- Must preserve `<>&` without HTML escaping and preserve Unicode emoji and newlines/tabs
+- Must handle large messages (10KB) and large histories efficiently (<2s for 1000 messages)
 
 ### Exit Codes
-0 success, 1 I/O error, 2 invalid input. Leave nonexist exit0.
+0 success, 1 I/O error, 2 invalid input. `leave` and `delete-room` for nonexistent targets still exit0 (with appropriate output), but `join` and `send` fail with exit2 for invalid state.
 
 ### Constraints
 - Go stdlib only, build via `go build -o <binary> .`
-- Handle `<>&` without escaping for both room and private, plus Unicode
-- Atomic CreateTemp+Rename + file lock + cleanup, all 20 concurrent
-- Use /tmp/codimango for temp
-- Respect --data flag default
+- Atomic CreateTemp+Rename + file lock + cleanup required for correctness under concurrency
+- Use `/tmp/codimango` for temp if needed
+- Respect `--data` flag default
 
 ### Examples
 ```bash
@@ -96,13 +107,3 @@ go build -o ./chat-server .
 ./chat-server --data /app/data/chat.json list-users general
 ./chat-server --help
 ```
-
-Implement at `/app` – Turn1.
-
-### Success Criteria – Extra Hard (56 tests)
-- Binary builds, help contains keywords, bare help, unknown exit2, empty IDs exit2, invalid limit exit2, missing message exit2, nonexist [], leave all [], join after delete fails, send after leave fails
-- Rooms sorted, idempotent, delete true/false, 200 rooms, isolation, room ID special chars dash/underscore/dot/colon
-- Joins idempotent, fail exit2 if nonexist, 20 concurrent joins preserve all 20 sorted, leaves idempotent, list-users sorted
-- Messages ordered globally monotonic interleaved, limit latest N, limit zero all, private isolation, list-all-users sorted persisting after delete, 1000 history perf <2s, 400/500 previously 1000 now, Unicode emoji, newlines/tabs, large message 10KB
-- Integrity: strict wrapper checksum canonical no HTML escape room+private, backup integer nanosec, stderr warnings, stdlib-only, atomic all 20 same room + all 20 diff rooms + 20 concurrent joins, lock cleanup, spaces Join both, private special chars
-- 56 tests extra hard, naive fails but proper locking+Join+global counter passes
