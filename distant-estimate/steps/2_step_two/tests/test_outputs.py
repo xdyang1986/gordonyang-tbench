@@ -2187,3 +2187,174 @@ def test_superseded_edge_malformed_still_invalid_step2():
         assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
     finally:
         os.unlink(gp)
+
+
+def test_f1_with_traffic_per_direction_raw_revives():
+    # F1: with traffic, survey-log resolves per direction, not per unordered
+    # Log: A->B 10, B->A 2. Without traffic both 2, with traffic A->B 10, B->A 2
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 2},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp("[]")
+    try:
+        # without traffic: unordered last wins 2 both ways
+        proc_no = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc_no.returncode == 0
+        out_no = json.loads(proc_no.stdout.decode().strip())
+        assert out_no["distance"] == 2, (
+            f"without traffic unordered should be 2, got {out_no['distance']}"
+        )
+        # with traffic (even empty): per direction, A->B should be 10
+        proc_yes = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc_yes.returncode == 0
+        out_yes = json.loads(proc_yes.stdout.decode().strip())
+        assert out_yes["distance"] == 10, (
+            f"with traffic per-direction should revive 10, got {out_yes['distance']}"
+        )
+        # opposite direction B->A should be 2 with traffic
+        proc_rev = run(["--graph", gp, "--from", "B", "--to", "A", "--traffic", tp])
+        assert proc_rev.returncode == 0
+        out_rev = json.loads(proc_rev.stdout.decode().strip())
+        assert out_rev["distance"] == 2
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_f1_traffic_entry_revives_superseded_raw():
+    # Log: A->B 10, B->A 100, A->B 3 (last per unordered is 3)
+    # Without traffic: A->B 3, B->A 3
+    # With traffic: A->B 3, B->A 100 (revives 100)
+    # Traffic entry for B->A with factor 1 should see raw 100 when traffic present
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 100},
+            {"from": "A", "to": "B", "distance": 3},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps({"traffic": [{"from": "B", "to": "A", "factor": 1}]}))
+    try:
+        proc_no = run(["--graph", gp, "--from", "B", "--to", "A"])
+        assert proc_no.returncode == 0
+        out_no = json.loads(proc_no.stdout.decode().strip())
+        assert out_no["distance"] == 3, (
+            f"without traffic unordered last 3, got {out_no['distance']}"
+        )
+        proc_yes = run(["--graph", gp, "--from", "B", "--to", "A", "--traffic", tp])
+        assert proc_yes.returncode == 0
+        out_yes = json.loads(proc_yes.stdout.decode().strip())
+        assert out_yes["distance"] == 100, (
+            f"with traffic per-direction should be 100, got {out_yes['distance']}"
+        )
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_f1_raw_along_effective_direction_dependent():
+    # Raw becomes direction-dependent with traffic, so raw along effective best differs per direction
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 20},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2},
+            {"from": "B", "to": "A", "factor": 2},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc_ab = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        proc_ba = run(["--graph", gp, "--from", "B", "--to", "A", "--traffic", tp])
+        assert proc_ab.returncode == 0 and proc_ba.returncode == 0
+        out_ab = json.loads(proc_ab.stdout.decode().strip())
+        out_ba = json.loads(proc_ba.stdout.decode().strip())
+        # A->B raw 10 eff 20, B->A raw 20 eff 40, direction dependent raw
+        assert out_ab["distance"] == 10
+        assert out_ba["distance"] == 20
+        assert out_ab["distance"] != out_ba["distance"]
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_f2_zone_toll_once_per_route_reenter_free():
+    # F2: toll at most once per route, re-entering paid zone free
+    # A-B f2 d5, B-C f1 d7, C-D f2 d10 (re-enter f2)
+    # First f2 pay5, f1 pay7, re-enter f2 free (not 10) => tolls 12, eff = raw*factor sum +12
+    # Raw 10 each, factor 2,1,2 => raw*factor =20+10+20=50 +12=62
+    # Per-entry (not once-per-route) would be 5+7+10=22 eff 72
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "C", "distance": 10},
+            {"from": "C", "to": "D", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2, "delay": 5},
+            {"from": "B", "to": "C", "factor": 1, "delay": 7},
+            {"from": "C", "to": "D", "factor": 2, "delay": 10},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "D", "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        # raw*factor sum = 10*2 +10*1+10*2=50
+        # once-per-route tolls: f2 first 5 + f1 7 + re-enter f2 free =12 => eff 62
+        assert math.isclose(out["effective_distance"], 62, abs_tol=1e-6), (
+            f"expected 62, got {out['effective_distance']}"
+        )
+        assert out["distance"] == 30
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_f2_distinct_factor_bound_max_4_invalid():
+    # At most 4 distinct factors per manifest, 5 distinct -> invalid
+    graph = {
+        "nodes": ["A", "B", "C", "D", "E"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 1},
+            {"from": "B", "to": "C", "distance": 1},
+            {"from": "C", "to": "D", "distance": 1},
+            {"from": "D", "to": "E", "distance": 1},
+            {"from": "A", "to": "E", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 1.1},
+            {"from": "B", "to": "C", "factor": 1.2},
+            {"from": "C", "to": "D", "factor": 1.3},
+            {"from": "D", "to": "E", "factor": 1.4},
+            {"from": "A", "to": "E", "factor": 1.5},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "E", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)

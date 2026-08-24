@@ -3,7 +3,7 @@
 set -euo pipefail
 mkdir -p /app
 if [ ! -f /app/main.go ]; then
-  echo "[M2 layer] M1 main.go missing – bootstrapping M1 base with T1-T4"
+  echo "[M2 layer] M1 main.go missing – bootstrapping M1 base T1-T4 unordered"
   cat > /app/go.mod <<'GOMOD'
 module router
 go 1.22
@@ -31,12 +31,8 @@ type BatchOut struct{ Source string `json:"source"`; Destination string `json:"d
 func printHelp() { fmt.Println(`Usage: router --graph <PATH> --from <NODE> --to <NODE> [--requests <PATH>]`) }
 
 func comparePaths(a, b []string) int {
-    ml := len(a)
-    if len(b) < ml { ml = len(b) }
-    for i := 0; i < ml; i++ {
-        if a[i] < b[i] { return -1 }
-        if a[i] > b[i] { return 1 }
-    }
+    ml := len(a); if len(b) < ml { ml = len(b) }
+    for i := 0; i < ml; i++ { if a[i] < b[i] { return -1 }; if a[i] > b[i] { return 1 } }
     if len(a) < len(b) { return -1 }
     if len(a) > len(b) { return 1 }
     return 0
@@ -130,16 +126,13 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if t == "" || t == "null" || !strings.HasPrefix(t, "{") { return nil, nil, false }
         var eMap map[string]json.RawMessage
         if err := json.Unmarshal(raw, &eMap); err != nil { return nil, nil, false }
-        fromRaw, okF := eMap["from"]
-        toRaw, okT := eMap["to"]
-        distRaw, okD := eMap["distance"]
+        fromRaw, okF := eMap["from"]; toRaw, okT := eMap["to"]; distRaw, okD := eMap["distance"]
         if !okF || !okT || !okD { return nil, nil, false }
         var fromStr, toStr string
         if json.Unmarshal(fromRaw, &fromStr) != nil || json.Unmarshal(toRaw, &toStr) != nil { return nil, nil, false }
         if containsFFFD(fromStr) || containsFFFD(toStr) { return nil, nil, false }
         var distVal float64
         if json.Unmarshal(distRaw, &distVal) != nil || strings.TrimSpace(fromStr) == "" || strings.TrimSpace(toStr) == "" || fromStr == toStr || !nodeSet[fromStr] || !nodeSet[toStr] || distVal <= 0 || math.IsNaN(distVal) || math.IsInf(distVal, 0) { return nil, nil, false }
-        // T2: superseded still validated (validated above before overwriting), last wins
         adj[fromStr][toStr] = distVal
         adj[toStr][fromStr] = distVal
     }
@@ -281,10 +274,10 @@ func main() {
     }
 }
 M1GO
-  cd /app && go build -o router . && echo "[M2 layer] Built M1 base T1-T4"
+  cd /app && go build -o router . && echo "[M2 layer] Built M1 base T1-T4 unordered"
   cp /app/main.go /app/main.go.m1
 else
-  echo "[M2 layer] M1 main.go found ($(wc -c < /app/main.go) bytes) – layering traffic"
+  echo "[M2 layer] M1 main.go found ($(wc -c < /app/main.go) bytes) – layering traffic F1/F2"
   cp /app/main.go /app/main.go.m1.bak
   rm -f /app/traffic.go
 fi
@@ -312,17 +305,16 @@ type TrafficParsed struct {
     Delay  float64
 }
 
+var factorToBit map[uint64]int
+
 func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[string]float64) (map[string]TrafficParsed, bool) {
     if path == "" {
+        factorToBit = map[uint64]int{math.Float64bits(1.0): 0}
         return make(map[string]TrafficParsed), true
     }
     data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, false
-    }
-    if hasDuplicateKeys(data) {
-        return nil, false
-    }
+    if err != nil { return nil, false }
+    if hasDuplicateKeys(data) { return nil, false }
     var tmpMap map[string]json.RawMessage
     var rawEntries []json.RawMessage
     if err := json.Unmarshal(data, &tmpMap); err == nil {
@@ -364,17 +356,43 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
         key := fromStr + "|" + toStr
         factorMap[key] = TrafficParsed{Factor: factorVal, Delay: delayVal}
     }
+    // F2: at most 4 distinct factors per manifest
+    distinct := make(map[uint64]struct{})
+    for _, tp := range factorMap {
+        distinct[math.Float64bits(tp.Factor)] = struct{}{}
+    }
+    if len(distinct) > 4 { return nil, false }
+    // Build bitmask for all distinct including default 1.0
+    allDistinct := make(map[uint64]struct{})
+    for k := range distinct { allDistinct[k] = struct{}{} }
+    allDistinct[math.Float64bits(1.0)] = struct{}{}
+    factorToBit = make(map[uint64]int)
+    idx := 0
+    for k := range allDistinct {
+        factorToBit[k] = idx
+        idx++
+    }
     return factorMap, true
 }
 
-func getTrafficInfo(from, to string, factorMap map[string]TrafficParsed) (float64, float64, uint64) {
+func getTrafficInfo(from, to string, factorMap map[string]TrafficParsed) (float64, float64, uint64, int) {
     if factorMap != nil {
         key := from + "|" + to
         if tp, ok := factorMap[key]; ok {
-            return tp.Factor, tp.Delay, math.Float64bits(tp.Factor)
+            zb := math.Float64bits(tp.Factor)
+            bit := 0
+            if factorToBit != nil {
+                if v, ok := factorToBit[zb]; ok { bit = v }
+            }
+            return tp.Factor, tp.Delay, zb, bit
         }
     }
-    return 1.0, 0.0, math.Float64bits(1.0)
+    zb := math.Float64bits(1.0)
+    bit := 0
+    if factorToBit != nil {
+        if v, ok := factorToBit[zb]; ok { bit = v }
+    }
+    return 1.0, 0.0, zb, bit
 }
 
 TRAFFIC_EOF
@@ -443,9 +461,10 @@ func comparePaths(a, b []string) int {
 }
 
 type dState struct {
-    node  string
-    zone  uint64
-    fresh bool
+    node     string
+    zone     uint64
+    paidMask uint64
+    fresh    bool
 }
 
 type Item struct {
@@ -521,7 +540,7 @@ func hasDuplicateKeys(data []byte) bool {
 
 func containsFFFD(s string) bool { return strings.ContainsRune(s, '\uFFFD') }
 
-func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bool) {
+func parseGraphNoTraffic(path string) (map[string]map[string]float64, map[string]bool, bool) {
     data, err := os.ReadFile(path)
     if err != nil { return nil, nil, false }
     if hasDuplicateKeys(data) { return nil, nil, false }
@@ -551,9 +570,7 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
         if t == "" || t == "null" || !strings.HasPrefix(t, "{") { return nil, nil, false }
         var eMap map[string]json.RawMessage
         if err := json.Unmarshal(raw, &eMap); err != nil { return nil, nil, false }
-        fromRaw, okFrom := eMap["from"]
-        toRaw, okTo := eMap["to"]
-        distRaw, okDist := eMap["distance"]
+        fromRaw, okFrom := eMap["from"]; toRaw, okTo := eMap["to"]; distRaw, okDist := eMap["distance"]
         if !okFrom || !okTo || !okDist { return nil, nil, false }
         var fromStr, toStr string
         if err := json.Unmarshal(fromRaw, &fromStr); err != nil { return nil, nil, false }
@@ -568,16 +585,89 @@ func parseGraph(path string) (map[string]map[string]float64, map[string]bool, bo
     return adj, nodeSet, true
 }
 
+func parseGraphWithTraffic(path string) (map[string]map[string]float64, map[string]bool, bool) {
+    data, err := os.ReadFile(path)
+    if err != nil { return nil, nil, false }
+    if hasDuplicateKeys(data) { return nil, nil, false }
+    var top map[string]json.RawMessage
+    if err := json.Unmarshal(data, &top); err != nil { return nil, nil, false }
+    nodesRaw, ok := top["nodes"]
+    if !ok { return nil, nil, false }
+    edgesRaw, ok := top["edges"]
+    if !ok { return nil, nil, false }
+    var nodesArr []json.RawMessage
+    if err := json.Unmarshal(nodesRaw, &nodesArr); err != nil || len(nodesArr) == 0 { return nil, nil, false }
+    nodes := make([]string, 0, len(nodesArr))
+    nodeSet := make(map[string]bool)
+    for _, raw := range nodesArr {
+        var s string
+        if err := json.Unmarshal(raw, &s); err != nil || strings.TrimSpace(s) == "" || nodeSet[s] { return nil, nil, false }
+        if containsFFFD(s) { return nil, nil, false }
+        nodeSet[s] = true
+        nodes = append(nodes, s)
+    }
+    var edgesArr []json.RawMessage
+    if err := json.Unmarshal(edgesRaw, &edgesArr); err != nil { return nil, nil, false }
+    orderedLast := make(map[string]float64)
+    unorderedSet := make(map[string]struct{})
+    for _, raw := range edgesArr {
+        t := strings.TrimSpace(string(raw))
+        if t == "" || t == "null" || !strings.HasPrefix(t, "{") { return nil, nil, false }
+        var eMap map[string]json.RawMessage
+        if err := json.Unmarshal(raw, &eMap); err != nil { return nil, nil, false }
+        fromRaw, okFrom := eMap["from"]; toRaw, okTo := eMap["to"]; distRaw, okDist := eMap["distance"]
+        if !okFrom || !okTo || !okDist { return nil, nil, false }
+        var fromStr, toStr string
+        if err := json.Unmarshal(fromRaw, &fromStr); err != nil { return nil, nil, false }
+        if err := json.Unmarshal(toRaw, &toStr); err != nil { return nil, nil, false }
+        if containsFFFD(fromStr) || containsFFFD(toStr) { return nil, nil, false }
+        var distVal float64
+        if err := json.Unmarshal(distRaw, &distVal); err != nil || distVal <= 0 || math.IsNaN(distVal) || math.IsInf(distVal, 0) { return nil, nil, false }
+        if strings.TrimSpace(fromStr) == "" || strings.TrimSpace(toStr) == "" || fromStr == toStr || !nodeSet[fromStr] || !nodeSet[toStr] { return nil, nil, false }
+        orderedKey := fromStr + "|" + toStr
+        orderedLast[orderedKey] = distVal
+        var uk string
+        if fromStr < toStr { uk = fromStr + "|" + toStr } else { uk = toStr + "|" + fromStr }
+        unorderedSet[uk] = struct{}{}
+    }
+    adj := make(map[string]map[string]float64)
+    for _, nd := range nodes { adj[nd] = make(map[string]float64) }
+    for uk := range unorderedSet {
+        parts := strings.Split(uk, "|")
+        if len(parts) != 2 { continue }
+        u := parts[0]; v := parts[1]
+        _, hasUV := orderedLast[u+"|"+v]
+        _, hasVU := orderedLast[v+"|"+u]
+        var dUV, dVU float64
+        if hasUV { dUV = orderedLast[u+"|"+v] }
+        if hasVU { dVU = orderedLast[v+"|"+u] }
+        if hasUV && hasVU {
+            adj[u][v] = dUV
+            adj[v][u] = dVU
+        } else if hasUV {
+            adj[u][v] = dUV
+            adj[v][u] = dUV
+        } else if hasVU {
+            adj[u][v] = dVU
+            adj[v][u] = dVU
+        }
+    }
+    return adj, nodeSet, true
+}
+
 func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficParsed, source, dest string, nodeSet map[string]bool) ([]string, float64, float64, bool) {
     const eps = 1e-9
     if !nodeSet[source] || !nodeSet[dest] { return nil, -1, -1, false }
     if source == dest { return []string{source}, 0, 0, true }
+    if factorToBit == nil {
+        factorToBit = map[uint64]int{math.Float64bits(1.0): 0}
+    }
     bestEff := make(map[dState]float64)
     bestRaw := make(map[dState]float64)
     bestToll := make(map[dState]int)
     bestPath := make(map[dState][]string)
 
-    initSt := dState{node: source, fresh: true}
+    initSt := dState{node: source, fresh: true, paidMask: 0, zone: 0}
     bestEff[initSt] = 0
     bestRaw[initSt] = 0
     bestToll[initSt] = 0
@@ -590,35 +680,56 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
     for pq.Len() > 0 {
         it := heap.Pop(pq).(*Item)
         u := it.st
-
         if be, ok := bestEff[u]; ok {
             if it.eff > be+eps { continue }
             if math.Abs(it.eff-be) <= eps {
-                if br, ok := bestRaw[u]; ok && it.raw > br+eps { continue }
-                if bt, ok := bestToll[u]; ok && math.Abs(it.raw-bestRaw[u]) <= eps && it.tolls > bt { continue }
+                if it.raw > bestRaw[u]+eps { continue }
+                if math.Abs(it.raw-bestRaw[u]) <= eps && it.tolls > bestToll[u] { continue }
                 if bp, ok := bestPath[u]; ok && math.Abs(it.raw-bestRaw[u]) <= eps && it.tolls == bestToll[u] && comparePaths(it.path, bp) > 0 { continue }
             }
         } else { continue }
-
         if u.node == dest { return it.path, it.raw, it.eff, true }
-
         neigh := make([]string, 0, len(adj[u.node]))
         for v := range adj[u.node] { neigh = append(neigh, v) }
         sort.Strings(neigh)
         for _, v := range neigh {
             rawEdge := adj[u.node][v]
-            factor, delay, zone := getTrafficInfo(u.node, v, factorMap)
-            toll := 0.0
-            tollInc := 0
-            if u.fresh || u.zone != zone {
-                toll = delay
-                tollInc = 1
+            factor, delay, zoneBits, bitIdx := getTrafficInfo(u.node, v, factorMap)
+            bitMask := uint64(1) << uint(bitIdx)
+            var toll float64
+            var newPaidMask uint64
+            var tollInc int
+            if u.fresh {
+                if (u.paidMask & bitMask) == 0 {
+                    toll = delay
+                    newPaidMask = u.paidMask | bitMask
+                    if delay > 0 || true {
+                        tollInc = 1
+                    }
+                } else {
+                    toll = 0
+                    newPaidMask = u.paidMask
+                }
+            } else {
+                if u.zone != zoneBits {
+                    if (u.paidMask & bitMask) == 0 {
+                        toll = delay
+                        newPaidMask = u.paidMask | bitMask
+                        tollInc = 1
+                    } else {
+                        toll = 0
+                        newPaidMask = u.paidMask
+                    }
+                } else {
+                    toll = 0
+                    newPaidMask = u.paidMask
+                }
             }
             effEdge := rawEdge*factor + toll
             newEff := it.eff + effEdge
             newRaw := it.raw + rawEdge
             newTolls := it.tolls + tollInc
-            newSt := dState{node: v, zone: zone, fresh: false}
+            newSt := dState{node: v, zone: zoneBits, paidMask: newPaidMask, fresh: false}
             newPath := append(append([]string{}, it.path...), v)
 
             improve := false
@@ -652,12 +763,12 @@ func dijkstra(adj map[string]map[string]float64, factorMap map[string]TrafficPar
 }
 
 type allRes struct {
-    bestRaw map[string]float64
-    bestEff map[string]float64
+    bestRaw  map[string]float64
+    bestEff  map[string]float64
     bestToll map[string]int
-    prev    map[dState]dState
-    has     map[string]bool
-    winner  map[string]dState
+    prev     map[dState]dState
+    has      map[string]bool
+    winner   map[string]dState
 }
 
 func reconstructPath(prev map[dState]dState, source string, destSt dState) []string {
@@ -678,6 +789,9 @@ func reconstructPath(prev map[dState]dState, source string, destSt dState) []str
 
 func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]TrafficParsed, source string, nodeSet map[string]bool) allRes {
     const eps = 1e-9
+    if factorToBit == nil {
+        factorToBit = map[uint64]int{math.Float64bits(1.0): 0}
+    }
     bestEffSt := make(map[dState]float64)
     bestRawSt := make(map[dState]float64)
     bestTollSt := make(map[dState]int)
@@ -694,7 +808,7 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
         return allRes{bestRaw, bestEff, bestToll, prev, has, winner}
     }
 
-    initSt := dState{node: source, fresh: true}
+    initSt := dState{node: source, fresh: true, paidMask: 0, zone: 0}
     bestEffSt[initSt] = 0
     bestRawSt[initSt] = 0
     bestTollSt[initSt] = 0
@@ -712,7 +826,6 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
     for pq.Len() > 0 {
         it := heap.Pop(pq).(*Item)
         u := it.st
-
         if be, ok := bestEffSt[u]; ok {
             if it.eff > be+eps { continue }
             if math.Abs(it.eff-be) <= eps {
@@ -727,18 +840,37 @@ func dijkstraAll(adj map[string]map[string]float64, factorMap map[string]Traffic
         sort.Strings(neigh)
         for _, v := range neigh {
             rawEdge := adj[u.node][v]
-            factor, delay, zone := getTrafficInfo(u.node, v, factorMap)
-            toll := 0.0
-            tollInc := 0
-            if u.fresh || u.zone != zone {
-                toll = delay
-                tollInc = 1
+            factor, delay, zoneBits, bitIdx := getTrafficInfo(u.node, v, factorMap)
+            bitMask := uint64(1) << uint(bitIdx)
+            var toll float64
+            var newPaidMask uint64
+            var tollInc int
+            if u.fresh {
+                if (u.paidMask & bitMask) == 0 {
+                    toll = delay
+                    newPaidMask = u.paidMask | bitMask
+                    tollInc = 1
+                } else {
+                    newPaidMask = u.paidMask
+                }
+            } else {
+                if u.zone != zoneBits {
+                    if (u.paidMask & bitMask) == 0 {
+                        toll = delay
+                        newPaidMask = u.paidMask | bitMask
+                        tollInc = 1
+                    } else {
+                        newPaidMask = u.paidMask
+                    }
+                } else {
+                    newPaidMask = u.paidMask
+                }
             }
             effEdge := rawEdge*factor + toll
             newEff := it.eff + effEdge
             newRaw := it.raw + rawEdge
             newTolls := it.tolls + tollInc
-            newSt := dState{node: v, zone: zone, fresh: false}
+            newSt := dState{node: v, zone: zoneBits, paidMask: newPaidMask, fresh: false}
             newPath := append(append([]string{}, it.path...), v)
 
             improveState := false
@@ -835,11 +967,20 @@ func main() {
     if isFlagPresent("requests") && requestsPath == "" { os.Exit(2) }
     if fromNode == "" { fromNode = sourceAlt }
     if toNode == "" { toNode = destAlt }
-    adj, nodeSet, ok := parseGraph(graphPath)
+
+    usingTraffic := trafficPath != ""
+    var adj map[string]map[string]float64
+    var nodeSet map[string]bool
+    var ok bool
+    if usingTraffic {
+        adj, nodeSet, ok = parseGraphWithTraffic(graphPath)
+    } else {
+        adj, nodeSet, ok = parseGraphNoTraffic(graphPath)
+    }
     if !ok { os.Exit(2) }
     factorMap, ok := parseTraffic(trafficPath, nodeSet, adj)
     if !ok { os.Exit(2) }
-    usingTraffic := trafficPath != ""
+
     if requestsPath != "" {
         data, err := os.ReadFile(requestsPath)
         if err != nil { os.Exit(2) }
@@ -973,5 +1114,5 @@ func main() {
     }
 }
 GOEOF
-cd /app && go build -o router . && echo "Build ok v6 T1-T5 zone toll + last-wins"
-ls -lh /app/main.go /app/traffic.go /app/main.go.m1* 2>/dev/null
+cd /app && go build -o router . && echo "Build ok v7 F1 per-direction raw + F2 once-per-route toll + T1-T5"
+ls -lh /app/main.go /app/traffic.go 2>/dev/null
