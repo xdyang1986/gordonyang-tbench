@@ -14,7 +14,7 @@ if [ -f /app/go.mod ]; then
   ls -lh /app/router 2>&1 | head -n 5 || true
 fi
 
-python3 -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
+python3 -I -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -v
 
 # Parse CTRF under isolated interpreter so sitecustomize cannot kill parser.
 # -S skips site initialization (no sitecustomize), -I drops PYTHONPATH and cwd from sys.path.

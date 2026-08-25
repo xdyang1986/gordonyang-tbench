@@ -49,7 +49,7 @@ Any violation → exit 2 no stdout.
 
 - File must be JSON array (object/string/trailing comma `[{...},]` → invalid).
 - Each element must be object (null/number/string/array → invalid whole file).
-- Each object needs `source`/`destination` or `from`/`to`; prefer `source`/`destination` if both.
+- Each object needs `source`/`destination` or `from`/`to` from single family; mixing families or having both families is invalid (see mixing rule below).
   - Missing key entirely → invalid whole file exit 2.
   - Value must be string (number/null/bool/object/array → invalid). `{}` missing both → invalid. Raw JSON null literal `{"source":null}` → invalid (Go collapses null to "" – check `RawMessage` == "null").
   - Empty `""` or whitespace-only `"   "` present → no route not invalid: output `[]`, `-1`, exit 1 if any, batch continues.

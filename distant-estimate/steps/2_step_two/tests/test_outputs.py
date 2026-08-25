@@ -3143,3 +3143,132 @@ def test_traffic_entry_delay_array_invalid():
     finally:
         os.unlink(gp)
         os.unlink(tp)
+
+
+# --- R06: --source / --destination single-route alias (missing since 52561ef) ---
+
+
+def test_source_destination_alias_single_route_step2():
+    gp = tmp(
+        json.dumps(
+            {
+                "nodes": ["A", "B", "C"],
+                "edges": [
+                    {"from": "A", "to": "B", "distance": 2},
+                    {"from": "B", "to": "C", "distance": 3},
+                ],
+            }
+        )
+    )
+    try:
+        proc = run(["--graph", gp, "--source", "A", "--destination", "C"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "C"]
+        assert math.isclose(out["distance"], 5)
+    finally:
+        os.unlink(gp)
+
+
+def test_source_destination_alias_with_traffic_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 5}]}
+        )
+    )
+    tp = tmp(
+        json.dumps({"traffic": [{"from": "A", "to": "B", "factor": 2, "delay": 3}]})
+    )
+    try:
+        proc_from = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        proc_src = run(
+            ["--graph", gp, "--source", "A", "--destination", "B", "--traffic", tp]
+        )
+        assert proc_from.returncode == 0 and proc_src.returncode == 0
+        out_from = json.loads(proc_from.stdout.decode().strip())
+        out_src = json.loads(proc_src.stdout.decode().strip())
+        assert out_from["path"] == out_src["path"] == ["A", "B"]
+        assert out_from["distance"] == out_src["distance"] == 5
+        assert out_from["effective_distance"] == out_src["effective_distance"] == 13
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_source_destination_alias_equals_syntax_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 7}]}
+        )
+    )
+    try:
+        proc = run([f"--graph={gp}", "--source=A", "--destination=B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 7
+    finally:
+        os.unlink(gp)
+
+
+def test_source_destination_alias_with_traffic_equals_syntax():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 4}]}
+        )
+    )
+    tp = tmp(json.dumps({"traffic": [{"from": "A", "to": "B", "factor": 1.5}]}))
+    try:
+        proc = run(
+            [f"--graph={gp}", "--source=A", f"--destination=B", f"--traffic={tp}"]
+        )
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 4
+        assert math.isclose(out["effective_distance"], 6.0)
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+# --- Extension of null widening (per final suggestion, not required but improves margin) ---
+
+
+def test_nodes_element_null_invalid():
+    gp = tmp('{"nodes": ["A", null], "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_requests_array_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("null")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+
+
+def test_traffic_wrapper_array_contains_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('{"traffic": [null]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)

@@ -209,6 +209,10 @@ func main() {
         data, err := os.ReadFile(requestsPath)
         if err != nil { os.Exit(2) }
         if hasDuplicateKeys(data) { os.Exit(2) }
+        {
+            tt := strings.TrimSpace(string(data))
+            if tt == "null" || len(tt) == 0 || tt[0] != '[' { os.Exit(2) }
+        }
         var rawArr []json.RawMessage
         if json.Unmarshal(data, &rawArr) != nil { os.Exit(2) }
         type pair struct{ src, dst string }
@@ -323,16 +327,29 @@ func parseTraffic(path string, nodeSet map[string]bool, adj map[string]map[strin
     data, err := os.ReadFile(path)
     if err != nil { return nil, false }
     if hasDuplicateKeys(data) { return nil, false }
+    {
+        t := strings.TrimSpace(string(data))
+        if t == "null" { return nil, false }
+    }
     var tmpMap map[string]json.RawMessage
     var rawEntries []json.RawMessage
     if err := json.Unmarshal(data, &tmpMap); err == nil {
         trafRaw, ok := tmpMap["traffic"]
         if !ok { return nil, false }
         if strings.TrimSpace(string(trafRaw)) == "null" { return nil, false }
+        {
+            tt := strings.TrimSpace(string(trafRaw))
+            if tt == "null" || len(tt) == 0 || tt[0] != '[' { return nil, false }
+        }
         if err := json.Unmarshal(trafRaw, &rawEntries); err != nil { return nil, false }
+        if rawEntries == nil { return nil, false }
     } else {
+        {
+            t := strings.TrimSpace(string(data))
+            if t == "null" || len(t) == 0 || t[0] != '[' { return nil, false }
+        }
         if err := json.Unmarshal(data, &rawEntries); err != nil { return nil, false }
-        if rawEntries == nil { rawEntries = []json.RawMessage{} }
+        if rawEntries == nil { return nil, false }
     }
     factorMap := make(map[string]TrafficParsed)
     for _, raw := range rawEntries {
@@ -1009,6 +1026,10 @@ func main() {
         data, err := os.ReadFile(requestsPath)
         if err != nil { os.Exit(2) }
         if hasDuplicateKeys(data) { os.Exit(2) }
+        {
+            t := strings.TrimSpace(string(data))
+            if t == "null" || len(t) == 0 || t[0] != '[' { os.Exit(2) }
+        }
         var rawArr []json.RawMessage
         if err := json.Unmarshal(data, &rawArr); err != nil { os.Exit(2) }
         type pair struct{ src, dst string }

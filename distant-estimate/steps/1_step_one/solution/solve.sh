@@ -409,6 +409,12 @@ func main() {
         if hasDuplicateKeys(data) {
             os.Exit(2)
         }
+        {
+            t := strings.TrimSpace(string(data))
+            if t == "null" || len(t) == 0 || t[0] != '[' {
+                os.Exit(2)
+            }
+        }
         var rawArr []json.RawMessage
         if err := json.Unmarshal(data, &rawArr); err != nil {
             os.Exit(2)

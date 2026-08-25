@@ -1685,3 +1685,59 @@ def test_edge_element_array_invalid():
         assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
     finally:
         os.unlink(gp)
+
+
+# --- R06: --source / --destination single-route alias (missing since 52561ef) ---
+
+
+def test_source_destination_alias_single_route():
+    gp = tmp(
+        json.dumps(
+            {
+                "nodes": ["A", "B", "C"],
+                "edges": [
+                    {"from": "A", "to": "B", "distance": 2},
+                    {"from": "B", "to": "C", "distance": 3},
+                ],
+            }
+        )
+    )
+    try:
+        proc = run(["--graph", gp, "--source", "A", "--destination", "C"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B", "C"]
+        assert math.isclose(out["distance"], 5)
+    finally:
+        os.unlink(gp)
+
+
+def test_source_destination_alias_equals_syntax():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 7}]}
+        )
+    )
+    try:
+        proc = run([f"--graph={gp}", "--source=A", "--destination=B"])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+        assert out["distance"] == 7
+    finally:
+        os.unlink(gp)
+
+
+def test_source_alias_mixed_with_from_to_order_independence():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    try:
+        proc = run(["--source", "A", "--graph", gp, "--destination", "B"])
+        assert proc.returncode == 0
+        out = json.loads(proc.stdout.decode().strip())
+        assert out["path"] == ["A", "B"]
+    finally:
+        os.unlink(gp)

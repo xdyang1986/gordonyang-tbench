@@ -2,9 +2,9 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/computer-resource-optimization-v2"
-description = "Sequencing lab fleet orchestrator for NovaSeq flowcells: instruments stream 10k barcoded flowcells, 100k pipeline jobs flow through a durable MD5-checksummed JSON store with atomic writes; the CLI reports placement status, schedules jobs with best-fit cpu→mem→gpu→id tie-break, throttles per-sequencer allocations with token-bucket refill and no-consume on insufficient, tracks rig health via heartbeat TTL, snapshots and restores lab state, preserves an ops-log robust to 200KB lines and corrupt entries, and defragments via optimize that evacuates until no flowcell is relocatable."
+description = "Exact systems behavior: Python-compatible canonical JSON checksums, lock-safe multi-process updates, strict CLI exit/output contracts, correct state movement across partitioned files. Sequencing lab fleet orchestrator for NovaSeq flowcells: 10k barcoded flowcells and 100k pipeline jobs via durable MD5-checksummed store with atomic writes; CLI reports placement, schedules with best-fit cpu waste asc → mem waste desc → gpu waste asc → id lex, throttles per-sequencer with token-bucket refill and no-consume on insufficient, tracks health via heartbeat TTL, snapshots/restores lab state including counter and config with exact token-state preservation, preserves ops-log with chronological ordering robust to 200KB lines, and defragments via optimize until no flowcell is relocatable, maintaining Turn1 --data fallback mode."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
-keywords = ["go", "genomics", "hpc", "bioinformatics", "sequencer", "crispr", "illumina", "pacbio", "dna-pipeline", "resource-orchestration"]
+keywords = ["go", "genomics", "bioinformatics", "sequencer", "crispr", "illumina", "pacbio", "dna-pipeline"]
 format = "terminal_bench_multi_turn"
 workstream = "swe_public_repo"
 
@@ -13,7 +13,7 @@ difficulty = "hard"
 category = "software-engineering"
 category_usecase = "resource_optimization"
 category_subdomain = "scientific_computing"
-tags = ["genomics", "hpc", "bioinformatics", "sequencer", "crispr", "dna-pipeline", "resource-orchestration", "go"]
+tags = ["genomics", "bioinformatics", "sequencer", "crispr", "dna-pipeline", "go"]
 author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
 expert_time_estimate_min = 90.0
