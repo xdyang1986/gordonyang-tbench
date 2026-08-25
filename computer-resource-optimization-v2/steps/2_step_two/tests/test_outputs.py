@@ -2088,14 +2088,14 @@ def test_ops_log_chronological_ordering():
 def test_rate_limit_token_state_snapshot_restore_exact():
     """
     R06: No exact rate-limit token-state check across snapshot/restore.
-    Verifies that token bucket state is preserved exactly. De-flaked: rate 0.001 so >1s hiccup cannot refill.
+    Verifies that token bucket state is preserved exactly. CLI-only, no hand-writing internal files.
+    De-flaked: rate 0.001 so >1s hiccup cannot refill.
     """
     clean_all()
     cfg = default_config()
-    # Low burst to make token state observable, rate 0.001/s negligible refill to de-flake (any >1s hiccup would refill if rate=1)
+    # Low burst to make token state observable, rate 0.001/s negligible refill to de-flake
     cfg["rate_limit"] = {"allocations_per_second": 0.001, "burst": 2}
     write_config(cfg)
-    # Need nodes and jobs
     run_config("add-node", "rl-node1", "10", "10240", "0")
     for i in range(3):
         run_config("add-job", f"rl-job-{i}", "1", "256", "0")
@@ -2104,7 +2104,7 @@ def test_rate_limit_token_state_snapshot_restore_exact():
     assert r1.returncode == 0, f"first allocate should succeed {r1.stderr}"
     r2 = run_config("allocate", "rl-job-1", "rl-node1")
     assert r2.returncode == 0, f"second allocate should succeed {r2.stderr}"
-    # Third allocate should be rate-limited (exit 1) because tokens exhausted and rate 1/s hasn't refilled yet
+    # Third allocate should be rate-limited (exit 1) because tokens exhausted
     r3 = run_config("allocate", "rl-job-2", "rl-node1")
     assert r3.returncode == 1, f"third allocate should be rate-limited after burst exhausted, got {r3.returncode} {r3.stderr}"
     assert "rate limit" in r3.stderr.lower()
@@ -2118,31 +2118,24 @@ def test_rate_limit_token_state_snapshot_restore_exact():
     assert r_snap.returncode == 0
     snap_data = json.loads(open(snap_file, "r", encoding="utf-8").read())
     assert "rate_limit" in snap_data, "snapshot file must include rate_limit for token-state preservation"
-    # Check that rate_limit file on disk has low tokens
-    rl_path = cfg["rate_limit_path"]
-    rl_raw = open(rl_path, "r", encoding="utf-8").read()
-    rl_wrapper = json.loads(rl_raw)
-    rl_data = rl_wrapper.get("data", {})
-    assert "rl-node1" in rl_data, f"rate_limit file should have bucket for rl-node1, got {rl_data.keys()}"
-    tokens_before = rl_data["rl-node1"]["tokens"]
-    assert tokens_before < 1.5, f"tokens should be <1.5 after exhausting burst, got {tokens_before}"
+    # Verify via CLI that we are still rate-limited (no file inspection)
+    run_config("add-job", "rl-job-check-still-limited", "1", "256", "0")
+    r_still = run_config("allocate", "rl-job-check-still-limited", "rl-node1")
+    assert r_still.returncode == 1, "should still be rate-limited before restore tamper"
 
-    # Now wait a bit and allocate should still be limited if we restore? Actually if we wait, tokens refill.
-    # Instead, we test restore brings back exact low token state
-    # First, tamper with rate_limit file to reset to burst (simulate losing state)
-    # Write wrapper with tokens = burst
-    import hashlib
-    def write_rl(data_obj):
-        canonical = json.dumps(data_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        cs = hashlib.md5(canonical.encode()).hexdigest()
-        json.dump({"data": data_obj, "checksum": cs}, open(rl_path, "w"), indent=2)
-    write_rl({"rl-node1": {"tokens": 2, "last_refill": rl_data["rl-node1"]["last_refill"]}})
-    # Now allocate should succeed (because we reset tokens)
+    # Tamper to usable state via CLI-only means: delete rate_limit file to trigger empty->burst reset per spec
+    # Spec says: if rate_limit file invalid/missing -> treat as empty (reset to burst) and allow allocation
+    rl_path = cfg["rate_limit_path"]
+    try:
+        os.remove(rl_path)
+    except FileNotFoundError:
+        pass
+    # Now allocate should succeed (reset to burst)
     run_config("add-job", "rl-job-reset", "1", "256", "0")
     r_reset = run_config("allocate", "rl-job-reset", "rl-node1")
-    assert r_reset.returncode == 0, "after resetting tokens to burst, allocate should succeed"
+    assert r_reset.returncode == 0, f"after deleting rate_limit file (empty->burst), allocate should succeed, got {r_reset.returncode} {r_reset.stderr}"
 
-    # Restore from snapshot - should bring back low token state
+    # Restore from snapshot - should bring back low token state (exact preservation)
     r_restore = run_config("restore", snap_file)
     assert r_restore.returncode == 0
     # After restore, tokens should be low again, so next allocate should be rate-limited
@@ -2151,11 +2144,11 @@ def test_rate_limit_token_state_snapshot_restore_exact():
     assert r_after.returncode == 1, f"after restore, token state should be exact low state, so allocate should be rate-limited, got {r_after.returncode}"
     assert "rate limit" in r_after.stderr.lower()
 
-    # Also test dir mode
+    # Also test dir mode - CLI-only
     snap_dir = "/tmp/rl_snapshot_dir"
     if os.path.exists(snap_dir):
         shutil.rmtree(snap_dir)
-    # Need to re-consume tokens to get low state again, then snapshot dir
+    # Re-consume tokens to get low state again, then snapshot dir
     clean_all()
     cfg = default_config()
     cfg["rate_limit"] = {"allocations_per_second": 0.001, "burst": 2}
@@ -2168,11 +2161,19 @@ def test_rate_limit_token_state_snapshot_restore_exact():
     r_snap_dir = run_config("snapshot", snap_dir)
     assert r_snap_dir.returncode == 0
     assert os.path.exists(os.path.join(snap_dir, os.path.basename(rl_path))), "dir snapshot must include rate_limit file"
-    # Mutate and restore dir
-    write_rl({"rl-node1": {"tokens": 2, "last_refill": 0}})
+    # Verify still rate-limited
+    run_config("add-job", "rl-job-dir-check", "1", "256", "0")
+    assert run_config("allocate", "rl-job-dir-check", "rl-node1").returncode == 1
+    # Reset via deletion (CLI-only)
+    try:
+        os.remove(rl_path)
+    except FileNotFoundError:
+        pass
+    run_config("add-job", "rl-job-dir-reset", "1", "256", "0")
+    assert run_config("allocate", "rl-job-dir-reset", "rl-node1").returncode == 0
+    # Restore dir
     r_restore_dir = run_config("restore", snap_dir)
     assert r_restore_dir.returncode == 0
-    # After dir restore, should be rate-limited again
     run_config("add-job", "rl-job-dir-restore", "1", "256", "0")
     r_dir_after = run_config("allocate", "rl-job-dir-restore", "rl-node1")
     assert r_dir_after.returncode == 1, "dir restore must preserve exact token state"
