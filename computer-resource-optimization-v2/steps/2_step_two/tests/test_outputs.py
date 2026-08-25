@@ -1951,3 +1951,295 @@ def test_ops_log_contains_schedule():
     assert any((e.get("op") == "allocate") for e in arr2), "ops-log should contain allocate"
     _assert_no_lock_tmp_left()
 
+
+
+def test_turn1_fallback_regression_comprehensive():
+    """
+    R06: Step2 must keep Turn1 working in fallback mode (instruction.md:5, :64).
+    Previous tests only checked missing-config list-nodes. A solution can pass while breaking most --data commands.
+    This exercises the full Turn1 API via --data (single-file mode) even when the binary was rebuilt for flowcell.
+    """
+    clean_all()
+    # Remove config to force fallback path, but also test with config present via --data
+    try:
+        os.remove(CONFIG_PATH)
+    except FileNotFoundError:
+        pass
+    # Single-file data path
+    single_path = "/app/data/cluster.json"
+    try:
+        os.remove(single_path)
+    except FileNotFoundError:
+        pass
+    # Use run_single which uses --data, not --config
+    # Basic CRUD
+    r = run_single("add-node", "fb-node1", "4", "1024", "1")
+    assert r.returncode == 0, f"fallback add-node should work {r.stderr}"
+    r = run_single("add-node", "fb-node2", "8", "2048", "0")
+    assert r.returncode == 0
+    r = run_single("list-nodes")
+    assert r.returncode == 0
+    nodes = json.loads(r.stdout)
+    assert len(nodes) == 2
+    assert nodes[0]["id"] == "fb-node1"
+    # get-node
+    r = run_single("get-node", "fb-node1")
+    assert r.returncode == 0
+    assert json.loads(r.stdout)["id"] == "fb-node1"
+    # add-job
+    r = run_single("add-job", "fb-job1", "1", "256", "0")
+    assert r.returncode == 0
+    r = run_single("add-job", "fb-job2", "2", "512", "1")
+    assert r.returncode == 0
+    r = run_single("list-jobs")
+    assert len(json.loads(r.stdout)) == 2
+    # allocate
+    r = run_single("allocate", "fb-job1", "fb-node1")
+    assert r.returncode == 0
+    assert "allocated" in r.stdout
+    # status
+    r = run_single("status")
+    assert r.returncode == 0
+    st = json.loads(r.stdout)
+    assert st["total_nodes"] == 2
+    assert st["allocated_jobs"] == 1
+    # schedule (first-fit)
+    r = run_single("schedule", "fb-job2")
+    assert r.returncode == 0
+    # deallocate both jobs before removing node
+    r = run_single("deallocate", "fb-job1")
+    assert r.returncode == 0
+    assert "true" in r.stdout.lower()
+    r = run_single("deallocate", "fb-job2")
+    # fb-job2 may be allocated, deallocate returns true/false but 0
+    assert r.returncode == 0
+    # remove-job
+    r = run_single("remove-job", "fb-job1")
+    assert r.returncode == 0
+    r = run_single("remove-job", "fb-job2")
+    assert r.returncode == 0
+    # remove-node
+    r = run_single("remove-node", "fb-node1")
+    assert r.returncode == 0
+    # After removing, list should have 1 node
+    assert len(json.loads(run_single("list-nodes").stdout)) == 1
+    _assert_no_lock_tmp_left()
+    # Restore config for subsequent tests
+    write_config(default_config())
+
+
+def test_ops_log_chronological_ordering():
+    """
+    R06: No chronological ops-log ordering assertion existed. Must preserve order.
+    """
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 10000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "10", "10240", "0")
+    run_config("add-node", "node2", "10", "10240", "0")
+    ops_sequence = []
+    for i in range(5):
+        jid = f"job-ord-{i}"
+        run_config("add-job", jid, "1", "256", "0")
+        r = run_config("allocate", jid, "node1" if i % 2 == 0 else "node2")
+        if r.returncode == 0:
+            ops_sequence.append(jid)
+    # add some schedules
+    for i in range(2):
+        jid = f"job-sched-{i}"
+        run_config("add-job", jid, "1", "256", "0")
+        r = run_config("schedule", jid)
+        if r.returncode == 0:
+            ops_sequence.append(jid)
+    rlog = run_config("ops-log")
+    assert rlog.returncode == 0
+    arr = json.loads(rlog.stdout)
+    # arr must be in chronological order - extract job_ids in order
+    logged_ids = []
+    for e in arr:
+        # details may be nested
+        jid = e.get("job_id") or e.get("details", {}).get("job_id") or ""
+        if jid:
+            logged_ids.append(jid)
+        else:
+            # try to find job id in string representation
+            s = json.dumps(e)
+            # not perfect, but we check at least ordering of ops
+            pass
+    # Check that allocate/schedule entries appear in order of ops_sequence
+    # Filter logged_ids to only those in ops_sequence preserving order
+    filtered = [jid for jid in logged_ids if jid in ops_sequence]
+    # The filtered order should match ops_sequence order for those that were allocated/scheduled
+    # Find indices
+    # Build position map
+    pos = {jid: idx for idx, jid in enumerate(ops_sequence)}
+    last = -1
+    for jid in filtered:
+        if jid in pos:
+            cur = pos[jid]
+            assert cur >= last, f"ops-log not chronological: {jid} appeared out of order, sequence {ops_sequence} logged order {filtered}"
+            last = cur
+    # Also ensure at least 5 entries
+    assert len(arr) >= len(ops_sequence), f"ops-log should have at least {len(ops_sequence)} entries, got {len(arr)}"
+    _assert_no_lock_tmp_left()
+
+
+def test_rate_limit_token_state_snapshot_restore_exact():
+    """
+    R06: No exact rate-limit token-state check across snapshot/restore.
+    Verifies that token bucket state is preserved exactly.
+    """
+    clean_all()
+    cfg = default_config()
+    # Low burst to make token state observable, rate 1/s slow refill
+    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 2}
+    write_config(cfg)
+    # Need nodes and jobs
+    run_config("add-node", "rl-node1", "10", "10240", "0")
+    for i in range(3):
+        run_config("add-job", f"rl-job-{i}", "1", "256", "0")
+    # Allocate 2 jobs to same node -> consumes 2 tokens (burst 2)
+    r1 = run_config("allocate", "rl-job-0", "rl-node1")
+    assert r1.returncode == 0, f"first allocate should succeed {r1.stderr}"
+    r2 = run_config("allocate", "rl-job-1", "rl-node1")
+    assert r2.returncode == 0, f"second allocate should succeed {r2.stderr}"
+    # Third allocate should be rate-limited (exit 1) because tokens exhausted and rate 1/s hasn't refilled yet
+    r3 = run_config("allocate", "rl-job-2", "rl-node1")
+    assert r3.returncode == 1, f"third allocate should be rate-limited after burst exhausted, got {r3.returncode} {r3.stderr}"
+    assert "rate limit" in r3.stderr.lower()
+    # Snapshot at this point: token bucket for rl-node1 should be near 0
+    snap_file = "/tmp/rl_snapshot.json"
+    try:
+        os.remove(snap_file)
+    except FileNotFoundError:
+        pass
+    r_snap = run_config("snapshot", snap_file)
+    assert r_snap.returncode == 0
+    snap_data = json.loads(open(snap_file, "r", encoding="utf-8").read())
+    assert "rate_limit" in snap_data, "snapshot file must include rate_limit for token-state preservation"
+    # Check that rate_limit file on disk has low tokens
+    rl_path = cfg["rate_limit_path"]
+    rl_raw = open(rl_path, "r", encoding="utf-8").read()
+    rl_wrapper = json.loads(rl_raw)
+    rl_data = rl_wrapper.get("data", {})
+    assert "rl-node1" in rl_data, f"rate_limit file should have bucket for rl-node1, got {rl_data.keys()}"
+    tokens_before = rl_data["rl-node1"]["tokens"]
+    assert tokens_before < 1.5, f"tokens should be <1.5 after exhausting burst, got {tokens_before}"
+
+    # Now wait a bit and allocate should still be limited if we restore? Actually if we wait, tokens refill.
+    # Instead, we test restore brings back exact low token state
+    # First, tamper with rate_limit file to reset to burst (simulate losing state)
+    # Write wrapper with tokens = burst
+    import hashlib
+    def write_rl(data_obj):
+        canonical = json.dumps(data_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cs = hashlib.md5(canonical.encode()).hexdigest()
+        json.dump({"data": data_obj, "checksum": cs}, open(rl_path, "w"), indent=2)
+    write_rl({"rl-node1": {"tokens": 2, "last_refill": rl_data["rl-node1"]["last_refill"]}})
+    # Now allocate should succeed (because we reset tokens)
+    run_config("add-job", "rl-job-reset", "1", "256", "0")
+    r_reset = run_config("allocate", "rl-job-reset", "rl-node1")
+    assert r_reset.returncode == 0, "after resetting tokens to burst, allocate should succeed"
+
+    # Restore from snapshot - should bring back low token state
+    r_restore = run_config("restore", snap_file)
+    assert r_restore.returncode == 0
+    # After restore, tokens should be low again, so next allocate should be rate-limited
+    run_config("add-job", "rl-job-after-restore", "1", "256", "0")
+    r_after = run_config("allocate", "rl-job-after-restore", "rl-node1")
+    assert r_after.returncode == 1, f"after restore, token state should be exact low state, so allocate should be rate-limited, got {r_after.returncode}"
+    assert "rate limit" in r_after.stderr.lower()
+
+    # Also test dir mode
+    snap_dir = "/tmp/rl_snapshot_dir"
+    if os.path.exists(snap_dir):
+        shutil.rmtree(snap_dir)
+    # Need to re-consume tokens to get low state again, then snapshot dir
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1, "burst": 2}
+    write_config(cfg)
+    run_config("add-node", "rl-node1", "10", "10240", "0")
+    for i in range(3):
+        run_config("add-job", f"rl-job-{i}", "1", "256", "0")
+    run_config("allocate", "rl-job-0", "rl-node1")
+    run_config("allocate", "rl-job-1", "rl-node1")
+    r_snap_dir = run_config("snapshot", snap_dir)
+    assert r_snap_dir.returncode == 0
+    assert os.path.exists(os.path.join(snap_dir, os.path.basename(rl_path))), "dir snapshot must include rate_limit file"
+    # Mutate and restore dir
+    write_rl({"rl-node1": {"tokens": 2, "last_refill": 0}})
+    r_restore_dir = run_config("restore", snap_dir)
+    assert r_restore_dir.returncode == 0
+    # After dir restore, should be rate-limited again
+    run_config("add-job", "rl-job-dir-restore", "1", "256", "0")
+    r_dir_after = run_config("allocate", "rl-job-dir-restore", "rl-node1")
+    assert r_dir_after.returncode == 1, "dir restore must preserve exact token state"
+    _assert_no_lock_tmp_left()
+
+
+def test_2000_nodes_perf_target():
+    """
+    R06: The stated 2000-node perf target isn't tested. Spec says list-nodes 2000 <2s.
+    We test via direct file manipulation to avoid 2000 CLI invocations overhead, plus via CLI for smaller scale.
+    """
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 10000, "burst": 10000}
+    write_config(cfg)
+    import hashlib, time, random
+
+    def write_flowcell_wrapper(path, nodes_dict):
+        # nodes_dict: id -> node JSON
+        data = {"nodes": nodes_dict}
+        canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        cs = hashlib.md5(canonical.encode()).hexdigest()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json.dump({"data": data, "checksum": cs}, open(path, "w"), indent=2)
+
+    # Create 2000 nodes across 4 flowcells
+    nodes_per_flowcell = 500
+    node_id_counter = 0
+    for fc in cfg["flowcells"]:
+        nodes = {}
+        for _ in range(nodes_per_flowcell):
+            nid = f"perf-node-{node_id_counter:05d}"
+            nodes[nid] = {
+                "id": nid,
+                "total": {"cpu": 4, "memory": 1024, "gpu": 0},
+                "used": {"cpu": 0, "memory": 0, "gpu": 0},
+                "free": {"cpu": 4, "memory": 1024, "gpu": 0},
+                "jobs": []
+            }
+            node_id_counter += 1
+        write_flowcell_wrapper(fc["path"], nodes)
+
+    # Ensure other files exist empty/wrapped
+    for p in [cfg["jobs_path"], cfg["presence_path"], cfg["rate_limit_path"], cfg["counter_path"]]:
+        if not os.path.exists(p):
+            # create empty wrappers
+            empty_data = {"jobs": {}} if "jobs" in p else {} if "presence" in p or "rate_limit" in p else {"version": 0}
+            canonical = json.dumps(empty_data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            cs = hashlib.md5(canonical.encode()).hexdigest()
+            json.dump({"data": empty_data, "checksum": cs}, open(p, "w"), indent=2)
+    # Create ops log empty
+    open(cfg["ops_log"], "w").write("")
+
+    # Now test list-nodes perf
+    start = time.time()
+    r = run_config("list-nodes", "0", "0")
+    elapsed = time.time() - start
+    assert r.returncode == 0, f"list-nodes 2000 should succeed {r.stderr}"
+    arr = json.loads(r.stdout)
+    assert len(arr) == 2000, f"expected 2000 nodes, got {len(arr)}"
+    assert elapsed < 2.0, f"list-nodes 2000 nodes took {elapsed}s, should be <2s (spec perf target)"
+    # Also test with limit/offset
+    start2 = time.time()
+    r2 = run_config("list-nodes", "100", "100")
+    elapsed2 = time.time() - start2
+    assert r2.returncode == 0
+    assert len(json.loads(r2.stdout)) == 100
+    assert elapsed2 < 2.0
+    _assert_no_lock_tmp_left()
+
