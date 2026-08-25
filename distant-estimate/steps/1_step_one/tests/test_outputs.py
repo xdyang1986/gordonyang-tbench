@@ -1399,3 +1399,289 @@ def test_batch_from_destination_mixing_invalid():
     finally:
         os.unlink(gp)
         os.unlink(rp)
+
+
+# --- Type matrix coverage: 43 specified-but-untested cells ---
+# Spec says nodes/edges missing or not array -> invalid (line 34) and edge fields invalid types.
+# These tests fill the matrix that was almost entirely unexercised per instrumentation.
+
+
+def test_nodes_null_invalid():
+    gp = tmp('{"nodes": null, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_nodes_bool_invalid():
+    gp = tmp('{"nodes": true, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_nodes_number_invalid():
+    gp = tmp('{"nodes": 5, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_nodes_object_invalid():
+    gp = tmp('{"nodes": {}, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_nodes_string_invalid():
+    gp = tmp('{"nodes": "x", "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_null_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": null}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == "", (
+            f"edges:null must be exit2, got rc {proc.returncode} out {proc.stdout.decode()[:100]}"
+        )
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_bool_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": true}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_number_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": 5}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_object_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": {}}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_string_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": "x"}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_number_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from": 123, "to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_bool_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from": true, "to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_null_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from": null, "to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_object_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from": {}, "to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_array_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from": [], "to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_from_missing_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_number_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":456,"distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_bool_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":false,"distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_null_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":null,"distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_object_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":{},"distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_array_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":[],"distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_to_missing_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_distance_bool_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":"B","distance":true}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_distance_null_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":"B","distance":null}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_distance_object_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":"B","distance":{}}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_distance_array_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":"B","distance":[]}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_distance_missing_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [{"from":"A","to":"B"}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_element_null_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [null]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_element_string_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": ["x"]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_element_number_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [5]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_edge_element_array_invalid():
+    gp = tmp('{"nodes":["A","B"], "edges": [[1,2,3]]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)

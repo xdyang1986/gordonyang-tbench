@@ -2708,3 +2708,438 @@ def test_f2_randomized_zone_reentry_bruteforce_crosscheck():
         finally:
             os.unlink(gp)
             os.unlink(tp)
+
+
+# --- Type matrix: 43 specified-but-untested cells (AFTR R06 gap) ---
+# Only traffic=null was tested and accounted for 13% avocado failures. Filling matrix is cheapest durable margin.
+# No spec change, no oracle change beyond edges:null bug already fixed.
+
+
+def test_edges_null_invalid_step2():
+    gp = tmp('{"nodes":["A","B"], "edges": null}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == "", (
+            f"edges:null must be exit2, got {proc.returncode}"
+        )
+    finally:
+        os.unlink(gp)
+
+
+def test_edges_null_invalid_with_traffic():
+    gp = tmp('{"nodes":["A","B"], "edges": null}')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_nodes_bool_invalid_step2():
+    gp = tmp('{"nodes": true, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_nodes_number_invalid_step2():
+    gp = tmp('{"nodes": 5, "edges": [{"from":"A","to":"B","distance":1}]}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+
+
+def test_traffic_wrapper_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('{"traffic": {}}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_wrapper_string_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('{"traffic": "x"}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_wrapper_number_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('{"traffic": 5}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_wrapper_bool_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('{"traffic": true}')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_top_level_number_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp("5")
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_top_level_string_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('"x"')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_from_bool_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from": true, "to":"B","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_from_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from": null, "to":"B","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_from_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from": {}, "to":"B","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_from_array_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from": [], "to":"B","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_from_missing_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"to":"B","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_number_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":123,"factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_bool_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":false,"factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":null,"factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":{},"factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_array_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":[],"factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_to_missing_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","factor":2}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_factor_bool_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":true}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_factor_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":null}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_factor_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":{}}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_factor_array_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":[]}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_factor_missing_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B"}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_delay_bool_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":2,"delay":true}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_delay_null_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":2,"delay":null}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_delay_object_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":2,"delay":{}}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+
+
+def test_traffic_entry_delay_array_invalid():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp('[{"from":"A","to":"B","factor":2,"delay":[]}]')
+    try:
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
