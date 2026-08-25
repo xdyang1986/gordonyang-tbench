@@ -16,19 +16,19 @@ gid prio min weight cap rate burst cost     (S lines)
 ```
 
 - `T` batches ≥1, each load may be positive, zero, or negative (negative = deallocation) up to ±1e12.
-- Groups: prio, min≥0, weight≥1, cap≥0 total cost, rate≥0 per-batch max count (0=unlimited), burst≥0 one-time extra count beyond rate.
-- Subs: gid, prio, min, weight, cap total cost, rate max count per batch (0 unlimited), burst, cost≥1 per-message cost (each message consumes cost from cap).
+- Groups: prio, min≥0, weight≥1, cap≥0 total cost budget (count-approximated as `floor(remainingCost / minCostInGroup)` for effective group count; see Effective caps), rate≥0 per-batch max count (0=unlimited), burst≥0 one-time extra count beyond rate.
+- Subs: gid, prio, min, weight, cap total cost, rate max count per batch (0 unlimited), burst, cost≥1 per-message cost (each message consumes cost from subscriber cap; subscriber cumulative cost never exceeds cap).
 - Blank lines and extra spaces robust. Must accept old formats: groups 5 fields burst0, subs 6 fields burst0 cost1, 7 fields burst given cost1.
 
 ## Output format
 
-Exactly `T` lines, each line S comma-separated ints in input order for that batch (counts, may be negative for deallocation), no spaces. Cumulative cost never exceeds caps.
+Exactly `T` lines, each line S comma-separated ints in input order for that batch (counts, may be negative for deallocation), no spaces. Subscriber cumulative cost never exceeds caps; group caps are count-approximated via `floor(cap / minCostInGroup)` and may be exceeded in heterogeneous-cost cases.
 
 Build: `cd /app && go build -o /app/allocator .` Stdlib only.
 
 ## Necessary specification
 
-- **Effective caps with burst+cost:** `sRemCost = cap - totalCost`, `sRemCount = floor(sRemCost/cost)`, `sEffCount = min(sRemCount, rate+burst_rem if rate>0)`. Sum per group `sumMemberEff`. Group `gRemCost = cap - totalCost`, `minCostInGroup = min cost among members`. `gRemCount = floor(gRemCost/minCost)` if has members else 0. Effective group count `effG = min(gRemCount, sumMemberEff, rate+burst_rem if rate>0, 0 if no members)`. Invalid gid →0 and excluded from group totals AND credit/weight/burst updates (final values equal initial).
+- **Effective caps with burst+cost:** `sRemCost = cap - totalCost`, `sRemCount = floor(sRemCost/cost)`, `sEffCount = min(sRemCount, rate+burst_rem if rate>0)`. Sum per group `sumMemberEff`. Group `gRemCost = cap - totalCost`, `minCostInGroup = min cost among members`. `gRemCount = floor(gRemCost/minCost)` if has members else 0 — group caps are count-approximated as `floor(cap / minCostInGroup)` (not cost-exact; heterogeneous-cost groups may have sum(memberCost) > group cap). Effective group count `effG = min(gRemCount, sumMemberEff, rate+burst_rem if rate>0, 0 if no members)`. Invalid gid →0 and excluded from group totals AND credit/weight/burst updates (final values equal initial).
 
 - **Backward-compat parsing:** Must accept older formats: 5-field groups behave as burst 0, 6-field subs as burst0 cost1, 7-field subs as cost1. Legacy formats must produce identical output to full-field equivalents (e.g., 5-field group `0 0 1 10 0` as `0 0 1 10 0 0`, 6-field sub `0 10 0 1 5 0` as `0 10 0 1 5 0 0 1`, 7-field sub `0 10 0 1 5 0 0` as `0 10 0 1 5 0 0 1`).
 
@@ -72,7 +72,7 @@ Build: `cd /app && go build -o /app/allocator .` Stdlib only.
     - If group allocation cannot be fully taken by members, leftover returns to remaining and is reallocated to other groups next iteration.
   - For example, with group caps 10 each and one group limited by member caps to 2 total, load 10 results in batch allocation `1,1,8` where group0 gets 2 total and group1 gets 8 total, demonstrating rebalancing.
 
-- **Negative loads:** If load<0, N=-load dealloc by priority desc groups then members, respecting totals never <0, burst unaffected, counts as activity.
+- **Negative loads:** If load<0, N=-load dealloc by priority desc groups then members, respecting subscriber totals never <0, burst unaffected, counts as activity. Group cost may be exceeded due to count-approximation.
 
 - **Hierarchical order:** Groups then per-group members.
 

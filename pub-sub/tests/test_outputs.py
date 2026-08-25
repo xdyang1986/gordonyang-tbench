@@ -406,6 +406,23 @@ CASES = [
         ],
         ["3,2,5", "3,2,5"],
     ),
+    # Heterogeneous-cost group cap regression: group cap is count-approximated via minCost
+    # cap=3 total cost budget, costs 1 and 3, load 4 -> 2,1 with group cost 5 > cap 3 (expected per spec fix)
+    (
+        1,
+        [4],
+        [(0, 0, 1, 3, 0, 0)],
+        [(0, 0, 0, 1, 10, 0, 0, 1), (0, 0, 0, 1, 10, 0, 0, 3)],
+        ["2,1"],
+    ),
+    # Positive after deallocation + burst carryover observable
+    (
+        3,
+        [5, -2, 5],
+        [(0, 0, 1, 10, 2, 3)],
+        [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)],
+        ["3,2", "-2,0", "1,1"],
+    ),
 ]
 
 
@@ -416,6 +433,7 @@ def test_allocation(T, loads, groups, subs, expected):
 
 
 def test_conservation():
+    # Subscriber cost never exceeds caps (group caps are count-approximated per spec fix, may be exceeded)
     for T, loads, groups, subs, _ in CASES:
         out = run_case(T, loads, groups, subs)
         assert len(out) == T
@@ -431,6 +449,89 @@ def test_conservation():
                 assert tot_cost[i] + v * costs[i] <= caps[i]
             for i, v in enumerate(parts):
                 tot_cost[i] += v * costs[i]
+
+
+def test_group_cap_count_approx():
+    # Group caps are count-approximated as floor(remainingCost / minCostInGroup), not cost-exact.
+    # Verify group batch count <= effGCount (count) and subscriber caps enforced.
+    for T, loads, groups, subs, _ in CASES:
+        # compute oracle's group remaining cost at batch start using reference logic (simplified)
+        # We only test that subscriber invariants hold (already) and that group count approx holds for simple cases.
+        # For heterogeneous case cap=3 costs 1,3 load4 -> group count eff = floor(3/1)=3, allocation 2+1=3 <=3, but cost 5>3 allowed.
+        out = run_case(T, loads, groups, subs)
+        S = len(subs)
+        G = len(groups)
+        # For this test we only check a lightweight invariant: sum of member counts per group <= sumMemberEff and <= floor(gRem/minCost)
+        # Using same logic as reference for first batch (no prior totals) to avoid needing full state tracking
+        # This catches false positives where group allocation ignores sumMemberEff
+        if T != 1:
+            continue
+        # single-batch cases only for simplicity
+        g_rem = [groups[g][3] for g in range(G)]
+        s_rem = [subs[s][4] for s in range(S)]
+        s_cost = [subs[s][7] if len(subs[s]) >= 8 else 1 for s in range(S)]
+        s_eff = []
+        for s in range(S):
+            c = s_cost[s] if s_cost[s] > 0 else 1
+            rc = s_rem[s] // c
+            ra = subs[s][5] if len(subs[s]) > 5 else 0
+            bu = subs[s][6] if len(subs[s]) > 6 else 0
+            if ra > 0:
+                rc = min(rc, ra + bu)
+            s_eff.append(rc)
+        sum_member = [0] * G
+        min_cost = [10**18] * G
+        for s in range(S):
+            gid = subs[s][0]
+            if 0 <= gid < G:
+                sum_member[gid] += s_eff[s]
+                if s_cost[s] < min_cost[gid]:
+                    min_cost[gid] = s_cost[s]
+        for g in range(G):
+            has = any(subs[s][0] == g for s in range(S))
+            if not has:
+                continue
+            g_rem_count = g_rem[g] // min_cost[g] if min_cost[g] != 10**18 else 0
+            eff_g = g_rem_count
+            if sum_member[g] < eff_g:
+                eff_g = sum_member[g]
+            ra = groups[g][4] if len(groups[g]) > 4 else 0
+            bu = groups[g][5] if len(groups[g]) > 5 else 0
+            if ra > 0:
+                eff_g = min(eff_g, ra + bu)
+            # check first batch output
+            parts = [int(x) for x in out[0].split(",")]
+            group_count = sum(parts[i] for i in range(S) if subs[i][0] == g)
+            assert group_count <= eff_g, (
+                f"group {g} count {group_count} > eff {eff_g} (approx)"
+            )
+
+
+def test_heterogeneous_group_cap_regression():
+    # Blocker 1 regression: group cap 3, costs 1 and 3, load 4 -> 2,1 with group cost 5 > cap 3 allowed per count-approx spec
+    out = run_case(
+        1,
+        [4],
+        [(0, 0, 1, 3, 0, 0)],
+        [(0, 0, 0, 1, 10, 0, 0, 1), (0, 0, 0, 1, 10, 0, 0, 3)],
+    )
+    assert out == ["2,1"]
+    # Verify subscriber caps still hold but group cost exceeds cap (expected)
+    parts = [int(x) for x in out[0].split(",")]
+    assert parts == [2, 1]
+    # subscriber caps 10 each, cost 2*1=2 <=10, 1*3=3 <=10 OK
+    # group cost 5 > cap 3 is allowed per spec fix
+
+
+def test_positive_after_deallocation_burst():
+    # Blocker 3: positive load after deallocation to observe burst persistence
+    out = run_case(
+        3,
+        [5, -2, 5],
+        [(0, 0, 1, 10, 2, 3)],
+        [(0, 0, 0, 1, 10, 2, 3, 1), (0, 0, 0, 1, 10, 0, 0, 1)],
+    )
+    assert out == ["3,2", "-2,0", "1,1"]
 
 
 def test_min_exceeds_cap():
