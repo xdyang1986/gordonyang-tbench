@@ -673,6 +673,11 @@ func main() {
 				groupW[g] = newW
 			} else {
 				groupCredit[g] = groupCredit[g] + wOld
+				newW := mulDiv(wOld, 9, 10)
+				if newW < 1 {
+					newW = 1
+				}
+				groupW[g] = newW
 			}
 		}
 		for s := 0; s < S; s++ {
@@ -694,6 +699,11 @@ func main() {
 				subW[s] = newW
 			} else {
 				subCredit[s] = subCredit[s] + wOld
+				newW := mulDiv(wOld, 9, 10)
+				if newW < 1 {
+					newW = 1
+				}
+				subW[s] = newW
 			}
 		}
 

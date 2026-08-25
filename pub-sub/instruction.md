@@ -102,6 +102,30 @@ Correct output:
 4,6
 ```
 
+Input:
+
+```
+4
+1
+1
+1
+12
+1
+0 0 1 100 0 0
+2
+0 0 0 1 20 0 0 1
+0 0 0 4 20 0 0 1
+```
+
+Correct output:
+
+```
+0,1
+0,1
+1,0
+5,7
+```
+
 ## Task
 
 Repair the program in `/app` so it produces the correct allocation for these cases and in

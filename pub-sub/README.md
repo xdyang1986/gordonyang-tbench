@@ -36,7 +36,14 @@ single-batch smoke tests look correct.
 |---|---|---|
 | 1 | Persistent credit | Decay is a plain halving `c/2`; the reference is `c/2 + 1`. Reads as idiomatic. |
 | 2 | Burst | Excess is measured against `rate + burst_rem` instead of `rate`, so the guard can never fire and `burst_rem` is never depleted. |
-| 3 | Dynamic weight | Eligible-but-unallocated entities never grow their weight — the `+1` in the `else` branch is absent. |
+| 3 | Dynamic weight | The `else` branch applies the served branch's `w*9/10` decay to eligible-but-unallocated entities instead of growing them by 1. |
+
+**Bug 3 was rewritten after `f4e1b2d` came back 0/15.** It was originally an *omission* — the `+1` line simply
+absent from the `else` branch. Every agent in every trial fixed bugs 1 and 2 and then failed on exactly the same
+three weight tests, because an omitted line leaves no artifact to read, question, or correct. It is now a *wrong
+expression*: the branch visibly updates the weight, and the adjacent `credit += wOld` line in the same branch
+hints that the correct direction is growth, not decay. Same 14/70 failure profile; discoverable instead of
+undiscoverable.
 
 `go vet` is clean on the shipped source; there is no dead code or unused-variable tell that marks the defects as
 planted.
@@ -45,7 +52,25 @@ planted.
 
 - Reference (`solution/solve.sh`): **70/70**.
 - Shipped buggy state: **14 failed / 56 passed**.
-- Verified end-to-end locally: buggy `/app` → 14 failures → run `solve.sh` → 70/70.
+- Verified end-to-end locally (container-exact: `/app` holds only `main.go`, no `go.mod`): buggy → 14 failures →
+  run `solve.sh` → 70/70.
+
+### Online run at `f4e1b2d` (first debug-in-place attempt) — 0/15, corrected
+
+| Agent | Result | Best trial |
+|---|---|---|
+| avocado | 0/5 | 66/70 |
+| opus | 0/5 | 66/70 |
+| gpt | 0/5 | 63/70 |
+
+Oracle spawned 0 of 3 trials (platform glitch, no build artifacts), so validation stayed `pending`. Agent trials
+were genuine — real durations (225–1811s) and costs, `reward=0.00` not `error`.
+
+CTRF showed an identical failure signature across all three models: `test_dynamic_weight_1_1_10`,
+`test_served_decay_vs_unallocated`, `test_eligible_but_unallocated_plus1`. Not a capability gradient — a single
+undiscoverable defect blocking 100% of attempts. Two of three models fixed bugs 1 and 2 cleanly and stopped at
+66/70. Fixed by making bug 3 visible (above) and by adding a fourth prompt example that pins the `+1` recurrence
+across two consecutive starved batches.
 
 Failures span three subsystems — 8 exact multi-batch allocation cases plus `test_positive_after_deallocation_burst`,
 `test_burst_carryover_multi_batch`, `test_dynamic_weight_1_1_10`, `test_served_decay_vs_unallocated`,
