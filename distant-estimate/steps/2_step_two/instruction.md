@@ -68,8 +68,8 @@ Validation:
 
 - Top-level: Must be object containing `traffic` array OR direct array. If object: `traffic` key must exist and be array; `{"traffic":null}` etc → invalid. Missing key `{"foo":[]}` invalid. If direct: top-level must be JSON array. Empty `[]` and `{"traffic":[]}` valid → default factor 1 delay 0.
 - Invalid JSON trailing comma, comment, BOM → invalid exit2.
-- Duplicate keys: any traffic entry object containing duplicate keys (e.g. `{"from":"A","to":"B","factor":2,"factor":2}`) → invalid exit2.
-- Distinct factor bound: at most 4 distinct factor values per manifest; more → invalid exit2 (keeps bitmask bounded).
+- Duplicate keys: any object containing duplicate keys → invalid exit2. This includes traffic entry objects (e.g. `{"from":"A","to":"B","factor":2,"factor":2}`) and top-level wrapper object (e.g. `{"traffic":[...],"traffic":[...]}`) – same Go `Unmarshal` silent-last-wins trap as edges. Wrapper duplicate is invalid even if arrays identical.
+- Distinct factor bound: at most 4 distinct factor values per manifest **counting only surviving ordered pairs after last-wins deduplication** (not all log records). I.e., if log contains 5 distinct factors but duplicate ordered pair overwrites one, surviving set may be 4 → valid. More than 4 distinct surviving factor values → invalid exit2 (keeps bitmask bounded). This pins the ambiguity: count surviving, not raw log, for fairness.
 - Array elements: Each element must be object (null/string/number/array → invalid whole file). Empty object `{}` invalid. Raw null element invalid.
 - Each entry required fields: `from` string required, `to` string required, `factor` >0 required, `delay` optional >=0 default 0.
   - `from`/`to`: must be string, non-empty TrimSpace, leading/trailing spaces exact distinct, must exist exactly in nodes, must correspond to existing undirected road leg (unordered pair must exist after per-unordered existence, even if per-direction fallback), must not contain U+FFFD → invalid. Self-loop invalid.

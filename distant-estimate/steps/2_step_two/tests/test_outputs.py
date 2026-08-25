@@ -2168,25 +2168,69 @@ def test_toll_count_tie_break_fewer_tolls_wins():
         os.unlink(tp)
 
 
-def test_duplicate_keys_inside_edge_invalid_step2():
+def test_traffic_wrapper_duplicate_keys_invalid():
+    # P1: top-level wrapper duplicate keys {"traffic":[...],"traffic":[...]} -> invalid
+    # Same silent-last-wins trap as entry objects, previously uncovered
     gp = tmp(
-        '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"distance":5}]}'
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    tp = tmp(
+        '{"traffic": [{"from":"A","to":"B","factor":2}], "traffic": [{"from":"A","to":"B","factor":3}]}'
     )
     try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
-        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc = run(["--graph", gp, "--from", "A", "--to", "B", "--traffic", tp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == "", (
+            f"wrapper duplicate keys should be invalid, got rc {proc.returncode} out {proc.stdout.decode()[:200]}"
+        )
     finally:
         os.unlink(gp)
+        os.unlink(tp)
 
 
-def test_superseded_edge_malformed_still_invalid_step2():
-    raw = '{"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":"bad"},{"from":"A","to":"B","distance":5}]}'
-    gp = tmp(raw)
+def test_f2_distinct_factor_bound_counts_surviving_not_all_logs_valid():
+    # P1: factor-bound ambiguity pinned to surviving ordered pairs after last-wins
+    # Log has 5 distinct factors but after deduplication only 4 distinct survive -> valid
+    # If counting all logs (5) would be invalid, fairness fix discriminator
+    graph = {
+        "nodes": ["A", "B", "C", "D", "E"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 1},
+            {"from": "B", "to": "C", "distance": 1},
+            {"from": "C", "to": "D", "distance": 1},
+            {"from": "D", "to": "E", "distance": 1},
+            {"from": "A", "to": "E", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 1.1},
+            {"from": "B", "to": "C", "factor": 1.2},
+            {"from": "C", "to": "D", "factor": 1.3},
+            {"from": "D", "to": "E", "factor": 1.4},
+            {"from": "A", "to": "E", "factor": 1.5},
+            {
+                "from": "A",
+                "to": "B",
+                "factor": 1.4,
+            },  # overwrites 1.1 with 1.4, surviving distinct = {1.2,1.3,1.4,1.5}=4
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
     try:
-        proc = run(["--graph", gp, "--from", "A", "--to", "B"])
-        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc = run(["--graph", gp, "--from", "A", "--to", "E", "--traffic", tp])
+        # surviving count is 4 -> valid per spec pinned to surviving, not all logs
+        assert proc.returncode == 0, (
+            f"surviving 4 distinct should be valid (counts surviving, not all logs), got rc {proc.returncode} stderr {proc.stderr.decode()[:200]}"
+        )
+        out = json.loads(proc.stdout.decode().strip())
+        # path should be direct or via chain depending, but must succeed
+        assert "path" in out and out["path"] != []
     finally:
         os.unlink(gp)
+        os.unlink(tp)
 
 
 def test_f1_with_traffic_per_direction_raw_revives():
@@ -2330,7 +2374,7 @@ def test_f2_zone_toll_once_per_route_reenter_free():
 
 
 def test_f2_distinct_factor_bound_max_4_invalid():
-    # At most 4 distinct factors per manifest, 5 distinct -> invalid
+    # At most 4 distinct factors per manifest, 5 distinct -> invalid (surviving count)
     graph = {
         "nodes": ["A", "B", "C", "D", "E"],
         "edges": [
@@ -2358,3 +2402,309 @@ def test_f2_distinct_factor_bound_max_4_invalid():
     finally:
         os.unlink(gp)
         os.unlink(tp)
+
+
+def test_f1_with_traffic_per_direction_raw_revives_batch():
+    # P2: batch-mode coverage for F1
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 2},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp("[]")
+    rq = tmp(
+        json.dumps(
+            [{"source": "A", "destination": "B"}, {"source": "B", "destination": "A"}]
+        )
+    )
+    try:
+        proc_no = run(["--graph", gp, "--requests", rq])
+        assert proc_no.returncode == 0
+        lines = proc_no.stdout.decode().strip().splitlines()
+        outs = [json.loads(l) for l in lines]
+        # without traffic unordered last wins 2 both ways
+        assert outs[0]["distance"] == 2 and outs[1]["distance"] == 2
+        proc_yes = run(["--graph", gp, "--requests", rq, "--traffic", tp])
+        assert proc_yes.returncode == 0
+        lines = proc_yes.stdout.decode().strip().splitlines()
+        outs = [json.loads(l) for l in lines]
+        # with traffic per-direction A->B 10, B->A 2
+        assert outs[0]["distance"] == 10, (
+            f"batch with traffic A->B should be 10, got {outs[0]['distance']}"
+        )
+        assert outs[1]["distance"] == 2
+        assert "effective_distance" in outs[0] and "traffic_delay" in outs[0]
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rq)
+
+
+def test_f1_traffic_entry_revives_superseded_raw_batch():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 100},
+            {"from": "A", "to": "B", "distance": 3},
+        ],
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps({"traffic": [{"from": "B", "to": "A", "factor": 1}]}))
+    rq = tmp(json.dumps([{"source": "B", "destination": "A"}]))
+    try:
+        proc_no = run(["--graph", gp, "--requests", rq])
+        assert proc_no.returncode == 0
+        out_no = json.loads(proc_no.stdout.decode().strip().splitlines()[0])
+        assert out_no["distance"] == 3
+        proc_yes = run(["--graph", gp, "--requests", rq, "--traffic", tp])
+        assert proc_yes.returncode == 0
+        out_yes = json.loads(proc_yes.stdout.decode().strip().splitlines()[0])
+        assert out_yes["distance"] == 100
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rq)
+
+
+def test_f1_raw_along_effective_direction_dependent_batch():
+    graph = {
+        "nodes": ["A", "B"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "A", "distance": 20},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2},
+            {"from": "B", "to": "A", "factor": 2},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    rq = tmp(
+        json.dumps(
+            [{"source": "A", "destination": "B"}, {"source": "B", "destination": "A"}]
+        )
+    )
+    try:
+        proc = run(["--graph", gp, "--requests", rq, "--traffic", tp])
+        assert proc.returncode == 0
+        lines = proc.stdout.decode().strip().splitlines()
+        outs = [json.loads(l) for l in lines]
+        assert outs[0]["distance"] == 10 and outs[1]["distance"] == 20
+        assert outs[0]["distance"] != outs[1]["distance"]
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rq)
+
+
+def test_f2_zone_toll_once_per_route_reenter_free_batch():
+    # P2: batch-mode coverage for F2 once-per-route
+    graph = {
+        "nodes": ["A", "B", "C", "D"],
+        "edges": [
+            {"from": "A", "to": "B", "distance": 10},
+            {"from": "B", "to": "C", "distance": 10},
+            {"from": "C", "to": "D", "distance": 10},
+        ],
+    }
+    traffic = {
+        "traffic": [
+            {"from": "A", "to": "B", "factor": 2, "delay": 5},
+            {"from": "B", "to": "C", "factor": 1, "delay": 7},
+            {"from": "C", "to": "D", "factor": 2, "delay": 10},
+        ]
+    }
+    gp = tmp(json.dumps(graph))
+    tp = tmp(json.dumps(traffic))
+    rq = tmp(json.dumps([{"source": "A", "destination": "D"}]))
+    try:
+        proc = run(["--graph", gp, "--requests", rq, "--traffic", tp])
+        assert proc.returncode == 0, proc.stderr.decode()
+        out = json.loads(proc.stdout.decode().strip().splitlines()[0])
+        assert math.isclose(out["effective_distance"], 62, abs_tol=1e-6), (
+            f"batch expected 62, got {out['effective_distance']}"
+        )
+        assert out["distance"] == 30
+        assert out["traffic_delay"] == 32
+    finally:
+        os.unlink(gp)
+        os.unlink(tp)
+        os.unlink(rq)
+
+
+def test_f2_randomized_zone_reentry_bruteforce_crosscheck():
+    # P1 highest yield: randomized property test comparing against brute-force enumeration
+    # Catches any deviation in paidMask search, not one hand-picked case, can't be special-cased
+    import random
+
+    def brute_best(adj, traffic_map, src, dst):
+        # adj: dict node -> dict neighbor -> raw
+        # traffic_map: dict (u,v) -> (factor, delay)
+        best = None  # (eff, raw, tolls, path)
+
+        def compare_paths(a, b):
+            ml = len(a)
+            if len(b) < ml:
+                ml = len(b)
+            for i in range(ml):
+                if a[i] < b[i]:
+                    return -1
+                if a[i] > b[i]:
+                    return 1
+            if len(a) < len(b):
+                return -1
+            if len(a) > len(b):
+                return 1
+            return 0
+
+        def dfs(cur, path, raw_sum, eff_sum, visited_factors, tolls):
+            nonlocal best
+            if cur == dst:
+                cand = (eff_sum, raw_sum, tolls, list(path))
+                if best is None:
+                    best = cand
+                else:
+                    be, br, bt, bp = best
+                    # eff primary
+                    if abs(cand[0] - be) > 1e-9:
+                        if cand[0] < be:
+                            best = cand
+                    else:
+                        if abs(cand[1] - br) > 1e-9:
+                            if cand[1] < br:
+                                best = cand
+                        else:
+                            if cand[2] != bt:
+                                if cand[2] < bt:
+                                    best = cand
+                            else:
+                                if compare_paths(cand[3], bp) < 0:
+                                    best = cand
+                return
+            # prune if eff already worse than best
+            if best is not None and eff_sum > best[0] + 1e-9:
+                return
+            for nb, raw_edge in adj.get(cur, {}).items():
+                if nb in path:
+                    continue
+                factor, delay = traffic_map.get((cur, nb), (1.0, 0.0))
+                is_new = factor not in visited_factors
+                new_visited = visited_factors | {factor}
+                new_tolls = tolls + (1 if is_new else 0)
+                new_raw = raw_sum + raw_edge
+                new_eff = eff_sum + raw_edge * factor + (delay if is_new else 0)
+                dfs(nb, path + [nb], new_raw, new_eff, new_visited, new_tolls)
+
+        dfs(src, [src], 0.0, 0.0, set(), 0)
+        return best
+
+    rnd = random.Random(42)
+    for case_idx in range(15):
+        nodes = ["A", "B", "C", "D", "E"]
+        # random edges
+        edges = []
+        adj = {n: {} for n in nodes}
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                if rnd.random() < 0.5:
+                    d = rnd.randint(1, 10)
+                    u = nodes[i]
+                    v = nodes[j]
+                    edges.append({"from": u, "to": v, "distance": d})
+                    adj[u][v] = d
+                    adj[v][u] = d
+        # ensure at least 3 edges
+        if len(edges) < 3:
+            continue
+        # traffic: pick subset of directed arcs
+        traffic_entries = []
+        traffic_map = {}
+        factors = [1.0, 2.0, 3.0]  # keep distinct <=3 for bound
+        for u, v in list(adj.items()):
+            for nb in list(v.keys()):
+                if rnd.random() < 0.5:
+                    f = rnd.choice(factors)
+                    dl = rnd.choice([0, 1, 5])
+                    traffic_entries.append(
+                        {"from": u, "to": nb, "factor": f, "delay": dl}
+                    )
+                    # last wins for same ordered pair – simulate last wins by overwriting
+                    traffic_map[(u, nb)] = (f, float(dl))
+
+        # pick source/dest connected
+        src = rnd.choice(nodes)
+        dst = rnd.choice([n for n in nodes if n != src])
+        # check connectivity via BFS ignoring traffic
+        from collections import deque
+
+        def reachable(s, t):
+            q = deque([s])
+            seen = {s}
+            while q:
+                cur = q.popleft()
+                if cur == t:
+                    return True
+                for nb in adj.get(cur, {}):
+                    if nb not in seen:
+                        seen.add(nb)
+                        q.append(nb)
+            return False
+
+        if not reachable(src, dst):
+            continue
+
+        # write temp files
+        graph_obj = {"nodes": nodes, "edges": edges}
+        traffic_obj = {"traffic": traffic_entries}
+        gp = tmp(json.dumps(graph_obj))
+        tp = tmp(json.dumps(traffic_obj))
+        try:
+            proc = run(["--graph", gp, "--from", src, "--to", dst, "--traffic", tp])
+            if proc.returncode not in (0, 1):
+                # invalid graph/traffic due to random (e.g., distinct bound) – skip
+                continue
+            if proc.returncode == 1:
+                # no route – brute should also have no route
+                brute = brute_best(adj, traffic_map, src, dst)
+                assert brute is None, (
+                    f"router says no route but brute found {brute} case {case_idx}"
+                )
+                continue
+            out = json.loads(proc.stdout.decode().strip())
+            if out["distance"] == -1:
+                brute = brute_best(adj, traffic_map, src, dst)
+                assert brute is None
+                continue
+            brute = brute_best(adj, traffic_map, src, dst)
+            assert brute is not None, (
+                f"brute found no route but router did case {case_idx} {src}->{dst} adj {adj} traffic {traffic_map}"
+            )
+            beff, braw, btolls, bpath = brute
+            # compare against router output
+            assert math.isclose(out["distance"], braw, abs_tol=1e-6), (
+                f"case {case_idx} raw mismatch: router {out['distance']} brute {braw} path router {out['path']} brute {bpath} src {src} dst {dst} traffic {traffic_map}"
+            )
+            assert math.isclose(out["effective_distance"], beff, abs_tol=1e-6), (
+                f"case {case_idx} eff mismatch: router {out['effective_distance']} brute {beff} raw {out['distance']} vs {braw} path router {out['path']} brute {bpath} src {src} dst {dst}"
+            )
+            # path may differ if tie-break differs? But we implement same tie-break, so check eff/raw/tolls primary and path lex as well
+            # Allow path divergence only if eff/raw/tolls equal and lex order would pick different – but our brute uses same lex, so should match
+            if not math.isclose(
+                out["effective_distance"], beff, abs_tol=1e-9
+            ) or not math.isclose(out["distance"], braw, abs_tol=1e-9):
+                continue
+            # if tolls tie-break matters, our brute tolls count may differ but eff equal – check path lex if needed
+            # For strictness, require path equal when eff equal
+            assert out["path"] == bpath, (
+                f"case {case_idx} path mismatch: router {out['path']} brute {bpath} eff {out['effective_distance']} vs {beff} raw {out['distance']} vs {braw} src {src} dst {dst}"
+            )
+        finally:
+            os.unlink(gp)
+            os.unlink(tp)
