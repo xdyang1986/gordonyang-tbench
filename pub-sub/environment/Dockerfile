@@ -13,3 +13,6 @@ RUN for i in 1 2 3; do apt-get update && break || sleep 5; done && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Ship the allocator the agent must debug and repair in place.
+COPY broken/main.go /app/main.go

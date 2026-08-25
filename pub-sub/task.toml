@@ -4,9 +4,9 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Balanced harder (65 tests, T lines) with burst, cost, dynamic weight, negative, global rebalancing - closes BAD_GRADING_WEAK grading hole via exact multi-batch cases killing mutants: dynamic weight 1,1,10 verbatim, served-decay vs eligible-but-unallocated +1, burst carryover where batch2 cap differs because batch1 consumed burst (5,5 -> 3,2 then 1,1), negative dealloc cost>1, credit off-by-one multi-round. Fixes R07 chmod theater (drop chmod, rely on fuzz/deterministic). Fixes too easy 33-test base and too complex 56-test T+8 timeout 4320s. Input T loads +-1e12, G groups prio min weight cap rate burst (6 fields), S subs gid prio min weight cap rate burst cost (8 fields) cost>=1 caps total cost, supports old 5-field groups burst0 and 6-field subs burst0 cost1 and 7-field subs cost1 backward compat (tested raw). Effective caps: sRemCost=cap-totalCost, sRemCount=floor(sRemCost/cost), sEffCount=min(sRemCount, rate+burst_rem if rate>0), sumMemberEff, gRemCost, gRemCount=floor(gRemCost/minCost) if has members else 0, effG=min(gRemCount,sumMemberEff,rate+burst_rem,0 if no members). Invalid gid excluded from totals AND credit/weight/burst updates. Min-phase order priority desc tie idx capping min(min,effCap,rem). Weighted loop fully pinned prose: temp credits init persistent, active alloc<effCap, total=sum credits, if total==0 bulk RR fallback, else share=floor(rem*credit/total) via 128-bit mulDiv, capped, fallback highest credit tie idx, temp credits c/2+1 if delta>0 else +weight, repeat. Persistent credit c/2+1 if alloc!=0 else +weight_old, dynamic weight max(1,floor(mulDiv(w,9,10))) else w+1 overflow-safe. Burst consumption after positive batch excess over rate consumes burst_rem. Global rebalancing while remaining>0 up to 10 iter recomputing eff caps. Negative dealloc by priority desc groups then members never <0. Output T lines S CSV. Tests 65 total: 34 exact allocation (24 original +10 new exact multi-batch killing credit, burst, weight mutants +3 sensitive converted to exact) +21 corners. Agent timeout 2400 sec covers claude-code 1392-1936s observed (includes build/verify overhead)."
+description = "Debug-in-place hierarchical broker allocator with burst, cost, dynamic weight, negative, rebalancing - 3 subtle planted bugs (credit off-by-one multi-round, burst carryover consumption check, eligible-but-unallocated weight+1 missing). Shipped as environment/broken/main.go with defects, instruction gives only I/O format and 3 failing input/output examples, no algorithm spec, rephrase-proof (Avocado rephrases instruction.md not shipped code, why v17 survived). Agent must reverse-engineer intended behavior from shipped code and localize deviation. Reference solve.sh writes corrected program. Failing examples: 5,5,5 weights 3,1 -> 4,1 each (credit), 5,5,5 rate2 burst3 -> 3,2 then 1,1 (burst), 1,1,10 weights 1,2 -> 0,1 /1,0 /4,6 (dynamic weight). Fourth example 6,-3,6,6 for loosening if all-agents-0: 4,2 /-3,0 /3,3 /3,3 vs shipped 4,2 /-3,0 /0,6 /6,0 covers negative activity and burst. Agent timeout 2400 sec covers observed claude-code 1392-1936s including build/verify overhead. Dockerfile base golang:1.26.2-bookworm not rate-limited ECR mirror, with retries for apt/pip."
 
-keywords = ["allocation", "go", "broker", "fair-share", "priority", "multi-batch"]
+keywords = ["allocation", "go", "broker", "fair-share", "priority", "multi-batch", "debug-in-place"]
 
 [[task.authors]]
 name = "Gordon Yang"
@@ -21,7 +21,7 @@ category_usecase = "handle_events"
 category_subdomain = "backend_services"
 reward_type = "binary"
 languages = ["go"]
-tags = ["allocation", "go", "broker", "fair-share", "priority", "multi-batch"]
+tags = ["allocation", "go", "broker", "fair-share", "priority", "multi-batch", "debug-in-place"]
 expert_time_estimate_min = 45.0
 junior_time_estimate_min = 90.0
 
