@@ -26,8 +26,8 @@ router (no args) -> help
 {"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"extra":"ignore"}]}
 ```
 
-- `nodes`: required array strings only (number/null/bool/object/array → invalid). At least 1, empty array invalid. Whitespace-only/empty → invalid. Location IDs case-sensitive, may contain `-_./` and slash: `A-1`, `A_2`, `A.3`, `A/B` distinct valid. Unique exact match including leading/trailing spaces: `" A"` vs `"A"` distinct valid, not duplicate. Extra top-level fields ignored.
-- `edges`: required array objects only (null/string/number/array like `[1,2,3]` or `["A","B",1]` → invalid). Each leg: `from` string required, `to` string required, `distance` number >0 required.
+- `nodes`: required array strings only (number/null/bool/object/string → invalid for top-level value; empty array invalid). Elements must be strings only (number/null/bool/object/array → invalid). Whitespace-only/empty → invalid. Location IDs case-sensitive, may contain `-_./` and slash: `A-1`, `A_2`, `A.3`, `A/B` distinct valid. Unique exact match including leading/trailing spaces: `" A"` vs `"A"` distinct valid, not duplicate. Extra top-level fields ignored.
+- `edges`: required array objects only (number/null/bool/object/string → invalid for top-level value). Empty array valid (graph with no roads). Elements must be objects only (null/string/number/array/bool/object → invalid, e.g. `[1,2,3]` or `["A","B",1]`). Each leg: `from` string required, `to` string required, `distance` number >0 required.
   - `from`/`to` must be string, presence required, empty/whitespace-only → invalid, `from==to` exact → self-loop invalid, must exist exactly in nodes no trim (`" A"` ≠ `"A"` → missing → invalid).
   - `distance`: JSON number >0 finite, int/float/scientific (`2.5`, `1e3`, `1e-3`, `1e+3`, `1E+3`, `2.5e+2`). Zero, negative, `-0`, missing, null, string, bool, object/array → invalid. `+5` invalid JSON (explicit plus).
   - Extra nested fields inside leg ignored.

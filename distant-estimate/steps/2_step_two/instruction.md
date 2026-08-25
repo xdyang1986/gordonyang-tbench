@@ -24,7 +24,7 @@ router --help | -h | help | (no args) -> help containing graph, from, to, reques
 {"nodes":["A","B"],"edges":[{"from":"A","to":"B","distance":5,"extra":"ignore"}]}
 ```
 
-Same validation as Turn1 including survey-log override, duplicate-key detection, FFFD guard, and superseded validation, but **conditional on traffic**:
+Same validation as Turn1 including survey-log override, duplicate-key detection, FFFD guard, superseded validation, and explicit top-level type matrix (number/null/bool/object/string invalid for nodes/edges top-level, elements typed), but **conditional on traffic**:
 
 - **Without traffic (raw-only)**: `edges` is append-ordered survey log for undirected segments: later record authoritative for same unordered pair, even in reverse orientation (B-A superseding A-B). Only last per unordered pair survives both directions. Superseded records still validated – malformed earlier for same unordered pair that later re-surveys still invalidates whole manifest.
 - **With traffic (F1)**: override resolves **per direction**. A traffic entry naming B->A revives raw record superseded in that direction. Concretely, per ordered pair last wins; if both orientations have records, raw becomes direction-dependent (A->B may be 10, B->A 2). If only one orientation ever appears, both directions share that raw to keep road undirected. This makes inherited step-1 code that assumes one raw per unordered pair actively wrong under traffic, and raw-along-effective-best becomes direction-dependent. The ~26 `test_raw_regression_*` no-traffic tests must stay bit-identical while traffic path diverges.
