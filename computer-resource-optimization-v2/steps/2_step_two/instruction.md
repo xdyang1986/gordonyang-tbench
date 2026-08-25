@@ -95,15 +95,14 @@ Config format (weights are explicit per-sequencer throughput):
 - `get-node`: finds across flowcells.
 - Jobs: `add-job` idempotent preserve old and allocation, `remove-job` true/false deallocates first (jobs becomes [] not null), `list-jobs` same pagination, `get-job`.
 - `allocate`, `deallocate`, `schedule`, `status` work across flowcells under global lock `/app/data/global.lock`.
-- `schedule`: BEST-FIT for scale. Among sequencers that can host the job, pick the one that packs CPU tightest; remaining ties are broken by criteria you must derive from the cases below. Already allocated → exit 2; no fit → exit 1 stderr `no fit`, no stdout.
+- `schedule`: BEST-FIT for scale. Among sequencers that can host the job, pick the one that minimizes CPU waste (free CPU - required CPU) ascending; ties are broken by memory headroom descending (larger free-memory waste preferred for basecalling buffer), then GPU waste ascending, then node ID lexicographically ascending. Explicit chain: cpu waste asc → mem waste desc → gpu waste asc → node id lex. Already allocated → exit 2; no fit → exit 1 stderr `no fit`, no stdout.
 
   Worked cases — free capacity as cpu/mem/gpu, job requires 2/512/0:
-    nodeA 10/10240/0, nodeB 4/1024/0   → nodeB
-    nodeA  4/ 2048/0, nodeB 4/1024/0   → nodeA
-    nodeX  4/ 1024/1, nodeY 4/1024/0   → nodeY
-    nodeB  4/ 1024/0, nodeA 4/1024/0   → nodeA
-
-  Those cases uniquely determine the tie-break chain; sequencers reserve basecalling buffer, so memory headroom is preferred where CPU and GPU are not.
+    nodeA 10/10240/0, nodeB 4/1024/0   → nodeB  (cpu waste 8 vs 2)
+    nodeA  4/ 2048/0, nodeB 4/1024/0   → nodeA  (cpu waste equal 2, mem waste 1536 vs 512 → mem desc prefers larger)
+    nodeX  4/ 1024/1, nodeY 4/1024/0   → nodeY  (cpu waste 2 equal, mem waste 512 equal, gpu waste 1 vs 0 → gpu asc)
+    nodeB  4/ 1024/0, nodeA 4/1024/0   → nodeA  (cpu/mem/gpu waste all equal → id lex)
+    nodeA  4/ 2048/10, nodeB 4/ 1024/0 → nodeA  (cpu waste equal 2, mem waste 1536 vs 512 → mem desc wins over gpu asc; if gpu asc were before mem desc, nodeB would win with gpu waste 0 < 10)
 - Node JSON `jobs` always `[]` not `null`.
 
 ### Presence – sequencer health TTL

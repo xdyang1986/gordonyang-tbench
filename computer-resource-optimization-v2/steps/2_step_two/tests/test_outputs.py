@@ -1815,3 +1815,139 @@ def test_restore_dir_no_restorable_files_exit2():
     )
     assert r.stdout.strip() == ""
     _assert_no_lock_tmp_left()
+
+
+def test_restore_overwrites_mutated_config_dir_and_file():
+    # Spec line 39: restore overwrites config
+    for mode in ["dir", "file"]:
+        clean_all()
+        cfg = default_config()
+        cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+        write_config(cfg)
+        # capture original config raw
+        orig_raw = open(CONFIG_PATH, "r", encoding="utf-8").read()
+        orig_json = json.loads(orig_raw)
+        run_config("add-node", "node1", "4", "1024", "0")
+        if mode == "dir":
+            snap = "/tmp/backup_config_test_dir"
+            if os.path.exists(snap):
+                shutil.rmtree(snap)
+            r = run_config("snapshot", snap)
+            assert r.returncode == 0, f"snapshot dir failed {r.stderr}"
+            assert os.path.isdir(snap)
+            # mutate live config
+            mutated = dict(orig_json)
+            mutated["flowcell_count"] = 999
+            mutated["mutated_field"] = "evil"
+            json.dump(mutated, open(CONFIG_PATH, "w"), indent=2)
+            assert json.loads(open(CONFIG_PATH).read())["flowcell_count"] == 999
+            # restore
+            r2 = run_config("restore", snap)
+            assert r2.returncode == 0, f"restore dir should succeed after config mutation {r2.stderr}"
+            restored = json.loads(open(CONFIG_PATH, "r", encoding="utf-8").read())
+            # restored should match original, not mutated
+            assert restored["flowcell_count"] == orig_json["flowcell_count"], f"restore dir must overwrite mutated config, got {restored['flowcell_count']}"
+            assert "mutated_field" not in restored
+        else:
+            snap = "/tmp/backup_config_test.json"
+            try:
+                os.remove(snap)
+            except FileNotFoundError:
+                pass
+            r = run_config("snapshot", snap)
+            assert r.returncode == 0, f"snapshot file failed {r.stderr}"
+            # mutate
+            mutated = dict(orig_json)
+            mutated["flowcell_count"] = 999
+            mutated["mutated_field"] = "evil"
+            json.dump(mutated, open(CONFIG_PATH, "w"), indent=2)
+            assert json.loads(open(CONFIG_PATH).read())["flowcell_count"] == 999
+            r2 = run_config("restore", snap)
+            assert r2.returncode == 0, f"restore file should succeed after config mutation {r2.stderr}"
+            restored = json.loads(open(CONFIG_PATH, "r", encoding="utf-8").read())
+            assert restored["flowcell_count"] == orig_json["flowcell_count"]
+            assert "mutated_field" not in restored
+        _assert_no_lock_tmp_left()
+
+
+def test_snapshot_includes_counter_and_restore():
+    # Spec line 38: snapshot copies counter_path, restore overwrites it
+    for mode in ["dir", "file"]:
+        clean_all()
+        cfg = default_config()
+        cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+        write_config(cfg)
+        run_config("add-node", "node1", "4", "1024", "0")
+        # ensure counter file exists with known content
+        counter_path = cfg["counter_path"]
+        # write a known wrapper
+        import hashlib
+        def write_counter(data_obj):
+            canonical = json.dumps(data_obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            cs = hashlib.md5(canonical.encode()).hexdigest()
+            json.dump({"data": data_obj, "checksum": cs}, open(counter_path, "w"), indent=2)
+        write_counter({"version": 42, "seq": 123})
+        orig_counter_raw = open(counter_path, "r", encoding="utf-8").read()
+        orig_counter_data = json.loads(orig_counter_raw)["data"]
+        assert orig_counter_data["version"] == 42
+        if mode == "dir":
+            snap = "/tmp/backup_counter_dir"
+            if os.path.exists(snap):
+                shutil.rmtree(snap)
+            r = run_config("snapshot", snap)
+            assert r.returncode == 0
+            # check backup dir contains counter file
+            assert os.path.exists(os.path.join(snap, os.path.basename(counter_path))), "dir snapshot must include counter file"
+            # mutate live counter
+            write_counter({"version": 999})
+            assert json.loads(open(counter_path).read())["data"]["version"] == 999
+            r2 = run_config("restore", snap)
+            assert r2.returncode == 0
+            restored = json.loads(open(counter_path).read())["data"]
+            assert restored["version"] == 42, f"dir restore must bring back counter, got {restored}"
+        else:
+            snap = "/tmp/backup_counter.json"
+            try:
+                os.remove(snap)
+            except FileNotFoundError:
+                pass
+            r = run_config("snapshot", snap)
+            assert r.returncode == 0
+            snap_json = json.loads(open(snap, "r", encoding="utf-8").read())
+            assert "counter" in snap_json, "file snapshot must include counter key"
+            # mutate
+            write_counter({"version": 999})
+            r2 = run_config("restore", snap)
+            assert r2.returncode == 0
+            restored = json.loads(open(counter_path).read())["data"]
+            # file snapshot's counter was the parsed data, should restore to 42
+            assert restored["version"] == 42, f"file restore must bring back counter, got {restored}"
+        _assert_no_lock_tmp_left()
+
+
+def test_ops_log_contains_schedule():
+    # Spec line 46: Must log successful allocate and schedule
+    clean_all()
+    cfg = default_config()
+    cfg["rate_limit"] = {"allocations_per_second": 1000, "burst": 10000}
+    write_config(cfg)
+    run_config("add-node", "node1", "4", "1024", "0")
+    run_config("add-node", "node2", "4", "1024", "0")
+    run_config("add-job", "jobS", "1", "256", "0")
+    r = run_config("schedule", "jobS")
+    assert r.returncode == 0, f"schedule should succeed {r.stderr}"
+    rlog = run_config("ops-log")
+    assert rlog.returncode == 0
+    arr = json.loads(rlog.stdout)
+    assert len(arr) >= 1
+    # must contain schedule
+    assert any((e.get("op") == "schedule" or "schedule" in str(e).lower()) for e in arr), f"ops-log must contain schedule op, got {arr}"
+    # also test after allocate
+    run_config("add-job", "jobA", "1", "256", "0")
+    run_config("allocate", "jobA", "node1")
+    rlog2 = run_config("ops-log")
+    arr2 = json.loads(rlog2.stdout)
+    assert any((e.get("op") == "schedule") for e in arr2), "ops-log should still contain schedule"
+    assert any((e.get("op") == "allocate") for e in arr2), "ops-log should contain allocate"
+    _assert_no_lock_tmp_left()
+
