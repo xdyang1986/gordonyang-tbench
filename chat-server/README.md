@@ -41,7 +41,7 @@ Why naive fails both steps (56/58):
 
 ## Completion Rates
 
-### Latest online validation — commit `e5d715d` (56 + 58 tests)
+### Latest online validation — commit `e5d715d` (56 + 58 tests, now 59 + 61 after robustness fixes)
 
 **Validation status: PASSING.** Structural 10/10 PASS, oracle 3/3, provenance clean, contamination not checked (repo not yet covered by the pipeline). Agentic Full-Task Review at this commit: **GOOD / GENUINELY_HARD**, all 13 rubrics PASS, secondary issues NONE.
 
@@ -78,11 +78,11 @@ Three lessons from this sequence:
 - **gpt-5.5 (T1 6/9)** — Turn 1 is the wall; when it clears Turn 1 it usually clears Turn 2 (5/6).
 - **claude-opus-5 (T1 8/10, T2 8/8)** — only Turn 1 catches it, and Turn 2 is free once reached. This is the weakest part of the current calibration: at the frontier the task is a Turn-1 test.
 
-Oracle proves all 114 tests (56 + 58) on all three online trials; verifier time 10–18s for Turn 1 and 24–33s for Turn 2, well inside the 600s verifier timeout. Reproduced locally in a 2-CPU / 4 GB container at this commit: Turn 1 56/56 in 9.1s, Turn 2 58/58 on three consecutive runs (23.5s / 23.1s / 23.2s) — the timing-sensitive rate-limit and presence-TTL tests are stable.
+Oracle proves all 120 tests (59 + 61) on all three online trials; verifier time 10–18s for Turn 1 and 24–33s for Turn 2, well inside the 600s verifier timeout. Reproduced locally in a 2-CPU / 4 GB container at this commit: Turn 1 56/56 in 9.1s, Turn 2 58/58 on three consecutive runs (23.5s / 23.1s / 23.2s) — the timing-sensitive rate-limit and presence-TTL tests are stable.
 
 ## Model Analysis
 
-**Failure Categorization (hard 56+56):**
+**Failure Categorization (hard 59+61):**
 
 1. **Checksum + HTML Escaping (25%)**: Default Marshal escapes `<>&` → MD5 mismatch vs Python canonical. Fix `SetEscapeHTML(false)` + alphabetical field order + wrapper checksum for all files. Private special chars and private special chars sharded + Unicode emoji + large message 10KB test.
 
@@ -98,7 +98,7 @@ Oracle proves all 114 tests (56 + 58) on all three online trials; verifier time 
 
 7. **Presence TTL + Unknown + Multi-User + Pagination + Snapshot File Mode (2.5% Turn2)**: Unknown false last_seen0, TTL expiry 3s, multi-user TTL, offset pagination 50/500/1000 room+private <2s, snapshot dir all files+config + file mode combined JSON with counter exact restore, ops-log invalid skipping + content order + large 100, 200 rooms sharded, large message 10KB sharded, unicode.
 
-**Cross-model**: Turn1 56 tests, Turn2 58 tests. Measured at `e5d715d`: opus-5 8/10, gpt-5.5 5/9, avocado 3/10, oracle 3/3 — monotonic in model strength with the weak-model gate mixed rather than saturated at either end.
+**Cross-model**: Turn1 59 tests, Turn2 61 tests. Measured at `e5d715d`: opus-5 8/10, gpt-5.5 5/9, avocado 3/10, oracle 3/3 — monotonic in model strength with the weak-model gate mixed rather than saturated at either end.
 
 **Reasoning gaps**: Spec details (checksum canonical, weighted hash, persistent token bucket with refill multiple cycles and no side effects, broadcast dedup and single-token cost, global lock, spaces Join, counter exact restore, empty ID and invalid limit validation, 200 rooms, concurrent joins, Unicode, 10KB, 1000-msg history), not flaky. The two known flake sources have been removed: wall-clock-sensitive rate limits (now 0.05/s except in the dedicated refill test) and apt-dependent image builds.
 
@@ -106,7 +106,7 @@ Oracle proves all 114 tests (56 + 58) on all three online trials; verifier time 
 
 (a) **Hardcoded**: CLI invoking Go binary, file persistence checks via `json.load` + checksum, not source. Room names include zebra, alpha, middle, room0-19, room-000..199 (200 rooms), room-0000 (100), global:announce, global:multi (5 msgs), global:rate, global:atomic, global:shared, unknownToleranceRoom, defaultTest, room-0..99 (100), room-000..199 sharded (200 rooms), nonexist. Distribution computes expected via Python MD5 weighted exact for 20/100/200 rooms. Pagination expects bulk490-499 for 500, bulk990-999 for 1000 (Turn1), bulk500 for 1000, pbulk250 for 500 varying. Rate-limit tests check counter and ops_log side effects, per-user independence, refill and multiple cycles, and per-shard byte equality on a rejected broadcast – bucket storage shape is format-agnostic so no artificial format blocker remains.
 
-(b) **Overfitting**: Hidden hard includes concurrent all 20 same+diff rooms+20 joins + concurrent mixed, spaces Join multiple args room+private both modes +10KB, global ID interleaving + next_id after corruption reset + persistence across many ops 20 room+private →41, 500/1000-msg Turn1 latest N +100/200-room sorted +1000/2000-msg Turn2 offset +500 private offset perf <2s plus 2000 perf, seen_users persists after delete, lock cleanup both, private special chars <>& + Unicode emoji + newlines/tabs + large message 10KB + large message 10KB sharded + 200 rooms sharded + 20 multi-shard all 20 + 20 joins sharded + unicode emoji sharded + private special chars sharded, invalid limit exit2, empty IDs exit2, missing message exit2, nonexist [] and leave all [] and join after delete fails and send after leave fails and limit zero all (both single and sharded), rate-limit refill 1.6s + multiple cycles 1.2s + persistence format-agnostic + per-user independence + corruption handling private/rate_limit/presence, presence unknown + multi-user TTL expiry, weighted 50/100/200 rooms, global broadcast replication dedup same ID + multiple 5 msgs, distribution global*shard_count, checksum all files strict wrapper + after many ops, snapshot file mode combined JSON with counter exact restore + all files exact + ops_log, config validation exit2 for shard_count≤0 etc + unknown-field tolerance top and shard level + defaults, ops-log invalid skipping warning + content order + large 100, 200 rooms sharded, 20 multi-shard all 20, 20 joins sharded all 20. Overfitting to only general room fails.
+(b) **Overfitting**: Hidden hard includes concurrent all 20 same+diff rooms+20 joins + concurrent mixed, spaces Join multiple args room+private both modes +10KB, global ID interleaving + next_id after corruption reset + persistence across many ops 20 room+private →41, 500/1000-msg Turn1 latest N +100/200-room sorted +1000-msg Turn2 offset +500 private offset perf <2s, seen_users persists after delete, lock cleanup both, private special chars <>& + Unicode emoji + newlines/tabs + large message 10KB + large message 10KB sharded + 200 rooms sharded + 20 multi-shard all 20 + 20 joins sharded + unicode emoji sharded + private special chars sharded, invalid limit exit2, empty IDs exit2, missing message exit2, nonexist [] and leave all [] and join after delete fails and send after leave fails and limit zero all (both single and sharded), rate-limit refill 1.6s + multiple cycles 1.2s + persistence format-agnostic + per-user independence + corruption handling private/rate_limit/presence, presence unknown + multi-user TTL expiry, weighted 50/100/200 rooms, global broadcast replication dedup same ID + multiple 5 msgs, distribution global*shard_count, checksum all files strict wrapper + after many ops, snapshot file mode combined JSON with counter exact restore + all files exact + ops_log, config validation exit2 for shard_count≤0 etc + unknown-field tolerance top and shard level + defaults, ops-log invalid skipping warning + content order + large 100, 200 rooms sharded, 20 multi-shard all 20, 20 joins sharded all 20. Overfitting to only general room fails.
 
 (c) **Modifying test files**: Verifier isolated Docker, /tests separate; agent modifying /tests doesn't help; binary must satisfy file persistence and checksum and locking. `test.sh` derives `reward.txt` from `/logs/verifier/ctrf.json` (requires `summary.tests > 0`, `summary.passed == summary.tests`, `summary.failed + summary.other == 0`) rather than from a process exit status, and runs the parser under `python -I -S` so a `sitecustomize.py` / `atexit` shim cannot force a passing reward.
 

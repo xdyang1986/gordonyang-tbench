@@ -1,8 +1,8 @@
-# Turn 2: Large-Scale Chat Server Support (Go)
+# Large-Scale Chat Server Support
 
-Turn1 implemented core chat communication with single-file persistence. Now extend to sharded, production-grade distributed behavior while keeping Turn1 functionality working when `--config` is used.
+You've built the core chat server with durable single-file persistence that handles rooms, users, messages, and integrity. Now we need to scale it to many rooms and users with production-grade distributed systems requirements.
 
-Turn1 code is present via `inherit_prior_session`. You must keep Turn1 commands working in both single-file and sharded modes (create-room, delete-room, list-rooms sorted, join, leave, list-users sorted, send via Join, get-messages with limit/offset, send-private via Join, get-private, list-all-users sorted, checksum strict, atomic behavior, spaces, global ID, edge validation).
+The existing code is present in `/app` and should continue to work. Keep the core behaviors working in both single-file and sharded modes: create-room, delete-room, list-rooms sorted, join, leave, list-users sorted, send via Join, get-messages with limit/offset handling, send-private via Join, get-private, list-all-users sorted, checksum integrity, atomic file operations, handling of spaces, global ID monotonicity, and edge validation.
 
 ## Task – Extend Go Chat Server at `/app/` (same module), built via `go build -o <binary> .`
 
@@ -151,8 +151,12 @@ Help must contain keywords: `create-room`, `delete-room`, `list-rooms`, `join`, 
 
 ### Pagination
 
-- `get-messages <roomID> [limit] [offset]`: limit 0 or omitted → all, offset 0 default, returns `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]`
-- Same for `get-private`
+- `get-messages <roomID> [limit] [offset]`: 
+  - With 1 arg (roomID): returns all messages sorted by id asc
+  - With 2 args (roomID, limit): if limit==0 returns all, if limit>0 returns latest N (suffix) – preserves Turn-1 behavior for backward compatibility
+  - With 3 args (roomID, limit, offset): offset defaults to 0, returns slice `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]` – this is the extended form for sharded mode
+  - Same rules apply to `get-private`
+- The two-argument form returning latest N vs the three-argument form returning slice from offset is intentional to keep Turn-1 compatibility while adding offset support. Implementations must distinguish by argument count.
 - Must handle spaces via Join
 - Must be O(n) slicing not O(n²), performance <2s for 1000+ messages
 

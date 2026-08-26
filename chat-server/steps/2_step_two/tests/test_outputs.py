@@ -187,12 +187,53 @@ def test_help_contains_keywords():
 
 
 def test_single_mode_still_works():
+    # CHAT-005: Turn1 compatibility must be thoroughly checked, not just exit code
     _reset_sharded()
     if os.path.exists(CONFIG_PATH):
         os.remove(CONFIG_PATH)
-    _cli_data("create-room", "general")
-    _cli_data("join", "general", "alice")
-    assert _cli_data("send", "general", "alice", "hi").returncode == 0
+    # Ensure data dir clean for single-file mode
+    import json as _json
+    import hashlib as _hashlib
+    # Re-create empty chat.json for single mode
+    data_path = "/app/data/chat.json"
+    if os.path.exists(data_path):
+        os.remove(data_path)
+    # Test full Turn1 flow in single-file mode
+    assert _cli_data("create-room", "general").returncode == 0
+    assert _cli_data("join", "general", "alice").returncode == 0
+    r_send = _cli_data("send", "general", "alice", "hi from single mode")
+    assert r_send.returncode == 0
+    msg = _json.loads(r_send.stdout.strip())
+    assert msg["content"] == "hi from single mode" and msg["room_id"] == "general"
+    # Verify file wrapper checksum and room schema
+    assert os.path.exists(data_path)
+    with open(data_path) as f:
+        wrapper = _json.load(f)
+        assert "data" in wrapper and "checksum" in wrapper, "single file must use wrapper checksum"
+        data = wrapper["data"]
+        assert "rooms" in data and "general" in data["rooms"]
+        assert "users" in data["rooms"]["general"] and "messages" in data["rooms"]["general"]
+        # checksum validation
+        canonical = _json.dumps(data, sort_keys=True, separators=(',', ':'))
+        expected_checksum = _hashlib.md5(canonical.encode()).hexdigest()
+        assert wrapper["checksum"] == expected_checksum, "checksum must match canonical"
+    # Private messages in single mode
+    assert _cli_data("send-private", "alice", "bob", "priv").returncode == 0
+    assert len(_json.loads(_cli_data("get-private", "alice", "bob").stdout.strip())) == 1
+    # list-rooms sorted, list-users sorted, list-all-users, get-messages latest N
+    assert _json.loads(_cli_data("list-rooms").stdout.strip()) == ["general"]
+    assert _json.loads(_cli_data("list-users", "general").stdout.strip()) == ["alice"]
+    assert "alice" in _json.loads(_cli_data("list-all-users").stdout.strip())
+    # ID continuity across room and private (global monotonic)
+    r2 = _cli_data("send", "general", "alice", "second")
+    assert _json.loads(r2.stdout.strip())["id"] == msg["id"] + 2  # +1 for private, +1 for second room
+    # Corruption handling in single mode
+    with open(data_path, "w") as f:
+        f.write("{invalid json")
+    r_after_corrupt = _cli_data("list-rooms")
+    assert r_after_corrupt.returncode == 0
+    assert _json.loads(r_after_corrupt.stdout.strip()) == [], "after corruption, single file should reset to empty"
+    assert any(f.startswith("chat.json.corrupt.") for f in os.listdir("/app/data")), "backup must be created on corruption"
     _reset_sharded()
 
 
@@ -213,7 +254,11 @@ def test_get_shard_path():
     r = _cli("get-shard-path", "general")
     sid = _expected_weighted_shard_id("general", cfg["shards"])
     assert r.stdout.strip() == mapping[sid]
-    assert "," in _cli("get-shard-path", "global:announce").stdout.strip()
+    # For global rooms, must return comma-separated sorted list of all shard paths (sorted lexicographically)
+    global_path = _cli("get-shard-path", "global:announce").stdout.strip()
+    assert "," in global_path, "global shard-path should be comma-separated"
+    expected_sorted = ",".join(sorted([s["path"] for s in cfg["shards"]]))
+    assert global_path == expected_sorted, f"global shard-path must be sorted list {expected_sorted}, got {global_path}"
 
 
 def test_room_creation_and_distribution():
@@ -332,16 +377,46 @@ def test_special_chars_permissive():
     )
 
 
-def test_atomic_write():
-    combined = "".join(
-        open(os.path.join(r, f)).read()
-        for r, _, fs in os.walk(APP_DIR)
-        for f in fs
-        if f.endswith(".go")
-    )
-    if "CreateTemp" not in combined or "Rename" not in combined:
-        print("Advisory: missing CreateTemp+Rename")
-    assert True
+def test_atomic_write_no_torn_json_sharded():
+    # Robust atomic-write check for sharded mode: 30 concurrent 20KB sends to same room
+    # Poll all shard files 4000 times tight loop for invalid JSON
+    _reset_sharded()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    cfg = _load_config()
+    big_base = "Y" * 20480
+    procs = []
+    for i in range(30):
+        proc = subprocess.Popen(
+            [BIN, "--config", CONFIG_PATH, "send", "general", "alice", f"{big_base}{i}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        procs.append(proc)
+    torn = 0
+    for _ in range(4000):
+        try:
+            for s in cfg["shards"]:
+                path = s["path"]
+                if not os.path.exists(path):
+                    continue
+                with open(path, "r") as f:
+                    content = f.read()
+                    if not content.strip():
+                        continue
+                    json.loads(content)
+        except Exception:
+            torn += 1
+            break
+    for proc in procs:
+        proc.wait(timeout=20)
+    assert torn == 0, f"Torn JSON observed in sharded files {torn} times in 4000 polls – atomic CreateTemp+Rename required"
+    r = _cli("get-messages", "general")
+    assert r.returncode == 0
+    msgs = json.loads(r.stdout.strip())
+    assert len(msgs) == 30, f"Expected 30 msgs after concurrent 20KB, got {len(msgs)}"
+    assert not os.path.exists("/app/data/global.lock"), "global lock must be cleaned"
 
 
 def test_large_history_performance():
@@ -573,6 +648,13 @@ def test_ops_log_content_and_order():
     assert len(entries) >= 4
     ops = [e.get("op") for e in entries]
     assert ops.index("create-room") < ops.index("join") < ops.index("send")
+    # CHAT-007: ops-log entries must have ts field (int64 nanoseconds)
+    for e in entries:
+        assert "ts" in e, f"ops-log entry missing ts field: {e}"
+        assert isinstance(e["ts"], int) and e["ts"] > 0, f"ts must be positive int, got {e['ts']}"
+        assert "op" in e, "op field required"
+
+
 
 
 def test_ops_log_large():
@@ -985,6 +1067,80 @@ def test_list_users_after_leave_all_empty_sharded():
     _cli("leave", "general", "alice")
     _cli("leave", "general", "bob")
     assert json.loads(_cli("list-users", "general").stdout.strip()) == []
+
+
+def test_global_lock_mandated():
+    # CHAT-007: Must use /app/data/global.lock for multi-shard ops
+    # Verify by holding the lock and seeing reference block
+    _reset_sharded()
+    _cli("create-room", "general")
+    lock_path = "/app/data/global.lock"
+    # Create lock file manually to simulate held lock
+    # Use O_EXCL to mimic acquireLock
+    import os as _os
+    # Ensure no existing lock
+    try:
+        _os.remove(lock_path)
+    except:
+        pass
+    # Hold lock
+    f = _os.open(lock_path, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
+    try:
+        # Attempt operation that must use global lock – should fail or block >1s and exit 1/2
+        # Our implementation should try to acquire lock for 10s then fail
+        # If variant uses different lock name, it would succeed quickly
+        import time as _time
+        import subprocess as _sp
+        start = _time.time()
+        proc = _sp.Popen(
+            ["/tmp/codimango/chat_server", "--config", "/app/config.json", "create-room", "should-block"],
+            stdout=_sp.PIPE,
+            stderr=_sp.PIPE,
+            text=True,
+        )
+        try:
+            proc.wait(timeout=12)
+        except _sp.TimeoutExpired:
+            proc.kill()
+            elapsed = _time.time() - start
+            assert elapsed >= 2, f"operation should block while global.lock held, but returned too quickly"
+            # Also considered pass if it blocked long enough
+            return
+        elapsed = _time.time() - start
+        # If it returned, it should have failed to acquire lock (exit !=0) and taken >2s due to retry loop
+        assert proc.returncode != 0, "create-room should fail when global.lock is held"
+        assert elapsed >= 2, f"should have retried lock for at least 2s, elapsed {elapsed}"
+    finally:
+        _os.close(f)
+        try:
+            _os.remove(lock_path)
+        except:
+            pass
+
+
+def test_presence_last_seen_seconds_ago_field():
+    # CHAT-007: presence must include last_seen_seconds_ago
+    _reset_sharded()
+    _cli("heartbeat", "alice")
+    pres = json.loads(_cli("get-presence", "alice").stdout.strip())
+    assert "last_seen_seconds_ago" in pres, f"presence must include last_seen_seconds_ago, got {pres.keys()}"
+    assert isinstance(pres["last_seen_seconds_ago"], (int, float)), "last_seen_seconds_ago must be float/int"
+    assert pres["last_seen_seconds_ago"] >= 0
+    assert "last_seen" in pres and "online" in pres and "user_id" in pres
+
+
+def test_snapshot_dir_mode_copies_config():
+    # CHAT-007: dir-mode snapshot must copy config.json
+    _reset_sharded()
+    _cli("create-room", "general")
+    backup = "/tmp/codimango/snap_config_test"
+    import shutil as _shutil
+    if os.path.exists(backup):
+        _shutil.rmtree(backup)
+    assert _cli("snapshot", backup).returncode == 0
+    assert os.path.exists(os.path.join(backup, "config.json")), "snapshot dir mode must copy config.json"
+    # Also verify private, presence, counter, users exist if they were present
+    # At least config.json must be present per spec
 
 
 def test_global_broadcast_rate_limit_single_token_cost():

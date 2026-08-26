@@ -1,4 +1,4 @@
-# Turn 1: Chat Server Core Communication (Go)
+# Chat Server Core Communication
 
 We need a production-grade chat server for team collaboration. Build core chat communication functionality in Go with durable persistence and integrity.
 

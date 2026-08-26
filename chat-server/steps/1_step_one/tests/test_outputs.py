@@ -371,38 +371,42 @@ def test_stderr_warnings():
 
 
 def test_atomic_behavior_concurrent():
+    # Robust atomic-write check: 30 concurrent 20KB sends with tight polling
+    # The truncating-write variant produces torn JSON ~1 in 4000 polls; reference should produce 0
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
+    big_base = "X" * 20480
     procs = []
-    for i in range(20):
+    for i in range(30):
         p = subprocess.Popen(
-            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"cmsg{i}"],
+            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"{big_base}{i}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         procs.append(p)
-    file_valid = True
-    for _ in range(60):
+    torn = 0
+    # Tight polling: 4000 iterations, no sleep between polls is intentional to catch torn window
+    for _ in range(4000):
         try:
-            with open(DATA_PATH) as f:
-                json.load(f)
-        except:
-            file_valid = False
+            with open(DATA_PATH, "r") as f:
+                content = f.read()
+                if not content.strip():
+                    continue
+                json.loads(content)
+        except Exception:
+            torn += 1
             break
-        time.sleep(0.01)
-    for p in procs:
-        p.wait(timeout=15)
+    for proc in procs:
+        proc.wait(timeout=20)
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert file_valid
-    assert len(msgs) == 20, (
-        f"Expected all 20 msgs after 20 concurrent (extra hard), got {len(msgs)}"
-    )
-    assert len({m["id"] for m in msgs}) == len(msgs)
-    assert not os.path.exists(DATA_PATH + ".lock")
+    assert torn == 0, f"Torn JSON observed {torn} times in 4000 polls – file must never be observed as invalid JSON during concurrent operations"
+    assert len(msgs) == 30, f"Expected all 30 msgs after 30 concurrent 20KB sends, got {len(msgs)}"
+    assert len({m["id"] for m in msgs}) == len(msgs), "IDs must be unique under concurrency"
+    assert not os.path.exists(DATA_PATH + ".lock"), "lock file must be cleaned up"
 
 
 def test_stdlib_only():
@@ -420,18 +424,6 @@ def test_stdlib_only():
     for imp in r.stdout.strip().split():
         if "." in imp and "/" in imp and not imp.startswith("chat-server"):
             assert False, f"External import {imp}"
-
-
-def test_atomic_write_advisory():
-    combined = "".join(
-        open(os.path.join(r, f)).read()
-        for r, _, fs in os.walk(APP_DIR)
-        for f in fs
-        if f.endswith(".go")
-    )
-    if "CreateTemp" not in combined or "Rename" not in combined:
-        print("Advisory: missing CreateTemp+Rename")
-    assert True
 
 
 def test_multiple_rooms_isolation():
@@ -780,3 +772,67 @@ def test_send_after_leave_fails():
     _cli("join", "general", "alice")
     _cli("leave", "general", "alice")
     assert _cli("send", "general", "alice", "should fail").returncode == 2
+
+
+def test_message_timestamp_nanoseconds():
+    # CHAT-008: timestamp must be nanoseconds (UnixNano), not seconds
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    r = _cli("send", "general", "alice", "ts test")
+    assert r.returncode == 0
+    msg = json.loads(r.stdout.strip())
+    ts = msg.get("timestamp")
+    assert isinstance(ts, int), f"timestamp must be int, got {type(ts)}"
+    # Nanoseconds since epoch ~1.7e18, seconds ~1.7e9
+    assert ts > 1e15, f"timestamp should be nanoseconds (>1e15), got {ts} – emitting seconds fails this"
+    # Two messages should have increasing timestamps
+    r2 = _cli("send", "general", "alice", "second")
+    ts2 = json.loads(r2.stdout.strip()).get("timestamp")
+    assert ts2 > ts, "timestamps must be monotonic increasing"
+
+
+def test_get_private_limit_latest_n():
+    # CHAT-008: get-private limit must return latest N, not first N
+    _reset_data()
+    for i in range(5):
+        _cli("send-private", "alice", "bob", f"priv{i}")
+    msgs = json.loads(_cli("get-private", "alice", "bob", "2").stdout.strip())
+    assert len(msgs) == 2
+    # Reference returns two newest: priv3, priv4
+    assert msgs[0]["content"] == "priv3" and msgs[1]["content"] == "priv4", f"get-private limit should return latest N, got {[m['content'] for m in msgs]}"
+
+
+def test_empty_data_file_not_corruption():
+    # CHAT-008: empty file should be treated as empty store, not corruption
+    _reset_data()
+    # Write empty file (TrimSpace empty)
+    with open(DATA_PATH, "w") as f:
+        f.write("   \n  ")
+    r = _cli("list-rooms")
+    assert r.returncode == 0, f"empty file should be treated as empty store, got {r.returncode}"
+    assert json.loads(r.stdout.strip()) == [], f"empty file should give empty rooms, got {r.stdout}"
+    # Should NOT create corrupt backup for empty file
+    import os as _os
+    # Clean any existing corrupt files first
+    for fname in _os.listdir(os.path.dirname(DATA_PATH)):
+        if "corrupt" in fname:
+            _os.remove(os.path.join(os.path.dirname(DATA_PATH), fname))
+    with open(DATA_PATH, "w") as f:
+        f.write("   ")
+    _cli("list-rooms")
+    corrupts = [f for f in _os.listdir(os.path.dirname(DATA_PATH)) if "corrupt" in f]
+    assert len(corrupts) == 0, f"empty file should NOT create corrupt backup, found {corrupts}"
+
+
+def test_whitespace_trim_identifiers():
+    # CHAT-008: identifiers with only spaces should be rejected (TrimSpace)
+    _reset_data()
+    assert _cli("create-room", "   ").returncode == 2, "create-room with spaces only should exit 2"
+    _cli("create-room", "general")
+    assert _cli("join", "general", "   ").returncode == 2, "join with spaces-only userID should exit 2"
+    assert _cli("join", "   ", "alice").returncode == 2, "join with spaces-only roomID should exit 2"
+    # Ensure no room named with spaces was created
+    rooms = json.loads(_cli("list-rooms").stdout.strip())
+    assert "   " not in rooms and "" not in rooms
+
