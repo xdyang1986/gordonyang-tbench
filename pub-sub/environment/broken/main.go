@@ -1,8 +1,3 @@
-// Command allocator distributes each batch of pending messages across a broker's
-// subscribers, which are organised into groups. Every group and subscriber has a
-// priority, a minimum guarantee, a weight, a cost cap, and optional per-batch rate
-// and burst limits. Allocator state (costs, credits, weights, burst) carries over
-// from one batch to the next.
 package main
 
 import (
@@ -171,7 +166,7 @@ func allocateBatch(load int, items []*item) []int {
 		remW -= used
 		for _, i := range active {
 			if delta[i] > 0 {
-				creditTmp[i] = creditTmp[i]/2 + 1
+				creditTmp[i] = creditTmp[i]/2  // BUG credit
 			} else {
 				creditTmp[i] += items[i].weight
 			}
@@ -480,7 +475,7 @@ func main() {
 				}
 				sRemCostIter := make([]int, S)
 				for s := 0; s < S; s++ {
-					rem := subC[s] - subTotalCost[s] - subBatchCount[s]*subCost[s]
+					rem := subC[s] - subTotalCost[s]  // BUG: omits - subBatchCount*cost
 					if rem < 0 {
 						rem = 0
 					}
@@ -495,7 +490,7 @@ func main() {
 					remCount := sRemCostIter[s] / cost
 					ra := subRate[s]
 					if ra > 0 {
-						rateRem := ra + subBurstRem[s] - subBatchCount[s]
+						rateRem := ra + subBurstRem[s]  // BUG: omits subBatchCount
 						if rateRem < 0 {
 							rateRem = 0
 						}
@@ -537,7 +532,7 @@ func main() {
 					}
 					ra := groupRate[g]
 					if ra > 0 {
-						rateRem := ra + groupBurstRem[g] - groupBatchCount[g]
+						rateRem := ra + groupBurstRem[g]  // BUG: omits groupBatchCount
 						if rateRem < 0 {
 							rateRem = 0
 						}
@@ -626,8 +621,8 @@ func main() {
 				}
 			}
 			for g := 0; g < G; g++ {
-				if groupRate[g] > 0 && groupBatchCount[g] > groupRate[g]+groupBurstRem[g] {
-					excess := groupBatchCount[g] - groupRate[g] - groupBurstRem[g]
+				if groupRate[g] > 0 && groupBatchCount[g] > groupRate[g] {
+					excess := groupBatchCount[g] - groupRate[g]
 					if excess > groupBurstRem[g] {
 						excess = groupBurstRem[g]
 					}
@@ -635,8 +630,8 @@ func main() {
 				}
 			}
 			for s := 0; s < S; s++ {
-				if subRate[s] > 0 && subBatchCount[s] > subRate[s]+subBurstRem[s] {
-					excess := subBatchCount[s] - subRate[s] - subBurstRem[s]
+				if subRate[s] > 0 && subBatchCount[s] > subRate[s] {
+					excess := subBatchCount[s] - subRate[s]
 					if excess > subBurstRem[s] {
 						excess = subBurstRem[s]
 					}
@@ -665,7 +660,7 @@ func main() {
 			}
 			wOld := groupW[g]
 			if groupBatchCount[g] != 0 {
-				groupCredit[g] = groupCredit[g] / 2
+				groupCredit[g] = groupCredit[g]/2  // BUG credit
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
@@ -673,11 +668,7 @@ func main() {
 				groupW[g] = newW
 			} else {
 				groupCredit[g] = groupCredit[g] + wOld
-				newW := mulDiv(wOld, 9, 10)
-				if newW < 1 {
-					newW = 1
-				}
-				groupW[g] = newW
+				groupW[g] = wOld + 1
 			}
 		}
 		for s := 0; s < S; s++ {
@@ -691,7 +682,7 @@ func main() {
 			}
 			wOld := subW[s]
 			if subBatchCount[s] != 0 {
-				subCredit[s] = subCredit[s] / 2
+				subCredit[s] = subCredit[s]/2  // BUG credit
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
@@ -699,11 +690,7 @@ func main() {
 				subW[s] = newW
 			} else {
 				subCredit[s] = subCredit[s] + wOld
-				newW := mulDiv(wOld, 9, 10)
-				if newW < 1 {
-					newW = 1
-				}
-				subW[s] = newW
+				subW[s] = wOld + 1
 			}
 		}
 

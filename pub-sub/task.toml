@@ -4,7 +4,7 @@ schema_version = "1.1"
 name = "codimango/pub-sub"
 format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
-description = "Debug-in-place hierarchical broker allocator with burst, cost, dynamic weight, negative, rebalancing - 3 subtle planted bugs (credit off-by-one multi-round, burst carryover consumption check, eligible-but-unallocated weight decayed instead of +1). Shipped as environment/broken/main.go with defects, instruction gives only I/O format and 3 failing input/output examples, no algorithm spec, rephrase-proof (Avocado rephrases instruction.md not shipped code, why v17 survived). Agent must reverse-engineer intended behavior from shipped code and localize deviation. Reference solve.sh writes corrected program. Failing examples: 5,5,5 weights 3,1 -> 4,1 each (credit), 5,5,5 rate2 burst3 -> 3,2 then 1,1 (burst), 1,1,10 weights 1,2 -> 0,1 /1,0 /4,6 (dynamic weight). Fourth example added after f4e1b2d came back 0/15: loads 1,1,1,12 weights 1,4 -> 0,1 /0,1 /1,0 /5,7 vs shipped 0,1 /1,0 /0,1 /6,6, which starves sub0 for two consecutive batches so the +1-per-batch weight recurrence is pinned by two increments rather than inferred from a single divergence. Held in reserve if still too hard: 6,-3,6,6 -> 4,2 /-3,0 /3,3 /3,3 vs shipped 4,2 /-3,0 /0,6 /6,0, covering negative activity and burst. Agent timeout 2400 sec covers observed claude-code 1392-1936s including build/verify overhead. Dockerfile base golang:1.26.2-bookworm not rate-limited ECR mirror, with retries for apt/pip."
+description = "Debug-in-place hierarchical broker allocator with burst, cost, dynamic weight, negative, rebalancing - 4 defects: 3 invariant violations in rebalancing loop forgetting within-batch allocation (sRemCostIter omits -subBatch*cost -> exceeds sub cost cap 10 fails, group rateRem omits -groupBatchCount -> exceeds group rate+burst 11 fails, sub rateRem omits -subBatchCount -> exceeds sub rate 6 fails) + credit off-by-one c/2 vs c/2+1 (pins weight recurrence via credit). Combined 28/70 failing, reference 70/70, go vet clean. Shipped as environment/broken/main.go. Instruction only I/O format + Invariants + 4 failing examples (no algorithm spec, rephrase-proof). Examples: cap violation 2/15/12 -> 5,3,2/0,0,0 vs shipped 6,3,2 (sub cap5 cost1 ->6 exceeds), group rate 2/5/5 rate2 burst3 -> 3,2/1,1 vs shipped 3,2/3,2 (batch2 exceeds rate+burst), sub rate 2/5/5 ->5/2 vs 5/5, weight pinning 4/1/1/1/12 weights1,4 ->0,1/0,1/1,0/5,7 vs shipped 0,1/1,0/0,1/6,6 starves sub0 two batches pinning +1 recurrence. Agent timeout 3000 sec (only passing trial used 2079s of 2400). Dockerfile base golang:1.26.2-bookworm, relies on python3 preinstalled in buildpack-deps, pip install pytest with retries (no apt-get) to eliminate SandboxBuildFailedError ECR/mirror and apt flakiness, no rubric-ID comments. Group min re-applied every iter mutant is provably unkillable black-box (0 diffs in 200k): outer loop never has second productive iteration for correct impl (allocateBatch consumes min(load,cap))."
 
 keywords = ["allocation", "go", "broker", "fair-share", "priority", "multi-batch", "debug-in-place"]
 
@@ -29,7 +29,7 @@ junior_time_estimate_min = 90.0
 timeout_sec = 120.0
 
 [agent]
-timeout_sec = 2400.0
+timeout_sec = 3000.0
 
 [environment]
 build_timeout_sec = 600.0

@@ -31,38 +31,57 @@ may be negative when a load is negative.
 
 Build: `cd /app && go build -o /app/allocator .` Standard library only.
 
+## Invariants
+
+The correct program always respects these properties (they are not recurrences, just
+limits it never exceeds):
+
+- A subscriber's cumulative cost (`sum count * cost` over all batches so far) never
+  exceeds its `cap`.
+- When `rate > 0`, a subscriber's per-batch count never exceeds `rate + remaining burst`;
+  likewise for groups — a group's per-batch total never exceeds `group rate + remaining group burst`.
+- Per-batch total allocated equals `min(load, available capacity)` (limited by caps and
+  rates), with no over-allocation.
+- Counts are non-negative except when `load` is negative (deallocation).
+
+Any output violating these invariants is flatly wrong, regardless of policy.
+
 ## Failing cases
 
 The program currently produces the wrong output for these inputs. The **correct** output
-is shown; the program prints something else.
+is shown; the program prints something else. Each shipped output violates an invariant
+above.
 
 Input:
 
 ```
-3
-5
-5
-5
-1
-0 0 1 100 0 0
 2
-0 0 0 3 50 0 0 1
-0 0 0 1 50 0 0 1
+15
+12
+2
+0 0 1 6 0 0
+0 0 1 5 0 0
+3
+0 0 0 3 5 0 0 1
+1 0 0 3 9 0 0 2
+1 0 0 2 11 0 0 1
 ```
 
 Correct output:
 
 ```
-4,1
-4,1
-4,1
+5,3,2
+0,0,0
 ```
+
+Shipped prints `6,3,2` / `0,0,0` — subscriber 0 has `cap 5 cost 1`, so 6 messages puts
+cumulative cost at 6 against a cap of 5, violating the cap invariant. Whatever the
+intended policy, this is objectively wrong.
 
 Input:
 
 ```
-3
-5
+2
 5
 5
 1
@@ -77,30 +96,34 @@ Correct output:
 ```
 3,2
 1,1
-1,1
 ```
+
+Shipped prints `3,2` / `3,2` — second batch exceeds the group's `rate + burst`
+(`rate 2 burst 3` consumed in batch 1, so batch 2 max is 2, not 5), violating the group
+rate invariant.
 
 Input:
 
 ```
-3
-1
-1
-10
+2
+5
+5
 1
 0 0 1 100 0 0
-2
-0 0 0 1 10 0 0 1
-0 0 0 2 10 0 0 1
+1
+0 0 0 1 50 2 3 1
 ```
 
 Correct output:
 
 ```
-0,1
-1,0
-4,6
+5
+2
 ```
+
+Shipped prints `5` / `5` — second batch exceeds the subscriber's rate
+(`rate 2 burst 3` consumed in batch 1, so batch 2 max is 2, not 5), violating the
+subscriber rate invariant.
 
 Input:
 
@@ -125,6 +148,9 @@ Correct output:
 1,0
 5,7
 ```
+
+Shipped prints `0,1` / `1,0` / `0,1` / `6,6` — starves sub0 for two consecutive batches,
+so recurrence shows as two increments (1→2→3) rather than one, pinning exact +1 rule.
 
 ## Task
 
