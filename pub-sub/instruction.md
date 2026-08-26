@@ -49,8 +49,7 @@ Any output violating these invariants is flatly wrong, regardless of policy.
 ## Failing cases
 
 The program currently produces the wrong output for these inputs. The **correct** output
-is shown; the program prints something else. Each shipped output violates an invariant
-above.
+is shown; the program prints something else. Some of these break one of the invariants above; others are consistent with every invariant and still wrong, so satisfying the invariants is necessary but not sufficient.
 
 Input:
 
@@ -147,7 +146,7 @@ Correct output:
 3,7
 ```
 
-Shipped prints `1,3` / `0,4` / `10,0`. No rates, bursts or costs are involved here — only the per-batch credit update differs. This isolates the credit recurrence and falsifies the common guess c*9/10 which would give 1,3 / 0,4 / 5,5.
+Shipped prints `1,3` / `0,4` / `10,0`. No rates, bursts or costs are involved here, and the first batch already matches.
 
 Input:
 
@@ -168,7 +167,7 @@ Correct output:
 7,3,2
 ```
 
-Shipped prints `8,3,1` — single batch, so persistent credit sites cannot contribute — only the in-round weighted loop differs. This exposes the in-round creditTmp defect (D1 L169).
+Shipped prints `8,3,1`. This input is a single batch.
 
 Input:
 
@@ -191,7 +190,7 @@ Correct output:
 1,3
 ```
 
-Shipped prints `2,6` / `0,4` — two groups, which no earlier example had — this exposes the group credit defect (D5 L663). The c*9/10 guess also gives `2,6` / `0,4`, so this kills that guess too.
+Shipped prints `2,6` / `0,4`. The first batch matches; only the second diverges.
 
 ## Task
 

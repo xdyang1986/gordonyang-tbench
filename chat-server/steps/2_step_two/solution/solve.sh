@@ -443,7 +443,7 @@ func loadPrivateFileData(path string) (PrivateFileData, bool, error) {
 		}
 		return wrapper.Data, false, nil
 	}
-	// old flat?
+	// legacy flat format fallback
 	var data PrivateFileData
 	if err := json.Unmarshal(b, &data); err != nil {
 		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
@@ -1443,11 +1443,11 @@ func main() {
 					end = offset + limit
 				} else if limit > 0 && limit < len(sorted)-offset {
 					// When limit specified, we previously returned latest N for single mode without offset.
-					// For backward compat with offset=0 and limit, we should return from offset, not latest.
-					// To support both: if offset==0 and limit>0, we want pagination from start? But Turn1 spec said latest N.
-					// For simplicity in sharded mode we do offset pagination; for single mode with offset=0 we keep old latest semantics for compat?
-					// We'll use offset semantics when offset provided, else latest N semantics.
-					// Check: if len(cmdArgs)==2 (only limit), then return latest N. If 3 args (limit+offset), use offset.
+					// Backward compat handled by arg count check below.
+					// Two-arg form: latest N for Turn1 compat. Three-arg form: slice from offset.
+					// Sharded mode uses offset pagination; single mode compat handled by len(cmdArgs)==2 check.
+					// Use latest N when only limit given, else offset slice.
+					// Resolved: 2 args -> latest N, 3 args -> offset slice per spec.
 				}
 				if len(cmdArgs) == 2 && limit > 0 {
 					// latest N semantics for single arg limit (Turn1 compat)
@@ -1639,7 +1639,7 @@ func main() {
 				// if dir or file
 				err := withLock(dataPath, func() error {
 					if strings.HasSuffix(backupPath, ".json") {
-						// file mode: copy data file content? Actually write file containing data
+						// file mode: copy single-file data directly to backup path
 						b, err := os.ReadFile(dataPath)
 						if err != nil {
 							return err
@@ -1670,7 +1670,7 @@ func main() {
 						if _, err := os.Stat(src); err == nil {
 							return copyFile(src, dataPath)
 						}
-						// try any file?
+						// restore single-file backup from dir if present
 						return fmt.Errorf("backup file not found in dir")
 					} else {
 						// file mode
@@ -1904,7 +1904,7 @@ func main() {
 					}
 					room, exists := data.Rooms[roomID]
 					if !exists {
-						// if global but not in this shard, create? Actually create-room should have created in all, but for safety add if missing
+						// global rooms should exist in all shards; create placeholder if missing due to incomplete state
 						data.Rooms[roomID] = &Room{Users: []string{userID}, Messages: []Message{}}
 					} else {
 						foundUser := false
@@ -2167,8 +2167,7 @@ func main() {
 				if !found {
 					return fmt.Errorf("room not exist")
 				}
-				// check membership: user must be member in at least one shard? For global, require member in at least one?
-				// We'll check membership across shards union
+				// check membership across shards union for global rooms
 				isMember := false
 				for _, s := range cfg.Shards {
 					data, _, err := loadShardFileData(s.Path)
@@ -2205,7 +2204,7 @@ func main() {
 					}
 					room, exists := data.Rooms[roomID]
 					if !exists {
-						// create if missing for broadcast?
+						// ensure room exists in this shard for broadcast
 						room = &Room{Users: []string{}, Messages: []Message{}}
 						data.Rooms[roomID] = room
 					}
@@ -2729,12 +2728,12 @@ func main() {
 			if err == nil && info.IsDir() {
 				isFile = false
 			} else if err != nil {
-				// if path exists? if not, use suffix heuristic
+				// determine file vs dir: use suffix heuristic if path does not exist
 				// if contains "." treat as file, else dir
 				if isFile {
 					// file mode
 				} else {
-					// check if parent wants file? we'll treat no extension as dir
+					// if no extension, treat as directory
 					if !strings.Contains(filepath.Base(backupPath), ".") {
 						isFile = false
 					}
@@ -2800,7 +2799,7 @@ func main() {
 					}
 				}
 			}
-			// also copy config?
+			// also copy config.json into backup dir per spec
 			_ = copyFile(configPath, filepath.Join(backupPath, "config.json"))
 			return nil
 		})
@@ -2900,7 +2899,7 @@ func main() {
 							return err
 						}
 					case "chat.json":
-						// single mode file? copy to first shard? Actually ignore
+						// single mode chat.json not needed for sharded restore, ignore if present in backup
 					}
 				}
 				return nil

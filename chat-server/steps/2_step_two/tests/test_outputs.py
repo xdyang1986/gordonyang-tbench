@@ -400,12 +400,12 @@ def test_atomic_write_replaces_file_not_truncates_sharded():
 
 
 def test_atomic_write_no_torn_json_sharded():
-    # Modest concurrency for end-to-end guarantee
+    # Modest concurrency 30x2KB for sharded – same treatment as single-file
     _reset_sharded()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     procs = []
-    for i in range(12):
+    for i in range(30):
         proc = subprocess.Popen(
             [BIN, "--config", CONFIG_PATH, "send", "general", "alice", f"cmsg{i}_" + "Y"*2048],
             stdout=subprocess.PIPE,
@@ -424,12 +424,15 @@ def test_atomic_write_no_torn_json_sharded():
             pass
         time.sleep(0.001)
     for proc in procs:
-        proc.wait(timeout=120)
+        proc.wait(timeout=180)
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert len(msgs) == 12, f"Expected 12 msgs after concurrent, got {len(msgs)}"
-    assert not os.path.exists("/app/data/global.lock")
+    assert len(msgs) == 30, f"Expected 30 msgs after concurrent 2KB sharded, got {len(msgs)}"
+    import glob as _glob
+    tmp_residue = _glob.glob("/app/data/tmp-*.json") + _glob.glob("/tmp/codimango/tmp-*.json")
+    assert len(tmp_residue) == 0, f"tmp residue left after sharded burst: {tmp_residue}"
+    assert not os.path.exists("/app/data/global.lock"), "global lock must be cleaned"
 
 
 def test_large_history_performance():

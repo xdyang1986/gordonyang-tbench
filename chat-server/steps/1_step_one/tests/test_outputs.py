@@ -391,12 +391,13 @@ def test_atomic_write_replaces_file_not_truncates():
 
 
 def test_atomic_behavior_concurrent():
-    # Modest concurrency test for end-to-end guarantee (not a race detector)
+    # Modest concurrency: 30 x 2KB (small payload, ~65KB file) keeps strict all-N but avoids 50x slower Daytona I/O
+    # Previously 30x20KB took 0.4s local and >20s on Daytona – unsafe. 2KB is order magnitude less I/O.
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     procs = []
-    for i in range(12):
+    for i in range(30):
         p = subprocess.Popen(
             [BIN, "--data", DATA_PATH, "send", "general", "alice", f"cmsg{i}_" + "X"*2048],
             stdout=subprocess.PIPE,
@@ -404,7 +405,6 @@ def test_atomic_behavior_concurrent():
             text=True,
         )
         procs.append(p)
-    # Light polling with 1ms sleep to observe file while concurrent writes happen
     for _ in range(200):
         try:
             with open(DATA_PATH) as f:
@@ -413,13 +413,17 @@ def test_atomic_behavior_concurrent():
             pass
         time.sleep(0.001)
     for proc in procs:
-        proc.wait(timeout=120)
+        proc.wait(timeout=180)
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert len(msgs) == 12, f"Expected all 12 msgs after concurrent sends, got {len(msgs)}"
+    assert len(msgs) == 30, f"Expected all 30 msgs after concurrent 2KB sends, got {len(msgs)}"
     assert len({m["id"] for m in msgs}) == len(msgs)
-    assert not os.path.exists(DATA_PATH + ".lock")
+    # Deterministic residue checks: no tmp files and no lock left (I/O-free strictness)
+    import glob as _glob
+    tmp_residue = _glob.glob(os.path.join(os.path.dirname(DATA_PATH), "tmp-*.json"))
+    assert len(tmp_residue) == 0, f"tmp residue left in data dir after concurrent burst: {tmp_residue}"
+    assert not os.path.exists(DATA_PATH + ".lock"), "lock file must be cleaned up"
 
 
 def test_stdlib_only():
