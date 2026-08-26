@@ -2,12 +2,12 @@
 
 ## Description
 
-**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying six subtle defects.**
+**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying four subtle defects.**
 
 The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects
-in place. `instruction.md` gives **only** the stdin/stdout format plus three failing input/output examples — it
-does **not** state the allocation algorithm. The algorithm lives in the shipped 706-line source and has to be
-reverse-engineered.
+in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output
+example per defect — it does **not** state the allocation algorithm. The algorithm lives in the shipped ~700-line
+source and has to be reverse-engineered.
 
 ## Why this shape
 
@@ -27,33 +27,43 @@ Moving the algorithm out of the prompt and into the code makes the difficulty **
 transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the
 same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The six defects
-
-There are **six**, not four — the credit recurrence appears at three separate sites, and counting them as one
-"credit defect" is what hid the problem for three rounds.
-
-Three are **invariant violations**: the shipped program exceeds a limit `instruction.md` declares it must
-respect. Those are objectively wrong regardless of allocation policy, so the agent can verify a fix without
-knowing the policy. Three are **policy divergences** in the credit recurrence, which are only findable if a
-visible example exposes them.
+## The four defects
 
 | # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
-| D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | **E5** |
+| D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | E5 |
 | D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
 | D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
 | D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
-| D5 | 663 | `groupCredit[g] = c/2` instead of `c/2 + 1` | policy | **E6** |
-| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` | policy | E4 |
 
 D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state
-and forgets the allocation already made *within the current batch*.
+and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the
+shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the
+allocation policy. All 15 agents at `0bf1e7c` fixed all three.
 
-D1 is distinct from D5/D6 and this matters — it governs the **in-round** weighted loop, so it shows up in
-single-batch inputs, while D5/D6 only move multi-batch results. An agent can fix both persistent sites and still
-fail; `test_credit_off_by_one` is a `T=1` case and is driven purely by D1.
+D1 is the one **policy divergence**, and it is deliberately the only one left. The two persistent credit sites at
+lines 663 and 685 are shipped **correct**, reading `c/2 + 1`, while line 169 reads `c/2`. The file therefore
+documents its own defect: three credit-update sites, two agreeing, one not. That converts an unguessable
+recurrence into a visible internal inconsistency, with no hint in the prompt.
 
-Combined: **28/70 failing**, reference 70/70, `go vet` clean on both.
+Combined: **27/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 27 failures,
+`solve.sh` → 70/70.
+
+### Why the credit defects went from three to one
+
+At `0bf1e7c` all three credit sites were bugged (D1 plus persistent D5/D6) and the run came back 0/15. CTRF
+against the shipped baseline shows why:
+
+| | shipped baseline | agents |
+|---|---|---|
+| invariant tests (conservation, fuzz, rate, min, cap, gid) | fail | **fixed** |
+| `test_credit_off_by_one` | fail | still fail |
+| `test_dynamic_weight_1_1_10`, `test_served_decay_vs_unallocated`, `test_eligible_but_unallocated_plus1` | **pass** | **newly broken** |
+
+Agents were *regressing* the dynamic-weight recurrence — code that was never defective — while hunting the credit
+bugs, because weight and credit are updated in the same block and nothing distinguished which was wrong. Adding
+more defects to that block made the flailing worse, not the task harder. Leaving the persistent sites correct
+gives the agent a reference point inside the file and removes the incentive to perturb neighbouring logic.
 
 ### Every defect must be exposed by an example — enforced by `tools/audit_defects.py`
 
@@ -139,10 +149,11 @@ defects as planted.
 ## Completion Rates
 
 - Reference (`solution/solve.sh`): **70/70**.
-- Shipped buggy state: **28 failed / 42 passed**.
+- Shipped buggy state: **27 failed / 43 passed**.
 - Verified **inside the real built image** (`docker build environment/`, then mount `tests/` and `solution/`):
-  - shipped, no fix → `reward=0`, 28 failed / 42 passed
-  - `solve.sh` then `tests/test.sh` → `reward=1`, 70/70
+  shipped → `reward=0`; `solve.sh` then `tests/test.sh` → `reward=1`, 70/70. (Image verification was run against
+  the six-defect source at 28 failures; the four-defect source is verified locally at 27 and changes no harness
+  behaviour.)
 
 ### Online run at `f4e1b2d` (first debug-in-place attempt) — 0/15, corrected
 
@@ -254,6 +265,24 @@ correct `2,6` / `1,3` — shipped prints `2,6` / `0,4`. The `c*9/10` guess also 
 falsifies it too.
 
 With both added the audit passes: every defect exposed, 1:1 defect-to-example mapping.
+
+### Online run at `0bf1e7c` (leak fixed, six defects, all exposed) — 0/15
+
+Clean sample: 15 genuine trials, zero infra aborts, 377–3040s. Oracle 3/3, AI assessment back to Accept
+(0 Crit / 0 High) after the leakage fix, provenance and contamination clean.
+
+Every quality gate passes. The only failure is difficulty, and the CTRF comparison above identifies the mechanism
+as flailing-induced regression rather than raw difficulty. Response: cut the credit defects from three to one and
+leave the persistent sites correct as an in-file reference point. Examples E4 and E6 targeted the retired defects
+and must be dropped — `tools/audit_defects.py` flags them automatically:
+
+```
+  E4: shipped output matches the reference — not a failing case
+  E6: shipped output matches the reference — not a failing case
+```
+
+Note one trial ran 3040s against a 3000s agent timeout, so the ceiling is being reached; worth watching if
+metacode durations keep climbing.
 
 ## Test Quality
 

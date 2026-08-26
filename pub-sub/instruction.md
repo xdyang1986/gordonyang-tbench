@@ -127,30 +127,6 @@ subscriber rate invariant.
 Input:
 
 ```
-3
-4
-4
-10
-1
-0 0 1 200 0 0
-2
-0 0 0 1 34 0 0 1
-0 0 0 3 33 0 0 1
-```
-
-Correct output:
-
-```
-1,3
-1,3
-3,7
-```
-
-Shipped prints `1,3` / `0,4` / `10,0`. No rates, bursts or costs are involved here, and the first batch already matches.
-
-Input:
-
-```
 1
 12
 1
@@ -168,29 +144,6 @@ Correct output:
 ```
 
 Shipped prints `8,3,1`. This input is a single batch.
-
-Input:
-
-```
-2
-8
-4
-2
-0 0 1 28 0 0
-0 0 3 59 0 0
-2
-0 0 0 2 14 0 0 1
-1 0 0 1 10 0 0 1
-```
-
-Correct output:
-
-```
-2,6
-1,3
-```
-
-Shipped prints `2,6` / `0,4`. The first batch matches; only the second diverges.
 
 ## Task
 
