@@ -2540,141 +2540,227 @@ def test_f2_zone_toll_once_per_route_reenter_free_batch():
 
 
 def test_f2_randomized_zone_reentry_bruteforce_crosscheck():
-    # P1 highest yield: randomized property test comparing against brute-force enumeration
-    # Catches any deviation in paidMask search, not one hand-picked case, can't be special-cased
+    # Only step-2 test that composes all rules – brute-force reference for full eff→raw→tolls→lex cascade.
+    # Historically caught opus. Broadened per suggestion: few hundred cases, 7-8 nodes,
+    # duplicate+reverse edge records so F1 composes with F2, factor multiset repeating includes 1.0
+    # so re-entry fires, delays zeros and ties, batch self-consistency targeting dijkstraAll/
+    # winner-selection fragile path. Fair by construction, can't be special-cased. Fixed seed 42.
     import random
+    from collections import deque
+
+    def compare_paths(a, b):
+        ml = len(a) if len(a) < len(b) else len(b)
+        for i in range(ml):
+            if a[i] < b[i]:
+                return -1
+            if a[i] > b[i]:
+                return 1
+        if len(a) < len(b):
+            return -1
+        if len(a) > len(b):
+            return 1
+        return 0
 
     def brute_best(adj, traffic_map, src, dst):
-        # adj: dict node -> dict neighbor -> raw
-        # traffic_map: dict (u,v) -> (factor, delay)
-        best = None  # (eff, raw, tolls, path)
+        # Stateful Dijkstra over (node, zone, paid_set) – allows node revisits with different paidMask,
+        # matching oracle's state expansion. Required because optimal with once-per-route can involve cycles.
+        import heapq
 
-        def compare_paths(a, b):
-            ml = len(a)
-            if len(b) < ml:
-                ml = len(b)
-            for i in range(ml):
-                if a[i] < b[i]:
-                    return -1
-                if a[i] > b[i]:
-                    return 1
-            if len(a) < len(b):
-                return -1
-            if len(a) > len(b):
-                return 1
-            return 0
+        def state_key(node, zone, paid):
+            return (node, zone, frozenset(paid))
 
-        def dfs(cur, path, raw_sum, eff_sum, visited_factors, tolls):
-            nonlocal best
-            if cur == dst:
-                cand = (eff_sum, raw_sum, tolls, list(path))
-                if best is None:
-                    best = cand
+        # heap elements: (eff, raw, tolls, path, node, zone, paid_set)
+        heap = []
+        heapq.heappush(heap, (0.0, 0.0, 0, [src], src, None, set()))
+        best_for_state = {}  # (node, zone, frozenset(paid)) -> (eff, raw, tolls)
+        best_overall = None
+
+        while heap:
+            eff, raw, tolls, path, node, zone, paid = heapq.heappop(heap)
+            key = state_key(node, zone, paid)
+            if key in best_for_state:
+                be, br, bt = best_for_state[key]
+                # if current worse than recorded for same state, skip
+                if eff > be + 1e-9:
+                    continue
+                if abs(eff - be) <= 1e-9:
+                    if raw > br + 1e-9:
+                        continue
+                    if abs(raw - br) <= 1e-9 and tolls > bt:
+                        continue
+            else:
+                best_for_state[key] = (eff, raw, tolls)
+
+            if node == dst:
+                cand = (eff, raw, tolls, list(path))
+                if best_overall is None:
+                    best_overall = cand
                 else:
-                    be, br, bt, bp = best
-                    # eff primary
+                    be, br, bt, bp = best_overall
                     if abs(cand[0] - be) > 1e-9:
                         if cand[0] < be:
-                            best = cand
+                            best_overall = cand
                     else:
                         if abs(cand[1] - br) > 1e-9:
                             if cand[1] < br:
-                                best = cand
+                                best_overall = cand
                         else:
                             if cand[2] != bt:
                                 if cand[2] < bt:
-                                    best = cand
+                                    best_overall = cand
                             else:
                                 if compare_paths(cand[3], bp) < 0:
-                                    best = cand
-                return
-            # prune if eff already worse than best
-            if best is not None and eff_sum > best[0] + 1e-9:
-                return
-            for nb, raw_edge in adj.get(cur, {}).items():
-                if nb in path:
-                    continue
-                factor, delay = traffic_map.get((cur, nb), (1.0, 0.0))
-                is_new = factor not in visited_factors
-                new_visited = visited_factors | {factor}
-                new_tolls = tolls + (1 if is_new else 0)
-                new_raw = raw_sum + raw_edge
-                new_eff = eff_sum + raw_edge * factor + (delay if is_new else 0)
-                dfs(nb, path + [nb], new_raw, new_eff, new_visited, new_tolls)
+                                    best_overall = cand
+                # Since heap ordered by eff->raw->tolls->lex, first time we pop dst is optimal
+                # But we keep searching for same eff/raw/tolls with lex smaller? Our heap already orders lex via path?
+                # We push with path lex handled by compare? For simplicity, continue until eff exceeds best
+                if best_overall is not None and eff > best_overall[0] + 1e-9:
+                    break
 
-        dfs(src, [src], 0.0, 0.0, set(), 0)
-        return best
+            for nb, raw_edge in adj.get(node, {}).items():
+                # Allow revisits – only forbid revisiting same state
+                factor, delay = traffic_map.get((node, nb), (1.0, 0.0))
+                is_new = factor not in paid
+                new_paid = paid | {factor}
+                new_tolls = tolls + (1 if is_new else 0)
+                new_raw = raw + raw_edge
+                new_eff = eff + raw_edge * factor + (delay if is_new else 0)
+                new_zone = factor
+                new_path = path + [nb]
+                new_key = state_key(nb, new_zone, new_paid)
+                if new_key in best_for_state:
+                    be, br, bt = best_for_state[new_key]
+                    if new_eff > be + 1e-9:
+                        continue
+                    if abs(new_eff - be) <= 1e-9 and new_raw > br + 1e-9:
+                        continue
+                    if (
+                        abs(new_eff - be) <= 1e-9
+                        and abs(new_raw - br) <= 1e-9
+                        and new_tolls >= bt
+                    ):
+                        # if same eff/raw/tolls, we still need to consider lex smaller path
+                        # Check if existing path for this state is lex smaller; we don't store path per state, so we allow push and let overall best handle lex
+                        pass
+                heapq.heappush(
+                    heap,
+                    (new_eff, new_raw, new_tolls, new_path, nb, new_zone, new_paid),
+                )
+
+        return best_overall
+
+    def build_adj_with_traffic_f1(nodes, edge_records):
+        # edge_records: list of {from,to,distance} with duplicates and reverse orientations
+        # Implements F1: per ordered pair last wins, if only one orientation both share
+        ordered_last = {}
+        unordered_set = set()
+        node_set = set(nodes)
+        for rec in edge_records:
+            f = rec["from"]
+            t = rec["to"]
+            d = rec["distance"]
+            if f not in node_set or t not in node_set or f == t:
+                continue
+            ordered_last[(f, t)] = d
+            uk = (f, t) if f < t else (t, f)
+            unordered_set.add(uk)
+        adj = {n: {} for n in nodes}
+        for u, v in unordered_set:
+            has_uv = (u, v) in ordered_last
+            has_vu = (v, u) in ordered_last
+            if has_uv and has_vu:
+                adj[u][v] = ordered_last[(u, v)]
+                adj[v][u] = ordered_last[(v, u)]
+            elif has_uv:
+                d = ordered_last[(u, v)]
+                adj[u][v] = d
+                adj[v][u] = d
+            elif has_vu:
+                d = ordered_last[(v, u)]
+                adj[u][v] = d
+                adj[v][u] = d
+        return adj, ordered_last, unordered_set
+
+    def reachable(adj, s, t):
+        q = deque([s])
+        seen = {s}
+        while q:
+            cur = q.popleft()
+            if cur == t:
+                return True
+            for nb in adj.get(cur, {}):
+                if nb not in seen:
+                    seen.add(nb)
+                    q.append(nb)
+        return False
 
     rnd = random.Random(42)
-    for case_idx in range(15):
-        nodes = ["A", "B", "C", "D", "E"]
-        # random edges
-        edges = []
-        adj = {n: {} for n in nodes}
-        for i in range(len(nodes)):
-            for j in range(i + 1, len(nodes)):
-                if rnd.random() < 0.5:
-                    d = rnd.randint(1, 10)
-                    u = nodes[i]
-                    v = nodes[j]
-                    edges.append({"from": u, "to": v, "distance": d})
-                    adj[u][v] = d
-                    adj[v][u] = d
-        # ensure at least 3 edges
-        if len(edges) < 3:
+    # --- Phase 1: single-route brute-force cross-check, widened generator ---
+    # 150 cases, 7-8 nodes, duplicate/reverse edge records, repeating factor multiset incl 1.0
+    nodes_pool = ["A", "B", "C", "D", "E", "F", "G", "H"]
+    for case_idx in range(150):
+        num_nodes = rnd.choice([7, 8])
+        nodes = nodes_pool[:num_nodes]
+        edge_records = []
+        # generate duplicate/reverse records for many unordered pairs so F1 composes
+        for i in range(num_nodes):
+            for j in range(i + 1, num_nodes):
+                if rnd.random() < 0.6:
+                    # 1-3 duplicate records per unordered pair with varying orientation/distance
+                    dup = rnd.randint(1, 3)
+                    for _ in range(dup):
+                        u = nodes[i]
+                        v = nodes[j]
+                        if rnd.random() < 0.5:
+                            f, t = u, v
+                        else:
+                            f, t = v, u
+                        d = rnd.randint(1, 10)
+                        edge_records.append({"from": f, "to": t, "distance": d})
+        if len(edge_records) < 6:
             continue
-        # traffic: pick subset of directed arcs
+        adj, _, _ = build_adj_with_traffic_f1(nodes, edge_records)
+        # traffic with duplicate per ordered pair, repeating factors incl 1.0, delays zeros/ties
         traffic_entries = []
         traffic_map = {}
-        factors = [1.0, 2.0, 3.0]  # keep distinct <=3 for bound
-        for u, v in list(adj.items()):
-            for nb in list(v.keys()):
-                if rnd.random() < 0.5:
+        # factor multiset repeating and includes 1.0 so re-entry fires
+        factors = [1.0, 1.0, 2.0, 2.0, 3.0, 1.5]  # 4 distinct max, repeats
+        delays = [0, 0, 0, 1, 5, 5, 10]  # zeros and ties
+        # collect directed arcs present
+        dir_arcs = []
+        for u in nodes:
+            for v in adj.get(u, {}):
+                dir_arcs.append((u, v))
+        for u, v in dir_arcs:
+            if rnd.random() < 0.7:
+                dup = rnd.randint(1, 2)
+                for _ in range(dup):
                     f = rnd.choice(factors)
-                    dl = rnd.choice([0, 1, 5])
+                    dl = rnd.choice(delays)
                     traffic_entries.append(
-                        {"from": u, "to": nb, "factor": f, "delay": dl}
+                        {"from": u, "to": v, "factor": f, "delay": dl}
                     )
-                    # last wins for same ordered pair – simulate last wins by overwriting
-                    traffic_map[(u, nb)] = (f, float(dl))
-
-        # pick source/dest connected
+                    traffic_map[(u, v)] = (f, float(dl))
+        # ensure distinct <=4 already via factors set
+        distinct_f = set(ff for ff, _ in traffic_map.values())
+        if len(distinct_f) > 4:
+            continue
         src = rnd.choice(nodes)
         dst = rnd.choice([n for n in nodes if n != src])
-        # check connectivity via BFS ignoring traffic
-        from collections import deque
-
-        def reachable(s, t):
-            q = deque([s])
-            seen = {s}
-            while q:
-                cur = q.popleft()
-                if cur == t:
-                    return True
-                for nb in adj.get(cur, {}):
-                    if nb not in seen:
-                        seen.add(nb)
-                        q.append(nb)
-            return False
-
-        if not reachable(src, dst):
+        if not reachable(adj, src, dst):
             continue
-
-        # write temp files
-        graph_obj = {"nodes": nodes, "edges": edges}
+        graph_obj = {"nodes": nodes, "edges": edge_records}
         traffic_obj = {"traffic": traffic_entries}
         gp = tmp(json.dumps(graph_obj))
         tp = tmp(json.dumps(traffic_obj))
         try:
             proc = run(["--graph", gp, "--from", src, "--to", dst, "--traffic", tp])
             if proc.returncode not in (0, 1):
-                # invalid graph/traffic due to random (e.g., distinct bound) – skip
                 continue
             if proc.returncode == 1:
-                # no route – brute should also have no route
                 brute = brute_best(adj, traffic_map, src, dst)
                 assert brute is None, (
-                    f"router says no route but brute found {brute} case {case_idx}"
+                    f"case {case_idx} router no route but brute {brute}"
                 )
                 continue
             out = json.loads(proc.stdout.decode().strip())
@@ -2684,30 +2770,133 @@ def test_f2_randomized_zone_reentry_bruteforce_crosscheck():
                 continue
             brute = brute_best(adj, traffic_map, src, dst)
             assert brute is not None, (
-                f"brute found no route but router did case {case_idx} {src}->{dst} adj {adj} traffic {traffic_map}"
+                f"case {case_idx} brute no route but router did {src}->{dst}"
             )
             beff, braw, btolls, bpath = brute
-            # compare against router output
             assert math.isclose(out["distance"], braw, abs_tol=1e-6), (
-                f"case {case_idx} raw mismatch: router {out['distance']} brute {braw} path router {out['path']} brute {bpath} src {src} dst {dst} traffic {traffic_map}"
+                f"case {case_idx} raw mismatch router {out['distance']} brute {braw} path {out['path']} vs {bpath}"
             )
             assert math.isclose(out["effective_distance"], beff, abs_tol=1e-6), (
-                f"case {case_idx} eff mismatch: router {out['effective_distance']} brute {beff} raw {out['distance']} vs {braw} path router {out['path']} brute {bpath} src {src} dst {dst}"
+                f"case {case_idx} eff mismatch router {out['effective_distance']} brute {beff}"
             )
-            # path may differ if tie-break differs? But we implement same tie-break, so check eff/raw/tolls primary and path lex as well
-            # Allow path divergence only if eff/raw/tolls equal and lex order would pick different – but our brute uses same lex, so should match
-            if not math.isclose(
+            # when eff/raw equal, require path lex equal (same tie-break)
+            if math.isclose(
                 out["effective_distance"], beff, abs_tol=1e-9
-            ) or not math.isclose(out["distance"], braw, abs_tol=1e-9):
-                continue
-            # if tolls tie-break matters, our brute tolls count may differ but eff equal – check path lex if needed
-            # For strictness, require path equal when eff equal
-            assert out["path"] == bpath, (
-                f"case {case_idx} path mismatch: router {out['path']} brute {bpath} eff {out['effective_distance']} vs {beff} raw {out['distance']} vs {braw} src {src} dst {dst}"
-            )
+            ) and math.isclose(out["distance"], braw, abs_tol=1e-9):
+                # tolls not exposed in single but path must match if our brute uses same cascade
+                assert out["path"] == bpath, (
+                    f"case {case_idx} path mismatch router {out['path']} brute {bpath} eff {beff} raw {braw}"
+                )
         finally:
             os.unlink(gp)
             os.unlink(tp)
+
+    # --- Phase 2: batch self-consistency – same random cases through --requests ---
+    # 40 cases, each 4-5 queries, assert batch lines match single-route results and brute.
+    # Targets dijkstraAll / winner-selection / reconstruction fragile path.
+    for case_idx in range(40):
+        num_nodes = rnd.choice([7, 8])
+        nodes = nodes_pool[:num_nodes]
+        edge_records = []
+        for i in range(num_nodes):
+            for j in range(i + 1, num_nodes):
+                if rnd.random() < 0.6:
+                    for _ in range(rnd.randint(1, 3)):
+                        f = nodes[i] if rnd.random() < 0.5 else nodes[j]
+                        t = nodes[j] if f == nodes[i] else nodes[i]
+                        edge_records.append(
+                            {"from": f, "to": t, "distance": rnd.randint(1, 10)}
+                        )
+        if len(edge_records) < 6:
+            continue
+        adj, _, _ = build_adj_with_traffic_f1(nodes, edge_records)
+        traffic_entries = []
+        traffic_map = {}
+        factors = [1.0, 1.0, 2.0, 2.0, 3.0, 1.5]
+        delays = [0, 0, 0, 1, 5, 5, 10]
+        for u, v in [(u, nb) for u in nodes for nb in adj.get(u, {})]:
+            if rnd.random() < 0.7:
+                for _ in range(rnd.randint(1, 2)):
+                    f = rnd.choice(factors)
+                    dl = rnd.choice(delays)
+                    traffic_entries.append(
+                        {"from": u, "to": v, "factor": f, "delay": dl}
+                    )
+                    traffic_map[(u, v)] = (f, float(dl))
+        if len(set(ff for ff, _ in traffic_map.values())) > 4:
+            continue
+        # build 5 random connected queries
+        queries = []
+        attempts = 0
+        while len(queries) < 5 and attempts < 50:
+            attempts += 1
+            s = rnd.choice(nodes)
+            t = rnd.choice([n for n in nodes if n != s])
+            if reachable(adj, s, t):
+                queries.append((s, t))
+        if len(queries) < 3:
+            continue
+        graph_obj = {"nodes": nodes, "edges": edge_records}
+        traffic_obj = {"traffic": traffic_entries}
+        req_obj = [{"source": s, "destination": d} for s, d in queries]
+        gp = tmp(json.dumps(graph_obj))
+        tp = tmp(json.dumps(traffic_obj))
+        rq = tmp(json.dumps(req_obj))
+        try:
+            proc_batch = run(["--graph", gp, "--requests", rq, "--traffic", tp])
+            assert proc_batch.returncode in (0, 1), (
+                f"batch case {case_idx} rc {proc_batch.returncode} stderr {proc_batch.stderr.decode()[:200]}"
+            )
+            batch_lines = proc_batch.stdout.decode().strip().splitlines()
+            assert len(batch_lines) == len(queries), (
+                f"batch lines {len(batch_lines)} != queries {len(queries)}"
+            )
+            batch_outs = [json.loads(l) for l in batch_lines]
+            for (s, d), bout in zip(queries, batch_outs):
+                brute = brute_best(adj, traffic_map, s, d)
+                if brute is None:
+                    assert bout["distance"] == -1 and bout["path"] == [], (
+                        f"batch no-route mismatch {s}->{d}"
+                    )
+                else:
+                    beff, braw, btolls, bpath = brute
+                    assert math.isclose(bout["distance"], braw, abs_tol=1e-6), (
+                        f"batch raw mismatch {s}->{d} bout {bout['distance']} brute {braw}"
+                    )
+                    assert math.isclose(
+                        bout["effective_distance"], beff, abs_tol=1e-6
+                    ), f"batch eff mismatch {s}->{d}"
+                    if math.isclose(
+                        bout["effective_distance"], beff, abs_tol=1e-9
+                    ) and math.isclose(bout["distance"], braw, abs_tol=1e-9):
+                        assert bout["path"] == bpath, (
+                            f"batch path mismatch {s}->{d} {bout['path']} vs {bpath}"
+                        )
+                # self-consistency vs single-route
+                proc_single = run(
+                    ["--graph", gp, "--from", s, "--to", d, "--traffic", tp]
+                )
+                assert proc_single.returncode == proc_batch.returncode or (
+                    proc_single.returncode in (0, 1) and proc_batch.returncode in (0, 1)
+                ), f"batch vs single rc mismatch"
+                if proc_single.returncode in (0, 1):
+                    sout = json.loads(proc_single.stdout.decode().strip())
+                    assert sout["distance"] == bout["distance"], (
+                        f"batch vs single distance mismatch {s}->{d}"
+                    )
+                    assert sout["path"] == bout["path"], (
+                        f"batch vs single path mismatch {s}->{d}"
+                    )
+                    if "effective_distance" in sout:
+                        assert math.isclose(
+                            sout["effective_distance"],
+                            bout["effective_distance"],
+                            abs_tol=1e-9,
+                        ), f"batch vs single eff mismatch {s}->{d}"
+        finally:
+            os.unlink(gp)
+            os.unlink(tp)
+            os.unlink(rq)
 
 
 # --- Type matrix: 43 specified-but-untested cells (AFTR R06 gap) ---

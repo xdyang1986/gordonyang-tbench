@@ -2,7 +2,7 @@
 
 ## Description
 
-**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator with three subtle multi-batch defects.**
+**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying six subtle defects.**
 
 The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects
 in place. `instruction.md` gives **only** the stdin/stdout format plus three failing input/output examples — it
@@ -27,27 +27,48 @@ Moving the algorithm out of the prompt and into the code makes the difficulty **
 transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the
 same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The four defects
+## The six defects
 
-Three of the four are **invariant violations** — the shipped program exceeds a limit `instruction.md` declares it
-must respect. That matters: an invariant violation is objectively wrong regardless of allocation policy, so the
-agent can verify a fix without knowing the policy. The fourth is a policy divergence in the credit recurrence.
+There are **six**, not four — the credit recurrence appears at three separate sites, and counting them as one
+"credit defect" is what hid the problem for three rounds.
 
-All four are multi-batch or multi-iteration only; the shipped program agrees with the reference on the first
-batch of every example.
+Three are **invariant violations**: the shipped program exceeds a limit `instruction.md` declares it must
+respect. Those are objectively wrong regardless of allocation policy, so the agent can verify a fix without
+knowing the policy. Three are **policy divergences** in the credit recurrence, which are only findable if a
+visible example exposes them.
 
-| # | Location | Defect | Effect | Own failures |
+| # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
-| 1 | `sRemCostIter` | omits `- subBatchCount[s]*subCost[s]` | exceeds subscriber **cost cap** | 10 |
-| 2 | group `rateRem` | omits `- groupBatchCount[g]` | exceeds group **rate + burst** | 11 |
-| 3 | subscriber `rateRem` | omits `- subBatchCount[s]` | exceeds subscriber **rate** | 6 |
-| 4 | persistent credit | plain halving `c/2` instead of `c/2 + 1` | policy divergence | 4 |
+| D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | **E5** |
+| D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
+| D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
+| D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
+| D5 | 663 | `groupCredit[g] = c/2` instead of `c/2 + 1` | policy | **E6** |
+| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` | policy | E4 |
 
-Defects 1–3 are the same conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from
-*persisted* state and forgets the allocation already made *within the current batch*. One locus, coherent story,
-findable together.
+D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state
+and forgets the allocation already made *within the current batch*.
+
+D1 is distinct from D5/D6 and this matters — it governs the **in-round** weighted loop, so it shows up in
+single-batch inputs, while D5/D6 only move multi-batch results. An agent can fix both persistent sites and still
+fail; `test_credit_off_by_one` is a `T=1` case and is driven purely by D1.
 
 Combined: **28/70 failing**, reference 70/70, `go vet` clean on both.
+
+### Every defect must be exposed by an example — enforced by `tools/audit_defects.py`
+
+Run it before every push. It extracts the reference from `solve.sh`, diffs it against the shipped source to
+enumerate defects, builds a binary per defect, parses the examples out of `instruction.md`, and fails if any
+defect produces identical output on all of them. It also checks each example really is a failing case and that
+each documented "Correct output" matches the reference.
+
+Against the committed state at `00a7555` it reports:
+
+```
+L169:creditTmp[i] = creditTmp[i]/2 + 1     .     .     .     .   <-- INVISIBLE
+L663:groupCredit[g] = groupCredit[g]/2 + 1 .     .     .     .   <-- INVISIBLE
+FAIL: see above — do not push
+```
 
 Concrete cap violation (needs no policy knowledge to recognise as a bug):
 
@@ -72,7 +93,7 @@ at 6 against a cap of 5.
 `BAD_AMBIGUOUS` — R01, R02 and R03 all failed, because the hidden tests enforced state semantics no agent could
 uniquely derive. Invariant violations replace guessing with checking.
 
-### Defect 4 was unfair until `cc85add` — fixed by adding a discriminating example
+### How the credit defects became unfair (historical record)
 
 Defect 4 is a policy divergence, and at `cc85add` it was provably unfair rather than merely hard. All 15 agent
 trials fixed defects 1–3 and failed only on the credit recurrence. A claude-code trajectory shows the agent
@@ -110,9 +131,7 @@ example, whose prose still described the retired dynamic-weight mechanism (*"pin
 solvers at the wrong subsystem. With it, guessing is falsified by visible evidence and the task becomes
 hypothesis-and-check rather than hypothesis-and-hope.
 
-If this still lands at 0/15, dropping defect 4 is the fallback — that leaves 23/70 failing, all of it objectively
-checkable. Note that defects 1–3 alone were solved by 15/15 agents, so that fallback most likely reads as too
-easy.
+Superseded: that example fixed D6 only. The audit later showed D1 and D5 were still invisible — see below.
 
 `go vet` is clean on the shipped source; there is no dead code, unused variable, or comment that marks the
 defects as planted.
@@ -178,6 +197,63 @@ CTRF across claude-code, metacode and codex shows one signature: defects 1–3 a
 
 Caveat on the AFTR: it rated R01 PASS, but the witness above shows a solution consistent with every visible
 example that the hidden tests reject. The `GOOD` verdict is fragile until the discriminating example lands.
+
+### Online run at `00a7555` (discriminating credit example) — 0/15, cause found
+
+Clean sample: 15 genuine trials, **zero infra aborts**, durations 335–1475s. Oracle 3/3, AI assessment Accept,
+provenance and contamination clean.
+
+The new example helped — metacode reached 33/35 named tests (only `test_allocation` + `test_credit_off_by_one`)
+and its trajectory shows it wrote `credit/2 + 1` correctly at both persistent sites. It still failed, because it
+never touched the third site, `creditTmp`.
+
+`tools/audit_defects.py` then showed why no agent could: of six defects, **D1 and D5 produced identical output on
+all four visible examples**. The task required six fixes while showing evidence for four. That, not difficulty,
+is what produced 0/15 three rounds running:
+
+| round | defect nobody could see |
+|---|---|
+| `f4e1b2d` | weight `+1` omission — no artifact in the code to read |
+| `cc85add` | persistent credit — the natural guess `c*9/10` satisfied every visible example |
+| `00a7555` | in-round `creditTmp` and group credit — invisible in every example |
+
+Each round fixed the named defect and left another unexposed one behind it. The audit script exists so this
+cannot recur.
+
+### Fix: two more examples, one per invisible defect
+
+**E5 — exposes D1 (in-round temp credit).** Single batch, so D5/D6 cannot contribute:
+
+```
+1
+12
+1
+0 0 2 42 0 0
+3
+0 0 0 3 14 0 0 1
+0 0 0 4 3 0 0 1
+0 0 0 1 13 0 0 1
+```
+correct `7,3,2` — shipped prints `8,3,1`.
+
+**E6 — exposes D5 (persistent group credit).** Needs two groups, which no earlier example had; that is exactly
+why D5 was invisible:
+
+```
+2
+8
+4
+2
+0 0 1 28 0 0
+0 0 3 59 0 0
+2
+0 0 0 2 14 0 0 1
+1 0 0 1 10 0 0 1
+```
+correct `2,6` / `1,3` — shipped prints `2,6` / `0,4`. The `c*9/10` guess also gives `2,6 / 0,4`, so this example
+falsifies it too.
+
+With both added the audit passes: every defect exposed, 1:1 defect-to-example mapping.
 
 ## Test Quality
 

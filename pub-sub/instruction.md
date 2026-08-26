@@ -149,6 +149,50 @@ Correct output:
 
 Shipped prints `1,3` / `0,4` / `10,0`. No rates, bursts or costs are involved here — only the per-batch credit update differs. This isolates the credit recurrence and falsifies the common guess c*9/10 which would give 1,3 / 0,4 / 5,5.
 
+Input:
+
+```
+1
+12
+1
+0 0 2 42 0 0
+3
+0 0 0 3 14 0 0 1
+0 0 0 4 3 0 0 1
+0 0 0 1 13 0 0 1
+```
+
+Correct output:
+
+```
+7,3,2
+```
+
+Shipped prints `8,3,1`. Single batch, so persistent credit sites cannot contribute — only the in-round weighted loop differs. This exposes the in-round creditTmp defect.
+
+Input:
+
+```
+2
+8
+4
+2
+0 0 1 28 0 0
+0 0 3 59 0 0
+2
+0 0 0 2 14 0 0 1
+1 0 0 1 10 0 0 1
+```
+
+Correct output:
+
+```
+2,6
+1,3
+```
+
+Shipped prints `2,6` / `0,4`. Two groups, which no earlier example had — this exposes the group credit defect. The c*9/10 guess also gives `2,6 / 0,4`, so this kills that guess too.
+
 ## Task
 
 Repair the program in `/app` so it produces the correct allocation for these cases and in
