@@ -27,33 +27,67 @@ Moving the algorithm out of the prompt and into the code makes the difficulty **
 transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the
 same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The three defects
+## The four defects
 
-All three are multi-batch-only: the shipped program agrees with the reference on batch 1 of every example, so
-single-batch smoke tests look correct.
+Three of the four are **invariant violations** — the shipped program exceeds a limit `instruction.md` declares it
+must respect. That matters: an invariant violation is objectively wrong regardless of allocation policy, so the
+agent can verify a fix without knowing the policy. The fourth is a policy divergence in the credit recurrence.
 
-| # | Subsystem | Defect |
-|---|---|---|
-| 1 | Persistent credit | Decay is a plain halving `c/2`; the reference is `c/2 + 1`. Reads as idiomatic. |
-| 2 | Burst | Excess is measured against `rate + burst_rem` instead of `rate`, so the guard can never fire and `burst_rem` is never depleted. |
-| 3 | Dynamic weight | The `else` branch applies the served branch's `w*9/10` decay to eligible-but-unallocated entities instead of growing them by 1. |
+All four are multi-batch or multi-iteration only; the shipped program agrees with the reference on the first
+batch of every example.
 
-**Bug 3 was rewritten after `f4e1b2d` came back 0/15.** It was originally an *omission* — the `+1` line simply
-absent from the `else` branch. Every agent in every trial fixed bugs 1 and 2 and then failed on exactly the same
-three weight tests, because an omitted line leaves no artifact to read, question, or correct. It is now a *wrong
-expression*: the branch visibly updates the weight, and the adjacent `credit += wOld` line in the same branch
-hints that the correct direction is growth, not decay. Same 14/70 failure profile; discoverable instead of
-undiscoverable.
+| # | Location | Defect | Effect | Own failures |
+|---|---|---|---|---|
+| 1 | `sRemCostIter` | omits `- subBatchCount[s]*subCost[s]` | exceeds subscriber **cost cap** | 10 |
+| 2 | group `rateRem` | omits `- groupBatchCount[g]` | exceeds group **rate + burst** | 11 |
+| 3 | subscriber `rateRem` | omits `- subBatchCount[s]` | exceeds subscriber **rate** | 6 |
+| 4 | persistent credit | plain halving `c/2` instead of `c/2 + 1` | policy divergence | 4 |
 
-`go vet` is clean on the shipped source; there is no dead code or unused-variable tell that marks the defects as
-planted.
+Defects 1–3 are the same conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from
+*persisted* state and forgets the allocation already made *within the current batch*. One locus, coherent story,
+findable together.
+
+Combined: **28/70 failing**, reference 70/70, `go vet` clean on both.
+
+Concrete cap violation (needs no policy knowledge to recognise as a bug):
+
+```
+2
+15
+12
+2
+0 0 1 6 0 0
+0 0 1 5 0 0
+3
+0 0 0 3 5 0 0 1
+1 0 0 3 9 0 0 2
+1 0 0 2 11 0 0 1
+```
+correct `5,3,2 / 0,0,0` — shipped `6,3,2 / 0,0,0`. Sub0 has cap 5 at cost 1, so 6 messages puts cumulative cost
+at 6 against a cap of 5.
+
+### Why the previous defect set was replaced
+
+`5698433` shipped three *policy divergences* (credit off-by-one, burst carryover, weight direction) and drew AFTR
+`BAD_AMBIGUOUS` — R01, R02 and R03 all failed, because the hidden tests enforced state semantics no agent could
+uniquely derive. Invariant violations replace guessing with checking.
+
+### Known residual risk
+
+Defect 4 is still a policy divergence. The AFTR at `e6e15492` observed that *"several rollouts fixed the
+invariants but chose plausible wrong credit rules that pass the visible examples."* If `BAD_AMBIGUOUS` recurs,
+dropping defect 4 is the lever — that leaves 23/70 failing, all of it objectively checkable.
+
+`go vet` is clean on the shipped source; there is no dead code, unused variable, or comment that marks the
+defects as planted.
 
 ## Completion Rates
 
 - Reference (`solution/solve.sh`): **70/70**.
-- Shipped buggy state: **14 failed / 56 passed**.
-- Verified end-to-end locally (container-exact: `/app` holds only `main.go`, no `go.mod`): buggy → 14 failures →
-  run `solve.sh` → 70/70.
+- Shipped buggy state: **28 failed / 42 passed**.
+- Verified **inside the real built image** (`docker build environment/`, then mount `tests/` and `solution/`):
+  - shipped, no fix → `reward=0`, 28 failed / 42 passed
+  - `solve.sh` then `tests/test.sh` → `reward=1`, 70/70
 
 ### Online run at `f4e1b2d` (first debug-in-place attempt) — 0/15, corrected
 
@@ -72,10 +106,23 @@ undiscoverable defect blocking 100% of attempts. Two of three models fixed bugs 
 66/70. Fixed by making bug 3 visible (above) and by adding a fourth prompt example that pins the `+1` recurrence
 across two consecutive starved batches.
 
-Failures span three subsystems — 8 exact multi-batch allocation cases plus `test_positive_after_deallocation_burst`,
-`test_burst_carryover_multi_batch`, `test_dynamic_weight_1_1_10`, `test_served_decay_vs_unallocated`,
-`test_eligible_but_unallocated_plus1`, `test_burst_carryover_cap_diff`. Scoring is all-or-nothing, so the agent
-must find all three.
+### Online run at `e6e15492` (invariant-violation redesign) — VOID
+
+Oracle 0/3, all agents 0/14. Neither number means anything: **the verifier could not run pytest in any trial.**
+`golang:1.26.2-bookworm` ships `/usr/bin/python3` but has no `pip` and no `ensurepip`, so
+`python3 -m pip install …` failed; the retry loop `for i in 1 2 3; do CMD && break || sleep 5; done` still exits 0,
+so the image built clean and every trial died at verify time with `No module named pytest`. AFTR: `BAD_INFRA`.
+
+That run also carried a separate own-goal: the shipped `main.go` contained six `// BUG` comments naming each
+defect and its fix, so even with a working verifier the task would have been self-solving (AFTR
+`Information Leakage: Significant`, 1 High). Both are fixed; the next run is the first valid measurement of this
+design.
+
+The Dockerfile now bootstraps pip via `python3-pip`, fails the build if installation fails, and asserts
+`import pytest, ctrf` plus the presence of the `--ctrf` flag `tests/test.sh` depends on. That assertion caught a
+real error while it was being written — the plugin's import name is `ctrf`, not `pytest_json_ctrf`.
+
+Scoring is all-or-nothing, so the agent must find every defect.
 
 ## Test Quality
 

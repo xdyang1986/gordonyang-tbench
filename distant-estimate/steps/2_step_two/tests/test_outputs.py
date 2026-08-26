@@ -3272,3 +3272,561 @@ def test_traffic_wrapper_array_contains_null_invalid():
     finally:
         os.unlink(gp)
         os.unlink(tp)
+
+
+# --- 32-cell step-2 batch-request matrix (R06 still open, only 18 distinct request files previously) ---
+# Top-level as object/string/number/bool, array elements as null/number/string/array/bool,
+# source/destination/from/to as number/bool/null/object/array, each with and without --traffic.
+# All already return exit2 empty stdout in current oracle, so tests-only no spec/oracle change.
+# Single covered cell test_requests_array_null_invalid was only step-2 test ever catching avocado+opus.
+
+
+def test_batch_top_level_object_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('{"source":"A","destination":"B"}')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_top_level_string_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('"x"')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_top_level_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("5")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_top_level_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("true")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_element_null_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("[null]")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_element_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("[5]")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_element_string_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('["x"]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_element_array_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("[[1,2,3]]")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_element_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp("[true]")
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_source_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source": 123, "destination":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_source_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source": true, "destination":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_source_null_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source": null, "destination":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_source_object_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source": {}, "destination":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_source_array_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source": [], "destination":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_destination_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source":"A","destination": 456}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_destination_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source":"A","destination": false}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_destination_null_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source":"A","destination": null}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_destination_object_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source":"A","destination": {}}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_destination_array_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"source":"A","destination": []}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_from_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from": 123, "to":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_from_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from": true, "to":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_from_null_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from": null, "to":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_from_object_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from": {}, "to":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_from_array_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from": [], "to":"B"}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_to_number_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from":"A","to": 789}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_to_bool_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from":"A","to": false}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_to_null_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from":"A","to": null}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_to_object_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from":"A","to": {}}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
+
+
+def test_batch_to_array_invalid_step2():
+    gp = tmp(
+        json.dumps(
+            {"nodes": ["A", "B"], "edges": [{"from": "A", "to": "B", "distance": 1}]}
+        )
+    )
+    rp = tmp('[{"from":"A","to": []}]')
+    tp = tmp("[]")
+    try:
+        proc = run(["--graph", gp, "--requests", rp])
+        assert proc.returncode == 2 and proc.stdout.decode().strip() == ""
+        proc2 = run(["--graph", gp, "--requests", rp, "--traffic", tp])
+        assert proc2.returncode == 2 and proc2.stdout.decode().strip() == ""
+    finally:
+        os.unlink(gp)
+        os.unlink(rp)
+        os.unlink(tp)
