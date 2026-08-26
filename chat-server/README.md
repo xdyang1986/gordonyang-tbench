@@ -41,7 +41,7 @@ Why naive fails both steps (56/58):
 
 ## Completion Rates
 
-### Latest online validation — commit `e5d715d` (56 + 58 tests, now 59 + 61 after robustness fixes)
+### Latest online validation — commit `0bf1e7c` (60 + 62 tests after robustness fixes)
 
 **Validation status: PASSING.** Structural 10/10 PASS, oracle 3/3, provenance clean, contamination not checked (repo not yet covered by the pipeline). Agentic Full-Task Review at this commit: **GOOD / GENUINELY_HARD**, all 13 rubrics PASS, secondary issues NONE.
 
@@ -78,11 +78,11 @@ Three lessons from this sequence:
 - **gpt-5.5 (T1 6/9)** — Turn 1 is the wall; when it clears Turn 1 it usually clears Turn 2 (5/6).
 - **claude-opus-5 (T1 8/10, T2 8/8)** — only Turn 1 catches it, and Turn 2 is free once reached. This is the weakest part of the current calibration: at the frontier the task is a Turn-1 test.
 
-Oracle proves all 120 tests (59 + 61) on all three online trials; verifier time 10–18s for Turn 1 and 24–33s for Turn 2, well inside the 600s verifier timeout. Reproduced locally in a 2-CPU / 4 GB container at this commit: Turn 1 56/56 in 9.1s, Turn 2 58/58 on three consecutive runs (23.5s / 23.1s / 23.2s) — the timing-sensitive rate-limit and presence-TTL tests are stable.
+Oracle proves all 122 tests (60 + 62) on all three online trials; verifier time 10–18s for Turn 1 and 24–33s for Turn 2, well inside the 600s verifier timeout. Reproduced locally in a 2-CPU / 4 GB container at this commit: Turn 1 56/56 in 9.1s, Turn 2 58/58 on three consecutive runs (23.5s / 23.1s / 23.2s) — the timing-sensitive rate-limit and presence-TTL tests are stable.
 
 ## Model Analysis
 
-**Failure Categorization (hard 59+61):**
+**Failure Categorization (hard 60+62):**
 
 1. **Checksum + HTML Escaping (25%)**: Default Marshal escapes `<>&` → MD5 mismatch vs Python canonical. Fix `SetEscapeHTML(false)` + alphabetical field order + wrapper checksum for all files. Private special chars and private special chars sharded + Unicode emoji + large message 10KB test.
 
@@ -98,7 +98,7 @@ Oracle proves all 120 tests (59 + 61) on all three online trials; verifier time 
 
 7. **Presence TTL + Unknown + Multi-User + Pagination + Snapshot File Mode (2.5% Turn2)**: Unknown false last_seen0, TTL expiry 3s, multi-user TTL, offset pagination 50/500/1000 room+private <2s, snapshot dir all files+config + file mode combined JSON with counter exact restore, ops-log invalid skipping + content order + large 100, 200 rooms sharded, large message 10KB sharded, unicode.
 
-**Cross-model**: Turn1 59 tests, Turn2 61 tests. Measured at `e5d715d`: opus-5 8/10, gpt-5.5 5/9, avocado 3/10, oracle 3/3 — monotonic in model strength with the weak-model gate mixed rather than saturated at either end.
+**Cross-model**: Turn1 60 tests, Turn2 62 tests. Measured at `e5d715d`: opus-5 8/10, gpt-5.5 5/9, avocado 3/10, oracle 3/3 — monotonic in model strength with the weak-model gate mixed rather than saturated at either end.
 
 **Reasoning gaps**: Spec details (checksum canonical, weighted hash, persistent token bucket with refill multiple cycles and no side effects, broadcast dedup and single-token cost, global lock, spaces Join, counter exact restore, empty ID and invalid limit validation, 200 rooms, concurrent joins, Unicode, 10KB, 1000-msg history), not flaky. The two known flake sources have been removed: wall-clock-sensitive rate limits (now 0.05/s except in the dedicated refill test) and apt-dependent image builds.
 
