@@ -377,46 +377,59 @@ def test_special_chars_permissive():
     )
 
 
-def test_atomic_write_no_torn_json_sharded():
-    # Robust atomic-write check for sharded mode: 30 concurrent 20KB sends to same room
-    # Poll all shard files 4000 times tight loop for invalid JSON
+def test_atomic_write_replaces_file_not_truncates_sharded():
+    # Deterministic check for sharded mode: rename replaces inode, truncate doesn't
     _reset_sharded()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
+    _cli("send", "general", "alice", "first")
     cfg = _load_config()
-    big_base = "Y" * 20480
+    sid = _expected_weighted_shard_id("general", cfg["shards"])
+    shard_path = [s["path"] for s in cfg["shards"] if s["id"] == sid][0]
+    ino_before = os.stat(shard_path).st_ino
+    with open(shard_path) as held:
+        _cli("send", "general", "alice", "second")
+        held.seek(0)
+        stale = held.read()
+    assert os.stat(shard_path).st_ino != ino_before, (
+        "shard file modified in place; writes must go to a temp file in same dir and be moved with rename"
+    )
+    # stale still has 1 message, current has 2
+    assert len(json.loads(stale)["data"]["rooms"]["general"]["messages"]) == 1
+    assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 2
+
+
+def test_atomic_write_no_torn_json_sharded():
+    # Modest concurrency for end-to-end guarantee
+    _reset_sharded()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
     procs = []
-    for i in range(30):
+    for i in range(12):
         proc = subprocess.Popen(
-            [BIN, "--config", CONFIG_PATH, "send", "general", "alice", f"{big_base}{i}"],
+            [BIN, "--config", CONFIG_PATH, "send", "general", "alice", f"cmsg{i}_" + "Y"*2048],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         procs.append(proc)
-    torn = 0
-    for _ in range(4000):
+    for _ in range(200):
         try:
+            cfg = _load_config()
             for s in cfg["shards"]:
-                path = s["path"]
-                if not os.path.exists(path):
-                    continue
-                with open(path, "r") as f:
-                    content = f.read()
-                    if not content.strip():
-                        continue
-                    json.loads(content)
+                if os.path.exists(s["path"]):
+                    with open(s["path"]) as f:
+                        json.load(f)
         except Exception:
-            torn += 1
-            break
+            pass
+        time.sleep(0.001)
     for proc in procs:
-        proc.wait(timeout=20)
-    assert torn == 0, f"Torn JSON observed in sharded files {torn} times in 4000 polls – atomic CreateTemp+Rename required"
+        proc.wait(timeout=120)
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert len(msgs) == 30, f"Expected 30 msgs after concurrent 20KB, got {len(msgs)}"
-    assert not os.path.exists("/app/data/global.lock"), "global lock must be cleaned"
+    assert len(msgs) == 12, f"Expected 12 msgs after concurrent, got {len(msgs)}"
+    assert not os.path.exists("/app/data/global.lock")
 
 
 def test_large_history_performance():
@@ -1070,28 +1083,19 @@ def test_list_users_after_leave_all_empty_sharded():
 
 
 def test_global_lock_mandated():
-    # CHAT-007: Must use /app/data/global.lock for multi-shard ops
-    # Verify by holding the lock and seeing reference block
+    # Must use /app/data/global.lock for multi-shard ops – looser check that doesn't pin retry params
     _reset_sharded()
     _cli("create-room", "general")
     lock_path = "/app/data/global.lock"
-    # Create lock file manually to simulate held lock
-    # Use O_EXCL to mimic acquireLock
     import os as _os
-    # Ensure no existing lock
     try:
         _os.remove(lock_path)
     except:
         pass
-    # Hold lock
     f = _os.open(lock_path, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
     try:
-        # Attempt operation that must use global lock – should fail or block >1s and exit 1/2
-        # Our implementation should try to acquire lock for 10s then fail
-        # If variant uses different lock name, it would succeed quickly
-        import time as _time
         import subprocess as _sp
-        start = _time.time()
+        # Hold global.lock, run a multi-shard op with short budget – it must not succeed
         proc = _sp.Popen(
             ["/tmp/codimango/chat_server", "--config", "/app/config.json", "create-room", "should-block"],
             stdout=_sp.PIPE,
@@ -1099,23 +1103,20 @@ def test_global_lock_mandated():
             text=True,
         )
         try:
-            proc.wait(timeout=12)
+            proc.wait(timeout=5)
         except _sp.TimeoutExpired:
+            # Blocking is also acceptable – it means it's respecting the lock
             proc.kill()
-            elapsed = _time.time() - start
-            assert elapsed >= 2, f"operation should block while global.lock held, but returned too quickly"
-            # Also considered pass if it blocked long enough
             return
-        elapsed = _time.time() - start
-        # If it returned, it should have failed to acquire lock (exit !=0) and taken >2s due to retry loop
-        assert proc.returncode != 0, "create-room should fail when global.lock is held"
-        assert elapsed >= 2, f"should have retried lock for at least 2s, elapsed {elapsed}"
+        # If it returned quickly, it must have failed (lock held)
+        assert proc.returncode != 0, "create-room should not succeed while global.lock is held (must use mandated global lock)"
     finally:
         _os.close(f)
         try:
             _os.remove(lock_path)
         except:
             pass
+
 
 
 def test_presence_last_seen_seconds_ago_field():

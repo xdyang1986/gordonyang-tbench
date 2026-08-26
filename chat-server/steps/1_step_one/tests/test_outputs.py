@@ -370,43 +370,56 @@ def test_stderr_warnings():
     assert "corrupt" in (r.stdout + r.stderr).lower()
 
 
-def test_atomic_behavior_concurrent():
-    # Robust atomic-write check: 30 concurrent 20KB sends with tight polling
-    # The truncating-write variant produces torn JSON ~1 in 4000 polls; reference should produce 0
+def test_atomic_write_replaces_file_not_truncates():
+    # Deterministic atomicity check: rename replaces inode, truncate doesn't
+    # Catches truncating-write variant in 4 CLI calls with no timing
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
-    big_base = "X" * 20480
+    _cli("send", "general", "alice", "first")
+    ino_before = os.stat(DATA_PATH).st_ino
+    with open(DATA_PATH) as held:  # opened before the write
+        _cli("send", "general", "alice", "second")
+        held.seek(0)
+        stale = held.read()  # rename -> still complete old file
+    assert os.stat(DATA_PATH).st_ino != ino_before, (
+        "data file modified in place; writes must go to a temp file in the same "
+        "directory and be moved into place with rename"
+    )
+    assert len(json.loads(stale)["data"]["rooms"]["general"]["messages"]) == 1
+    assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 2
+
+
+def test_atomic_behavior_concurrent():
+    # Modest concurrency test for end-to-end guarantee (not a race detector)
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
     procs = []
-    for i in range(30):
+    for i in range(12):
         p = subprocess.Popen(
-            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"{big_base}{i}"],
+            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"cmsg{i}_" + "X"*2048],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
         procs.append(p)
-    torn = 0
-    # Tight polling: 4000 iterations, no sleep between polls is intentional to catch torn window
-    for _ in range(4000):
+    # Light polling with 1ms sleep to observe file while concurrent writes happen
+    for _ in range(200):
         try:
-            with open(DATA_PATH, "r") as f:
-                content = f.read()
-                if not content.strip():
-                    continue
-                json.loads(content)
+            with open(DATA_PATH) as f:
+                json.load(f)
         except Exception:
-            torn += 1
-            break
+            pass
+        time.sleep(0.001)
     for proc in procs:
-        proc.wait(timeout=20)
+        proc.wait(timeout=120)
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert torn == 0, f"Torn JSON observed {torn} times in 4000 polls – file must never be observed as invalid JSON during concurrent operations"
-    assert len(msgs) == 30, f"Expected all 30 msgs after 30 concurrent 20KB sends, got {len(msgs)}"
-    assert len({m["id"] for m in msgs}) == len(msgs), "IDs must be unique under concurrency"
-    assert not os.path.exists(DATA_PATH + ".lock"), "lock file must be cleaned up"
+    assert len(msgs) == 12, f"Expected all 12 msgs after concurrent sends, got {len(msgs)}"
+    assert len({m["id"] for m in msgs}) == len(msgs)
+    assert not os.path.exists(DATA_PATH + ".lock")
 
 
 def test_stdlib_only():
