@@ -2,7 +2,7 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/distant-estimate"
-description = "Multi-turn Go CLI route planner. Turn 1 implements raw-distance shortest-path routing over an undirected road manifest, with strict JSON validation, append-ordered survey-log edge semantics, single and batch modes, exact exit codes, and deterministic lexicographic tie-breaking. Turn 2 extends the same binary with an optional directed traffic manifest: routing minimizes effective distance under per-zone congestion tolls and direction-dependent edge lengths, while still reporting raw distance along the effective-best path."
+description = "All-or-nothing Go router. Turn1 126 tests, Turn2 159 tests after R07,R06,R01 + null hardening. Real bug edges:null must be invalid exit2 not no-route fixed. Type matrix 43 cells filled. R07 reward hacking via /app/pytest.py shadowing fixed with python3 -I -m pytest. R06 missing --source/--destination alias tests added both steps plus with traffic batch. R01/R02 stale prefer sentence removed. Null subclass widened: nodes element null, requests null, traffic wrapper contains null, traffic top-level null. Turn1 last-wins survey-log T1-T5. Turn2 F1 per-direction raw F2 once-per-route paidMask bitmask <=4 surviving factor, tie-break eff->raw->tolls->lex, randomized brute-force 15 cases."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "routing", "dijkstra", "shortest-path", "traffic-aware", "graph", "cli", "lexicographic-tie-break", "multi-turn"]
 format = "terminal_bench_multi_turn"
