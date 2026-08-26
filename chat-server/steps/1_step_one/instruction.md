@@ -36,42 +36,29 @@ Message JSON:
 
 IDs: globally incrementing int64 starting at 1, unique across room and private messages, monotonic interleaved. Example: room1, priv1, room2, priv2 → ids 1,2,3,4. `next_id` persists across restarts and is not reset on delete; only after corruption recovery it resets to 1. The next send after many ops must have id == previous next_id.
 
-### Persistence with Integrity – Explicit File Format
+### Persistence with Integrity – Split Files (Realistic Layout)
 
-File at `--data` must use wrapper `{"data": <StoreData>, "checksum": "<md5 hex>"}` where checksum is MD5 of canonical JSON: `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping. In Go, `json.Encoder.SetEscapeHTML(false)` must be used both for checksum computation and for file write, so raw file must contain literal "<" and emoji characters, not `\u003c` or escaped unicode.
+To mirror production sharded layout, persistence is split across three files in the same directory as `--data`, each with its own wrapper `{"data": <Data>, "checksum": "<md5 hex>"}` where checksum is MD5 of canonical JSON `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping. In Go, `json.Encoder.SetEscapeHTML(false)` must be used both for checksum computation and file write, so raw files must contain literal "<" and emoji, not `\u003c`.
 
-StoreData shape (keys sorted for checksum, Go struct tags must match):
-```json
-{
-  "next_id": 1,
-  "private_messages": [],
-  "rooms": {
-    "general": {
-      "users": ["alice", "bob"],
-      "messages": [ { "id":1, "room_id":"general", ... } ]
-    }
-  },
-  "seen_users": { "alice": true, "bob": true }
-}
-```
-- `next_id`: int64
-- `private_messages`: array of private Message objects
-- `rooms`: map from roomID string to object:
-  - `users`: JSON array of strings, sorted and deduplicated
-  - `messages`: JSON array of room messages, sorted by id asc
-- `seen_users`: map/object from userID to true (presence of key indicates user has been seen via join or private message). Must persist even after room deletion.
+Derived paths: if `--data` is `/app/data/chat.json`, then private messages are at `/app/data/private.json` (same dir, basename `private.json`) and counter at `/app/data/counter.json`. Custom `--data` paths use their directory.
 
-On write: atomic via `os.CreateTemp` in same directory + `os.Rename` plus file lock `<data>.lock` using `O_CREATE|O_EXCL` retry loop 5ms, 2000 tries, with cleanup after each command (lock file must not remain). Global ordering must be preserved under concurrent execution.
+File formats:
 
-On read:
-- Missing file → empty store `{"next_id":1,"private_messages":[],"rooms":{},"seen_users":{}}`
-- Empty file (TrimSpace empty) → empty store
-- Wrapper missing `checksum`, or checksum empty, or checksum mismatch, or invalid JSON → corruption recovery:
-  - Backup original file to `<original>.corrupt.<nanosec>` where `<nanosec>` is integer from `time.Now().UnixNano()` (must be digits only)
-  - Write to stderr a warning containing case-insensitive "corrupt" or "checksum"
-  - Recreate empty valid wrapper with correct checksum
+- **chat.json** (`--data`): `Data = {"rooms": {roomID: {users: []string, messages: []Message}}, "seen_users": {userID: bool}}`
+  - Room object: `users` sorted array, `messages` sorted by id asc
+- **private.json**: `Data = {"private_messages": []Message}`
+- **counter.json**: `Data = {"next_id": int64}` starting at 1, globally monotonic across room and private messages
 
-Concurrency: The file must never be observed as invalid JSON during concurrent operations. Parallel sends to the same room and to different rooms, as well as parallel joins, must preserve every message and user with unique IDs. The file lock must be cleaned up after each operation.
+All three files must use wrapper checksum, atomic write via `os.CreateTemp` in same directory + `os.Rename`, plus file locking. A global lock file `/app/data/global.lock` (in data directory) must be used for any operation touching multiple files (send, send-private, heartbeat-style ops if any) to keep ordering and avoid counter races; per-file `.lock` files are also allowed but global lock is mandatory for multi-file atomicity. Lock files must be cleaned after each command (must not remain) and no `tmp-*.json` residue must remain after a burst.
+
+On read per file:
+- Missing file → empty data: chat → `{"rooms":{},"seen_users":{}}`, private → `{"private_messages":[]}`, counter → `{"next_id":1}`
+- Empty file (TrimSpace empty) → empty data (same as missing)
+- Wrapper missing `checksum`, empty checksum, checksum mismatch, or invalid JSON → corruption: backup to `<original>.corrupt.<nanosec>` integer `UnixNano()`, stderr warning containing "corrupt" or "checksum", recreate empty valid wrapper
+
+IDs: globally incrementing int64 starting at 1, unique across room and private, monotonic interleaved. `next_id` in counter.json persists across restarts, not reset on delete, only after corruption recovery resets to 1.
+
+Concurrency: The files must never be observed as invalid JSON during concurrent operations. Parallel sends to same room and different rooms, as well as parallel joins, must preserve every message and user with unique IDs. File locks must be cleaned up after each operation, and no temporary files may remain.
 
 Edge handling:
 - Empty roomID or userID after TrimSpace → exit2

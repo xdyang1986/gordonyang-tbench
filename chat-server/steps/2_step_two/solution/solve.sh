@@ -68,6 +68,7 @@ type RateLimitConfig struct {
 }
 
 type Config struct {
+	AssignmentsPath    string           `json:"assignments_path,omitempty"`
 	CounterPath        string           `json:"counter_path,omitempty"`
 	OpsLog             string           `json:"ops_log,omitempty"`
 	PresencePath       string           `json:"presence_path,omitempty"`
@@ -79,6 +80,8 @@ type Config struct {
 	Shards             []Shard          `json:"shards"`
 	UsersPath          string           `json:"users_path,omitempty"`
 }
+
+type AssignmentsData map[string]int
 
 // File data types for sharded mode, alphabetical order
 
@@ -722,6 +725,72 @@ func loadUsersData(path string) (UsersData, bool, error) {
 	return data, false, nil
 }
 
+func loadAssignmentsData(path string) (AssignmentsData, bool, error) {
+	empty := AssignmentsData{}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return empty, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return empty, false, err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return empty, false, nil
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: assignments file %s corrupt, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if _, hasData := raw["data"]; hasData {
+		var wrapper struct {
+			Data     AssignmentsData `json:"data"`
+			Checksum string          `json:"checksum"`
+		}
+		if err := json.Unmarshal(b, &wrapper); err != nil {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: assignments file %s corrupt parse, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		if wrapper.Data == nil {
+			wrapper.Data = AssignmentsData{}
+		}
+		if wrapper.Checksum == "" {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: assignments file %s missing checksum, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		expected := computeChecksumGeneric(wrapper.Data)
+		if expected != wrapper.Checksum {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: assignments file %s checksum mismatch, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		return wrapper.Data, false, nil
+	}
+	var data AssignmentsData
+	if err := json.Unmarshal(b, &data); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: assignments file %s invalid format, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if data == nil {
+		data = AssignmentsData{}
+	}
+	return data, false, nil
+}
+
 // ---------- Lock helpers ----------
 
 func acquireLock(lockPath string) error {
@@ -833,6 +902,13 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
+func getAssignmentsPath(cfg Config) string {
+	if cfg.AssignmentsPath != "" {
+		return cfg.AssignmentsPath
+	}
+	return "/app/data/assignments.json"
+}
+
 func getShardPathForRoom(roomID string, cfg Config) (string, error) {
 	if isGlobalRoom(roomID) {
 		paths := []string{}
@@ -844,6 +920,17 @@ func getShardPathForRoom(roomID string, cfg Config) (string, error) {
 		}
 		return strings.Join(paths, ","), nil
 	}
+	// Sticky assignment: if room already assigned, use recorded shard
+	assignmentsPath := getAssignmentsPath(cfg)
+	if assignments, _, _ := loadAssignmentsData(assignmentsPath); assignments != nil {
+		if assignedID, ok := assignments[roomID]; ok {
+			for _, s := range cfg.Shards {
+				if s.ID == assignedID {
+					return s.Path, nil
+				}
+			}
+		}
+	}
 	sid := hashRoomWeighted(roomID, cfg)
 	for _, s := range cfg.Shards {
 		if s.ID == sid {
@@ -854,6 +941,15 @@ func getShardPathForRoom(roomID string, cfg Config) (string, error) {
 }
 
 func getShardIDForRoom(roomID string, cfg Config) int {
+	if isGlobalRoom(roomID) {
+		return -1
+	}
+	assignmentsPath := getAssignmentsPath(cfg)
+	if assignments, _, _ := loadAssignmentsData(assignmentsPath); assignments != nil {
+		if assignedID, ok := assignments[roomID]; ok {
+			return assignedID
+		}
+	}
 	return hashRoomWeighted(roomID, cfg)
 }
 
@@ -1763,6 +1859,7 @@ func main() {
 				_ = appendOpsLog(opsLogPath, "create-room", map[string]interface{}{"room": roomID})
 				return nil
 			}
+			// Compute shard via hash for new rooms, but respect sticky assignment for existing
 			shardPath, err := getShardPathForRoom(roomID, cfg)
 			if err != nil {
 				return err
@@ -1776,6 +1873,16 @@ func main() {
 			}
 			if err := atomicWriteGeneric(shardPath, data); err != nil {
 				return err
+			}
+			// Record sticky assignment: shard decided once at creation
+			assignmentsPath := getAssignmentsPath(cfg)
+			assignments, _, _ := loadAssignmentsData(assignmentsPath)
+			if assignments == nil {
+				assignments = AssignmentsData{}
+			}
+			if _, exists := assignments[roomID]; !exists {
+				assignments[roomID] = hashRoomWeighted(roomID, cfg)
+				_ = atomicWriteGeneric(assignmentsPath, assignments)
 			}
 			_ = appendOpsLog(opsLogPath, "create-room", map[string]interface{}{"room": roomID, "shard_path": shardPath})
 			return nil
@@ -1828,6 +1935,15 @@ func main() {
 			}
 			if err := atomicWriteGeneric(shardPath, data); err != nil {
 				return err
+			}
+			// Remove sticky assignment
+			assignmentsPath := getAssignmentsPath(cfg)
+			assignments, _, _ := loadAssignmentsData(assignmentsPath)
+			if assignments != nil {
+				if _, ok := assignments[roomID]; ok {
+					delete(assignments, roomID)
+					_ = atomicWriteGeneric(assignmentsPath, assignments)
+				}
 			}
 			if deleted {
 				_ = appendOpsLog(opsLogPath, "delete-room", map[string]interface{}{"room": roomID})
@@ -2761,6 +2877,8 @@ func main() {
 				combined["counter"] = counterData
 				usersData, _, _ := loadUsersData(usersPath)
 				combined["users"] = usersData
+				assignmentsData, _, _ := loadAssignmentsData(getAssignmentsPath(cfg))
+				combined["assignments"] = assignmentsData
 				// ops log content
 				opsEntries, _ := readOpsLog(opsLogPath)
 				combined["ops_log"] = opsEntries
@@ -2789,7 +2907,7 @@ func main() {
 					}
 				}
 			}
-			for _, p := range []string{privatePath, presencePath, rateLimitPath, counterPath, usersPath, opsLogPath} {
+			for _, p := range []string{privatePath, presencePath, rateLimitPath, counterPath, usersPath, opsLogPath, getAssignmentsPath(cfg)} {
 				if p == "" {
 					continue
 				}
@@ -2898,6 +3016,10 @@ func main() {
 						if err := copyFile(src, opsLogPath); err != nil {
 							return err
 						}
+					case "assignments.json":
+						if err := copyFile(src, getAssignmentsPath(cfg)); err != nil {
+							return err
+						}
 					case "chat.json":
 						// single mode chat.json not needed for sharded restore, ignore if present in backup
 					}
@@ -2954,6 +3076,12 @@ func main() {
 				var users UsersData
 				if err := json.Unmarshal(raw, &users); err == nil {
 					_ = atomicWriteGeneric(usersPath, users)
+				}
+			}
+			if raw, ok := combined["assignments"]; ok {
+				var assignments AssignmentsData
+				if err := json.Unmarshal(raw, &assignments); err == nil {
+					_ = atomicWriteGeneric(getAssignmentsPath(cfg), assignments)
 				}
 			}
 			if raw, ok := combined["ops_log"]; ok {

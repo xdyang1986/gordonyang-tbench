@@ -59,21 +59,18 @@ def _write_with_checksum(path, data):
 
 def _reset_data():
     os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
-    for p in [DATA_PATH, DATA_PATH + ".lock"]:
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except:
-            pass
     dirn = os.path.dirname(DATA_PATH)
-    for f in os.listdir(dirn):
-        if ".corrupt." in f:
+    # Clean all Chat data files and locks and corrupt backups
+    for fname in os.listdir(dirn):
+        if fname.startswith("chat.") or fname.startswith("private.") or fname.startswith("counter.") or fname.endswith(".lock") or ".corrupt." in fname or fname.startswith("tmp-"):
             try:
-                os.remove(os.path.join(dirn, f))
+                os.remove(os.path.join(dirn, fname))
             except:
                 pass
-    empty = {"next_id": 1, "private_messages": [], "rooms": {}, "seen_users": {}}
-    _write_with_checksum(DATA_PATH, empty)
+    # Write split files with wrapper checksum
+    _write_with_checksum(DATA_PATH, {"rooms": {}, "seen_users": {}})
+    _write_with_checksum(os.path.join(dirn, "private.json"), {"private_messages": []})
+    _write_with_checksum(os.path.join(dirn, "counter.json"), {"next_id": 1})
 
 
 def _cli(*args, data_path=DATA_PATH):
@@ -82,16 +79,42 @@ def _cli(*args, data_path=DATA_PATH):
 
 
 def _load_data():
-    if not os.path.exists(DATA_PATH):
-        return {"rooms": {}, "private_messages": [], "next_id": 1, "seen_users": {}}
-    with open(DATA_PATH) as f:
+    # Load combined view from split files (chat.json + private.json + counter.json)
+    dirn = os.path.dirname(DATA_PATH)
+    chat_path = DATA_PATH
+    private_path = os.path.join(dirn, "private.json")
+    counter_path = os.path.join(dirn, "counter.json")
+    combined = {"rooms": {}, "private_messages": [], "next_id": 1, "seen_users": {}}
+    if os.path.exists(chat_path):
         try:
-            obj = json.load(f)
+            with open(chat_path) as f:
+                obj = json.load(f)
+                data = obj.get("data", obj) if isinstance(obj, dict) else {}
+                if "rooms" in data:
+                    combined["rooms"] = data["rooms"]
+                if "seen_users" in data:
+                    combined["seen_users"] = data["seen_users"]
         except:
-            return {"rooms": {}, "private_messages": [], "next_id": 1, "seen_users": {}}
-    if "data" in obj:
-        return obj["data"]
-    return obj
+            pass
+    if os.path.exists(private_path):
+        try:
+            with open(private_path) as f:
+                obj = json.load(f)
+                data = obj.get("data", obj) if isinstance(obj, dict) else {}
+                if "private_messages" in data:
+                    combined["private_messages"] = data["private_messages"]
+        except:
+            pass
+    if os.path.exists(counter_path):
+        try:
+            with open(counter_path) as f:
+                obj = json.load(f)
+                data = obj.get("data", obj) if isinstance(obj, dict) else {}
+                if "next_id" in data:
+                    combined["next_id"] = data["next_id"]
+        except:
+            pass
+    return combined
 
 
 def test_binary_builds():
@@ -291,16 +314,36 @@ def test_special_chars_no_html_escaping():
 
 
 def test_checksum_integrity_strict():
+    # Split persistence: check all 3 files have wrapper checksum and canonical MD5
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     _cli("send", "general", "alice", "check")
-    with open(DATA_PATH) as f:
-        obj = json.load(f)
-    assert "data" in obj and "checksum" in obj
-    data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
-    expected = hashlib.md5(data_json.encode()).hexdigest()
-    assert obj["checksum"] == expected
+    _cli("send-private", "alice", "bob", "priv check")
+    dirn = os.path.dirname(DATA_PATH)
+    for fname in ["chat.json", "private.json", "counter.json"]:
+        fpath = os.path.join(dirn, fname)
+        assert os.path.exists(fpath), f"{fname} must exist with split persistence"
+        with open(fpath) as f:
+            obj = json.load(f)
+        assert "data" in obj and "checksum" in obj, f"{fname} must use wrapper"
+        data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
+        expected = hashlib.md5(data_json.encode()).hexdigest()
+        assert obj["checksum"] == expected, f"{fname} checksum mismatch: expected {expected} got {obj['checksum']}"
+        # Must contain literal < not escaped if special chars present? At least check SetEscapeHTML
+        # For chat file with special chars, raw must contain "<"
+    # Also check chat file still has literal < for special chars test
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    special = "<>&"
+    _cli("send", "general", "alice", special)
+    raw = open(DATA_PATH).read()
+    assert "<" in raw, "Must use SetEscapeHTML(false) for chat.json"
+    # private file also must not escape
+    _cli("send-private", "alice", "bob", special)
+    priv_raw = open(os.path.join(dirn, "private.json")).read()
+    assert "<" in priv_raw, "private.json must use SetEscapeHTML(false)"
 
 
 def test_checksum_mismatch_handling():
@@ -607,7 +650,8 @@ def test_private_special_chars_no_escape():
         json.loads(_cli("get-private", "alice", "bob").stdout.strip())[0]["content"]
         == special
     )
-    assert "<" in open(DATA_PATH).read()
+    dirn = os.path.dirname(DATA_PATH)
+    assert "<" in open(os.path.join(dirn, "private.json")).read(), "private.json must use SetEscapeHTML(false)"
 
 
 def test_invalid_limit_exit_2():
@@ -692,12 +736,14 @@ def test_next_id_after_corruption_resets():
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     _cli("send", "general", "alice", "before")
-    with open(DATA_PATH, "w") as f:
+    dirn = os.path.dirname(DATA_PATH)
+    # Corrupt counter.json to test next_id reset (split persistence)
+    with open(os.path.join(dirn, "counter.json"), "w") as f:
         f.write("{invalid json")
     r = _cli("list-rooms")
     assert r.returncode == 0
     data = _load_data()
-    assert data["next_id"] == 1
+    assert data["next_id"] == 1, f"counter corruption should reset next_id to 1, got {data['next_id']}"
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     r2 = _cli("send", "general", "alice", "after corruption")
