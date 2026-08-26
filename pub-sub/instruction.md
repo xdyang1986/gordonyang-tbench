@@ -128,29 +128,26 @@ subscriber rate invariant.
 Input:
 
 ```
+3
 4
+4
+10
 1
-1
-1
-12
-1
-0 0 1 100 0 0
+0 0 1 200 0 0
 2
-0 0 0 1 20 0 0 1
-0 0 0 4 20 0 0 1
+0 0 0 1 34 0 0 1
+0 0 0 3 33 0 0 1
 ```
 
 Correct output:
 
 ```
-0,1
-0,1
-1,0
-5,7
+1,3
+1,3
+3,7
 ```
 
-Shipped prints `0,1` / `1,0` / `0,1` / `6,6` — starves sub0 for two consecutive batches,
-so recurrence shows as two increments (1→2→3) rather than one, pinning exact +1 rule.
+Shipped prints `1,3` / `0,4` / `10,0`. No rates, bursts or costs are involved here — only the per-batch credit update differs. This isolates the credit recurrence and falsifies the common guess c*9/10 which would give 1,3 / 0,4 / 5,5.
 
 ## Task
 

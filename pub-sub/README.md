@@ -72,11 +72,47 @@ at 6 against a cap of 5.
 `BAD_AMBIGUOUS` — R01, R02 and R03 all failed, because the hidden tests enforced state semantics no agent could
 uniquely derive. Invariant violations replace guessing with checking.
 
-### Known residual risk
+### Defect 4 was unfair until `cc85add` — fixed by adding a discriminating example
 
-Defect 4 is still a policy divergence. The AFTR at `e6e15492` observed that *"several rollouts fixed the
-invariants but chose plausible wrong credit rules that pass the visible examples."* If `BAD_AMBIGUOUS` recurs,
-dropping defect 4 is the lever — that leaves 23/70 failing, all of it objectively checkable.
+Defect 4 is a policy divergence, and at `cc85add` it was provably unfair rather than merely hard. All 15 agent
+trials fixed defects 1–3 and failed only on the credit recurrence. A claude-code trajectory shows the agent
+replaced the rule with `mulDiv(credit, 9, 10)` — copying the *weight* decay from the adjacent lines.
+
+That guess **reproduces the reference output on all four visible examples**, including the one meant to pin the
+credit rule. Agents were producing solutions consistent with 100% of the evidence they could see, and the hidden
+tests rejected them.
+
+The replacement fourth example separates the correct rule from every plausible alternative:
+
+```
+3
+4
+4
+10
+1
+0 0 1 200 0 0
+2
+0 0 0 1 34 0 0 1
+0 0 0 3 33 0 0 1
+```
+
+| credit rule | output |
+|---|---|
+| `c/2 + 1` (reference) | `1,3 / 1,3 / 3,7` |
+| `c/2` (shipped defect) | `1,3 / 0,4 / 10,0` |
+| `c*9/10` (what every agent chose) | `1,3 / 0,4 / 5,5` |
+| `(c+1)/2` | `1,3 / 1,3 / 5,5` |
+| `c/2 + 2` | `1,3 / 2,2 / 5,5` |
+| reset to `1` | `1,3 / 2,2 / 5,5` |
+
+No rates, bursts or cost factors, so it isolates the credit recurrence cleanly. It replaces the old fourth
+example, whose prose still described the retired dynamic-weight mechanism (*"pinning exact +1 rule"*) and pointed
+solvers at the wrong subsystem. With it, guessing is falsified by visible evidence and the task becomes
+hypothesis-and-check rather than hypothesis-and-hope.
+
+If this still lands at 0/15, dropping defect 4 is the fallback — that leaves 23/70 failing, all of it objectively
+checkable. Note that defects 1–3 alone were solved by 15/15 agents, so that fallback most likely reads as too
+easy.
 
 `go vet` is clean on the shipped source; there is no dead code, unused variable, or comment that marks the
 defects as planted.
@@ -123,6 +159,25 @@ The Dockerfile now bootstraps pip via `python3-pip`, fails the build if installa
 real error while it was being written — the plugin's import name is `ctrf`, not `pytest_json_ctrf`.
 
 Scoring is all-or-nothing, so the agent must find every defect.
+
+### Online run at `cc85add` (first valid measurement) — AFTR GOOD, 0/15 on difficulty
+
+| Gate | Result |
+|---|---|
+| Oracle | 3/3 |
+| AI assessment | Accept (0 Crit · 0 High · 0 Med · 2 Low) |
+| AFTR | **GOOD**, difficulty **GENUINELY_HARD**, all 13 rubrics pass, Secondary NONE, "No required fixes" |
+| Balance | **failed** — avocado 0/5, opus 0/5, gpt 0/5 |
+
+The invariant-violation redesign cleared the quality axis outright: `BAD_AMBIGUOUS` is gone and R01–R03 pass.
+Trials were genuine (3 `SandboxBuildFailedError` aborts aside; durations 347–2277s, real costs).
+
+CTRF across claude-code, metacode and codex shows one signature: defects 1–3 all fixed, failures confined to
+`test_credit_off_by_one`, `test_served_decay_vs_unallocated`, `test_dynamic_weight_1_1_10` and a few
+`test_allocation` cases. Cause and fix above.
+
+Caveat on the AFTR: it rated R01 PASS, but the witness above shows a solution consistent with every visible
+example that the hidden tests reject. The `GOOD` verdict is fragile until the discriminating example lands.
 
 ## Test Quality
 
