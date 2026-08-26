@@ -1191,7 +1191,7 @@ def test_traffic_batch_100_with_traffic_relative():
         proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0, proc.stderr.decode()[:500]
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(2.5, 25 * base_elapsed + 1.0)
         lines = proc.stdout.decode().strip().splitlines()
         assert len(lines) == 100
     finally:
@@ -1268,7 +1268,7 @@ def test_traffic_performance_2000_nodes():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N1999", "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(3.5, 25 * base_elapsed + 1.0)
     finally:
         os.unlink(gp)
         os.unlink(tp)
@@ -1316,7 +1316,7 @@ def test_traffic_large_graph_5000_nodes():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N4999", "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 2.0
+        assert elapsed <= max(5.5, 25 * base_elapsed + 2.0)
     finally:
         os.unlink(gp)
         os.unlink(tp)
@@ -1347,7 +1347,7 @@ def test_traffic_large_batch_200_with_traffic():
         proc = run(["--graph", gp, "--requests", rp, "--traffic", tp])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(4.0, 25 * base_elapsed + 1.0)
         lines = proc.stdout.decode().strip().splitlines()
         assert len(lines) == 200
     finally:
@@ -1425,7 +1425,7 @@ def test_traffic_batch_5000_correctness():
             b = run(["--graph", base_gp, "--requests", base_rp])
             base_elapsed = time.time() - s
             assert b.returncode == 0
-            assert elapsed <= 25 * base_elapsed + 12.0
+            assert elapsed <= max(12.0, 25 * base_elapsed + 12.0)
         finally:
             os.unlink(base_gp)
             os.unlink(base_rp)

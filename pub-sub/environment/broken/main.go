@@ -166,7 +166,7 @@ func allocateBatch(load int, items []*item) []int {
 		remW -= used
 		for _, i := range active {
 			if delta[i] > 0 {
-				creditTmp[i] = creditTmp[i]/2  // BUG credit
+				creditTmp[i] = creditTmp[i] / 2
 			} else {
 				creditTmp[i] += items[i].weight
 			}
@@ -475,7 +475,7 @@ func main() {
 				}
 				sRemCostIter := make([]int, S)
 				for s := 0; s < S; s++ {
-					rem := subC[s] - subTotalCost[s]  // BUG: omits - subBatchCount*cost
+					rem := subC[s] - subTotalCost[s]
 					if rem < 0 {
 						rem = 0
 					}
@@ -490,7 +490,7 @@ func main() {
 					remCount := sRemCostIter[s] / cost
 					ra := subRate[s]
 					if ra > 0 {
-						rateRem := ra + subBurstRem[s]  // BUG: omits subBatchCount
+						rateRem := ra + subBurstRem[s]
 						if rateRem < 0 {
 							rateRem = 0
 						}
@@ -532,7 +532,7 @@ func main() {
 					}
 					ra := groupRate[g]
 					if ra > 0 {
-						rateRem := ra + groupBurstRem[g]  // BUG: omits groupBatchCount
+						rateRem := ra + groupBurstRem[g]
 						if rateRem < 0 {
 							rateRem = 0
 						}
@@ -660,7 +660,7 @@ func main() {
 			}
 			wOld := groupW[g]
 			if groupBatchCount[g] != 0 {
-				groupCredit[g] = groupCredit[g]/2  // BUG credit
+				groupCredit[g] = groupCredit[g] / 2
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
@@ -682,7 +682,7 @@ func main() {
 			}
 			wOld := subW[s]
 			if subBatchCount[s] != 0 {
-				subCredit[s] = subCredit[s]/2  // BUG credit
+				subCredit[s] = subCredit[s] / 2
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1

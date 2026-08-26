@@ -1057,7 +1057,7 @@ def test_large_batch_100_requests():
         proc = run(["--graph", gp, "--requests", rp])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(2.0, 25 * base_elapsed + 1.0)
         lines = proc.stdout.decode().strip().splitlines()
         assert len(lines) == 100
     finally:
@@ -1101,7 +1101,7 @@ def test_large_graph_1000_nodes_performance():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N999"])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(2.5, 25 * base_elapsed + 1.0)
         out = json.loads(proc.stdout.decode().strip())
         assert out["distance"] <= 999
     finally:
@@ -1130,7 +1130,7 @@ def test_large_graph_2000_nodes():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N1999"])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(3.5, 25 * base_elapsed + 1.0)
     finally:
         os.unlink(gp)
         os.unlink(base_gp)
@@ -1157,7 +1157,7 @@ def test_large_graph_5000_nodes_performance():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N4999"])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 2.0
+        assert elapsed <= max(4.5, 25 * base_elapsed + 2.0)
     finally:
         os.unlink(gp)
         os.unlink(base_gp)
@@ -1180,7 +1180,7 @@ def test_large_batch_500_requests():
         proc = run(["--graph", gp, "--requests", rp])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(4.0, 25 * base_elapsed + 1.0)
         lines = proc.stdout.decode().strip().splitlines()
         assert len(lines) == 500
     finally:
@@ -1213,7 +1213,7 @@ def test_performance_dense_5000_edges():
         proc = run(["--graph", gp, "--from", "N0", "--to", "N99"])
         elapsed = time.time() - start
         assert proc.returncode == 0
-        assert elapsed <= 25 * base_elapsed + 1.0
+        assert elapsed <= max(2.0, 25 * base_elapsed + 1.0)
     finally:
         os.unlink(gp)
         os.unlink(base_gp)

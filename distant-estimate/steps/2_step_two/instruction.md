@@ -103,7 +103,7 @@ Example expensive arrival wins (node-level Dijkstra fails): graph A-B 10 f1 100,
 
 ## Performance
 
-500 locations 2000 legs 100 req with traffic <2.5s, 1000 line <3s, 2000 nodes <3.5s, 5000 <5.5s, 10000 <8s. Batch 100 relative <=25*base+1, 2000 batch <7.5s, 5000 <12s. Same-source amortization same 500 ≤25% multi 500 distinct. State expansion (node, zone, paidMask) bounded by 16*arc count with distinct ≤4, perf fixtures ≤2 distinct so ≤3 per node extra.
+500 locations 2000 legs 100 req with traffic <2.5s, 1000 line <3s, 2000 nodes <3.5s, 5000 <5.5s, 10000 <8s. Batch 100 with traffic <2.5s, batch 200 with traffic <4s, 2000 batch <7.5s, 5000 <12s. Same-source amortization same 500 ≤25% multi 500 distinct.
 
 ## Examples
 
@@ -118,4 +118,4 @@ go build -o router .
 ./router --graph network.json --requests [] --traffic []  # empty batch + empty traffic
 ```
 
-Turn2 must still pass all Turn1 validations when traffic absent. F3: keep six inherited traps as regressions zero difficulty; new step2 budget is traffic-only.
+Turn2 must still pass all Turn1 validations when traffic absent.
