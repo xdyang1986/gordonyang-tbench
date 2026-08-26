@@ -168,7 +168,7 @@ Correct output:
 7,3,2
 ```
 
-Shipped prints `8,3,1`. Single batch, so persistent credit sites cannot contribute — only the in-round weighted loop differs. This exposes the in-round creditTmp defect.
+Shipped prints `8,3,1` — single batch, so persistent credit sites cannot contribute — only the in-round weighted loop differs. This exposes the in-round creditTmp defect (D1 L169).
 
 Input:
 
@@ -191,7 +191,7 @@ Correct output:
 1,3
 ```
 
-Shipped prints `2,6` / `0,4`. Two groups, which no earlier example had — this exposes the group credit defect. The c*9/10 guess also gives `2,6 / 0,4`, so this kills that guess too.
+Shipped prints `2,6` / `0,4` — two groups, which no earlier example had — this exposes the group credit defect (D5 L663). The c*9/10 guess also gives `2,6` / `0,4`, so this kills that guess too.
 
 ## Task
 
