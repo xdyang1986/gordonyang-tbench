@@ -2,59 +2,43 @@
 
 ## Status
 
-**READY at `11be1a1` (2026-08-27).** Validation **passing**, AFTR **GOOD / GENUINELY_HARD** (all 13 rubrics,
-Secondary Issues NONE), AI assessment Accept (0 Critical / 0 High / 0 Medium / 1 Low), oracle 3/3, contamination
-LOW. Balance: avocado 4/5, opus 3/5, gpt 4/5 — 11/15, every trial genuine. Provenance passed with verdict
-**SUSPECT — review recommended**, the one soft flag.
+**READY at `e704e82` cut to 4 defects was 13/15 too easy (0bf1e7c 0/15). New bracket proposes 1 ref relocated far at `11be1a1` etc. Reviewer notes avocado 9/9 at 1 ref visible at L663 22 lines away identical structure — copy not inference. This commit flips reference: creditTmp L169 now CORRECT inside allocateBatch (~500 lines away, different function/var), groupCredit L663 and subCredit L685 both bugged c/2 agreeing. Combined 25/70 failing, 4 examples E1-E3 + E7 exposing both credit defects.**
 
 ## Description
 
-**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects.**
+**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects (3 invariant + 2 persistent credit) with reference relocated far.**
 
-The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects
-in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output
-example per defect — it does **not** state the allocation algorithm. The algorithm lives in the shipped ~700-line
-source and has to be reverse-engineered.
+The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output example per defect — it does **not** state the allocation algorithm. The algorithm lives in the shipped ~700-line source and has to be reverse-engineered.
 
 ## Why this shape
 
-From-scratch with a fully-pinned spec saturated the gate. Pooled across the two runs whose `instruction.md`
-differed only by two backticks:
+From-scratch with a fully-pinned spec saturated the gate. Pooled across the two runs whose `instruction.md` differed only by two backticks:
 
 | Commit | avocado | opus | gpt |
 |---|---|---|---|
 | `2950b49` | 3/4 | 4/5 | 3/5 |
 | `12319f8` | 5/5 | 4/5 | 5/5 |
 
-**24/29 ≈ 83% pooled.** The `2950b49` pass was variance, not a real band. The AFTR at `12319f8` diagnosed the
-cause directly: *"The crux is not discovering an algorithm, because the spec pins the algorithm, but translating
-a dense stateful specification into correct code."* It was a transcription task.
+**24/29 ≈ 83% pooled.** The `2950b49` pass was variance, not a real band. The AFTR at `12319f8` diagnosed the cause directly: *"The crux is not discovering an algorithm, because the spec pins the algorithm, but translating a dense stateful specification into correct code."* It was a transcription task.
 
-Moving the algorithm out of the prompt and into the code makes the difficulty **inference** rather than
-transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the
-same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
+Moving the algorithm out of the prompt and into the code makes the difficulty **inference** rather than transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The five defects
+## The five defects (relocated reference)
 
 | # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
-| D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | E5 |
+| D1 | 169 | `creditTmp[i] = c/2 + 1` CORRECT — reference inside allocateBatch | correct (reference far) | — |
 | D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
 | D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
 | D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
-| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` (persistent) | policy | E4 |
+| D5 | 663 | `groupCredit[g] = c/2` instead of `c/2 + 1` | policy | E4 (combined) |
+| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` | policy | E4 (combined) |
 
-`groupCredit` at line 663 ships **correct** (`c/2 + 1`) and is the deliberate in-file reference point: of three
-credit-update sites, one is right and two are wrong. See the calibration bracket below for why exactly one
-reference.
+Only one correct credit site visible, and it is ~500 lines away in different function under different var name (`creditTmp` vs `groupCredit/subCredit`), so two defective sites agree with each other and comparing them yields nothing. This attacks copy vs inference: previous 1-ref config at L663 22 lines away identical structure gave avocado 9/9 (one reported failure was MetaModelCatalogError TimeoutError infra, status=completed reward=0.00 misread). Bracket: 0 refs 0/15 unfair regress weight, 1 ref near identical 9/9, 2 refs 13/15 too easy, 1 ref far should be in band.
 
-D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state
-and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the
-shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the
-allocation policy. All 15 agents at `0bf1e7c` fixed all three.
+D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the allocation policy.
 
-Combined: **28/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 28 failures,
-`solve.sh` → 70/70.
+Combined: **25/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 25 failures, `solve.sh` → 70/70. Audit passes with 4 examples where E7 exposes both credit defects.
 
 ### Calibration bracket — how many correct credit sites to leave visible
 

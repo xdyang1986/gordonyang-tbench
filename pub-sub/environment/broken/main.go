@@ -166,7 +166,7 @@ func allocateBatch(load int, items []*item) []int {
 		remW -= used
 		for _, i := range active {
 			if delta[i] > 0 {
-				creditTmp[i] = creditTmp[i] / 2
+				creditTmp[i] = creditTmp[i]/2 + 1
 			} else {
 				creditTmp[i] += items[i].weight
 			}
@@ -660,7 +660,7 @@ func main() {
 			}
 			wOld := groupW[g]
 			if groupBatchCount[g] != 0 {
-				groupCredit[g] = groupCredit[g]/2 + 1
+				groupCredit[g] = groupCredit[g] / 2
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
