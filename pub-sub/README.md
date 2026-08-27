@@ -1,5 +1,12 @@
 # codimango/pub-sub
 
+## Status
+
+**READY at `11be1a1` (2026-08-27).** Validation **passing**, AFTR **GOOD / GENUINELY_HARD** (all 13 rubrics,
+Secondary Issues NONE), AI assessment Accept (0 Critical / 0 High / 0 Medium / 1 Low), oracle 3/3, contamination
+LOW. Balance: avocado 4/5, opus 3/5, gpt 4/5 — 11/15, every trial genuine. Provenance passed with verdict
+**SUSPECT — review recommended**, the one soft flag.
+
 ## Description
 
 **Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects.**
@@ -57,12 +64,15 @@ The number of *correct* credit sites the agent can see is the difficulty dial, a
 |---|---|---|
 | `0bf1e7c` — all three credit sites bugged | 0 | **0/15** (avocado 0/5, opus 0/5, gpt 0/5) |
 | `e704e82` — only in-round bugged | 2 | **13/15 too easy** (avocado 5/5, opus 5/5, gpt 3/5) |
-| current — in-round + `subCredit` bugged | 1 | proposed |
+| **`11be1a1` — in-round + `subCredit` bugged** | **1** | **11/15 — in band, validation passing** (avocado 4/5, opus 3/5, gpt 4/5) |
 
 With no reference the recurrence is unguessable and every agent regresses neighbouring weight logic while
 flailing. With two references it is a copy-paste: the pattern is right there twice. One reference means the agent
 must notice the inconsistency *and* work out that it applies to two other sites, one of which
 (`creditTmp`) only shows up in single-batch inputs.
+
+Generalizable rule: for a policy-divergence defect, leave **exactly one** correct instance of the pattern in the
+file. Zero makes it unfair guessing; two make it copy-paste.
 
 ### Why all-three-bugged fails: agents regress code that was never broken
 
@@ -87,7 +97,8 @@ enumerate defects, builds a binary per defect, parses the examples out of `instr
 defect produces identical output on all of them. It also checks each example really is a failing case and that
 each documented "Correct output" matches the reference.
 
-Against the committed state at `00a7555` it reports:
+On the current state it reports `PASS` — 5 defects, 5 examples, clean 1:1 mapping. Historically it is what caught
+the `00a7555` failure, where two defects were unfindable:
 
 ```
 L169:creditTmp[i] = creditTmp[i]/2 + 1     .     .     .     .   <-- INVISIBLE
@@ -163,12 +174,13 @@ defects as planted.
 
 ## Completion Rates
 
-- Reference (`solution/solve.sh`): **70/70**.
-- Shipped buggy state: **27 failed / 43 passed**.
+- Reference (`solution/solve.sh`): **70/70**. Oracle 3/3 online.
+- Shipped buggy state: **28 failed / 42 passed**.
+- `tools/audit_defects.py`: **PASS** — 5 defects, 5 examples, 1:1 mapping, every example a real failing case,
+  every documented "Correct output" matching the reference.
 - Verified **inside the real built image** (`docker build environment/`, then mount `tests/` and `solution/`):
   shipped → `reward=0`; `solve.sh` then `tests/test.sh` → `reward=1`, 70/70. (Image verification was run against
-  the six-defect source at 28 failures; the four-defect source is verified locally at 27 and changes no harness
-  behaviour.)
+  an earlier defect set; the current source is verified locally and changes no harness behaviour.)
 
 ### Online run at `f4e1b2d` (first debug-in-place attempt) — 0/15, corrected
 
@@ -316,6 +328,33 @@ Provenance broke for the same reason as at `2950b49`: the prompt file was edited
 through Avocado. This time the edit was pure deletion (−47 lines, removing E4 and E6) — **deletions count as
 authorship edits too**. Any change to that file, including removing text, has to go through Avocado.
 
+### Online run at `11be1a1` (five defects, one reference site) — PASSING
+
+| Gate | Result |
+|---|---|
+| Structural | PASS 10/10 |
+| Oracle | 3/3 |
+| **Balance** | **PASS** — avocado 4/5 · opus 3/5 · gpt 4/5 |
+| AI assessment | Accept (0 Critical · 0 High · 0 Medium · 1 Low) |
+| Contamination | LOW |
+| Provenance | passed — **SUSPECT, review recommended** |
+| **AFTR** | **`GOOD` · `GENUINELY_HARD` · all 13 rubrics pass · Secondary NONE** |
+
+AFTR: *"This is a GOOD task: R01:Spec sufficiency, R06:Test coverage, R07:Reward-hacking, and R13:Golden
+reliability are all strong, and the rollout distribution gives useful signal."*
+
+All 15 trials genuine — no infra aborts, durations 191–1675s, real costs, a real 11/4 pass-fail mix. The
+one-reference prediction from the bracket above landed exactly where it was projected.
+
+**Two cautions for anyone touching this next:**
+
+- **The margin is one trial.** Avocado at 4/5 passes; 5/5 is the too-easy fail. At a true rate near 80% a re-run
+  has roughly a 1-in-3 chance of coming back 5/5. Don't re-run validation hoping for a better number — the
+  realistic outcomes are "same" or "fails".
+- **Do not take the AFTR's optional suggestion.** It proposes adding a visible credit-recurrence case to reduce
+  "plausible near-misses", which would raise the pass rate while avocado is already one trial from the ceiling.
+  It is explicitly optional and the verdict is GOOD without it.
+
 ## Test Quality
 
 Grader unchanged from the `GOOD`-AFTR version at `12319f8` (AFTR: verdict GOOD, Secondary Issues NONE, all 13
@@ -337,10 +376,19 @@ Tests build and run the agent's binary on fresh stdin — no static-artifact che
 
 ## Open items
 
-- AFTR (optional) asked for one exact regression isolating whether a negative deallocation updates credit and
-  weight. Under the debug-in-place shape the "counts as activity" clause no longer appears in the prompt, so this
-  is grading strength rather than spec alignment. Candidate input (correct output shown, shipped program prints
-  `4,2 / -3,0 / 0,6 / 6,0`):
+Nothing blocking at `11be1a1`. The items below are deliberately **not** actioned — see the cautions under the
+`11be1a1` run.
+
+- The AFTR's optional suggestions (spell out the group-cap count approximation; add a visible credit-recurrence
+  case) would both raise the pass rate. Declined while avocado sits at 4/5.
+- Provenance reads `SUSPECT — review recommended`. It counts as passed, but this check has failed twice before on
+  direct edits to the prompt file (once an addition, once a pure deletion). Worth confirming the last prompt
+  change went through Avocado, and saying so in the submission so the reviewer doesn't have to guess.
+- Two mutants — group and member minimums re-applied on every rebalancing iteration instead of only the first —
+  pass all 70 tests. Untested behaviour; a candidate case if `tests/` is ever reopened.
+- Older AFTR note (still unactioned, grading strength rather than spec alignment): an exact regression isolating
+  whether a negative deallocation updates credit and weight. Candidate input (correct output shown; the
+  four-defect source printed `4,2 / -3,0 / 0,6 / 6,0`):
 
   ```
   4
@@ -358,6 +406,19 @@ Tests build and run the agent's binary on fresh stdin — no static-artifact che
 
 ## History
 
-17+ from-scratch versions (Python and Go, prescriptive and terse, 33–70 tests) all saturated the gate. `f400820`
-(v17) was the sole pass, via debug-in-place + under-specification. This version restores that shape on top of the
-richer allocator and the hardened 70-test grader.
+17+ from-scratch versions (Python and Go, prescriptive and terse, 33–70 tests) all saturated the gate — pooled
+24/29 ≈ 83%, which the AFTR called transcription rather than problem-solving. `f400820` (v17) was the sole pass,
+via debug-in-place + under-specification. The current task restores that shape on top of the richer allocator and
+the hardened 70-test grader.
+
+Getting from there to `11be1a1` took a further nine rounds, and the four failure classes are worth remembering:
+
+| class | rounds lost | fix |
+|---|---|---|
+| broken verifier (pytest never installed; build succeeded anyway) | 1 | in-image oracle check |
+| unexposed defect — impossible, not hard | 3 | `tools/audit_defects.py` |
+| information leakage (internal annotations reaching the prompt) | 1 | keep defect labels out of the handoff |
+| provenance (prompt edited outside Avocado — additions *and* deletions) | 2 | regenerate, never edit |
+
+The two scripted checks — defect visibility and the in-image oracle — cover the first two classes and should run
+before every push.
