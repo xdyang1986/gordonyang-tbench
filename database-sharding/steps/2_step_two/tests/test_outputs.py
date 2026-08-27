@@ -6,6 +6,8 @@ Tests for Turn 2 Hard: versioned integrity (shard_id+version), weighted, broadca
 import json
 import os
 import hashlib
+import ctypes
+import struct
 import subprocess
 import tempfile
 import shutil
@@ -204,6 +206,59 @@ def _direct_migrate_binary(legacy_path, config_path, extra_args):
         "migrate",
     ] + extra_args
     return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
+
+_IN_MODIFY = 0x00000002
+_IN_CLOSE_WRITE = 0x00000008
+_IN_MOVED_FROM = 0x00000040
+_IN_MOVED_TO = 0x00000080
+_IN_CREATE = 0x00000100
+_IN_DELETE = 0x00000200
+_INOTIFY_EVENT = struct.Struct("iIII")
+
+
+def _start_inotify(*directories):
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    assert fd >= 0, f"inotify_init1 failed with errno {ctypes.get_errno()}"
+    watches = {}
+    mask = (
+        _IN_MODIFY
+        | _IN_CLOSE_WRITE
+        | _IN_MOVED_FROM
+        | _IN_MOVED_TO
+        | _IN_CREATE
+        | _IN_DELETE
+    )
+    for directory in directories:
+        wd = libc.inotify_add_watch(fd, os.fsencode(directory), mask)
+        if wd < 0:
+            os.close(fd)
+            pytest.fail(
+                f"inotify_add_watch({directory}) failed with errno {ctypes.get_errno()}"
+            )
+        watches[wd] = directory
+    return fd, watches
+
+
+def _read_inotify_events(fd, watches):
+    events = []
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        offset = 0
+        while offset < len(chunk):
+            wd, mask, cookie, name_len = _INOTIFY_EVENT.unpack_from(chunk, offset)
+            offset += _INOTIFY_EVENT.size
+            raw_name = chunk[offset : offset + name_len]
+            offset += name_len
+            name = os.fsdecode(raw_name.rstrip(b"\0"))
+            events.append((watches.get(wd), name, mask, cookie))
+    return events
 
 
 # ------------------------------------------------------------------ #
@@ -1349,24 +1404,60 @@ def test_migrate_backup_tightened():
         shutil.rmtree(tmpdir)
 
 
-def test_atomic_write_source_inspection_migrate():
-    go_files = []
-    for root, _, files in os.walk(APP_DIR):
-        for f in files:
-            if f.endswith(".go"):
-                go_files.append(os.path.join(root, f))
-    combined = ""
-    for gf in go_files:
-        try:
-            combined += open(gf).read() + "\n"
-        except:
-            pass
-    assert "CreateTemp" in combined, "Go code should use CreateTemp for atomic writes"
-    assert "Rename" in combined, "Go code should use Rename for atomic writes"
-    assert "grouped" in combined.lower() or "map[int]" in combined, (
-        "Migration should group keys per shard for batched writes"
-    )
-    assert "SetEscapeHTML" in combined, "Must disable HTML escaping for checksum"
+def test_atomic_batched_write_behavior_migrate():
+    _reset_shards()
+    tmpdir = tempfile.mkdtemp()
+    fd = None
+    try:
+        shard_path = os.path.join(tmpdir, "shard.json")
+        config_path = os.path.join(tmpdir, "config.json")
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        original = {"already-there": "keep"}
+        legacy_data = {
+            "batch-key-1": "<one>",
+            "batch-key-2": {"nested": "&two"},
+            "batch-key-3": [1, 2, 3],
+        }
+        _write_shard_versioned(shard_path, original, 0, 7)
+        with open(config_path, "w") as f:
+            json.dump(
+                {"shard_count": 1, "shards": [{"id": 0, "path": shard_path}]},
+                f,
+            )
+        with open(legacy_path, "w") as f:
+            json.dump(legacy_data, f)
+
+        fd, watches = _start_inotify(tmpdir)
+        r = _direct_migrate_binary(legacy_path, config_path, [])
+        assert r.returncode == 0, r.stderr
+        events = _read_inotify_events(fd, watches)
+
+        shard_events = [
+            mask
+            for path, name, mask, _ in events
+            if path == tmpdir and name == "shard.json"
+        ]
+        assert sum(bool(mask & _IN_MOVED_TO) for mask in shard_events) == 1, (
+            f"Final shard must be replaced exactly once by atomic rename, events={events}"
+        )
+        assert not any(mask & (_IN_MODIFY | _IN_DELETE) for mask in shard_events), (
+            f"Final shard must never be modified/truncated or deleted in place, events={events}"
+        )
+
+        obj = _load_shard_full(shard_path)
+        assert obj is not None
+        assert obj["shard_id"] == 0
+        assert obj["version"] == 8, (
+            "Multiple legacy keys for one shard must be committed in one version bump"
+        )
+        assert obj["data"] == {**original, **legacy_data}
+        data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
+        assert obj["checksum"] == hashlib.md5(data_json.encode()).hexdigest()
+        assert "<one>" in open(shard_path).read()
+    finally:
+        if fd is not None:
+            os.close(fd)
+        shutil.rmtree(tmpdir)
 
 
 def test_stdlib_go_list_imports():
@@ -1992,20 +2083,37 @@ def test_migration_staging_dir_exists_and_versioned():
         shutil.rmtree(tmpdir)
 
 
-def test_atomic_write_source_inspection_staging():
-    go_files = []
-    for root, _, files in os.walk(APP_DIR):
-        for f in files:
-            if f.endswith(".go"):
-                go_files.append(os.path.join(root, f))
-    combined = ""
-    for gf in go_files:
-        try:
-            combined += open(gf).read() + "\n"
-        except:
-            pass
-    assert "staging" in combined.lower(), (
-        "Go code should mention staging dir for two-phase migration"
-    )
-    assert "CreateTemp" in combined
-    assert "Rename" in combined
+def test_staging_and_final_write_behavior():
+    _reset_shards()
+    tmpdir = tempfile.mkdtemp()
+    staging_dir = "/app/data/staging"
+    try:
+        shard_path = os.path.join(tmpdir, "final-shard.json")
+        config_path = os.path.join(tmpdir, "config.json")
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        legacy_data = {"stage-first-1": "value-1", "stage-first-2": "value-2"}
+        _write_shard_versioned(shard_path, {"existing": True}, 0, 2)
+        with open(config_path, "w") as f:
+            json.dump(
+                {"shard_count": 1, "shards": [{"id": 0, "path": shard_path}]},
+                f,
+            )
+        with open(legacy_path, "w") as f:
+            json.dump(legacy_data, f)
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir)
+        r = _direct_migrate_binary(legacy_path, config_path, [])
+        assert r.returncode == 0, r.stderr
+
+        staged_path = os.path.join(staging_dir, "shard_0.json")
+        staged_obj = _load_shard_full(staged_path)
+        final_obj = _load_shard_full(shard_path)
+        assert staged_obj is not None
+        assert final_obj is not None
+        assert staged_obj == final_obj
+        assert final_obj["version"] == 3
+        assert final_obj["data"] == {"existing": True, **legacy_data}
+    finally:
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir)
+        shutil.rmtree(tmpdir)

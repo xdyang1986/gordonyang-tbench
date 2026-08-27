@@ -26,11 +26,11 @@ Latest online validation – commit `718dc32`, Nest jobs 4365681–84, completed
 | Stage | Agent | Result |
 | --- | --- | --- |
 | oracle | oracle | 3/3 (100%) |
-| metacode | avocado `meta/avocado-code-flex-5p15` | 7/10 (70%) |
+| metacode | avocado `meta/avocado-5.14-code` | 7/10 (70%) |
 | agent | claude-code `claude-opus-4-8` | 9/10 (90%) |
 | codex | `gpt-5.5` | 10/10 (100%) |
 
-Balance gate verdict: *"avocado not trivial and ≥1 agent solved"*. Structural 10/10, contamination MEDIUM, novelty MEDIUM, embedding dedup max-sim 0.57, provenance CLEAN.
+Balance gate verdict: *"avocado not trivial and ≥1 agent solved"*. Structural 10/10, contamination MEDIUM, novelty MEDIUM, embedding dedup max-sim 0.471, provenance CLEAN.
 
 - **Turn 1 is non-discriminating: 43/43 trials passed it.** Every failing trial scored `step1=1, step2=0`. The 27 Turn1 tests currently contribute zero signal and consume roughly half the trial budget.
 - **All difficulty sits in a few Turn2 tests, and 3 of 4 failures were single-test misses out of 73:**
