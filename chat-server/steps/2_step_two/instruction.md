@@ -51,7 +51,7 @@ Validation rules (must exit 2 on violation):
 
 All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where canonical = `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping, using `SetEscapeHTML(false)` in Go.
 
-- Each shard file (e.g., `/app/data/shard_0.json`): `Data = {"next_id": int64, "rooms": {roomID: {users: []string, messages: []Message}}, "seen_users": {userID: bool}}`
+- Each shard file (e.g., `/app/data/shard_0.json`): `Data = {"rooms": {roomID: {users: []string, messages: []Message}}, "deleted_rooms": {roomID: {users: []string, messages: []Message, deleted_at: int64}}, "seen_users": {userID: bool}}`
   - Room object identical to Turn1: must have keys `users` (sorted array) and `messages` (array sorted by id asc)
 - `private_path`: `{"private_messages": []Message}`
 - `presence_path`: `{"<userID>": last_seen_nano}` where map value is int64 nanoseconds from `UnixNano()`, or empty object `{}`
@@ -66,9 +66,9 @@ All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for c
 ### Sharded Semantics
 
 - Rooms are assigned to a shard via weighted consistent hashing of roomID. Global rooms with prefix `global:` are broadcast rooms with special handling.
-- `create-room <roomID>`: idempotent exit0, fail exit2 if empty after TrimSpace. For normal rooms, creates entry in designated shard only (per sticky assignment, records assignment at creation). For `global:` prefix, creates room in ALL shards (replicated). Re-creating same ID after deletion starts empty and does NOT clear existing tombstone. Must handle empty ID exit2.
-- `delete-room <roomID>`: tombstone – moves room's messages and member list into `deleted_rooms` in its shard (or all shards if global) with deletion timestamp `time.Now().UnixNano()`. Prints `true` if existed and moved, `false` otherwise. After deletion, room omitted from `list-rooms`, `get-messages` returns `[]`, `list-users` exits 2, `join`/`send` fail exit2, but `list-all-users` still includes ever-members and `next_id` unaffected. `deleted_rooms` participates in wrapper checksum and corruption recovery.
-- `purge <roomID>`: removes tombstone and sticky assignment, prints true if removed, false otherwise, exits 2 if no tombstone exists.
+- `create-room <roomID>`: idempotent exit0, fail exit2 if empty after TrimSpace. For normal rooms, creates entry in designated shard only. For `global:` prefix, creates room in ALL shards (replicated). Re-creating same ID after deletion starts empty and does NOT clear existing tombstone. Must handle empty ID exit2.
+- `delete-room <roomID>`: tombstone – retains history, prints true/false, exit0 even if room not exist or global (applies to all shards if global) . After deletion room behaves as deleted.
+- `purge <roomID>`: removes tombstone, prints true/false, exits 2 if no tombstone exists.
 - `join <roomID> <userID>`: For normal rooms, fails exit2 if room does not exist in its shard. For global rooms, operates on all shards (creates membership in each). Idempotent exit0 otherwise. Empty IDs exit2. Tracks global seen_users.
 - `leave <roomID> <userID>`: Idempotent exit0 even if room or user does not exist. For normal rooms, removes from its shard; for global, removes from all shards. After leaving all users, `list-users` must return `[]`. `send` after leaving all must fail exit2.
 - `list-rooms`: unions all shards, deduplicated, sorted lexicographically. Must handle many rooms sorted.
@@ -77,6 +77,10 @@ All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for c
 - `get-messages <roomID> [limit] [offset]`: Returns messages sorted by id asc. Pagination: `offset` default 0, `limit` default 0 meaning all. If `limit>0`, returns `sorted[offset:offset+limit]`; else returns `[offset:]`. Invalid limit/offset (non-int, negative) → exit2. Nonexistent room → `[]` exit0 (not error). For global rooms, must dedupe by ID (since replicated) and return sorted unique list. Must be efficient for large histories (<2s for 1000+ messages).
 - Private messages stored in `private_path` file, with global lock, atomic, checksum, corruption handling. `send-private <from> <to> <msg>` always allowed (no membership requirement), tracks seen users, message via Join, requires message else exit2, handles spaces, special chars, Unicode, large 10KB.
 - `get-private <u1> <u2> [limit] [offset]`: Both directions, sorted asc, same pagination semantics as `get-messages`, limit/offset validation exit2, limit zero all, isolation between conversation pairs.
+
+### Tombstone deletion
+
+delete-room retains history: the room's members and messages move to deleted_rooms under the room ID with a deleted_at nanosecond timestamp. A tombstoned room behaves as though it does not exist for every command except list-all-users, which still reports everyone who was ever a member. Re-creating a room with same ID after deletion starts empty and does NOT clear existing tombstone. purge <roomID> is the only way to remove a tombstone. deleted_rooms participates in wrapper checksum and corruption recovery like any other field.
 
 ### Rate Limiting
 
