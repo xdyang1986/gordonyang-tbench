@@ -1,6 +1,6 @@
 # Database Sharding Proxy – Multi-Turn Hard Task
 
-This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go with weighted routing, broadcast keys, checksum integrity, corruption handling, self-healing, ops.log, and legacy migration. The task is hard but solvable, with 27 and 73 tests (100 total after trimming Turn1).
+This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go with weighted routing, broadcast keys, checksum integrity, corruption handling, self-healing, ops.log, and legacy migration. The task is hard but solvable, with 28 and 75 tests (103 total after trimming Turn1 and adding discriminators).
 
 ## Overview
 

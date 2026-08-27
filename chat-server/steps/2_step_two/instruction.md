@@ -1,16 +1,16 @@
 # Large-Scale Chat Server Support
 
-You've built the core chat server with durable single-file persistence that handles rooms, users, messages, and integrity. Now we need to scale it to many rooms and users with production-grade distributed systems requirements.
+You've built the core chat server with durable split-file persistence (chat.json with rooms+deleted_rooms+seen_users, private.json, counter.json) that handles rooms, users, messages, and integrity. Now we need to scale it to many rooms and users with production-grade distributed systems requirements.
 
-The existing code is present in `/app` and should continue to work. Keep the core behaviors working in both single-file and sharded modes: create-room, delete-room, list-rooms sorted, join, leave, list-users sorted, send via Join, get-messages with limit/offset handling, send-private via Join, get-private, list-all-users sorted, checksum integrity, atomic file operations, handling of spaces, global ID monotonicity, and edge validation.
+The existing code is present in `/app` and should continue to work. Keep the core behaviors working in both Turn1 split-file mode and sharded modes: create-room, delete-room, purge, tombstone, list-rooms sorted, join, leave, list-users sorted, send via Join, get-messages with limit/offset handling, send-private via Join, get-private, list-all-users sorted, checksum integrity, atomic file operations, handling of spaces, global ID monotonicity, and edge validation.
 
 ## Task – Extend Go Chat Server at `/app/` (same module), built via `go build -o <binary> .`
 
 Stdlib only.
 
 ### Flags
-- `--data` default `/app/data/chat.json` – single-file mode (Turn1 compatibility)
-- `--config` default `/app/config.json` – sharded mode config path. If config file exists and is valid JSON, sharded mode is active; otherwise fallback to single-file behavior.
+- `--data` default `/app/data/chat.json` – Turn1 compatibility mode (split files as per Turn1: chat.json with rooms+deleted_rooms+seen_users, private.json, counter.json), fallback when config missing or invalid JSON
+- `--config` default `/app/config.json` – sharded mode config path. If config file exists and is valid JSON, sharded mode is active; otherwise fallback to Turn1 split-file behavior.
 
 ### Config File Format
 
@@ -61,7 +61,7 @@ All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where c
 - `assignments_path` (default `/app/data/assignments.json`): `{"roomID": shardID, ...}` mapping room to its sticky shard assignment, e.g., `{"general": 2}`. Global rooms may be absent or -1. Must use wrapper checksum, atomic write, corruption handling.
 - `ops_log`: append-only JSON-lines file (not wrapper), each line is a JSON object
 
-All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command.
+All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding.
 
 ### Sharded Semantics
 

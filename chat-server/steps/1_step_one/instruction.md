@@ -50,7 +50,7 @@ File formats:
 - **private.json**: `Data = {"private_messages": []Message}`
 - **counter.json**: `Data = {"next_id": int64}` starting at 1, globally monotonic across room and private messages
 
-All three files must use wrapper checksum, atomic write via `os.CreateTemp` in same directory + `os.Rename`, plus file locking. A global lock file `/app/data/global.lock` (in data directory) must be used for any operation touching multiple files (send, send-private, delete-room, purge) to keep ordering and avoid races; per-file `.lock` files are also allowed but global lock is mandatory for multi-file atomicity. Lock files must be cleaned after each command (must not remain) and no `tmp-*.json` residue must remain after a burst.
+All three files must use wrapper checksum, atomic write via `os.CreateTemp` in same directory + `os.Rename`, plus file locking. A global lock file `/app/data/global.lock` (in data directory) must be used for any operation touching multiple files (send, send-private, delete-room, purge) to keep ordering and avoid races; per-file `.lock` files are also allowed but global lock is mandatory for multi-file atomicity. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding. Lock files must be cleaned after each command (must not remain) and no `tmp-*.json` residue must remain after a burst.
 
 On read per file:
 - Missing file → empty data: chat → `{"rooms":{},"deleted_rooms":{},"seen_users":{}}`, private → `{"private_messages":[]}`, counter → `{"next_id":1}`

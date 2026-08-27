@@ -998,6 +998,17 @@ func validateConfig(cfg Config) error {
 			return fmt.Errorf("weight must be >0 for shard %d", s.ID)
 		}
 	}
+	if cfg.RateLimit != nil {
+		if cfg.RateLimit.MessagesPerSecond <= 0 {
+			return fmt.Errorf("messages_per_second must be >0")
+		}
+		if cfg.RateLimit.Burst <= 0 {
+			return fmt.Errorf("burst must be >0")
+		}
+	}
+	if cfg.PresenceTTLSeconds < 0 {
+		return fmt.Errorf("presence_ttl_seconds must be >=0")
+	}
 	return nil
 }
 
