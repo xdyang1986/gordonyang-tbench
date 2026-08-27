@@ -66,8 +66,9 @@ All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for c
 ### Sharded Semantics
 
 - Rooms are assigned to a shard via weighted consistent hashing of roomID. Global rooms with prefix `global:` are broadcast rooms with special handling.
-- `create-room <roomID>`: idempotent exit0, fail exit2 if empty after TrimSpace. For normal rooms, creates entry in designated shard only. For `global:` prefix, creates room in ALL shards (replicated). Must handle empty ID exit2.
-- `delete-room <roomID>`: removes room from its designated shard, or from all shards if global. Prints `true` if existed, `false` otherwise.
+- `create-room <roomID>`: idempotent exit0, fail exit2 if empty after TrimSpace. For normal rooms, creates entry in designated shard only (per sticky assignment, records assignment at creation). For `global:` prefix, creates room in ALL shards (replicated). Re-creating same ID after deletion starts empty and does NOT clear existing tombstone. Must handle empty ID exit2.
+- `delete-room <roomID>`: tombstone – moves room's messages and member list into `deleted_rooms` in its shard (or all shards if global) with deletion timestamp `time.Now().UnixNano()`. Prints `true` if existed and moved, `false` otherwise. After deletion, room omitted from `list-rooms`, `get-messages` returns `[]`, `list-users` exits 2, `join`/`send` fail exit2, but `list-all-users` still includes ever-members and `next_id` unaffected. `deleted_rooms` participates in wrapper checksum and corruption recovery.
+- `purge <roomID>`: removes tombstone and sticky assignment, prints true if removed, false otherwise, exits 2 if no tombstone exists.
 - `join <roomID> <userID>`: For normal rooms, fails exit2 if room does not exist in its shard. For global rooms, operates on all shards (creates membership in each). Idempotent exit0 otherwise. Empty IDs exit2. Tracks global seen_users.
 - `leave <roomID> <userID>`: Idempotent exit0 even if room or user does not exist. For normal rooms, removes from its shard; for global, removes from all shards. After leaving all users, `list-users` must return `[]`. `send` after leaving all must fail exit2.
 - `list-rooms`: unions all shards, deduplicated, sorted lexicographically. Must handle many rooms sorted.
@@ -139,7 +140,7 @@ restore <backup_path>        -> restores from backup
 ops-log                      -> prints ops.log as JSON array, skips invalid lines with warning
 ```
 
-Help must contain keywords: `create-room`, `delete-room`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-presence`, `list-online`, `snapshot`, `restore`, `ops-log`. Bare no args → help exit0.
+Help must contain keywords: `create-room`, `delete-room`, `purge`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `get-shard-id`, `get-shard-path`, `distribution`, `heartbeat`, `get-presence`, `list-online`, `snapshot`, `restore`, `ops-log`. Bare no args → help exit0.
 
 ### Weighted Sharding Algorithm
 

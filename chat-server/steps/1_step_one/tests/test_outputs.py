@@ -899,3 +899,109 @@ def test_whitespace_trim_identifiers():
     rooms = json.loads(_cli("list-rooms").stdout.strip())
     assert "   " not in rooms and "" not in rooms
 
+
+
+def test_delete_room_tombstone_moves_to_deleted_rooms():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("join", "general", "bob")
+    _cli("send", "general", "alice", "hello")
+    _cli("send", "general", "bob", "world")
+    r = _cli("delete-room", "general")
+    assert r.returncode == 0 and r.stdout.strip() == "true"
+    # Verify tombstone exists in chat.json with messages, users, deleted_at
+    import json as _json, os as _os
+    with open(DATA_PATH) as f:
+        wrapper = _json.load(f)
+        data = wrapper["data"]
+        assert "deleted_rooms" in data, "deleted_rooms must be in chat.json"
+        assert "general" in data["deleted_rooms"]
+        tomb = data["deleted_rooms"]["general"]
+        assert "users" in tomb and "messages" in tomb and "deleted_at" in tomb
+        assert set(tomb["users"]) == {"alice", "bob"}
+        assert len(tomb["messages"]) == 2
+        assert isinstance(tomb["deleted_at"], int) and tomb["deleted_at"] > 0
+    # Original rooms should be gone
+    assert "general" not in data["rooms"]
+
+
+def test_delete_room_tombstone_behavior():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("send", "general", "alice", "before delete")
+    assert _cli("delete-room", "general").stdout.strip() == "true"
+    # After deletion: list-rooms omits, get-messages returns [], list-users exit2, join/send fail
+    assert json.loads(_cli("list-rooms").stdout.strip()) == []
+    assert json.loads(_cli("get-messages", "general").stdout.strip()) == []
+    assert _cli("list-users", "general").returncode == 2
+    assert _cli("join", "general", "bob").returncode == 2
+    assert _cli("send", "general", "alice", "should fail").returncode == 2
+    # list-all-users still includes alice
+    assert "alice" in json.loads(_cli("list-all-users").stdout.strip())
+    # next_id unaffected – create new room and send should have id 2 (first was 1)
+    _cli("create-room", "newroom")
+    _cli("join", "newroom", "alice")
+    r = _cli("send", "newroom", "alice", "after")
+    assert json.loads(r.stdout.strip())["id"] == 2
+
+
+def test_recreate_same_id_keeps_tombstone():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("send", "general", "alice", "old msg")
+    _cli("delete-room", "general")
+    # Re-create same ID starts empty
+    assert _cli("create-room", "general").returncode == 0
+    assert json.loads(_cli("get-messages", "general").stdout.strip()) == []
+    assert json.loads(_cli("list-rooms").stdout.strip()) == ["general"]
+    # Tombstone still exists
+    with open(DATA_PATH) as f:
+        data = json.load(f)["data"]
+        assert "general" in data["deleted_rooms"], "re-creating must NOT clear tombstone"
+        assert len(data["deleted_rooms"]["general"]["messages"]) == 1
+
+
+def test_purge_removes_tombstone():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("delete-room", "general")
+    r = _cli("purge", "general")
+    assert r.returncode == 0 and r.stdout.strip() == "true"
+    with open(DATA_PATH) as f:
+        data = json.load(f)["data"]
+        assert "general" not in data.get("deleted_rooms", {})
+    # Second purge should exit 2
+    r2 = _cli("purge", "general")
+    assert r2.returncode == 2
+    # Purge non-existent also exit 2
+    assert _cli("purge", "nope").returncode == 2
+
+
+def test_tombstone_participates_in_checksum_and_corruption():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("delete-room", "general")
+    # Verify checksum includes deleted_rooms
+    with open(DATA_PATH) as f:
+        wrapper = json.load(f)
+        data = wrapper["data"]
+        assert "deleted_rooms" in data
+        # Compute expected checksum
+        import hashlib
+        data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        expected = hashlib.md5(data_json.encode()).hexdigest()
+        assert wrapper["checksum"] == expected
+    # Corruption handling should reset all including deleted_rooms
+    with open(DATA_PATH, "w") as f:
+        f.write("{invalid json")
+    r = _cli("list-rooms")
+    assert r.returncode == 0 and json.loads(r.stdout.strip()) == []
+    with open(DATA_PATH) as f:
+        data = json.load(f)["data"]
+        assert data.get("deleted_rooms", {}) == {}, "corruption should reset deleted_rooms too"
+

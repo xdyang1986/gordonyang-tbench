@@ -43,10 +43,11 @@ type Room struct {
 
 // StoreData for single-file mode (alphabetical)
 type StoreData struct {
-	NextID          int64            `json:"next_id"`
-	PrivateMessages []Message        `json:"private_messages"`
-	Rooms           map[string]*Room `json:"rooms"`
-	SeenUsers       map[string]bool  `json:"seen_users"`
+	DeletedRooms    map[string]*DeletedRoom `json:"deleted_rooms"`
+	NextID          int64                   `json:"next_id"`
+	PrivateMessages []Message               `json:"private_messages"`
+	Rooms           map[string]*Room        `json:"rooms"`
+	SeenUsers       map[string]bool         `json:"seen_users"`
 }
 
 type StoreFileWrapper struct {
@@ -85,10 +86,23 @@ type AssignmentsData map[string]int
 
 // File data types for sharded mode, alphabetical order
 
+type DeletedRoom struct {
+	DeletedAt int64     `json:"deleted_at"`
+	Messages  []Message `json:"messages"`
+	Users     []string  `json:"users"`
+}
+
+type ChatData struct {
+	DeletedRooms map[string]*DeletedRoom `json:"deleted_rooms"`
+	Rooms        map[string]*Room        `json:"rooms"`
+	SeenUsers    map[string]bool         `json:"seen_users"`
+}
+
 type ShardFileData struct {
-	NextID    int64            `json:"next_id"`
-	Rooms     map[string]*Room `json:"rooms"`
-	SeenUsers map[string]bool  `json:"seen_users"`
+	DeletedRooms map[string]*DeletedRoom `json:"deleted_rooms"`
+	NextID       int64                   `json:"next_id"`
+	Rooms        map[string]*Room        `json:"rooms"`
+	SeenUsers    map[string]bool         `json:"seen_users"`
 }
 
 type PrivateFileData struct {
@@ -180,6 +194,9 @@ func atomicWriteStoreData(path string, data StoreData) error {
 	if data.Rooms == nil {
 		data.Rooms = map[string]*Room{}
 	}
+	if data.DeletedRooms == nil {
+		data.DeletedRooms = map[string]*DeletedRoom{}
+	}
 	if data.PrivateMessages == nil {
 		data.PrivateMessages = []Message{}
 	}
@@ -256,6 +273,9 @@ func loadStoreData(path string) (StoreData, bool, error) {
 		if wrapper.Data.Rooms == nil {
 			wrapper.Data.Rooms = map[string]*Room{}
 		}
+		if wrapper.Data.DeletedRooms == nil {
+			wrapper.Data.DeletedRooms = map[string]*DeletedRoom{}
+		}
 		if wrapper.Data.PrivateMessages == nil {
 			wrapper.Data.PrivateMessages = []Message{}
 		}
@@ -294,6 +314,9 @@ func loadStoreData(path string) (StoreData, bool, error) {
 	if data.Rooms == nil {
 		data.Rooms = map[string]*Room{}
 	}
+	if data.DeletedRooms == nil {
+		data.DeletedRooms = map[string]*DeletedRoom{}
+	}
 	if data.PrivateMessages == nil {
 		data.PrivateMessages = []Message{}
 	}
@@ -308,11 +331,84 @@ func loadStoreData(path string) (StoreData, bool, error) {
 
 // ---------- Sharded file helpers ----------
 
+func loadChatData(path string) (ChatData, bool, error) {
+	empty := ChatData{
+		DeletedRooms: map[string]*DeletedRoom{},
+		Rooms:        map[string]*Room{},
+		SeenUsers:    map[string]bool{},
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return empty, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return empty, false, nil
+		}
+		return empty, false, err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return empty, false, nil
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: chat file %s corrupted (invalid JSON), backup %s: %v\n", path, backup, err)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if _, hasData := raw["data"]; hasData {
+		var wrapper struct {
+			Data     ChatData `json:"data"`
+			Checksum string   `json:"checksum"`
+		}
+		if err := json.Unmarshal(b, &wrapper); err != nil {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: chat file %s corrupted (unmarshal), backup %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		if wrapper.Data.Rooms == nil {
+			wrapper.Data.Rooms = map[string]*Room{}
+		}
+		if wrapper.Data.DeletedRooms == nil {
+			wrapper.Data.DeletedRooms = map[string]*DeletedRoom{}
+		}
+		if wrapper.Data.SeenUsers == nil {
+			wrapper.Data.SeenUsers = map[string]bool{}
+		}
+		if wrapper.Checksum == "" {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: chat file %s missing checksum (corrupt), backup %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		expected := computeChecksumGeneric(wrapper.Data)
+		if expected != wrapper.Checksum {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: chat file %s checksum mismatch (corrupt), expected %s got %s, backup %s\n", path, expected, wrapper.Checksum, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		return wrapper.Data, false, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+	_ = copyFile(path, backup)
+	fmt.Fprintf(os.Stderr, "Warning: chat file %s old format without wrapper (corrupt), backup %s\n", path, backup)
+	_ = atomicWriteGeneric(path, empty)
+	return empty, true, nil
+}
+
 func loadShardFileData(path string) (ShardFileData, bool, error) {
 	empty := ShardFileData{
-		Rooms:     map[string]*Room{},
-		NextID:    1,
-		SeenUsers: map[string]bool{},
+		DeletedRooms: map[string]*DeletedRoom{},
+		Rooms:        map[string]*Room{},
+		NextID:       1,
+		SeenUsers:    map[string]bool{},
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return empty, false, nil
@@ -349,6 +445,9 @@ func loadShardFileData(path string) (ShardFileData, bool, error) {
 		}
 		if wrapper.Data.Rooms == nil {
 			wrapper.Data.Rooms = map[string]*Room{}
+		}
+		if wrapper.Data.DeletedRooms == nil {
+			wrapper.Data.DeletedRooms = map[string]*DeletedRoom{}
 		}
 		if wrapper.Data.SeenUsers == nil {
 			wrapper.Data.SeenUsers = map[string]bool{}
@@ -1081,34 +1180,35 @@ func sortedKeysFromMap(m map[string]*Room) []string {
 func printHelp() {
 	fmt.Println(`Usage: chat-server [--data /app/data/chat.json] [--config /app/config.json] <command> [args]
 Commands:
-  create-room <roomID>                          creates room if not exists
-  delete-room <roomID>                          deletes room, prints true/false
-  list-rooms                                    JSON array sorted of rooms
-  join <roomID> <userID>                        join room, fails if room not exist exit 2
+  create-room <roomID>                          creates room if not exists, records sticky shard assignment
+  delete-room <roomID>                          tombstone room (moves to deleted_rooms with deleted_at), prints true/false
+  purge <roomID>                                removes tombstone and sticky assignment, prints true/false, exit2 if no tombstone
+  list-rooms                                    JSON array sorted of rooms (omits deleted)
+  join <roomID> <userID>                        join room, fails if room not exist or deleted exit2
   leave <roomID> <userID>                       leave room
-  list-users <roomID>                           JSON array sorted of users in room
-  send <roomID> <userID> <message>              sends message, user must be member
-  get-messages <roomID> [limit] [offset]        JSON array of messages oldest first, with pagination limit offset
+  list-users <roomID>                           JSON array sorted of users in room, exit2 if deleted
+  send <roomID> <userID> <message>              sends message, user must be member, not deleted
+  get-messages <roomID> [limit] [offset]        JSON array of messages oldest first, [] for deleted, pagination latest N for 2 args, slice for 3 args
   send-private <fromUser> <toUser> <message>    sends private message
   get-private <user1> <user2> [limit] [offset]  JSON array of private messages with pagination
-  list-all-users                                JSON array sorted unique users seen
-  get-shard-id <roomID>                         prints shard id, -1 for global: broadcast rooms, weighted hashing
-  get-shard-path <roomID>                       prints shard path, comma-separated sorted list for global:
-  distribution                                  JSON map shard_id->count of rooms including global broadcast
+  list-all-users                                JSON array sorted unique users seen (includes deleted)
+  get-shard-id <roomID>                         prints shard id, -1 for global: broadcast, sticky assignment for existing rooms
+  get-shard-path <roomID>                       prints shard path, comma-separated sorted list for global:, sticky for existing
+  distribution                                  JSON map shard_id->count of rooms including global broadcast, sticky
   heartbeat <userID>                            updates presence timestamp
   get-presence <userID>                         JSON {"user_id":...,"online":true/false,"last_seen":..., "last_seen_seconds_ago":float}
   list-online                                   JSON array sorted of online users within presence TTL
-  snapshot <backup_path>                        creates backup dir or file
-  restore <backup_path>                         restores from backup
-  ops-log                                       prints ops.log as JSON array
+  snapshot <backup_path>                        creates backup dir or file including assignments and deleted_rooms
+  restore <backup_path>                         restores from backup including assignments
+  ops-log                                       prints ops.log as JSON array with op and ts fields
 Flags:
   --data <path> (default /app/data/chat.json)
   --config <path> (default /app/config.json)
   --help -h help
-  checksum integrity, atomic write via CreateTemp and Rename
-  sharding with weight, rate limiting with token bucket, presence with TTL, pagination offset, snapshot/restore, ops.log
-  data includes rooms, private_messages, next_id, seen_users
-  shard includes weight per shard, rate, presence TTL
+  checksum integrity, atomic write via CreateTemp and Rename, file locking via global.lock
+  sharding with weight and sticky assignment, rate limiting token bucket single token global broadcast atomic, presence TTL, pagination, snapshot/restore, ops.log
+  data split: chat.json rooms+deleted_rooms+seen_users, private.json, counter.json, assignments.json sticky
+  tombstone: delete-room moves to deleted_rooms with deleted_at, purge removes tombstone
 `)
 }
 
@@ -1126,6 +1226,7 @@ func ensureDirForShards(cfg Config) error {
 		cfg.RateLimitPath,
 		cfg.CounterPath,
 		cfg.UsersPath,
+		getAssignmentsPath(cfg),
 	}
 	for _, p := range paths {
 		if p != "" {
@@ -1164,6 +1265,9 @@ func loadConfigFile(path string) (Config, error) {
 	}
 	if cfg.UsersPath == "" {
 		cfg.UsersPath = "/app/data/users.json"
+	}
+	if cfg.AssignmentsPath == "" {
+		cfg.AssignmentsPath = "/app/data/assignments.json"
 	}
 	if cfg.PresenceTTLSeconds == 0 {
 		cfg.PresenceTTLSeconds = 60
@@ -1906,7 +2010,15 @@ func main() {
 					if err != nil {
 						return err
 					}
-					if _, exists := data.Rooms[roomID]; exists {
+					if room, exists := data.Rooms[roomID]; exists {
+						if data.DeletedRooms == nil {
+							data.DeletedRooms = map[string]*DeletedRoom{}
+						}
+						data.DeletedRooms[roomID] = &DeletedRoom{
+							Users:     append([]string{}, room.Users...),
+							Messages:  append([]Message{}, room.Messages...),
+							DeletedAt: time.Now().UnixNano(),
+						}
 						delete(data.Rooms, roomID)
 						deleted = true
 						if err := atomicWriteGeneric(s.Path, data); err != nil {
@@ -1927,7 +2039,15 @@ func main() {
 			if err != nil {
 				return err
 			}
-			if _, exists := data.Rooms[roomID]; exists {
+			if room, exists := data.Rooms[roomID]; exists {
+				if data.DeletedRooms == nil {
+					data.DeletedRooms = map[string]*DeletedRoom{}
+				}
+				data.DeletedRooms[roomID] = &DeletedRoom{
+					Users:     append([]string{}, room.Users...),
+					Messages:  append([]Message{}, room.Messages...),
+					DeletedAt: time.Now().UnixNano(),
+				}
 				delete(data.Rooms, roomID)
 				deleted = true
 			} else {
@@ -1936,15 +2056,8 @@ func main() {
 			if err := atomicWriteGeneric(shardPath, data); err != nil {
 				return err
 			}
-			// Remove sticky assignment
-			assignmentsPath := getAssignmentsPath(cfg)
-			assignments, _, _ := loadAssignmentsData(assignmentsPath)
-			if assignments != nil {
-				if _, ok := assignments[roomID]; ok {
-					delete(assignments, roomID)
-					_ = atomicWriteGeneric(assignmentsPath, assignments)
-				}
-			}
+			// Keep sticky assignment for audit - do NOT remove on delete (tombstone stays on original shard)
+			// Assignment removal only happens on purge, per tombstone spec
 			if deleted {
 				_ = appendOpsLog(opsLogPath, "delete-room", map[string]interface{}{"room": roomID})
 			}
@@ -1958,6 +2071,57 @@ func main() {
 			fmt.Println("true")
 		} else {
 			fmt.Println("false")
+		}
+	case "purge":
+		if len(cmdArgs) < 1 {
+			fmt.Fprintln(os.Stderr, "requires <roomID>")
+			os.Exit(2)
+		}
+		roomID := cmdArgs[0]
+		if strings.TrimSpace(roomID) == "" {
+			fmt.Fprintln(os.Stderr, "roomID empty")
+			os.Exit(2)
+		}
+		var had bool
+		err := withGlobalLock(func() error {
+			// Remove tombstone from whichever shard holds it, and remove sticky assignment
+			had = false
+			for _, s := range cfg.Shards {
+				data, _, err := loadShardFileData(s.Path)
+				if err != nil {
+					return err
+				}
+				if data.DeletedRooms != nil {
+					if _, ok := data.DeletedRooms[roomID]; ok {
+						delete(data.DeletedRooms, roomID)
+						had = true
+						if err := atomicWriteGeneric(s.Path, data); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			// Remove sticky assignment
+			assignmentsPath := getAssignmentsPath(cfg)
+			assignments, _, _ := loadAssignmentsData(assignmentsPath)
+			if assignments != nil {
+				if _, ok := assignments[roomID]; ok {
+					delete(assignments, roomID)
+					had = true
+					_ = atomicWriteGeneric(assignmentsPath, assignments)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
+			os.Exit(1)
+		}
+		if had {
+			fmt.Println("true")
+		} else {
+			fmt.Println("false")
+			os.Exit(2)
 		}
 	case "list-rooms":
 		var rooms []string
@@ -2059,6 +2223,11 @@ func main() {
 			data, _, err := loadShardFileData(shardPath)
 			if err != nil {
 				return err
+			}
+			if data.DeletedRooms != nil {
+				if _, isDeleted := data.DeletedRooms[roomID]; isDeleted {
+					return fmt.Errorf("room not exist")
+				}
 			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
@@ -2213,6 +2382,11 @@ func main() {
 			if err != nil {
 				return err
 			}
+			if data.DeletedRooms != nil {
+				if _, isDeleted := data.DeletedRooms[roomID]; isDeleted {
+					return fmt.Errorf("room not exist")
+				}
+			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
 				return fmt.Errorf("room not exist")
@@ -2355,6 +2529,11 @@ func main() {
 			if err != nil {
 				return err
 			}
+			if data.DeletedRooms != nil {
+				if _, isDeleted := data.DeletedRooms[roomID]; isDeleted {
+					return fmt.Errorf("room not exist")
+				}
+			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
 				return fmt.Errorf("room not exist")
@@ -2482,6 +2661,12 @@ func main() {
 			data, _, err := loadShardFileData(shardPath)
 			if err != nil {
 				return err
+			}
+			if data.DeletedRooms != nil {
+				if _, isDeleted := data.DeletedRooms[roomID]; isDeleted {
+					msgs = []Message{}
+					return nil
+				}
 			}
 			room, exists := data.Rooms[roomID]
 			if !exists {
@@ -2655,6 +2840,11 @@ func main() {
 				}
 				for _, room := range data.Rooms {
 					for _, u := range room.Users {
+						set[u] = true
+					}
+				}
+				for _, dr := range data.DeletedRooms {
+					for _, u := range dr.Users {
 						set[u] = true
 					}
 				}
