@@ -58,14 +58,8 @@ proxy --config /app/config.json get <key> -> JSON value or "null", exit 0
   For global: check all shards in id order, return first found, or null
 
 proxy --config /app/config.json set <key> <value_json> -> durable, exit 0
-  value_json must be valid JSON; if not valid JSON, treat as raw string value (do not use lenient streaming decode that consumes prefix). Examples that must be treated as raw strings (not numbers/objects):
-  - `123abc` → value is string "123abc", not number 123
-  - `{"a":1} x` → string "{\"a\":1} x", not object
-  - `nullx` → string "nullx", not null
-  - `[1,2` → string "[1,2", not array (invalid JSON)
-  Valid JSON must be consumed fully:
-  - `  7   ` → number 7 (whitespace trimmed then valid)
-  - `{"a":1}` → object
+  value_json must be treated as raw string unless the entire input (after trimming surrounding whitespace) is valid JSON. Do not use lenient streaming decode that consumes a prefix and ignores trailing bytes; trailing characters after a valid JSON value or incomplete JSON must cause the whole input to be treated as raw string. Whitespace-trimmed valid JSON is still valid.
+
   For normal: write to its weighted designated shard, clean up duplicate/misplaced copies in other shards (delete from wrong shards)
   For global: write to ALL shards (replicate)
   On success, also append to ops.log with shard_id, ts, version
@@ -93,11 +87,9 @@ For invalid config, **no stdout**, only stderr. Missing key argument (e.g., `pro
 - Use MD5 big-endian mod but **weighted**:
   - Each shard has `weight` default 1 if missing. If weight present, must be >0 else config invalid exit 2.
   - Total weight = sum(weights)
-  - Compute hash: MD5 of key's UTF-8 bytes, interpret 16-byte digest as big-endian unsigned integer, e.g., Python `int(md5(key.encode()).hexdigest(),16)` – hash as big-endian
+  - Compute hash: MD5 of key's UTF-8 bytes, interpret 16-byte digest as big-endian unsigned integer.
   - Compute `weighted_index = hashInt % totalWeight`
   - Iterate shards **sorted by id ascending**, subtracting weight: for each shard in id order, if `weighted_index < shard.weight`, pick that shard id; else `weighted_index -= weight` and continue.
-
-  Example: shards 0:w1, 1:w2, 2:w1, 3:w1 → total 5. Hash%5=0→0, 1→1, 2→1, 3→2, 4→3.
 
 - For `global:` keys, `get-shard-id` returns -1 (broadcast indicator), not normal weighted.
 
@@ -156,11 +148,6 @@ On startup, validate, else exit 2 stderr, no stdout:
 
 ### Success
 
-- Weighted routing correct, broadcast global: works (replicates to all)
-- Durable new-format files with valid checksum (no HTML escaping), ops.log appended with version, ts, shard_id, one atomic write per shard
-- Sorted list-keys exact, distribution includes zeros, accounts for broadcast including global
-- Config validation exit 2 no stdout for duplicate id, empty path, negative id, id>=count, weight<=0, missing shard_count, invalid json, missing file, unknown command, missing key arg
-- Corruption backup/recreate including missing checksum, raw-string handling with table (123abc→string, etc.), help and bare help exit 0 containing version,checksum,staging,weight,global,ops.log
-- Self-healing set/delete cleans duplicates, large 100KB value handling, atomic write via temp+rename without HTML escaping
+Proxy correctly implements weighted routing, global broadcast, checksum integrity without HTML escaping, corruption backup with warning, self-healing cleanup on set/delete, ops.log append with version/shard_id/ts, sorted list-keys and distribution including zeros, config validation exit 2 with no stdout, and help output. See CLI and validation sections for detailed required behaviors.
 
 Legacy ignored for now.

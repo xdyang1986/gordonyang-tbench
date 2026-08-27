@@ -2092,6 +2092,7 @@ def test_staging_and_final_write_behavior():
         config_path = os.path.join(tmpdir, "config.json")
         legacy_path = os.path.join(tmpdir, "legacy.json")
         legacy_data = {"stage-first-1": "value-1", "stage-first-2": "value-2"}
+        expected_data = {"existing": True, **legacy_data}
         _write_shard_versioned(shard_path, {"existing": True}, 0, 2)
         with open(config_path, "w") as f:
             json.dump(
@@ -2105,15 +2106,36 @@ def test_staging_and_final_write_behavior():
         r = _direct_migrate_binary(legacy_path, config_path, [])
         assert r.returncode == 0, r.stderr
 
-        staged_path = os.path.join(staging_dir, "shard_0.json")
-        staged_obj = _load_shard_full(staged_path)
+        assert os.path.exists(staging_dir), "Staging dir must exist"
+        staged_files = [os.path.join(staging_dir, f) for f in os.listdir(staging_dir)]
+        assert len(staged_files) >= 1, "Staging dir should contain files"
+        # Locate staged file whose shard_id matches expected (0), like test_migration_staging_dir_exists_and_versioned
+        staged_obj = None
+        for fp in staged_files:
+            obj = _load_shard_full(fp)
+            if obj and obj.get("shard_id") == 0:
+                staged_obj = obj
+                break
+        assert staged_obj is not None, (
+            f"No staged file with shard_id 0 found, files: {staged_files}"
+        )
         final_obj = _load_shard_full(shard_path)
-        assert staged_obj is not None
         assert final_obj is not None
-        assert staged_obj == final_obj
-        assert final_obj["version"] == 3
-        assert final_obj["data"] == {"existing": True, **legacy_data}
+        # Substantive assertions: byte-equality with final shard, correct version, correct data
+        assert staged_obj == final_obj, (
+            f"Staged file should be byte-equal to final shard, staged={staged_obj} final={final_obj}"
+        )
+        assert final_obj["version"] == 3, (
+            f"Expected version 3, got {final_obj.get('version')}"
+        )
+        assert final_obj["data"] == expected_data, (
+            f"Expected data {expected_data}, got {final_obj.get('data')}"
+        )
+        assert final_obj["shard_id"] == 0
+        assert "checksum" in final_obj
     finally:
         if os.path.exists(staging_dir):
             shutil.rmtree(staging_dir)
         shutil.rmtree(tmpdir)
+
+

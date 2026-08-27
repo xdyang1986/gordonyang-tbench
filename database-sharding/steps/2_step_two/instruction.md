@@ -4,7 +4,7 @@
 
 Turn1 proxy now handles weighted sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum integrity without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<timestamp>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log`.
 
-Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 global configs that are not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without `shard_id`/`version`. Turn2 must upgrade to new versioned format and fix migration – harder than Turn1, loosened vs staging+updated_at extra-hard which gave 0/10 all.
+Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 global configs that are not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without `shard_id`/`version`. Turn2 must upgrade to new versioned format and fix migration.
 
 ## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=true so agent sees prior terminal state)
 
@@ -32,11 +32,11 @@ Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) 
     - Checksum mismatch (computed with no HTML escaping, sorted keys, separators `,`, `:`) → corruption
     - If has `data`+`checksum` but NO `shard_id` and NO `version` (Turn1 format) → treat as valid old format for backward compat: version default 0, shard_id from config, checksum must still be valid, else corruption. This allows Turn1 files to be read.
   - No `data` field → old flat format `{key: value}` backward compat, treat whole file as data, version 0, shard_id from config, convert to new format on next write. Invalid JSON → corruption.
-  - **Corruption handling**: backup to `<path>.corrupt.<nanosec>` where nanosec is `time.Now().UnixNano()` + stderr warning containing at least one of "corrupt"/"checksum"/"shard_id"/"version", then recreate empty with version 0, correct shard_id, valid checksum, atomic via `CreateTemp`+`Rename`.
+  - **Corruption handling**: backup to `<path>.corrupt.<nanosec>` where nanosec is `time.Now().UnixNano()` + stderr warning containing at least one of "corrupt"/"checksum"/"shard_id"/"version", then recreate empty with version 0, correct shard_id, valid checksum, atomic via temporary file in same directory then rename.
   - Because init repairs every shard, `list-keys`/`distribution` reading all shards triggers repair of all.
 
 - **On write** (`set`/`delete`):
-  - Always write **new versioned format** with incremented version (read current version, +1), correct shard_id, checksum without HTML escaping, atomic via `os.CreateTemp` in same dir + `os.Rename`. Source inspection will check for `CreateTemp` + `Rename` and `SetEscapeHTML`.
+  - Always write **new versioned format** with incremented version (read current version, +1), correct shard_id, checksum without HTML escaping, atomic via temporary file in same directory then rename to final path, without HTML escaping.
   - For `global:` broadcast keys (prefix `global:`): set writes to **all shards** (each increments version individually), get checks all shards in id order first found, delete deletes from all shards, `get-shard-id` returns -1, `get-shard-path` returns comma-separated sorted list of all paths by id.
   - Transaction log: on each successful `set`/`delete` (delete true), append JSON line to `/app/data/ops.log`:
     ```json
@@ -71,7 +71,7 @@ proxy --config /app/config.json --legacy /app/data/legacy.json --ops-log /app/da
 
 Harness tries both `<binary> --config X --legacy Y --ops-log Z migrate ...` and `<binary> migrate --config X --legacy Y ...`
 
-Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-hard which gave 0/10 timeout harness crash):
+Requirements:
 
 - **Read legacy**: old flat dict, missing → exit 1 stderr (not 2), invalid JSON → exit 1, empty `{}` → print "Legacy file is empty, nothing to migrate", still backup if requested, but **still perform duplicate/wrong-shard cleanup and ops.log replay** (even empty legacy must trigger cleanup/replay), exit 0. Must handle large legacy (1000 keys).
 
@@ -87,7 +87,7 @@ Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-h
 
 - **Group legacy keys**: For normal keys, weighted destination; for `global:` keys, destination = all shards. Must group per shard for batched writes.
 
-- **Batched atomic writes + staging (harder)**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via `os.CreateTemp` in same dir + `os.Rename`, version = old version +1 if changed. Must create staging dir `/app/data/staging` and write grouped files there first via atomic write (`staging/shard_<id>.json` with versioned format), then also write to final shard path atomically (two-phase). Source inspection checks `CreateTemp`+`Rename` and grouping map (`grouped` or `map[int]`) and `SetEscapeHTML` and `staging`. Direct per-key writes considered reward hacking. Must also increment version on ops.log replay.
+- **Batched atomic writes + staging (harder)**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via temporary file in same directory then rename, version = old version +1 if changed. Must create staging dir `/app/data/staging` and write grouped files there first via atomic write with versioned format, then also write to final shard path atomically (two-phase). Group keys per shard for batched writes (one atomic write per shard, not per-key). Must also increment version on ops.log replay.
 
 - **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), replay entries in ascending ts order, stable for ties, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. This ensures deletes prevent legacy resurrection and later ts wins. Must handle global keys in replay (replicate/delete all).
 
@@ -124,9 +124,9 @@ Requirements (harder than Turn1 loosened, easier than staging+updated_at extra-h
 - Go stdlib only: `go.mod` no external requires and `go list -f '{{join .Imports " "}}'` no dot imports
 - Build via `go build -o <binary> .`
 - Same weighted MD5 big-endian, no HTML escaping, broadcast, versioned integrity
-- Atomic via `CreateTemp`+`Rename`, source inspection for batched grouping
+- Atomic via temporary file in same directory then rename, batched grouping per shard (one write per shard, not per-key)
 - No hardcoded `/tmp/proxy`, use `/tmp/codimango` if tmp needed
-- Must use `bufio.Scanner` for ops.log to avoid `json.Decoder` infinite loop on corrupt line (previous harness crash)
+- Must use `bufio.Scanner` for ops.log to avoid `json.Decoder` infinite loop on corrupt line
 
 ### Example
 

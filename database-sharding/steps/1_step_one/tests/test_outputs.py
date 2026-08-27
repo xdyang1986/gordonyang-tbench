@@ -12,6 +12,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import ctypes
+import struct
 
 import pytest
 
@@ -161,6 +163,59 @@ def built():
 def _proxy_cli(*args, config_path=CONFIG_PATH):
     cmd = [BIN, "--config", config_path] + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+
+_IN_MODIFY = 0x00000002
+_IN_CLOSE_WRITE = 0x00000008
+_IN_MOVED_FROM = 0x00000040
+_IN_MOVED_TO = 0x00000080
+_IN_CREATE = 0x00000100
+_IN_DELETE = 0x00000200
+_INOTIFY_EVENT = struct.Struct("iIII")
+
+
+def _start_inotify(*directories):
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    assert fd >= 0, f"inotify_init1 failed with errno {ctypes.get_errno()}"
+    watches = {}
+    mask = (
+        _IN_MODIFY
+        | _IN_CLOSE_WRITE
+        | _IN_MOVED_FROM
+        | _IN_MOVED_TO
+        | _IN_CREATE
+        | _IN_DELETE
+    )
+    for directory in directories:
+        wd = libc.inotify_add_watch(fd, os.fsencode(directory), mask)
+        if wd < 0:
+            os.close(fd)
+            raise RuntimeError(
+                f"inotify_add_watch({directory}) failed with errno {ctypes.get_errno()}"
+            )
+        watches[wd] = directory
+    return fd, watches
+
+
+def _read_inotify_events(fd, watches):
+    events = []
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        offset = 0
+        while offset < len(chunk):
+            wd, mask, cookie, name_len = _INOTIFY_EVENT.unpack_from(chunk, offset)
+            offset += _INOTIFY_EVENT.size
+            raw_name = chunk[offset : offset + name_len]
+            offset += name_len
+            name = os.fsdecode(raw_name.rstrip(b"\0"))
+            events.append((watches.get(wd), name, mask, cookie))
+    return events
 
 
 def test_help_flag():
@@ -630,3 +685,46 @@ def test_raw_string_discriminator_full_table():
     assert r.returncode == 0
     r = _proxy_cli("get", "raw-obj")
     assert json.loads(r.stdout.strip()) == {"a": 1}
+
+
+def test_atomic_write_via_inotify_step1():
+    # Discriminator: set must atomically replace shard via rename, not modify in place
+    _reset_shards()
+    cfg = _load_config()
+    # Find key mapping to shard 0 for deterministic check
+    target_sid = 0
+    found_key = None
+    for i in range(2000):
+        k = f"atomic-inotify-{i}"
+        if _expected_shard_id(k, cfg["shard_count"]) == target_sid:
+            found_key = k
+            break
+    assert found_key is not None
+    shard_path = None
+    for s in cfg["shards"]:
+        if s["id"] == target_sid:
+            shard_path = s["path"]
+    assert shard_path
+    dir_name = os.path.dirname(shard_path)
+    fd = None
+    try:
+        fd, watches = _start_inotify(dir_name)
+        r = _proxy_cli("set", found_key, json.dumps({"atomic": "check"}))
+        assert r.returncode == 0
+        events = _read_inotify_events(fd, watches)
+        base_name = os.path.basename(shard_path)
+        shard_events = [mask for path, name, mask, _ in events if path == dir_name and name == base_name]
+        # Must have exactly one MOVED_TO (atomic rename) and no MODIFY/DELETE in place
+        assert sum(bool(mask & _IN_MOVED_TO) for mask in shard_events) == 1, (
+            f"Shard file must be replaced exactly once by atomic rename, events={events}"
+        )
+        assert not any(mask & (_IN_MODIFY | _IN_DELETE) for mask in shard_events), (
+            f"Shard file must not be modified or deleted in place, events={events}"
+        )
+        obj = _load_shard_full(shard_path)
+        assert obj is not None
+        assert "checksum" in obj and "data" in obj
+        assert found_key in obj["data"]
+    finally:
+        if fd is not None:
+            os.close(fd)
