@@ -9,8 +9,8 @@ The existing code is present in `/app` and should continue to work. Keep the cor
 Stdlib only.
 
 ### Flags
-- `--data` default `/app/data/chat.json` – Turn1 compatibility mode (split files as per Turn1: chat.json with rooms+deleted_rooms+seen_users, private.json, counter.json), fallback when config missing or invalid JSON
-- `--config` default `/app/config.json` – sharded mode config path. If config file exists and is valid JSON, sharded mode is active; otherwise fallback to Turn1 split-file behavior.
+- `--data` default `/app/data/chat.json` – Turn1 compatibility mode, used when --config is not supplied. Persistence keeps the Turn1 split-file layout: chat.json (rooms + deleted_rooms + seen_users), private.json, counter.json.
+- `--config` default `/app/config.json` – sharded mode. If --config is supplied, the file must exist and contain valid JSON that passes the validation rules below; a missing file, malformed JSON, or a validation failure exits 2. There is no silent fallback when --config is given.
 
 ### Config File Format
 
@@ -41,7 +41,7 @@ Validation rules (must exit 2 on violation):
 - `shards` must be non-empty array
 - Each shard: `id` must be >=0 and < shard_count, unique; `path` must be non-empty string; `weight` if present must be >0, default 1 if missing
 - `rate_limit` optional default `{"messages_per_second":5,"burst":10}` where messages_per_second may be float or int, positive; burst positive
-- `presence_ttl_seconds` optional default 60
+- `presence_ttl_seconds` optional, default 60; if present it must be a non-negative number — negative or non-numeric values are invalid (exit 2)
 - All path fields optional with defaults as shown above
 - Unknown fields at top-level or inside shard objects must be ignored (tolerant parsing): extra fields must not cause failure
 - `shard_count` mismatch with `len(shards)` is lenient (must not crash, may allow)

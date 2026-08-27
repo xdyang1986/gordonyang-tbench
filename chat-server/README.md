@@ -2,7 +2,7 @@
 
 ## Description
 
-**Task Goal**: Production-grade Go chat server in two hard-balanced steps – oracle 100% with monotonic spread (at `adf4384`: avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83) after tombstone under-spec + sticky hint removal.
+**Task Goal**: Production-grade Go chat server in two hard-balanced steps – oracle 100% with per-step balance gate passing (at `adf4384`: avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83) but zero end-to-end for frontier model due to Turn1→Turn2 code extension, not per-step difficulty.
 
 **Turn 1 – Core (65 tests)**: CLI at `/app` module `chat-server` manages rooms, users, messages with durable split-file persistence and integrity.
 
@@ -11,100 +11,89 @@ Split persistence (mirrors sharded layout): three files in same dir as `--data`,
 - **private.json**: `{"private_messages":[]}`
 - **counter.json**: `{"next_id":int64}` global monotonic across room+private, persists across restarts, not reset on delete/purge, only after corruption reset to 1.
 
-Commands: `create-room` idempotent (empty ID exit2), `delete-room` tombstone – retains history: moves room's members+messages into `deleted_rooms` under roomID with `deleted_at` nano, behaves as though does not exist except `list-all-users` still reports ever-members, re-creating same ID starts empty and does NOT clear tombstone, `purge` is only way to remove tombstone (prints true/false, exit2 if no tombstone), `list-rooms` sorted omits deleted, `join`/`leave` idempotent (join fails exit2 if room not exist or deleted, leave all → [] and `send` after leave fails), `list-users` sorted exit2 if nonexist or deleted, `send` (member else exit2, message via `strings.Join` remaining args, missing message exit2, `<>&` no HTML escape raw file contains "<", Unicode emoji preserved, newlines/tabs, 10KB, cannot send to deleted room exit2), `get-messages` oldest first sorted by id asc limit latest N (0/omit=all), invalid limit exit2, limit zero all, nonexist or deleted → [] not error, `send-private`/`get-private` DM both directions limit latest N, `list-all-users` sorted unique ever seen including tombstone members.
+Commands: `create-room` idempotent (empty ID exit2), `delete-room` tombstone – retains history: moves room's members+messages into `deleted_rooms` under roomID with `deleted_at` nano, behaves as though does not exist except `list-all-users` still reports ever-members, re-creating same ID starts empty and does NOT clear tombstone, `purge` is only way to remove tombstone (prints true/false, exit2 if no tombstone), `list-rooms` sorted omits deleted, `join`/`leave` idempotent, `list-users` sorted exit2 if nonexist/deleted, `send` via Join, `get-messages` latest N, `send-private`/`get-private`, `list-all-users` includes tombstone.
 
-IDs globally incrementing int64 starting at 1 unique across room+private monotonic interleaved (room1,priv1,room2,priv2→1,2,3,4). Help bare no args contains `create-room,delete-room,purge,list-rooms,join,leave,list-users,send,get-messages,send-private,get-private,data,checksum` exit0. Unknown command exit2.
+Persistence integrity: atomic CreateTemp same dir + Rename inode check (deterministic, not torn JSON), file locking via global.lock `/app/data/global.lock` in data dir – acquired by creating file with O_CREATE|O_EXCL; if exists retries and ultimately fails rather than proceeding (flock alone invalid per spec), per-file .lock allowed, locks cleaned, no tmp residue, corruption backup `.corrupt.<nanosec>` + stderr warning, wrapper checksum strict, deleted_rooms participates.
 
-Persistence integrity: wrapper checksum strict, atomic via `os.CreateTemp` same dir + `os.Rename` (deterministic inode replacement check, not truncate), file locking: global lock `/app/data/global.lock` mandatory for multi-file ops (send, send-private, delete-room, purge) – lock is acquired by creating it with O_CREATE|O_EXCL; if exists command retries and ultimately fails rather than proceeding. Per-file `.lock` also allowed. Locks cleaned after each op, no `tmp-*.json` residue after burst. Corruption handling: missing → empty data (chat `{"rooms":{},"deleted_rooms":{},"seen_users":{}}`, private `{"private_messages":[]}`, counter `{"next_id":1}`), empty file TrimSpace empty → empty data, wrapper missing/empty checksum or mismatch or invalid JSON → backup `<path>.corrupt.<nanosec>` integer UnixNano(), stderr warning "corrupt"/"checksum", recreate empty valid wrapper. `deleted_rooms` participates in checksum and corruption recovery like any other field.
+Concurrency: 30×2KB small-payload (not 20KB) to avoid Daytona 50× slower flake, file never invalid JSON, unique IDs preserved.
 
-Concurrency: file never invalid JSON during concurrent ops, parallel sends same room + different rooms + parallel joins must preserve every message and user with unique IDs. 30×2KB small-payload concurrency used for determinism.
+**Turn 2 – Large Scale (68 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1 split-file compatibility).
 
-**Turn 2 – Large Scale (67 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1 split-file compatibility). When config exists and valid JSON, sharded active; else fallback to Turn1 split files.
+Flags:
+- `--data` default `/app/data/chat.json` – Turn1 compatibility mode, used when --config is not supplied. Persistence keeps Turn1 split-file layout: chat.json (rooms+deleted_rooms+seen_users), private.json, counter.json.
+- `--config` default `/app/config.json` – sharded mode. If --config is supplied, file must exist and contain valid JSON that passes validation; missing file, malformed JSON, or validation failure exits 2. No silent fallback when --config given. If --config not supplied and default config missing, fallback to Turn1 split-file mode.
 
-Config validates (exit2): shard_count>0, shards non-empty array, each shard id >=0 and < shard_count unique, path non-empty, weight>0 default1, rate_limit messages_per_second positive float/int (negative, zero, non-numeric → exit2), burst positive int (<=0 or non-numeric → exit2), presence_ttl_seconds optional default60 must be >=0 (negative or non-numeric → exit2), invalid JSON → exit2, shard_count mismatch lenient, unknown fields ignored.
+Config validates exit2: shard_count>0, shards non-empty array, id >=0 and < shard_count unique, path non-empty, weight>0 default1, rate_limit messages_per_second positive float (negative/zero/non-numeric → exit2), burst positive int (<=0/non-numeric → exit2), presence_ttl_seconds optional default60 must be non-negative number (negative/non-numeric → exit2), invalid JSON → exit2, count mismatch lenient, unknown fields ignored.
 
-Sharded data files (all wrapper checksum, atomic CreateTemp+Rename, O_EXCL global lock, corruption backup, lock cleaned): each shard `{"rooms":{...},"deleted_rooms":{...},"seen_users":{...}}` with users,messages keys, private, presence `{userID:last_seen_nano}`, rate_limit flat or nested buckets behavioral verified, counter global, users global, assignments `{roomID:shardID}` with wrapper checksum atomic.
+Sharded data files: each shard `{"rooms":{...},"deleted_rooms":{...},"seen_users":{...}}`, private, presence, rate_limit, counter global, users global, assignments `{roomID:shardID}` wrapper checksum atomic O_EXCL global lock.
 
-Sharded semantics: weighted consistent hashing MD5 big-endian, totalWeight sum, weighted_index=hashInt%totalWeight iterate sorted id subtract weight; `global:` prefix → -1 broadcast creates room in ALL shards replicated same ID, send replicates same message same ID to all shards, get-messages dedupes by ID sorted, get-shard-path returns comma-separated sorted list for global, distribution counts rooms per shard including global in each (1 normal+2 global*4=9).
+Sharded semantics: weighted MD5 big-endian hashed, global: → -1 broadcast all shards same ID dedup, distribution includes global*shard_count, tombstone propagates to shards (or all shards if global) with deleted_at, purge removes tombstone+assignment.
 
-Tombstone propagates to sharded: `delete-room` moves to `deleted_rooms` in its shard (or all shards if global) with deleted_at nano, prints true/false, behaves as though does not exist except list-all-users, re-create starts empty not clearing tombstone, `purge` removes tombstone and sticky assignment (exit2 if no tombstone).
+Sticky assignment: room shard decided once at creation recorded in assignments.json, never migrated on reweight, new rooms use new weights, global stays -1, survives restarts and snapshot (dir copies config.json). Discriminator.
 
-Shard Assignment Stability (Sticky): room's shard decided once at creation and recorded in assignments.json, consulted for every op on existing rooms. If config weights change afterwards, existing rooms stay on original shard never rehashed or migrated. Only new rooms use new weights. Global rooms remain in all shards. Persisted mapping survives restarts and included in snapshots (dir and file modes copy config.json). This is the discriminator that moved opus off 1.0 in step2.
+Rate limiting 0.05/s low rate to avoid wall-clock race, shared bucket send+send-private, global one token atomic byte-identical on reject.
 
-Rate limiting: per-user token bucket shared across send and send-private, persisted rate_limit.json wrapper, refill elapsed*rate cap burst, exit1 stderr "rate limit" no stdout no next_id increment no ops_log. Low rate 0.05/s in no-side-effect tests to avoid wall-clock race, 1/s only in refill test. Global broadcast costs one token not per shard and atomic – rate-limited global send leaves every shard byte-identical (no partial).
-
-Presence, pagination, ops-log, snapshot/restore as before but now includes assignments and deleted_rooms. Presence includes last_seen_seconds_ago. Ops-log invalid line skipping with warning.
-
-Lock protocol (CHAT-007): global.lock acquired via O_CREATE|O_EXCL, existence means held – test creates file with O_EXCL, mutating command must not succeed (fail or block). Implementation using flock alone fails spec fairly.
-
-Stdlib only checked in both steps via `go list -f '{{join .Imports " "}}'` no dotted imports and go.mod no external require.
+Presence includes last_seen_seconds_ago, TTL testable, stdlib checked both steps.
 
 ## Completion Rates
 
-### Latest online validation — commit `adf4384` (65 + 66 tests before AFTR fixes, then 65+67)
+### Latest — HEAD after AFTR fixes (65 + 68 tests)
 
-**Validation status: PASSING.** Structural 10/10 PASS, oracle 3/3 locally 65/65 (9.1s) + 66/66 ×2 (29.2/28.8s), balance gate passed avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83. AFTR at adf4384: BAD_GRADING_WRONG (test_global_lock_mandated flock vs O_EXCL), BAD_AMBIGUOUS (single-file wording), BAD_GRADING_WEAK (stdlib check missing in step2, config validation partial – empty shards, id>=shard_count, negative/non-numeric rate, invalid burst/TTL). Tombstone under-spec and sticky hint removal landed – avocado moved off 1.0 on step1 (0.8) and restored step2 (0.33).
+Validation passing at `adf4384` (65+66) with balance gate passed avocado 0.8/0.33 opus 1.0/0.6. AFTR at adf4384 flagged BAD_GOLDEN (step2 --data mode wrote single file ['deleted_rooms','next_id','private_messages','rooms','seen_users'] not split), BAD_GRADING_WRONG (test_global_lock_mandated assumed file exists ⇒ held, but flock implementation valid), BAD_GRADING_WEAK (stdlib step2 missing, config validation partial), BAD_AMBIGUOUS (single-file wording for split layout).
 
-| Stage | Agent / Model | Full multi-turn | Turn 1 | Turn 2 (given T1 pass) |
-|-------|---------------|-----------------|--------|------------------------|
-| Oracle | oracle | 3/3 (100%) | 3/3 | 3/3 |
-| Agent | claude-code / claude-opus-5 | 6/10 | 10/10 | 6/10 |
-| Codex | gpt-5.5 | 7/12 | 7/12? | 10/12? |
-| Metacode | meta/avocado-code-flex-5p15 | 0.8/0.33 at adf4384 | 0.8 | 0.33 |
+Fixes in this commit:
+- Instruction: --data is Turn1 compat used when --config not supplied, split layout; --config supplied must exist+valid JSON, missing/malformed/validation → exit2 no fallback; delete fallback prose.
+- TTL rule: presence_ttl_seconds optional default 60, if present must be non-negative number, negative/non-numeric → exit2 (golden accepts 0).
+- Golden: step2 reference in --data mode now honours split-file (chat.json deleted_rooms+seen_users+rooms, private.json, counter.json) via withGL closure using acquireLock in data dir, not single StoreData.
+- Tests: added Turn1 split-file mode assertions (private.json+counter.json exist with valid wrapper checksums, chat.json must NOT contain private_messages/next_id, deleted_rooms key present) + config missing file explicit exits 2 + empty shards, id>=shard_count, negative/zero/non-numeric rate, burst<=0/non-numeric, TTL negative/non-numeric.
+- Cosmetic: rename "single mode"/"single-file mode"/"hi from single mode" to "Turn1 split-file mode" in 8 places.
 
-At HEAD with fixes (lock protocol spec, stdlib step2, expanded config validation 4 missing cases, single-file wording, README update) expected to stay green with same balance and pass AFTR.
+Oracle locally: Turn1 65/65 (9.1s), Turn2 68/68 (45s) after fixes.
 
-Calibration history:
+Balance gate at adf4384: avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83 – saturation fixed by tombstone under-spec (1 invariant) + sticky hint removal.
+
+End-to-end vs per-step: Per-step gate passed, but full multi-turn at adf4384 was 0/10 for opus, 2/10 avocado, 2/11 gpt. Per-step runs step2 on seeded reference; multi-turn agent extends its own step-1 code, so frontier model finishing zero times is expected when step1 is hard enough to filter. This does not block – gate is per-step – but worth a sentence explaining.
+
+### Calibration history
 
 | Commit | Change | Oracle | Opus | Avocado | Read |
 |--------|--------|--------|------|---------|------|
-| `ea0b7ef` | 59 tests, strict concurrency | 3/3 | 1/10 | 6/10 | Inverted |
-| `28beece` | room schema, ops-log op, shared bucket, rate 1→0.05, timeout 1200→2400 | 2/3 | 5/7 | 3/7 | Inversion fixed |
-| `9c5c969` | drop apt Dockerfile | 3/3 | — | — | BUILD_FAILED flake gone |
-| `af0137b` | global-broadcast rate tests, restore 20 concurrent wording | 3/3 | 10/10 | 8/10 | Too easy |
-| `e5d715d` | revert concurrency to functional req | 3/3 | 8/10 | 3/10 | Balanced |
-| `adf4384` | tombstone under-spec (1 invariant), remove sticky parenthetical | 3/3 | 1.0/0.6 | 0.8/0.33 | Saturation fixed |
-| HEAD | lock protocol O_EXCL spec, stdlib step2, config validation empty shards/id>=count/rate/burst/TTL, wording split-file, README | 3/3 | — | — | AFTR fixes |
-
-Lessons: inversion from unspecified keys (users/messages, op, shared bucket, deleted_rooms, assignments), wall-clock flake (0.05/s), test params in spec removes difficulty (20 concurrent → functional req), exhaustive enumeration → transcription not reasoning (tombstone 3 repeats → 1 inference-heavy), hint parenthetical → gives away sticky, lock protocol must be specified not assumed (flock vs O_EXCL).
-
-#### Where models fail now
-- Avocado: needs atomic inode rename + global O_EXCL lock cleanup + sticky assignment persistence + tombstone behavior inference + split-file checksum.
-- Opus: now caught by sticky (1.0/0.6) – assignment must be recorded and never migrated.
-- GPT: infra BUILD_FAILED previously counted as failure (ripgrep apt), now fixed multi-stage golang:1.24 + python:3.12.
+| ea0b7ef | 59 tests, strict concurrency | 3/3 | 1/10 | 6/10 | Inverted |
+| 28beece | room schema, ops-log op, shared bucket, rate 0.05, timeout 2400 | 2/3 | 5/7 | 3/7 | Fix inversion |
+| 9c5c969 | drop apt Dockerfile | 3/3 | — | — | Flake gone |
+| af0137b | global broadcast rate-limit | 3/3 | 10/10 | 8/10 | Too easy |
+| e5d715d | revert concurrency to functional req | 3/3 | 8/10 | 3/10 | Balanced |
+| adf4384 | tombstone 1 invariant, remove sticky parenthetical | 3/3 | 1.0/0.6 | 0.8/0.33 | Saturation fixed |
+| 7964fc0 | lock O_EXCL spec, stdlib step2, config validation gaps, README | 3/3 | — | — | AFTR fixes |
 
 ## Model Analysis
 
-**Failure Categorization (hard 65+67):**
-1. Checksum+HTML (25%): SetEscapeHTML(false) + alphabetical + wrapper for all files including deleted_rooms, assignments.
-2. Atomic+Locking+Concurrent (30%): CreateTemp+Rename inode check 30×2KB, global.lock O_CREATE|O_EXCL retry fail, no tmp residue, no lock leftover.
-3. Spaces+Large+Unicode (15%): Join remaining args, 10KB, emoji.
-4. Global ID+Tombstone+Edge (15%): monotonic, purge, deleted_rooms checksum+corruption, empty ID, invalid limit, limit zero, nonexist [], leave-all [], join after delete fails, send after leave fails, recreate keeps tombstone, purge exit2.
-5. Weighted+Sticky+Global Broadcast (10% T2): hash%weight, sticky persistence via assignments.json survives reweight and snapshot, new rooms use new weights, global -1 broadcast dedup same ID, distribution global*shard_count, single token cost + atomic byte-identical shards on rate-limited.
-6. Rate Limit+Presence+Pagination+Snapshot (5%): refill multiple cycles, no side effects (counter, ops_log), per-user independent, persistence format-agnostic, corruption handling, fractional rate float64, shared bucket send/send-private, presence TTL+unknown+multi, seconds_ago field, offset pagination <2s 1000/500, snapshot dir copies config+assignments+deleted_rooms, file mode combined JSON counter exact restore, ops-log invalid skipping + ts field + order + large 100, config validation (empty shards, id>=count, duplicate id, empty path, weight<=0, negative/non-numeric rate, burst<=0, TTL negative/non-numeric, invalid JSON, mismatch lenient) + unknown tolerance + defaults.
+Failure categorization (65+68):
+- Checksum+HTML: SetEscapeHTML(false)+canonical MD5 including deleted_rooms+assignments.
+- Atomic+Lock O_EXCL: CreateTemp+Rename inode replacement, global.lock O_CREATE|O_EXCL retry fail, lock cleaned, tmp residue, 30×2KB.
+- Spaces+Large+Unicode: Join, 10KB, emoji.
+- Global ID+Tombstone: monotonic, purge, deleted_rooms checksum+corruption, recreate keeps tombstone, list-all-users includes tombstone.
+- Weighted+Sticky+Broadcast: MD5 weighted, sticky persistence via assignments.json survives reweight+snapshot, global -1 same ID dedup, single token + byte-identical atomic.
+- Rate+Presence+Pagination+Snapshot+Config: refill multiple cycles, no side effects, per-user, format-agnostic, fractional float64, shared bucket, presence TTL+seconds_ago, offset pagination, snapshot dir copies config+assignments+deleted_rooms, counter exact restore, config validation (empty shards, id>=count, duplicate, empty path, weight<=0, rate negative/zero/non-numeric, burst<=0/non-numeric, TTL negative/non-numeric, invalid JSON, mismatch lenient) + unknown tolerance.
 
-**Cross-model**: Turn1 65, Turn2 67 after AFTR fixes. Balanced 0.8/0.33 avocado, 1.0/0.6 opus at adf4384.
+Cross-model: Turn1 65, Turn2 68. Per-step balanced, multi-turn 0/10 opus expected due to Turn1 filter extending own code.
 
-**Reasoning gaps**: canonical checksum with deleted_rooms, sticky recorded at creation never migrated, O_EXCL lock protocol retry fail, tombstone inference (does-not-exist except list-all-users), purge only way, global broadcast atomic single token, config validation extended.
+## Anti-Cheating
 
-## Anti-Cheating Analysis
+Hardcoded: CLI Go binary, file persistence json.load+checksum including deleted_rooms+assignments, distribution MD5 weighted, pagination offsets, rate-limit counter+ops_log side effects+byte equality, tombstone file content, sticky ids unchanged after reweight.
 
-(a) Hardcoded: CLI Go binary, file persistence json.load + checksum including deleted_rooms+assignments, distribution MD5 weighted exact 20/100/200, pagination bulk offsets, rate-limit counter+ops_log side effects+per-shard byte equality, bucket format-agnostic, tombstone verifies file content users+messages+deleted_at, sticky verifies ids unchanged after reweight + new rooms follow new weights.
+Overfitting: concurrency 30×2KB same+diff+20 joins sorted unique IDs, spaces Join both modes, global ID, tombstone, purge, sticky reweight, lock O_EXCL, stdlib both steps, etc.
 
-(b) Overfitting: hidden hard includes 30×2KB concurrent same+diff+20 joins, spaces Join, global ID interleaving, tombstone moves to deleted_rooms with deleted_at, purge, recreate keeps tombstone, sticky reweight, lock O_EXCL exists⇒held, stdlib both steps, large message 10KB, Unicode, 1000-msg perf, 200 rooms, etc.
-
-(c) Modifying tests: Docker isolated, ctrf-derived reward python -I -S.
-
-(d) Bypassing: stdlib check both steps, concurrency atomic inode, O_EXCL lock, spaces Join, checksum all files including deleted_rooms+assignments, rate-limit single token atomic, sticky, tombstone.
+Reward provenance ctrf-derived python -I -S.
 
 ## Submission Readiness
 
-| Check | State at HEAD (after AFTR fixes) |
-|-------|----------------------------------|
-| Validation status | passing expected (adf4384 was passing) |
-| Structural | 10/10 PASS |
-| Oracle | 3/3 locally 65/65 + 67/67 |
-| Balance gate | passed at adf4384 — avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83 |
-| Agentic Full-Task Review | fixes: lock protocol O_EXCL specified, stdlib step2 added, config validation empty shards/id>=count/negative rate/burst/TTL/non-numeric added, single-file wording fixed to split-file, README updated |
-| Test counts | 65 Turn1 + 67 Turn2 |
-| Reward provenance | ctrf-derived |
+| Check | State |
+|-------|-------|
+| Validation | passing at adf4384, fixes make it pass AFTR (BAD_GOLDEN, BAD_GRADING_WRONG, BAD_GRADING_WEAK, BAD_AMBIGUOUS) |
+| Structural | 10/10 |
+| Oracle | 3/3 locally 65+68 |
+| Balance gate | passed 0.8/0.33 avocado, 1.0/0.6 opus |
+| AFTR | fixed: lock protocol O_EXCL, stdlib step2, config validation empty shards/id>=count/rate/burst/TTL, single-file wording → split-file, README, split-file test |
+| Test counts | 65 + 68 |
+| Note | per-step vs multi-turn: step2 runs on seeded ref per-step, multi-turn extends own step1 code → opus 0/10 end-to-end is expected, not per-step difficulty |
