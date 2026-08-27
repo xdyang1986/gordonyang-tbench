@@ -2,7 +2,7 @@
 
 ## Description
 
-**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying four subtle defects.**
+**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects.**
 
 The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects
 in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output
@@ -27,7 +27,7 @@ Moving the algorithm out of the prompt and into the code makes the difficulty **
 transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the
 same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The four defects
+## The five defects
 
 | # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
@@ -35,21 +35,36 @@ same formula as `f400820` (v17), the only version of this task that has ever pas
 | D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
 | D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
 | D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
+| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` (persistent) | policy | E4 |
+
+`groupCredit` at line 663 ships **correct** (`c/2 + 1`) and is the deliberate in-file reference point: of three
+credit-update sites, one is right and two are wrong. See the calibration bracket below for why exactly one
+reference.
 
 D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state
 and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the
 shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the
 allocation policy. All 15 agents at `0bf1e7c` fixed all three.
 
-D1 is the one **policy divergence**, and it is deliberately the only one left. The two persistent credit sites at
-lines 663 and 685 are shipped **correct**, reading `c/2 + 1`, while line 169 reads `c/2`. The file therefore
-documents its own defect: three credit-update sites, two agreeing, one not. That converts an unguessable
-recurrence into a visible internal inconsistency, with no hint in the prompt.
-
-Combined: **27/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 27 failures,
+Combined: **28/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 28 failures,
 `solve.sh` → 70/70.
 
-### Why the credit defects went from three to one
+### Calibration bracket — how many correct credit sites to leave visible
+
+The number of *correct* credit sites the agent can see is the difficulty dial, and it is sharp:
+
+| shipped config | correct credit sites visible | result |
+|---|---|---|
+| `0bf1e7c` — all three credit sites bugged | 0 | **0/15** (avocado 0/5, opus 0/5, gpt 0/5) |
+| `e704e82` — only in-round bugged | 2 | **13/15 too easy** (avocado 5/5, opus 5/5, gpt 3/5) |
+| current — in-round + `subCredit` bugged | 1 | proposed |
+
+With no reference the recurrence is unguessable and every agent regresses neighbouring weight logic while
+flailing. With two references it is a copy-paste: the pattern is right there twice. One reference means the agent
+must notice the inconsistency *and* work out that it applies to two other sites, one of which
+(`creditTmp`) only shows up in single-batch inputs.
+
+### Why all-three-bugged fails: agents regress code that was never broken
 
 At `0bf1e7c` all three credit sites were bugged (D1 plus persistent D5/D6) and the run came back 0/15. CTRF
 against the shipped baseline shows why:
@@ -62,7 +77,7 @@ against the shipped baseline shows why:
 
 Agents were *regressing* the dynamic-weight recurrence — code that was never defective — while hunting the credit
 bugs, because weight and credit are updated in the same block and nothing distinguished which was wrong. Adding
-more defects to that block made the flailing worse, not the task harder. Leaving the persistent sites correct
+more defects to that block made the flailing worse, not the task harder. Leaving at least one credit site correct
 gives the agent a reference point inside the file and removes the incentive to perturb neighbouring logic.
 
 ### Every defect must be exposed by an example — enforced by `tools/audit_defects.py`
@@ -283,6 +298,23 @@ and must be dropped — `tools/audit_defects.py` flags them automatically:
 
 Note one trial ran 3040s against a 3000s agent timeout, so the ceiling is being reached; worth watching if
 metacode durations keep climbing.
+
+### Online run at `e704e82` (four defects, two reference sites) — TOO EASY, and provenance regressed
+
+| Gate | Result |
+|---|---|
+| Oracle | 3/3 |
+| AI assessment | **Accept (0 Crit / 0 High / 0 Med / 0 Low)** — cleanest yet |
+| Balance | **failed, too easy** — avocado 5/5, opus 5/5, gpt 3/5 |
+| Provenance | **failed** — unauthorized third-party model authorship |
+
+First time the difficulty dial moved off zero, and it overshot: leaving two correct credit sites turned D1 into a
+copy-paste. gpt at 3/5 shows the invariant defects still cost something; avocado and opus at 5/5 show they are not
+enough on their own.
+
+Provenance broke for the same reason as at `2950b49`: the prompt file was edited directly rather than regenerated
+through Avocado. This time the edit was pure deletion (−47 lines, removing E4 and E6) — **deletions count as
+authorship edits too**. Any change to that file, including removing text, has to go through Avocado.
 
 ## Test Quality
 

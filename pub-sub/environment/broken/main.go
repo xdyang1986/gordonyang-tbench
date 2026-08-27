@@ -682,7 +682,7 @@ func main() {
 			}
 			wOld := subW[s]
 			if subBatchCount[s] != 0 {
-				subCredit[s] = subCredit[s]/2 + 1
+				subCredit[s] = subCredit[s] / 2
 				newW := mulDiv(wOld, 9, 10)
 				if newW < 1 {
 					newW = 1
