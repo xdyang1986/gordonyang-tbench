@@ -31,3 +31,8 @@ WORKDIR /app
 
 # Ship the allocator the agent must debug and repair in place.
 COPY broken/main.go /app/main.go
+
+# Ship a module file so the build command quoted in the prompt
+# (cd /app && go build -o /app/allocator .) works as written from the initial
+# environment. Without it the build fails with "go.mod file not found".
+RUN printf 'module allocator\n\ngo 1.21\n' > /app/go.mod
