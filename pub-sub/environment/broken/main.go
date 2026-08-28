@@ -155,7 +155,7 @@ func allocateBatch(load int, items []*item) []int {
 		if used == 0 {
 			best := active[0]
 			for _, i := range active[1:] {
-				if creditTmp[i] > creditTmp[best] || (creditTmp[i] == creditTmp[best] && items[i].idx < items[best].idx) {
+				if creditTmp[i] > creditTmp[best] || (creditTmp[i] == creditTmp[best] && items[i].idx > items[best].idx) {
 					best = i
 				}
 			}
@@ -165,7 +165,7 @@ func allocateBatch(load int, items []*item) []int {
 		}
 		remW -= used
 		for _, i := range active {
-			if delta[i] > 0 {
+			if delta[i] >= 0 {
 				creditTmp[i] = creditTmp[i] / 2
 			} else {
 				creditTmp[i] += items[i].weight

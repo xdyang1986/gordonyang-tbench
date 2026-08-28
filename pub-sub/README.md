@@ -2,11 +2,19 @@
 
 ## Status
 
-**READY at `e704e82` cut to 4 defects was 13/15 too easy (0bf1e7c 0/15). New bracket proposes 1 ref relocated far at `11be1a1` etc. Reviewer notes avocado 9/9 at 1 ref visible at L663 22 lines away identical structure — copy not inference. This commit flips reference: creditTmp L169 now CORRECT inside allocateBatch (~500 lines away, different function/var), groupCredit L663 and subCredit L685 both bugged c/2 agreeing. Combined 25/70 failing, 4 examples E1-E3 + E7 exposing both credit defects.**
+**BLOCKED ON DIFFICULTY at `d08d996` (2026-08-28).** Everything except the balance gate is green: oracle 3/3,
+AFTR **GOOD** (all 13 rubrics, Secondary NONE), AI assessment Accept (0/0/0/1), contamination LOW. Balance
+**fails**: avocado 5/5, opus 4/4 genuine (one `NetworkConnectionError` abort), gpt 3/5. AFTR rates difficulty
+**EASY** and recommends dropping the `hard` metadata tag.
+
+The group-cap grading hole is closed (verified: a pure message-count rewrite of the reference now fails
+`test_group_cap_is_cost_based_not_count_based`). Closing it moved opus 5/5 → 4/4 and gpt 5/5 → 3/5, but **not**
+avocado. See "The dial is exhausted" below.
 
 ## Description
 
-**Debug-in-place (70 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects (3 invariant + 2 persistent credit) with reference relocated far.**
+**Debug-in-place (71 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects
+(3 invariant + 2 credit).** Shipped state fails 28/71; reference passes 71/71.
 
 The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output example per defect — it does **not** state the allocation algorithm. The algorithm lives in the shipped ~700-line source and has to be reverse-engineered.
 
@@ -23,40 +31,50 @@ From-scratch with a fully-pinned spec saturated the gate. Pooled across the two 
 
 Moving the algorithm out of the prompt and into the code makes the difficulty **inference** rather than transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The five defects (relocated reference)
+## The five defects
 
 | # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
-| D1 | 169 | `creditTmp[i] = c/2 + 1` CORRECT — reference inside allocateBatch | correct (reference far) | — |
+| D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | E5 |
 | D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
 | D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
 | D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
-| D5 | 663 | `groupCredit[g] = c/2` instead of `c/2 + 1` | policy | E4 (combined) |
-| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` | policy | E4 (combined) |
+| D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` (persistent) | policy | E4 |
 
-Only one correct credit site visible, and it is ~500 lines away in different function under different var name (`creditTmp` vs `groupCredit/subCredit`), so two defective sites agree with each other and comparing them yields nothing. This attacks copy vs inference: previous 1-ref config at L663 22 lines away identical structure gave avocado 9/9 (one reported failure was MetaModelCatalogError TimeoutError infra, status=completed reward=0.00 misread). Bracket: 0 refs 0/15 unfair regress weight, 1 ref near identical 9/9, 2 refs 13/15 too easy, 1 ref far should be in band.
+`groupCredit` at line 663 ships **correct** (`c/2 + 1`) — the single in-file reference point.
 
 D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the allocation policy.
 
-Combined: **25/70 failing**, reference 70/70, `go vet` clean on both. Verified end-to-end: shipped → 25 failures, `solve.sh` → 70/70. Audit passes with 4 examples where E7 exposes both credit defects.
+Combined: **28/71 failing**, reference 71/71, `go vet` clean on both. Verified end-to-end: shipped → 28 failures, `solve.sh` → 71/71. `tools/audit_defects.py` PASS — 5 defects, 5 examples, clean 1:1 mapping.
 
-### Calibration bracket — how many correct credit sites to leave visible
+### The dial is exhausted — avocado solves every fair configuration
 
-The number of *correct* credit sites the agent can see is the difficulty dial, and it is sharp:
+Avocado's record, per configuration, counting only genuine trials:
 
-| shipped config | correct credit sites visible | result |
+| config | correct credit references visible | avocado |
 |---|---|---|
-| `0bf1e7c` — all three credit sites bugged | 0 | **0/15** (avocado 0/5, opus 0/5, gpt 0/5) |
-| `e704e82` — only in-round bugged | 2 | **13/15 too easy** (avocado 5/5, opus 5/5, gpt 3/5) |
-| **`11be1a1` — in-round + `subCredit` bugged** | **1** | **11/15 — in band, validation passing** (avocado 4/5, opus 3/5, gpt 4/5) |
+| `0bf1e7c` — all three credit sites bugged | 0 | **0/5** |
+| `11be1a1` — in-round + `subCredit` bugged | 1, near (22 lines, same function) | 4/4, then 5/5 |
+| `14a51e7` — in-round correct, both persistent bugged | 1, far (different function and name) | 5/5 |
+| `d08d996` — same defects as `11be1a1`, grading hole closed | 1, near | 5/5 |
 
-With no reference the recurrence is unguessable and every agent regresses neighbouring weight logic while
-flailing. With two references it is a copy-paste: the pattern is right there twice. One reference means the agent
-must notice the inconsistency *and* work out that it applies to two other sites, one of which
-(`creditTmp`) only shows up in single-batch inputs.
+**Avocado is 19/19 across every configuration where a correct credit site is visible anywhere in the file, and
+0/5 in the one configuration where none is.** That zero-reference config is not hard, it is unfair: all three
+models score 0 and agents regress dynamic-weight code that was never defective.
 
-Generalizable rule: for a policy-divergence defect, leave **exactly one** correct instance of the pattern in the
-file. Zero makes it unfair guessing; two make it copy-paste.
+Two hypotheses were tested and both were wrong. Reference *proximity* does not matter (`14a51e7`: moving the
+reference ~500 lines away into a different function under a different name still gave 5/5). The grading hole was
+not masking avocado difficulty either — closing it converted opus and gpt passes into failures, because their
+submissions had included policy rewrites, but every avocado pass was already a genuine solve.
+
+What remains true: all five defects are **one-line fixes**. Once located, there is no work left. Any further
+progress has to come from a defect whose *repair* is substantial, not from moving or counting reference sites.
+
+Superseded note: an earlier revision of this README claimed `11be1a1` was "11/15 in band, validation passing" and
+derived a rule that exactly one visible reference lands in band. Both were wrong. That run's single avocado
+failure was a `MetaModelCatalogError` infra abort reported as `status=completed reward=0.00`, so avocado was
+really 4/4; on revalidation at the same commit it went 5/5. **`status=completed reward=0.00` does not mean the
+agent genuinely failed — the agent log has to be read.**
 
 ### Why all-three-bugged fails: agents regress code that was never broken
 

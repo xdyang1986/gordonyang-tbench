@@ -148,7 +148,7 @@ Correct output:
 2,8,1
 ```
 
-Shipped prints `1,6,0` / `0,11,0`. No rates, bursts or costs are involved here; the first batch matches and only the second diverges.
+Shipped prints `1,6,0` / `1,8,2`. No rates, bursts or costs are involved here; the first batch matches and only the second diverges.
 
 Input:
 
@@ -170,6 +170,29 @@ Correct output:
 ```
 
 Shipped prints `8,3,1`. This input is a single batch.
+
+Input:
+
+```
+2
+4
+3
+1
+0 0 2 56 0 0
+3
+0 0 0 3 12 0 0 1
+0 0 0 4 4 0 0 1
+0 0 0 2 4 0 0 1
+```
+
+Correct output:
+
+```
+1,2,1
+1,2,0
+```
+
+Shipped prints `1,3,0` / `0,0,3`. No rates, bursts or costs are involved here; both batches diverge.
 
 ## Task
 
