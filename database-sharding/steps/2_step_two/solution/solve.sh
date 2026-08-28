@@ -414,14 +414,18 @@ func (p *ShardingProxy) Get(key string) (interface{}, bool) {
 
 func (p *ShardingProxy) Set(key string, value interface{}) error {
 	if isGlobalKey(key) {
+		maxVer := 0
 		for _, s := range p.Config.Shards {
 			m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 			m[key] = value
 			if err := atomicWrite(s.Path, m, s.ID, ver+1); err != nil {
 				return err
 			}
-			_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1, ver+1)
+			if ver+1 > maxVer {
+				maxVer = ver + 1
+			}
 		}
+		_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1, maxVer)
 		return nil
 	}
 	path, err := p.GetShardPath(key)
@@ -452,6 +456,7 @@ func (p *ShardingProxy) Set(key string, value interface{}) error {
 func (p *ShardingProxy) Delete(key string) (bool, error) {
 	if isGlobalKey(key) {
 		deleted := false
+		maxVer := 0
 		for _, s := range p.Config.Shards {
 			m, ver, _ := readShardFileWithMeta(s.Path, s.ID)
 			if _, ok := m[key]; ok {
@@ -459,9 +464,14 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 				if err := atomicWrite(s.Path, m, s.ID, ver+1); err != nil {
 					return false, err
 				}
-				_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1, ver+1)
+				if ver+1 > maxVer {
+					maxVer = ver + 1
+				}
 				deleted = true
 			}
+		}
+		if deleted {
+			_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1, maxVer)
 		}
 		return deleted, nil
 	}

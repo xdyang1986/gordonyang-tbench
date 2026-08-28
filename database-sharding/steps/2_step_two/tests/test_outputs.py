@@ -311,14 +311,12 @@ def test_help_required_step2():
             )
         assert r.returncode == 0, f"migrate --help should exit 0"
         combined = (r.stdout + r.stderr).lower()
+        # Spec line 40 now says only "migrate --help must document its flags" – timestamp is not a migrate flag
+        # (flags are --dry-run, --backup, --force). Don't require version/shard_id/staging/timestamp.
         for word in [
             "dry-run",
             "backup",
             "force",
-            "version",
-            "shard_id",
-            "staging",
-            "timestamp",
         ]:
             assert word in combined, f"migrate help should contain '{word}'"
 
@@ -1206,8 +1204,9 @@ def test_migrate_force_overwrite_stderr():
         open("/app/data/ops.log", "w").write("")
         r = _direct_migrate_binary(legacy_path, CONFIG_PATH, ["--force"])
         assert r.returncode == 0
-        assert "overwriting" in r.stderr.lower(), (
-            f"Force should log overwriting to stderr, got {r.stderr}"
+        combined = (r.stdout + r.stderr).lower()
+        assert "overwriting" in combined, (
+            f"Force should log overwriting (spec no longer names stream), got stdout={r.stdout!r} stderr={r.stderr!r}"
         )
         assert json.loads(_proxy_cli("get", "forcekey").stdout.strip()) == "newval"
     finally:
@@ -2425,7 +2424,8 @@ def test_invalid_config_empty_shard_list_exit_2():
 
 
 def test_exact_ops_log_count_global_set_delete():
-    # R07: exact ops.log count for global set/delete - global set should log shard_count entries
+    # R06/R07: exact ops.log count for global set/delete - spec line 30 says singular one line per command with shard_id -1 as sentinel
+    # Previously oracle appended inside per-shard loop (4 entries all -1, information-free). Fixed oracle to log one entry, matching what all 3 agents did and spec.
     _reset_shards()
     cfg = _load_config()
     ops_path = "/app/data/ops.log"
@@ -2434,9 +2434,8 @@ def test_exact_ops_log_count_global_set_delete():
     r = _proxy_cli("set", "global:count-test", json.dumps("gval"))
     assert r.returncode == 0, f"Global set should succeed, stderr={r.stderr}"
     lines = [l for l in open(ops_path).read().strip().splitlines() if l.strip() != ""]
-    # Global set writes to all shards, each appends ops.log with shard_id -1
-    # So count should be shard_count (4) entries
-    assert len(lines) == cfg["shard_count"], f"Global set should append {cfg['shard_count']} entries to ops.log, got {len(lines)}: {lines}"
+    # Global set writes to all shards but logs ONE entry with shard_id -1 per spec line 30
+    assert len(lines) == 1, f"Global set should append 1 entry to ops.log (shard_id -1 sentinel), got {len(lines)}: {lines}"
     for line in lines:
         entry = json.loads(line)
         assert entry["op"] == "set"
@@ -2444,15 +2443,15 @@ def test_exact_ops_log_count_global_set_delete():
         assert entry["shard_id"] == -1
         assert "version" in entry and "ts" in entry
 
-    # Delete global key - should append shard_count entries if key existed in all shards
+    # Delete global key - should append 1 entry
     r = _proxy_cli("delete", "global:count-test")
     assert r.returncode == 0
     assert r.stdout.strip() == "true"
     lines_after = [l for l in open(ops_path).read().strip().splitlines() if l.strip() != ""]
-    # After set (4) + delete (4) = 8 total
-    assert len(lines_after) == cfg["shard_count"] * 2, f"After global set+delete, ops.log should have {cfg['shard_count']*2} entries, got {len(lines_after)}"
+    # After set (1) + delete (1) = 2 total, per fixed oracle and spec
+    assert len(lines_after) == 2, f"After global set+delete, ops.log should have 2 entries (1 set + 1 delete), got {len(lines_after)}: {lines_after}"
     delete_entries = [json.loads(l) for l in lines_after if json.loads(l)["op"] == "delete"]
-    assert len(delete_entries) == cfg["shard_count"]
+    assert len(delete_entries) == 1
     for entry in delete_entries:
         assert entry["shard_id"] == -1
         assert entry["key"] == "global:count-test"

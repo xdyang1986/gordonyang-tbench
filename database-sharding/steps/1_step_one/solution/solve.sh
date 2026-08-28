@@ -336,8 +336,8 @@ func (p *ShardingProxy) Set(key string, value interface{}) error {
 			m, _ := readShardOld(s.Path)
 			m[key] = value
 			_ = atomicWriteOld(s.Path, m)
-			_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1, 1)
 		}
+		_ = appendOpsLog(p.OpsLogPath, "set", key, value, -1, 1)
 		return nil
 	}
 	path, err := p.GetShardPath(key)
@@ -373,9 +373,11 @@ func (p *ShardingProxy) Delete(key string) (bool, error) {
 			if _, ok := m[key]; ok {
 				delete(m, key)
 				_ = atomicWriteOld(s.Path, m)
-				_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1, 1)
 				deleted = true
 			}
+		}
+		if deleted {
+			_ = appendOpsLog(p.OpsLogPath, "delete", key, nil, -1, 1)
 		}
 		return deleted, nil
 	}
