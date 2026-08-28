@@ -66,6 +66,7 @@ def _reset_data():
             fname.startswith("chat.")
             or fname.startswith("private.")
             or fname.startswith("counter.")
+            or fname.startswith("rate_limit.")
             or fname.endswith(".lock")
             or ".corrupt." in fname
             or fname.startswith("tmp-")
@@ -74,14 +75,25 @@ def _reset_data():
                 os.remove(os.path.join(dirn, fname))
             except:
                 pass
-    # Write split files with wrapper checksum
-    _write_with_checksum(DATA_PATH, {"rooms": {}, "seen_users": {}})
+    # Write split files with wrapper checksum – now 4 files including rate_limit
+    _write_with_checksum(
+        DATA_PATH, {"rooms": {}, "deleted_rooms": {}, "seen_users": {}}
+    )
     _write_with_checksum(os.path.join(dirn, "private.json"), {"private_messages": []})
     _write_with_checksum(os.path.join(dirn, "counter.json"), {"next_id": 1})
+    _write_with_checksum(os.path.join(dirn, "rate_limit.json"), {})
 
 
 def _cli(*args, data_path=DATA_PATH):
-    cmd = [BIN, "--data", data_path] + list(args)
+    # Default to high rate to avoid limiting for existing tests; rate-specific tests override via explicit flags
+    extra = []
+    has_rate = any("--messages-per-second" in str(a) for a in args)
+    has_burst = any(a == "--burst" or str(a).startswith("--burst=") for a in args)
+    if not has_rate:
+        extra += ["--messages-per-second", "1000"]
+    if not has_burst:
+        extra += ["--burst", "10000"]
+    cmd = [BIN, "--data", data_path] + extra + list(args)
     return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
 
 
@@ -445,6 +457,7 @@ def test_atomic_write_replaces_file_not_truncates():
 def test_atomic_behavior_concurrent():
     # Modest concurrency: 30 x 2KB (small payload, ~65KB file) keeps strict all-N but avoids 50x slower Daytona I/O
     # Previously 30x20KB took 0.4s local and >20s on Daytona – unsafe. 2KB is order magnitude less I/O.
+    # Now with rate limiting moved to step1, need high rate flags to avoid limiting during concurrency test
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
@@ -455,6 +468,10 @@ def test_atomic_behavior_concurrent():
                 BIN,
                 "--data",
                 DATA_PATH,
+                "--messages-per-second",
+                "1000",
+                "--burst",
+                "10000",
                 "send",
                 "general",
                 "alice",
@@ -618,7 +635,19 @@ def test_concurrent_different_rooms():
     procs = []
     for i in range(20):
         p = subprocess.Popen(
-            [BIN, "--data", DATA_PATH, "send", f"room{i}", "alice", f"msg{i}"],
+            [
+                BIN,
+                "--data",
+                DATA_PATH,
+                "--messages-per-second",
+                "1000",
+                "--burst",
+                "10000",
+                "send",
+                f"room{i}",
+                "alice",
+                f"msg{i}",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1108,7 +1137,7 @@ def test_blank_id_precedence():
 
 
 def test_checksum_all_files_after_many_ops():
-    # Direct mirror of step-2 test that catches avocado (6/10) – shallow vs deep
+    # Direct mirror of step-2 test that catches avocado (6/10) – shallow vs deep, now includes float payload file
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
@@ -1118,13 +1147,15 @@ def test_checksum_all_files_after_many_ops():
     dirn = os.path.dirname(DATA_PATH)
     import hashlib
 
-    for fname in ["chat.json", "private.json", "counter.json"]:
+    for fname in ["chat.json", "private.json", "counter.json", "rate_limit.json"]:
         obj = json.load(open(os.path.join(dirn, fname)))
         assert "data" in obj and "checksum" in obj, f"{fname} must use wrapper"
         expected = hashlib.md5(
             json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        assert obj["checksum"] == expected, f"{fname} checksum drifted after 100 ops"
+        assert obj["checksum"] == expected, (
+            f"{fname} checksum drifted after 100 ops - expected {expected} got {obj['checksum']}"
+        )
 
 
 def test_checksum_across_tombstone_lifecycle():
@@ -1133,12 +1164,14 @@ def test_checksum_across_tombstone_lifecycle():
     import hashlib
 
     def check(stage):
-        for fname in ["chat.json", "private.json", "counter.json"]:
+        for fname in ["chat.json", "private.json", "counter.json", "rate_limit.json"]:
             obj = json.load(open(os.path.join(dirn, fname)))
             expected = hashlib.md5(
                 json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
-            assert obj["checksum"] == expected, f"{fname} checksum wrong {stage}"
+            assert obj["checksum"] == expected, (
+                f"{fname} checksum wrong {stage} - expected {expected} got {obj['checksum']}"
+            )
 
     _reset_data()
     for r in ["alpha", "beta"]:
@@ -1157,4 +1190,291 @@ def test_checksum_across_tombstone_lifecycle():
     raw = json.load(open(os.path.join(dirn, "chat.json")))["data"]
     assert raw.get("deleted_rooms") == {}, (
         "deleted_rooms must serialize as {} after purge, not null or omitted"
+    )
+
+
+def test_rate_limit_rejection_exit1_no_side_effects():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    # Use low rate 0.05/s burst 2
+    assert (
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send",
+            "general",
+            "alice",
+            "msg1",
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send",
+            "general",
+            "alice",
+            "msg2",
+        ).returncode
+        == 0
+    )
+    dirn = os.path.dirname(DATA_PATH)
+    counter_before = json.load(open(os.path.join(dirn, "counter.json")))["data"][
+        "next_id"
+    ]
+    r = _cli(
+        "--messages-per-second",
+        "0.05",
+        "--burst",
+        "2",
+        "send",
+        "general",
+        "alice",
+        "msg3 should be limited",
+    )
+    assert r.returncode == 1 and "rate limit" in (r.stdout + r.stderr).lower(), (
+        f"should be rate limited, got {r.returncode}"
+    )
+    # counter must not advance
+    counter_after = json.load(open(os.path.join(dirn, "counter.json")))["data"][
+        "next_id"
+    ]
+    assert counter_after == counter_before
+    # messages count must stay 2
+    msgs = json.loads(_cli("get-messages", "general").stdout.strip())
+    assert len(msgs) == 2
+
+
+def test_rate_limit_refill():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    # burst 1, rate 1/s
+    assert (
+        _cli(
+            "--messages-per-second",
+            "1",
+            "--burst",
+            "1",
+            "send",
+            "general",
+            "alice",
+            "first",
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            "--messages-per-second",
+            "1",
+            "--burst",
+            "1",
+            "send",
+            "general",
+            "alice",
+            "second",
+        ).returncode
+        == 1
+    )
+    import time as _time
+
+    _time.sleep(1.2)
+    assert (
+        _cli(
+            "--messages-per-second",
+            "1",
+            "--burst",
+            "1",
+            "send",
+            "general",
+            "alice",
+            "after refill",
+        ).returncode
+        == 0
+    )
+
+
+def test_rate_limit_persistence_and_shared_bucket():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    assert (
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send",
+            "general",
+            "alice",
+            "g1",
+        ).returncode
+        == 0
+    )
+    assert (
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send-private",
+            "alice",
+            "bob",
+            "p1",
+        ).returncode
+        == 0
+    )
+    # third should be limited even though different command (shared bucket)
+    r = _cli(
+        "--messages-per-second",
+        "0.05",
+        "--burst",
+        "2",
+        "send",
+        "general",
+        "alice",
+        "g2 should fail",
+    )
+    assert r.returncode == 1
+    r2 = _cli(
+        "--messages-per-second",
+        "0.05",
+        "--burst",
+        "2",
+        "send-private",
+        "alice",
+        "bob",
+        "p2 should fail",
+    )
+    assert r2.returncode == 1
+    # bob independent
+    assert (
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send-private",
+            "bob",
+            "alice",
+            "bob ok",
+        ).returncode
+        == 0
+    )
+
+
+def test_rate_limit_file_corruption_handling_and_checksum():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    # corrupt rate_limit file
+    rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
+    with open(rate_path, "w") as f:
+        f.write("{invalid json")
+    # next send should succeed after corruption reset
+    r = _cli(
+        "--messages-per-second",
+        "5",
+        "--burst",
+        "10",
+        "send",
+        "general",
+        "alice",
+        "after corrupt",
+    )
+    assert r.returncode == 0
+    # file must have valid checksum after
+    import hashlib
+
+    obj = json.load(open(rate_path))
+    assert "checksum" in obj
+    exp = hashlib.md5(
+        json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert obj["checksum"] == exp, (
+        f"rate_limit.json checksum mismatch after corruption recovery: expected {exp} got {obj['checksum']}"
+    )
+    # also test checksum mismatch corruption
+    with open(rate_path, "w") as f:
+        json.dump({"data": {}, "checksum": "bad"}, f)
+    r2 = _cli("send", "general", "alice", "after bad checksum")
+    assert r2.returncode == 0
+
+
+def test_rate_limit_checksum_float_payload():
+    # The only float payload file – avocado fails here in step2 (rate_limit.json checksum mismatch)
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    for i in range(5):
+        _cli(
+            "--messages-per-second",
+            "1000",
+            "--burst",
+            "10000",
+            "send",
+            "general",
+            "alice",
+            f"msg{i}",
+        )
+    rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
+    import hashlib
+
+    obj = json.load(open(rate_path))
+    expected = hashlib.md5(
+        json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert obj["checksum"] == expected, (
+        f"{rate_path} checksum mismatch (float payload): expected {expected} got {obj['checksum']}"
+    )
+    # After many ops with fractional rate
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    for i in range(20):
+        _cli(
+            "--messages-per-second",
+            "0.05",
+            "--burst",
+            "2",
+            "send",
+            "general",
+            "alice",
+            f"m{i}",
+        )
+    obj = json.load(open(rate_path))
+    expected = hashlib.md5(
+        json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert obj["checksum"] == expected, (
+        f"rate_limit.json checksum drifted after fractional ops: expected {expected} got {obj['checksum']}"
+    )
+
+
+def test_invalid_rate_burst_args():
+    _reset_data()
+    assert (
+        _cli("--messages-per-second", "-1", "--burst", "10", "list-rooms").returncode
+        == 2
+    )
+    assert (
+        _cli("--messages-per-second", "0", "--burst", "10", "list-rooms").returncode
+        == 2
+    )
+    assert (
+        _cli("--messages-per-second", "fast", "--burst", "10", "list-rooms").returncode
+        == 2
+    )
+    assert (
+        _cli("--messages-per-second", "5", "--burst", "0", "list-rooms").returncode == 2
+    )
+    assert (
+        _cli("--messages-per-second", "5", "--burst", "-1", "list-rooms").returncode
+        == 2
     )

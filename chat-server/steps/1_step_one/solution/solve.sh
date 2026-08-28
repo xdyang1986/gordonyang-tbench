@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,78 @@ type PrivateData struct {
 type CounterData struct {
 	NextID int64 `json:"next_id"`
 }
+
+type RateBucket struct {
+	Tokens float64 `json:"tokens"`
+	LastRefill int64 `json:"last_refill"`
+}
+
+func loadRateLimitData(path string) (map[string]*RateBucket, bool, error) {
+	empty := map[string]*RateBucket{}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return empty, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return empty, false, err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return empty, false, nil
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: rate_limit file %s corrupt invalid JSON, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if _, hasData := raw["data"]; hasData {
+		var wrapper struct {
+			Data map[string]*RateBucket `json:"data"`
+			Checksum string `json:"checksum"`
+		}
+		if err := json.Unmarshal(b, &wrapper); err != nil {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: rate_limit file %s corrupt parse, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		if wrapper.Data == nil {
+			wrapper.Data = map[string]*RateBucket{}
+		}
+		if wrapper.Checksum == "" {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: rate_limit file %s missing checksum, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		expected := computeChecksumGeneric(wrapper.Data)
+		if expected != wrapper.Checksum {
+			backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+			_ = copyFile(path, backup)
+			fmt.Fprintf(os.Stderr, "Warning: rate_limit file %s checksum mismatch, backup to %s\n", path, backup)
+			_ = atomicWriteGeneric(path, empty)
+			return empty, true, nil
+		}
+		return wrapper.Data, false, nil
+	}
+	var data map[string]*RateBucket
+	if err := json.Unmarshal(b, &data); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: rate_limit file %s invalid old format, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if data == nil {
+		data = map[string]*RateBucket{}
+	}
+	return data, false, nil
+}
+
 
 func computeChecksumGeneric(data interface{}) string {
 	var buf bytes.Buffer
@@ -362,6 +435,8 @@ Flags:
 
 func main() {
 	dataPath := "/app/data/chat.json"
+	rate := 5.0
+	burst := 10
 	args := os.Args[1:]
 	filtered := []string{}
 	for i := 0; i < len(args); i++ {
@@ -371,6 +446,38 @@ func main() {
 			i++
 		} else if strings.HasPrefix(a, "--data=") {
 			dataPath = strings.TrimPrefix(a, "--data=")
+		} else if a == "--messages-per-second" && i+1 < len(args) {
+			v, err := strconv.ParseFloat(args[i+1], 64)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid rate")
+				os.Exit(2)
+			}
+			rate = v
+			i++
+		} else if strings.HasPrefix(a, "--messages-per-second=") {
+			vStr := strings.TrimPrefix(a, "--messages-per-second=")
+			v, err := strconv.ParseFloat(vStr, 64)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid rate")
+				os.Exit(2)
+			}
+			rate = v
+		} else if a == "--burst" && i+1 < len(args) {
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid burst")
+				os.Exit(2)
+			}
+			burst = v
+			i++
+		} else if strings.HasPrefix(a, "--burst=") {
+			vStr := strings.TrimPrefix(a, "--burst=")
+			v, err := strconv.Atoi(vStr)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid burst")
+				os.Exit(2)
+			}
+			burst = v
 		} else if a == "--config" && i+1 < len(args) {
 			i++
 		} else if strings.HasPrefix(a, "--config=") {
@@ -387,37 +494,11 @@ func main() {
 	}
 	cmd := filtered[0]
 	cmdArgs := filtered[1:]
-	// Identifier validation before existence/idempotent handling – precedence fix
-	isBlank := func(s string) bool { return strings.TrimSpace(s) == "" }
-	switch cmd {
-	case "create-room", "delete-room", "purge", "list-users", "get-messages":
-		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
-			fmt.Fprintln(os.Stderr, "empty ID")
-			os.Exit(2)
-		}
-	case "join", "leave", "send":
-		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
-			fmt.Fprintln(os.Stderr, "empty room")
-			os.Exit(2)
-		}
-		if len(cmdArgs) >= 2 && isBlank(cmdArgs[1]) {
-			fmt.Fprintln(os.Stderr, "empty user")
-			os.Exit(2)
-		}
-	case "send-private", "get-private":
-		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
-			fmt.Fprintln(os.Stderr, "empty from")
-			os.Exit(2)
-		}
-		if len(cmdArgs) >= 2 && isBlank(cmdArgs[1]) {
-			fmt.Fprintln(os.Stderr, "empty to")
-			os.Exit(2)
-		}
-	}
 	dir := filepath.Dir(dataPath)
 	_ = os.MkdirAll(dir, 0755)
 	privatePath := filepath.Join(dir, "private.json")
 	counterPath := filepath.Join(dir, "counter.json")
+	rateLimitPath := filepath.Join(dir, "rate_limit.json")
 
 	switch cmd {
 	case "create-room":
@@ -440,7 +521,6 @@ func main() {
 					chat.Rooms = map[string]*Room{}
 				}
 				chat.Rooms[roomID] = &Room{Users: []string{}, Messages: []Message{}}
-				// Do NOT clear tombstone if exists – re-creating starts empty but keeps tombstone
 			}
 			if chat.DeletedRooms == nil {
 				chat.DeletedRooms = map[string]*DeletedRoom{}
@@ -471,7 +551,6 @@ func main() {
 			}
 			room, exists := chat.Rooms[roomID]
 			if exists {
-				// Move to deleted_rooms with timestamp
 				dr := &DeletedRoom{
 					Users:     append([]string{}, room.Users...),
 					Messages:  append([]Message{}, room.Messages...),
@@ -564,7 +643,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// If room is deleted (in tombstone) treat as not exist
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -610,7 +688,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Leave on deleted room is idempotent (room stays deleted)
 			room, exists := chat.Rooms[roomID]
 			if !exists {
 				return atomicWriteGeneric(dataPath, chat)
@@ -640,7 +717,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// If deleted, exit 2 per tombstone spec
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -690,7 +766,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Cannot send to deleted room
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -700,6 +775,24 @@ func main() {
 			if err != nil {
 				return err
 			}
+			rl, _, err := loadRateLimitData(rateLimitPath)
+			if err != nil {
+				return err
+			}
+			bucket, ok := rl[userID]
+			now := time.Now().UnixNano()
+			if !ok {
+				bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
+				rl[userID] = bucket
+			}
+			elapsed := float64(now-bucket.LastRefill) / 1e9
+			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
+			bucket.LastRefill = now
+			if bucket.Tokens < 1 {
+				_ = atomicWriteGeneric(rateLimitPath, rl)
+				return fmt.Errorf("rate limited")
+			}
+			bucket.Tokens -= 1
 			room, exists := chat.Rooms[roomID]
 			if !exists {
 				return fmt.Errorf("room not exist")
@@ -731,9 +824,16 @@ func main() {
 			if err := atomicWriteGeneric(counterPath, counter); err != nil {
 				return err
 			}
+			if err := atomicWriteGeneric(rateLimitPath, rl); err != nil {
+				return err
+			}
 			return atomicWriteGeneric(dataPath, chat)
 		})
 		if err != nil {
+			if err.Error() == "rate limited" {
+				fmt.Fprintln(os.Stderr, "rate limit exceeded")
+				os.Exit(1)
+			}
 			if err.Error() == "room not exist" || err.Error() == "user not member" {
 				fmt.Fprintf(os.Stderr, "%s\n", err.Error())
 				os.Exit(2)
@@ -765,7 +865,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Deleted or nonexist returns []
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					msgs = []Message{}
@@ -822,6 +921,24 @@ func main() {
 			if err != nil {
 				return err
 			}
+			rl, _, err := loadRateLimitData(rateLimitPath)
+			if err != nil {
+				return err
+			}
+			now := time.Now().UnixNano()
+			bucket, ok := rl[fromUser]
+			if !ok {
+				bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
+				rl[fromUser] = bucket
+			}
+			elapsed := float64(now-bucket.LastRefill) / 1e9
+			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
+			bucket.LastRefill = now
+			if bucket.Tokens < 1 {
+				_ = atomicWriteGeneric(rateLimitPath, rl)
+				return fmt.Errorf("rate limited")
+			}
+			bucket.Tokens -= 1
 			msg := Message{
 				Content:   content,
 				From:      fromUser,
@@ -843,9 +960,16 @@ func main() {
 			if err := atomicWriteGeneric(privatePath, private); err != nil {
 				return err
 			}
+			if err := atomicWriteGeneric(rateLimitPath, rl); err != nil {
+				return err
+			}
 			return atomicWriteGeneric(dataPath, chat)
 		})
 		if err != nil {
+			if err.Error() == "rate limited" {
+				fmt.Fprintln(os.Stderr, "rate limit exceeded")
+				os.Exit(1)
+			}
 			fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
 			os.Exit(1)
 		}
@@ -914,7 +1038,6 @@ func main() {
 					set[u] = true
 				}
 			}
-			// Include users from deleted rooms (tombstones) for audit retention
 			for _, dr := range chat.DeletedRooms {
 				for _, u := range dr.Users {
 					set[u] = true
@@ -950,7 +1073,7 @@ func main() {
 	}
 }
 EOMAIN
-echo "Step1 solution applied (split persistence + tombstone)"
+echo "Step1 solution applied (split persistence + tombstone + rate-limit)"
 mkdir -p /tmp/codimango
 go build -o /tmp/codimango/chat_server_bin . && echo "Build OK" && rm -f /tmp/codimango/chat_server_bin
 python3 << 'PY'
@@ -964,5 +1087,6 @@ def write_with_checksum(path,data):
 write_with_checksum("/app/data/chat.json", {"rooms":{}, "deleted_rooms":{}, "seen_users":{}})
 write_with_checksum("/app/data/private.json", {"private_messages":[]})
 write_with_checksum("/app/data/counter.json", {"next_id":1})
-print("Reset split data with tombstone")
+write_with_checksum("/app/data/rate_limit.json", {})
+print("Reset split data with tombstone+rate-limit")
 PY

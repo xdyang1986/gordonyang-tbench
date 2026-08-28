@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -1299,6 +1300,8 @@ func main() {
 	configPath := "/app/config.json"
 	configExplicit := false
 	dataExplicit := false
+	rate := 5.0
+	burst := 10
 	args := os.Args[1:]
 	filtered := []string{}
 	for i := 0; i < len(args); i++ {
@@ -1310,6 +1313,38 @@ func main() {
 		} else if strings.HasPrefix(a, "--data=") {
 			dataPath = strings.TrimPrefix(a, "--data=")
 			dataExplicit = true
+		} else if a == "--messages-per-second" && i+1 < len(args) {
+			v, err := strconv.ParseFloat(args[i+1], 64)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid rate")
+				os.Exit(2)
+			}
+			rate = v
+			i++
+		} else if strings.HasPrefix(a, "--messages-per-second=") {
+			vStr := strings.TrimPrefix(a, "--messages-per-second=")
+			v, err := strconv.ParseFloat(vStr, 64)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid rate")
+				os.Exit(2)
+			}
+			rate = v
+		} else if a == "--burst" && i+1 < len(args) {
+			v, err := strconv.Atoi(args[i+1])
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid burst")
+				os.Exit(2)
+			}
+			burst = v
+			i++
+		} else if strings.HasPrefix(a, "--burst=") {
+			vStr := strings.TrimPrefix(a, "--burst=")
+			v, err := strconv.Atoi(vStr)
+			if err != nil || v <= 0 {
+				fmt.Fprintln(os.Stderr, "invalid burst")
+				os.Exit(2)
+			}
+			burst = v
 		} else if a == "--config" && i+1 < len(args) {
 			configPath = args[i+1]
 			configExplicit = true
@@ -1390,12 +1425,13 @@ func main() {
 		}
 	}
 
-		// ---------- Turn1 split-file mode (fixed BAD_GOLDEN) ----------
+			// ---------- Turn1 split-file mode with rate-limit (fixed BAD_GOLDEN + float payload) ----------
 	if !isSharded {
 		dir := filepath.Dir(dataPath)
 		_ = os.MkdirAll(dir, 0755)
 		privatePath := filepath.Join(dir, "private.json")
 		counterPath := filepath.Join(dir, "counter.json")
+		rateLimitPath := filepath.Join(dir, "rate_limit.json")
 		withGL := func(fn func() error) error {
 			lockPath := filepath.Join(dir, "global.lock")
 			if err := acquireLock(lockPath); err != nil {
@@ -1425,7 +1461,6 @@ func main() {
 					chat.Rooms = map[string]*Room{}
 				}
 				chat.Rooms[roomID] = &Room{Users: []string{}, Messages: []Message{}}
-				// Do NOT clear tombstone if exists – re-creating starts empty but keeps tombstone
 			}
 			if chat.DeletedRooms == nil {
 				chat.DeletedRooms = map[string]*DeletedRoom{}
@@ -1456,7 +1491,6 @@ func main() {
 			}
 			room, exists := chat.Rooms[roomID]
 			if exists {
-				// Move to deleted_rooms with timestamp
 				dr := &DeletedRoom{
 					Users:     append([]string{}, room.Users...),
 					Messages:  append([]Message{}, room.Messages...),
@@ -1549,7 +1583,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// If room is deleted (in tombstone) treat as not exist
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -1595,7 +1628,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Leave on deleted room is idempotent (room stays deleted)
 			room, exists := chat.Rooms[roomID]
 			if !exists {
 				return atomicWriteGeneric(dataPath, chat)
@@ -1625,7 +1657,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// If deleted, exit 2 per tombstone spec
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -1675,7 +1706,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Cannot send to deleted room
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					return fmt.Errorf("room not exist")
@@ -1685,6 +1715,24 @@ func main() {
 			if err != nil {
 				return err
 			}
+			rl, _, err := loadRateLimitData(rateLimitPath)
+			if err != nil {
+				return err
+			}
+			bucket, ok := rl[userID]
+			now := time.Now().UnixNano()
+			if !ok {
+				bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
+				rl[userID] = bucket
+			}
+			elapsed := float64(now-bucket.LastRefill) / 1e9
+			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
+			bucket.LastRefill = now
+			if bucket.Tokens < 1 {
+				_ = atomicWriteGeneric(rateLimitPath, rl)
+				return fmt.Errorf("rate limited")
+			}
+			bucket.Tokens -= 1
 			room, exists := chat.Rooms[roomID]
 			if !exists {
 				return fmt.Errorf("room not exist")
@@ -1716,9 +1764,16 @@ func main() {
 			if err := atomicWriteGeneric(counterPath, counter); err != nil {
 				return err
 			}
+			if err := atomicWriteGeneric(rateLimitPath, rl); err != nil {
+				return err
+			}
 			return atomicWriteGeneric(dataPath, chat)
 		})
 		if err != nil {
+			if err.Error() == "rate limited" {
+				fmt.Fprintln(os.Stderr, "rate limit exceeded")
+				os.Exit(1)
+			}
 			if err.Error() == "room not exist" || err.Error() == "user not member" {
 				fmt.Fprintf(os.Stderr, "%s\n", err.Error())
 				os.Exit(2)
@@ -1750,7 +1805,6 @@ func main() {
 			if err != nil {
 				return err
 			}
-			// Deleted or nonexist returns []
 			if chat.DeletedRooms != nil {
 				if _, isDeleted := chat.DeletedRooms[roomID]; isDeleted {
 					msgs = []Message{}
@@ -1807,6 +1861,24 @@ func main() {
 			if err != nil {
 				return err
 			}
+			rl, _, err := loadRateLimitData(rateLimitPath)
+			if err != nil {
+				return err
+			}
+			now := time.Now().UnixNano()
+			bucket, ok := rl[fromUser]
+			if !ok {
+				bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
+				rl[fromUser] = bucket
+			}
+			elapsed := float64(now-bucket.LastRefill) / 1e9
+			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
+			bucket.LastRefill = now
+			if bucket.Tokens < 1 {
+				_ = atomicWriteGeneric(rateLimitPath, rl)
+				return fmt.Errorf("rate limited")
+			}
+			bucket.Tokens -= 1
 			msg := Message{
 				Content:   content,
 				From:      fromUser,
@@ -1828,9 +1900,16 @@ func main() {
 			if err := atomicWriteGeneric(privatePath, private); err != nil {
 				return err
 			}
+			if err := atomicWriteGeneric(rateLimitPath, rl); err != nil {
+				return err
+			}
 			return atomicWriteGeneric(dataPath, chat)
 		})
 		if err != nil {
+			if err.Error() == "rate limited" {
+				fmt.Fprintln(os.Stderr, "rate limit exceeded")
+				os.Exit(1)
+			}
 			fmt.Fprintf(os.Stderr, "I/O error: %v\n", err)
 			os.Exit(1)
 		}
@@ -1899,7 +1978,6 @@ func main() {
 					set[u] = true
 				}
 			}
-			// Include users from deleted rooms (tombstones) for audit retention
 			for _, dr := range chat.DeletedRooms {
 				for _, u := range dr.Users {
 					set[u] = true
@@ -1937,6 +2015,7 @@ func main() {
 	}
 
 	// ---------- Sharded mode ----------
+// ---------- Sharded mode ----------
 // ---------- Sharded mode ----------
 	// Helper to get paths with defaults
 	opsLogPath := cfg.OpsLog
