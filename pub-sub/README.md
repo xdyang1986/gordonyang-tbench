@@ -2,19 +2,23 @@
 
 ## Status
 
-**BLOCKED ON DIFFICULTY at `d08d996` (2026-08-28).** Everything except the balance gate is green: oracle 3/3,
-AFTR **GOOD** (all 13 rubrics, Secondary NONE), AI assessment Accept (0/0/0/1), contamination LOW. Balance
-**fails**: avocado 5/5, opus 4/4 genuine (one `NetworkConnectionError` abort), gpt 3/5. AFTR rates difficulty
-**EASY** and recommends dropping the `hard` metadata tag.
+**READY at `8ffe707` (2026-08-28).** Validation **passing**. Oracle 3/3; balance avocado 4/5, opus 5/5, gpt 2/5;
+AI assessment Accept (0 Critical / 0 High / 2 Medium / 2 Low); contamination LOW; AFTR **GOOD** — all 13 rubrics
+pass, Secondary Issues NONE, *"No required fixes."* Provenance passed with verdict **SUSPECT — review
+recommended**.
 
-The group-cap grading hole is closed (verified: a pure message-count rewrite of the reference now fails
-`test_group_cap_is_cost_based_not_count_based`). Closing it moved opus 5/5 → 4/4 and gpt 5/5 → 3/5, but **not**
-avocado. See "The dial is exhausted" below.
+The reviewer's request at `11be1a1` was *"adjust the task difficulty to get at least one failure in the metacode
+trials."* That is now satisfied and the failure is verified genuine (see the `8ffe707` run below). The
+`Review status: needs_revision` flag is **stale** — it dates from the review at the earlier commit and should be
+re-run against `8ffe707`.
+
+Open: AFTR's only suggestion is to align the difficulty language, since `task.toml` still says
+`difficulty = "hard"` while the observed distribution is closer to EASY.
 
 ## Description
 
-**Debug-in-place (71 tests): repair a shipped Go hierarchical broker allocator carrying five subtle defects
-(3 invariant + 2 credit).** Shipped state fails 28/71; reference passes 71/71.
+**Debug-in-place (71 tests): repair a shipped Go hierarchical broker allocator carrying seven subtle defects
+(3 invariant + 4 policy).** Shipped state fails 38/71; reference passes 71/71.
 
 The Dockerfile `COPY`s `environment/broken/main.go` to `/app/main.go`. The agent must find and fix the defects in place. The prompt gives **only** the stdin/stdout format, four invariants, and one failing input/output example per defect — it does **not** state the allocation algorithm. The algorithm lives in the shipped ~700-line source and has to be reverse-engineered.
 
@@ -31,23 +35,36 @@ From-scratch with a fully-pinned spec saturated the gate. Pooled across the two 
 
 Moving the algorithm out of the prompt and into the code makes the difficulty **inference** rather than transcription, and is rephrase-proof — Avocado rewrites `instruction.md` but not the shipped source. This is the same formula as `f400820` (v17), the only version of this task that has ever passed the gate.
 
-## The five defects
+## The seven defects
 
 | # | Line | Defect | Class | Exposed by |
 |---|---|---|---|---|
+| P1 | 158 | progress-guarantee tie-break `idx <` → `idx >` | policy — not copyable | E2, E4 |
+| P3 | 168 | branch condition `delta[i] > 0` → `>= 0` | policy — not copyable | E6 |
 | D1 | 169 | `creditTmp[i] = c/2` instead of `c/2 + 1` (in-round) | policy | E5 |
 | D2 | 478 | `sRemCostIter` omits `- subBatchCount[s]*subCost[s]` | invariant — subscriber **cost cap** | E1 |
 | D3 | 493 | subscriber `rateRem` omits `- subBatchCount[s]` | invariant — subscriber **rate** | E3 |
 | D4 | 535 | group `rateRem` omits `- groupBatchCount[g]` | invariant — group **rate + burst** | E2 |
 | D6 | 685 | `subCredit[s] = c/2` instead of `c/2 + 1` (persistent) | policy | E4 |
 
-`groupCredit` at line 663 ships **correct** (`c/2 + 1`) — the single in-file reference point.
+`groupCredit` at line 663 ships **correct** (`c/2 + 1`) — the single in-file reference point for the credit rule.
 
 D2–D4 are one conceptual mistake: the 10-iteration rebalancing loop recomputes headroom from *persisted* state and forgets the allocation already made *within the current batch*. Each is an **invariant violation** — the shipped program exceeds a limit the prompt declares it must respect — so a fix is verifiable without knowing the allocation policy.
 
-Combined: **28/71 failing**, reference 71/71, `go vet` clean on both. Verified end-to-end: shipped → 28 failures, `solve.sh` → 71/71. `tools/audit_defects.py` PASS — 5 defects, 5 examples, clean 1:1 mapping.
+**P1 and P3 are what finally moved the gate.** Unlike the credit defects, neither has a correct twin elsewhere in
+the file, so they cannot be pattern-matched — but each has a small, enumerable candidate space (a comparison
+direction; a boundary condition), so an agent can still derive the answer by testing hypotheses against an
+example. Derivable without being copyable is the property every earlier configuration lacked.
 
-### The dial is exhausted — avocado solves every fair configuration
+Combined: **38/71 failing**, reference 71/71, `go vet` clean on both, no panics. Verified end-to-end: shipped → 38 failures, `solve.sh` → 71/71. `tools/audit_defects.py` PASS — 7 defects, 6 examples, every defect exposed and every example a real failing case.
+
+### The credit-reference dial was exhausted — superseded by P1/P3 at `8ffe707`
+
+The analysis below held for every configuration built out of the credit recurrence alone, and it is why that line
+of work stopped. It no longer describes the shipped task: adding P1 and P3 — defects with no copyable twin — put
+avocado at 4/5 and the balance gate green. Kept as the record of why the defect set has its current shape.
+
+#### Original note: avocado solves every fair credit-only configuration
 
 Avocado's record, per configuration, counting only genuine trials:
 
@@ -176,13 +193,13 @@ defects as planted.
 
 ## Completion Rates
 
-- Reference (`solution/solve.sh`): **70/70**. Oracle 3/3 online.
-- Shipped buggy state: **28 failed / 42 passed**.
-- `tools/audit_defects.py`: **PASS** — 5 defects, 5 examples, 1:1 mapping, every example a real failing case,
-  every documented "Correct output" matching the reference.
+- Reference (`solution/solve.sh`): **71/71**. Oracle 3/3 online.
+- Shipped buggy state: **38 failed / 33 passed**.
+- `tools/audit_defects.py`: **PASS** — 7 defects, 6 examples, every defect exposed, every example a real failing
+  case, every documented "Correct output" matching the reference.
 - Verified **inside the real built image** (`docker build environment/`, then mount `tests/` and `solution/`):
-  shipped → `reward=0`; `solve.sh` then `tests/test.sh` → `reward=1`, 70/70. (Image verification was run against
-  an earlier defect set; the current source is verified locally and changes no harness behaviour.)
+  shipped → `reward=0`; `solve.sh` then `tests/test.sh` → `reward=1`. (Image verification was run against an
+  earlier defect set; the current source is verified locally and changes no harness behaviour.)
 
 ### Online run at `f4e1b2d` (first debug-in-place attempt) — 0/15, corrected
 
@@ -356,6 +373,49 @@ one-reference prediction from the bracket above landed exactly where it was proj
 - **Do not take the AFTR's optional suggestion.** It proposes adding a visible credit-recurrence case to reduce
   "plausible near-misses", which would raise the pass rate while avocado is already one trial from the ceiling.
   It is explicitly optional and the verdict is GOOD without it.
+
+### Online run at `8ffe707` (seven defects) — PASSING
+
+| Gate | Result |
+|---|---|
+| Structural | PASS 10/10 |
+| Oracle | 3/3 |
+| **Balance** | **PASS** — avocado 4/5 · opus 5/5 · gpt 2/5 |
+| AI assessment | Accept (0 Critical · 0 High · 2 Medium · 2 Low) |
+| Contamination | LOW |
+| Provenance | passed — **SUSPECT, review recommended** |
+| **AFTR** | **`GOOD`** · all 13 rubrics · Secondary **NONE** · *"No required fixes"* |
+
+Adding P1 and P3 moved avocado 5/5 → 4/5 and gpt 3/5 → 2/5.
+
+**The avocado failure is verified genuine** (trial `30173062`). This matters because the earlier `11be1a1` pass
+was invalidated by an infra abort misread as a failure, so the check was done properly this time:
+
+| | `8ffe707` trial `30173062` | the fake failure at `11be1a1` |
+|---|---|---|
+| duration | **1183s** — longest of the five (passes 759–917s) | 191s — shorter than any pass |
+| error markers in agent log | **0** | `MetaModelCatalogError ... TimeoutError` |
+| verifier | ran fully — `4 failed, 67 passed in 18.88s` | never ran |
+| CTRF | complete, 34/36 named tests passed | no usable result |
+
+The decisive evidence is that the shipped baseline fails **38/71** and this submission fails **4/71** — the agent
+built a working binary and repaired 34 test-failures' worth of defects. An infra abort produces no program at all.
+Its failures are substantive wrong answers, not crashes:
+
+```
+test_dynamic_weight_1_1_10:  got 1,4,1,4              expected 1,3,1,5
+test_allocation[31]:         got 2,0,1,2,9,1,1,0,1,0  expected 2,0,1,2,7,1,1,0,3,0
+```
+
+Both are well-formed allocations with correct totals and a wrong distribution — a subtly incorrect fair-share
+policy, exactly what the task is built to catch.
+
+Finally, the residual signature is *unique*. A binary carrying only the in-round credit defect fails
+`test_allocation[10] [30] [31]` and `test_credit_off_by_one`; avocado failed `test_allocation[10] [24] [31]` and
+`test_dynamic_weight_1_1_10`. It did not skip a planted defect — it converged on its own subtly-wrong policy.
+
+**Caveat:** avocado at 4/5 is one trial from the too-easy threshold. Unlike `11be1a1` the failure is real, so a
+re-run is a genuine coin-flip rather than a masked certainty — but do not re-run hoping for a better number.
 
 ## Test Quality
 
