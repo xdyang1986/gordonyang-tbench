@@ -949,8 +949,6 @@ func main() {
 		os.Exit(2)
 	}
 }
-
-EOMAIN
 EOMAIN
 echo "Step1 solution applied (split persistence + tombstone)"
 mkdir -p /tmp/codimango
@@ -959,7 +957,7 @@ python3 << 'PY'
 import json, os, hashlib
 os.makedirs("/app/data", exist_ok=True)
 def write_with_checksum(path,data):
-    data_json=json.dumps(data,sort_keys=True,separators=(",",":"))
+    data_json=json.dumps(data,sort_keys=True,separators=(',',':'))
     checksum=hashlib.md5(data_json.encode()).hexdigest()
     with open(path,"w") as f:
         json.dump({"data":data,"checksum":checksum},f,indent=2)

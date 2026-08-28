@@ -1105,3 +1105,56 @@ def test_blank_id_precedence():
     assert _cli("get-private", " ", "bob").returncode == 2
     assert _cli("get-private", "alice", "").returncode == 2
     assert _cli("get-private", "alice", " ").returncode == 2
+
+
+def test_checksum_all_files_after_many_ops():
+    # Direct mirror of step-2 test that catches avocado (6/10) – shallow vs deep
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    for i in range(100):
+        _cli("send", "general", "alice", f"msg{i}")
+        _cli("send-private", "alice", "bob", f"priv{i}")
+    dirn = os.path.dirname(DATA_PATH)
+    import hashlib
+
+    for fname in ["chat.json", "private.json", "counter.json"]:
+        obj = json.load(open(os.path.join(dirn, fname)))
+        assert "data" in obj and "checksum" in obj, f"{fname} must use wrapper"
+        expected = hashlib.md5(
+            json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert obj["checksum"] == expected, f"{fname} checksum drifted after 100 ops"
+
+
+def test_checksum_across_tombstone_lifecycle():
+    # Drives deleted_rooms through empty -> populated -> empty, where nil map vs {} diverges
+    dirn = os.path.dirname(DATA_PATH)
+    import hashlib
+
+    def check(stage):
+        for fname in ["chat.json", "private.json", "counter.json"]:
+            obj = json.load(open(os.path.join(dirn, fname)))
+            expected = hashlib.md5(
+                json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            assert obj["checksum"] == expected, f"{fname} checksum wrong {stage}"
+
+    _reset_data()
+    for r in ["alpha", "beta"]:
+        _cli("create-room", r)
+        _cli("join", r, "alice")
+        _cli("send", r, "alice", "hi")
+    _cli("send-private", "alice", "bob", "p")
+    check("before delete")
+
+    _cli("delete-room", "alpha")  # deleted_rooms populated
+    check("after delete")
+
+    _cli("purge", "alpha")  # deleted_rooms back to empty
+    check("after purge")
+
+    raw = json.load(open(os.path.join(dirn, "chat.json")))["data"]
+    assert raw.get("deleted_rooms") == {}, (
+        "deleted_rooms must serialize as {} after purge, not null or omitted"
+    )
