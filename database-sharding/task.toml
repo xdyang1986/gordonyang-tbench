@@ -2,10 +2,10 @@ schema_version = "1.1"
 
 [task]
 name = "codimango/database-sharding"
-description = "Hard multi-turn Go sharding proxy. Turn1 28 tests under-specified to fix saturation: weighted MD5 big-endian totalWeight (no worked example mapping), global broadcast -1 and comma-separated sorted, checksum sorted keys no spaces no HTML escaping, config validation duplicate id weight<=0 no stdout unknown command missing key, corruption backup .corrupt.<nanosec> warning, self-healing set cleans wrong shard delete cleans all, large 100KB, distribution zeros global, list-keys sorted exact, ops.log version shard_id ts skips invalid warning, raw-string single invariant (full JSON consumption, trailing bytes -> raw string, no table), atomic inotify check, help version checksum staging weight global ops.log, success collapsed not exhaustive. Turn2 81 tests: staging two-phase with byte-equality not filename coupling (any file in staging dir whose shard_id matches, byte-equal to final, version+data checks) + ts-sorted stable ties abstract (no v1/v2 walkthrough), calibration notes stripped (no 'harder than Turn1 loosened vs staging+updated_at extra-hard' and no '(previous harness crash)'), versioned shard_id version data checksum where shard_id must match expected version increments old+1, checksum no HTML escaping, corruption handling shard_id mismatch missing version negative version missing checksum mismatch backup .corrupt.<nanosec> warning, fallback legacy, duplicate/wrong-shard cleanup only correct weighted retains non-global global replicated, migration staging dir /app/data/staging two-phase + ts-sorted replay ascending ts stable for ties, dry-run backup tightening .bak and ops.log.bak, version exact increment, distribution global after migration, large 100KB, empty valid MD5 d41d8cd98f00b204e9800998ecf8427e empty legacy still cleanup, unknown command missing args, help version shard_id checksum staging timestamp ts, inherit_prior_session true, source-inspection claims removed, calibration notes stripped, tautological or True fixed, custom --ops-log/post-subcommand/1MB via legacy added."
+description = "Hard single-turn Go sharding proxy migration. Turn1 proxy (weighted MD5 big-endian totalWeight, global broadcast -1/comma-separated sorted, checksum no HTML escaping, corruption backup, self-healing, ops.log, raw-string single invariant full JSON consumption, inotify atomic) is pre-built in Dockerfile to fix step-0 1.0 saturation (43/43 originally, every clean run gate failed needing 3+ steps exemption; two prior passing runs were infra flakes dropping Turn1 to 0.9). Grading is migration only (81 tests): versioned integrity shard_id+version+checksum, corruption handling shard_id mismatch/missing version/negative version/missing checksum/mismatch with .corrupt.<nanosec> backup+warning, fallback legacy (weighted then legacy, global id-order first-found then legacy), duplicate/wrong-shard cleanup only correct weighted retains non-global global replicated to all, weighted routing same as Turn1, batched atomic writes per shard + staging durable+byte-equal no ordering (reworded from ordering to durable atomic final writes plus byte-equal staged artifacts, fixes inotify breaks when staging dir recreated and ptrace amd64-only), ts-sorted ops.log replay ascending ts stable ties, version old+1, preserve vs force with Overwriting log accepted on either stream, dry-run plan mentions cleanup/version/shard_id no mods, backup tightening .bak and ops.log.bak, 1MB+ via legacy, large 100KB, empty legacy still triggers cleanup/replay, empty string valid MD5 d41d8cd98f00b204e9800998ecf8427e, help top-level names commands (get-shard-id/set/get/delete/list-keys/distribution/migrate) not subcommand flags, migrate --help names dry-run/backup/force, unknown command/bad config exit 2 no stdout, custom --ops-log exercised, post-subcommand flags (migrate --config ...) exercised, global get-shard-path comma-separated id-sorted, global get picks first id-order on conflict, missing/invalid config-file, empty shard lists, exact ops.log count global set/delete now 1 per spec singular line with shard_id -1 (fixed oracle previously logging per shard). Under-specified Turn1&2 to fix EASY saturation (removed raw-string table, weighted example Hash%5 mapping, Success exhaustive restatement, Turn2 checklist detail, calibration notes at lines 7,74,129 and source-inspection promises). Staging test fixed to use default CONFIG_PATH where /app/data/staging is both literal and shard-adjacent, raw bytes comparison, picks shard legacy key routes to."
 authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
 keywords = ["go", "database", "sharding", "proxy", "migration", "weighted", "broadcast", "checksum"]
-format = "terminal_bench_multi_turn"
+format = "terminal_bench_single_turn"
 workstream = "swe_public_repo"
 
 [metadata]
@@ -20,6 +20,12 @@ expert_time_estimate_min = 70
 junior_time_estimate_min = 130
 languages = ["go"]
 
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
 [environment]
 build_timeout_sec = 600.0
 cpus = 1
@@ -29,25 +35,8 @@ gpus = 0
 allow_internet = true
 mcp_servers = []
 
-[[steps]]
-name = "1_step_one"
-dependencies = []
-min_reward = 1.0
+[verifier.env]
 
-[steps.verifier]
-timeout_sec = 600.0
+[environment.env]
 
-[steps.agent]
-timeout_sec = 600.0
-
-[[steps]]
-name = "2_step_two"
-dependencies = ["1_step_one"]
-min_reward = 1.0
-inherit_prior_session = true
-
-[steps.verifier]
-timeout_sec = 600.0
-
-[steps.agent]
-timeout_sec = 600.0
+[solution.env]
