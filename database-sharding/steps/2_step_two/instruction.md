@@ -1,147 +1,92 @@
-# Turn 2: Hard Migration – Weighted, Broadcast, Versioned Integrity (shard_id+version), Cleanup, Log Replay
+# Turn 2: Hard Migration – Weighted, Broadcast, Versioned Integrity, Cleanup, Log Replay
 
 ## Background
 
-Turn1 proxy now handles weighted sharding (weights 1,2,1,1 total 5), `global:` broadcast replication to all shards, checksum integrity without HTML escaping (`SetEscapeHTML(false)`), config validation exit 2 no stdout, corruption backup `.corrupt.<timestamp>`, sorted `list-keys`, distribution including zeros, raw-string handling, transaction log `/app/data/ops.log`.
+Turn1 proxy now handles weighted sharding (weights 1,2,1,1 total 5), `global:` broadcast replication, checksum integrity without HTML escaping, config validation, corruption backup, sorted list-keys, distribution, raw-string handling, and transaction log.
 
-Now incident: legacy file `/app/data/legacy.json` old flat format (no checksum) contains 120 users + 30 orders + 5 global configs that are not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without `shard_id`/`version`. Turn2 must upgrade to new versioned format and fix migration.
+Legacy file `/app/data/legacy.json` is old flat format containing users, orders, and global configs not yet in shards. Prior buggy migration left duplicate non-global keys across multiple shards and misplaced keys (key in wrong weighted shard). Shard files from Turn1 are in old format `{"data":...,"checksum":...}` without shard_id/version. Turn2 must upgrade shards to versioned format and complete migration correctly.
 
-## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=true so agent sees prior terminal state)
+## Task – Update Go code at `/app/` (module `sharding`), built via `go build -o <binary> .` – Turn1 solution will be replayed via `solve.sh` before grading (inherit_prior_session=true)
 
-### 1. Proxy fallback + robustness (UPGRADED to versioned format with shard_id+version for HARD)
+### 1. Proxy upgrades to versioned format
 
-**Shard file format upgraded in Turn2 – MUST be versioned:**
-
+**Shard file format:**
 ```json
 {
-  "shard_id": <int, must equal shard id from config>,
-  "version": <int, >=0, increments by 1 on each successful set/delete and migration>,
+  "shard_id": <must equal expected id>,
+  "version": <>=0, increments by 1 on each successful set/delete/migration/replay>,
   "data": { ... },
-  "checksum": "md5 hex of canonical data JSON without HTML escaping"
+  "checksum": "md5 hex of data canonical JSON without HTML escaping"
 }
 ```
+Canonical JSON for checksum is sorted keys, no spaces, without HTML escaping (Go must disable `SetEscapeHTML`). Checksum covers only `data`.
 
-- Canonical data JSON for checksum: **sorted keys, no spaces, without HTML escaping**. Python `json.dumps(data, sort_keys=True, separators=(',', ':'))` must match Go `json.Marshal` with `SetEscapeHTML(false)` disabled (Go default escapes `<>&` as `\u003c` etc – must disable). Checksum = md5 hex of canonical data JSON only (version and shard_id NOT in checksum, only `data`).
+On startup (`NewShardingProxyWithLegacy`) validate and repair every configured shard before any command. Repair means backup corrupted file to `<path>.corrupt.<nanosec>` with warning containing corruption reason, then recreate empty versioned file with correct shard_id, version 0, valid checksum via atomic write (temp file in same dir then rename). Support backward compatibility: old flat file (whole file is data), Turn1 format (`data`+`checksum` without shard_id/version) with valid checksum, and Turn2 versioned format. All corruption forms (invalid JSON, missing or empty checksum, checksum mismatch, shard_id mismatch, missing/invalid version) must trigger repair.
 
-- **On read and initialization**: `NewShardingProxyWithLegacy` must **validate and repair every configured shard before any command** (not just on-demand). For each shard path with expected id `sid`:
-  - Missing/empty → empty `{}`, version 0, correct shard_id `sid`
-  - Invalid JSON → corruption
-  - Has `data` field:
-    - Missing `checksum` or empty checksum → corruption
-    - If has `shard_id` field present → require `checksum` present, `version` present and int >=0, and `shard_id == expected sid`, else corruption. Missing `version` or version <0 or not int when `shard_id` present → corruption.
-    - Checksum mismatch (computed with no HTML escaping, sorted keys, separators `,`, `:`) → corruption
-    - If has `data`+`checksum` but NO `shard_id` and NO `version` (Turn1 format) → treat as valid old format for backward compat: version default 0, shard_id from config, checksum must still be valid, else corruption. This allows Turn1 files to be read.
-  - No `data` field → old flat format `{key: value}` backward compat, treat whole file as data, version 0, shard_id from config, convert to new format on next write. Invalid JSON → corruption.
-  - **Corruption handling**: backup to `<path>.corrupt.<nanosec>` where nanosec is `time.Now().UnixNano()` + stderr warning containing at least one of "corrupt"/"checksum"/"shard_id"/"version", then recreate empty with version 0, correct shard_id, valid checksum, atomic via temporary file in same directory then rename.
-  - Because init repairs every shard, `list-keys`/`distribution` reading all shards triggers repair of all.
+On write (`set`/`delete`): always write new versioned format with incremented version, correct shard_id, valid checksum without HTML escaping, atomically via temp file then rename.
 
-- **On write** (`set`/`delete`):
-  - Always write **new versioned format** with incremented version (read current version, +1), correct shard_id, checksum without HTML escaping, atomic via temporary file in same directory then rename to final path, without HTML escaping.
-  - For `global:` broadcast keys (prefix `global:`): set writes to **all shards** (each increments version individually), get checks all shards in id order first found, delete deletes from all shards, `get-shard-id` returns -1, `get-shard-path` returns comma-separated sorted list of all paths by id.
-  - Transaction log: on each successful `set`/`delete` (delete true), append JSON line to `/app/data/ops.log`:
-    ```json
-    {"op":"set","key":"...","value":...,"ts":<unix_nano>,"shard_id":<id or -1>,"version":<new_version>}
-    {"op":"delete","key":"...","ts":<unix_nano>,"shard_id":<id or -1>,"version":<new_version>}
-    ```
-    Must use `O_APPEND`, create if missing, `SetEscapeHTML(false)`. If ops.log has invalid JSON line, skip with warning containing "corrupt"/"invalid"/"warning" (must use `bufio.Scanner`, not `json.Decoder` which can infinite loop on invalid line).
+Global broadcast keys (`global:` prefix): `set` writes to all shards (each version bumps), `get` must return first found scanning shards in id order then legacy fallback, `delete` deletes from all, `get-shard-id` returns -1, `get-shard-path` returns all paths comma-separated sorted by id.
 
-- `get` fallback: for normal keys, check weighted designated shard first (weighted algorithm), then legacy fallback (`--legacy` default `/app/data/legacy.json`, old flat). For `global:` keys, check all shards in id order first found, then legacy fallback. Zero-downtime.
-- `list-keys` union shards + legacy, deduped sorted lexicographically exact, reads all shards (triggers init repair). Must include global keys once even if replicated.
-- `distribution` counts only shards, includes all ids even zero (explicit 4 keys), counts broadcast keys in each shard (so sum >= unique).
-- `ops-log` command: prints ops.log as JSON array, skips invalid lines with warning.
-- `set` value_json: JSON; if not valid JSON, treat as raw string value. **Self-healing**: for normal keys, after writing to correct weighted shard, must also clean up duplicate/misplaced copies in other shards (delete from wrong shards with version bump). For global keys, write to all shards.
-- `delete` returns "true"/"false". **Self-healing**: for normal keys, must delete from all shards where key exists (to clean duplicates), not just designated shard, with version bump per shard; for global, deletes from all.
+Transaction log `/app/data/ops.log`: on successful `set`/`delete` append a JSON line with `op`, `key`, `value` (for set), `ts` (unix nano), `shard_id` (or -1 for global), `version`. Use `O_APPEND`, create if missing, no HTML escaping. On read, skip invalid JSON lines with warning and avoid infinite loop on corrupt line (use Scanner).
 
-**Empty string key handling – EXPLICIT:**
+`get` fallback: normal keys check designated weighted shard first then legacy (`--legacy` default `/app/data/legacy.json`); global keys check all shards in id order then legacy.
 
-- Empty string `""` **IS valid** for this task and must be hashed via MD5, MD5("") = `d41d8cd98f00b204e9800998ecf8427e7`, routed via weighted algorithm, and support `set ""`, `get ""`. This is distinct from missing key argument. `get-shard-id ""` must succeed exit 0 and compute weighted shard id, not exit 2. Missing key argument (zero args) must exit 2, no stdout. Must handle `""` as valid in all commands.
+`list-keys`, `distribution`, `ops-log`: `list-keys` union shards+legacy deduped sorted exact, `distribution` includes all shard ids even zero and counts broadcast keys per shard, `ops-log` prints JSON array skipping invalid lines with warning.
 
-**Help explicitly required (enhanced for versioned hard v2 with ts-sorted and staging):**
+`set` value parsing and self-healing: if value_json is not fully valid JSON after trimming whitespace, treat as raw string (no lenient streaming). After writing correct shard, clean up misplaced/duplicate copies in other shards; `delete` must clean all shards where key exists. Version bumps per modified shard.
 
-- Bare proxy with **no command** (`proxy`, `proxy --config X`, `proxy --config X --legacy Y`, `proxy --config X --legacy Y --ops-log Z`) must print help to stdout containing ALL of: `get-shard-id`, `set`, `get`, `delete`, `list-keys`, `distribution`, `migrate`, `config`, `legacy`, `weight`, `global`, `ops.log`, `dry-run`, `backup`, `force`, `version`, `shard_id`, `checksum`, `staging`, `timestamp`, `ts` and exit 0.
-- `--help`, `-h`, `help` must also print same help and exit 0.
-- `migrate --help` (any order, `migrate --help` or `--help migrate` or `migrate -h`) must print help containing `dry-run`, `backup`, `force`, `version`, `shard_id`, `staging`, `timestamp` and exit 0.
-- Unknown command or unknown migrate flag/arg must exit 2, no stdout on invalid config (only stderr).
+Empty string `""` is valid key, hashed via MD5 (`d41d8cd98f00b204e9800998ecf8427e` → weighted routing), not missing-arg error. Missing key argument (zero args) exits 2 with no stdout.
 
-### 2. Hard Migration subcommand (same binary) – weighted, broadcast, versioned, duplicate cleanup, log replay
+Help must document all commands and flags (including staging, version, checksum, timestamp, etc.) and exit 0 on bare args, `--help`, `-h`, `help`. `migrate --help` must document its flags. Unknown command/flag exits 2; invalid config exits 2 with no stdout.
+
+### 2. Migration subcommand
 
 ```
 proxy --config /app/config.json --legacy /app/data/legacy.json --ops-log /app/data/ops.log migrate [--dry-run] [--backup /path/to/backup.json] [--force]
 ```
+Flags may appear before or after `migrate` subcommand; harness tries both orders.
 
-Harness tries both `<binary> --config X --legacy Y --ops-log Z migrate ...` and `<binary> migrate --config X --legacy Y ...`
+Legacy reading: old flat dict. Missing file or invalid JSON → exit 1 with stderr. Empty `{}` → print “Legacy file is empty, nothing to migrate” but still perform cleanup and ops.log replay and honor backup if requested, exit 0. Handle large legacy.
 
-Requirements:
+Shard reading: support all formats as in proxy init with same corruption handling (backup + warning, treat as empty).
 
-- **Read legacy**: old flat dict, missing → exit 1 stderr (not 2), invalid JSON → exit 1, empty `{}` → print "Legacy file is empty, nothing to migrate", still backup if requested, but **still perform duplicate/wrong-shard cleanup and ops.log replay** (even empty legacy must trigger cleanup/replay), exit 0. Must handle large legacy (1000 keys).
+Ops.log reading: line by line via Scanner, skip invalid with warning, collect valid entries. Detect duplicate non-global keys across shards and log warning. Entries may be out-of-order by ts.
 
-- **Read shards**: support ALL formats: old flat `{"k":v}`, Turn1 format `{"data":...,"checksum":...}`, Turn2 versioned `{"shard_id":..., "version":..., "data":..., "checksum":...}` with corruption handling: invalid JSON, checksum mismatch, missing checksum, shard_id mismatch, missing version when shard_id present, version <0 → backup `.corrupt.<timestamp>` + warning containing corrupt/checksum/shard_id/version, treat as empty version 0.
+Cleanup: for any non-global key whose weighted destination does not match current shard, move it to correct shard; if present in multiple shards, keep only in correct shard after migration. Global keys must be replicated to all shards – after migration every shard contains each global key from legacy and existing global keys.
 
-- **Read ops.log**: line by line via `bufio.Scanner`, skip invalid JSON lines with stderr warning containing "corrupt"/"invalid"/"warning", collect valid entries, then replay entries in ascending ts order, stable for ties (if ts missing, treat as 0). Must handle ops.log with corrupted lines and out-of-order timestamps.
+Migration writes: group legacy keys per shard (normal weighted, global to all), batched one atomic write per shard with version old+1 if changed. Must create staging dir `/app/data/staging` and ensure staged artifacts are durable and byte-equal to final shards (final writes durable and atomic via temp file then rename; staged artifacts byte-equal). No ordering guarantee beyond durability and byte-equality – final writes are the source of truth.
 
-- **Detect inconsistent state**: scan all shards, build key→[shard ids] for non-global keys. If same non-global key in multiple shards, log stderr `Warning: key "dup" found in multiple shards [0 1]` and also `Detected duplicate keys...` (global duplicates expected, not warned as inconsistent). Must log warning for each duplicate.
+Tombstone replay: after legacy + cleanup merge, replay ops.log entries in ascending `ts` order, stable for ties (missing `ts` treated as 0), applying set/delete to correct shards (weighted for normal, all for global), each replay bumps version. This ensures deletes prevent legacy resurrection and later ts wins.
 
-- **Cleanup wrong-shard and duplicate (required, hard)**: For any non-global key where `hashWeighted(key) != current shard id`, remove from wrong shard and move to correct weighted shard. If non-global key exists in multiple shards including correct, keep only in correct weighted shard. After migration, no non-global shard contains key that doesn't belong. For `global:` keys, ensure **replicated to all shards**: after migration, every shard must contain each global key from legacy (and existing global keys replicated). If missing in some, replicate.
-
-- **Weighted routing**: totalWeight = sum(weights default 1). `hash = MD5(key)` big-endian int (Python `int(md5(key.encode()).hexdigest(),16)`), `idx = hash % totalWeight`, iterate shards sorted by id ascending subtracting weight to pick. `global:` → -1 for get-shard-id but migrate replicates to all. Must find keys for weighted indices via brute-force in tests.
-
-- **Group legacy keys**: For normal keys, weighted destination; for `global:` keys, destination = all shards. Must group per shard for batched writes.
-
-- **Batched atomic writes + staging (harder)**: per shard needing changes (legacy + cleanup + misplaced + global replication), write **once** atomically via temporary file in same directory then rename, version = old version +1 if changed. Must create staging dir `/app/data/staging` and write grouped files there first via atomic write with versioned format, then also write to final shard path atomically (two-phase). Group keys per shard for batched writes (one atomic write per shard, not per-key). Must also increment version on ops.log replay.
-
-- **Tombstone via ops.log replay (timestamp-sorted, hard)**: After legacy + cleanup merge (writes new versioned format), replay entries in ascending ts order, stable for ties, applying set/delete to correct shards (weighted for normal, all for global), each replay increments version. This ensures deletes prevent legacy resurrection and later ts wins. Must handle global keys in replay (replicate/delete all).
-
-- **Version handling**: new format has `version` incremented. Migration must write new format with `shard_id` correct, version = old version +1 (or +1 per changed shard). After migration, version >= previous, shard_id matches expected, checksum valid (no HTML escaping, sorted keys, separators `,`, `:`), data contains migrated keys. Post-migration new writes must continue incrementing version.
-
-- **Preserve vs force**: preserve existing shard keys unless `--force`. With `--force`, overwrite with legacy values and log stderr `Overwriting key 'X' in shard Y`.
-
-- **Dry-run**: prints plan with total legacy keys, per-shard legacy counts, misplaced/dup counts, ops count, no modifications, mentions `cleanup`, `version`, `shard_id`. Must not modify any shard file.
-
-- **Backup tightening**: with `--backup <path>`, copy legacy to backup path (mkdir -p) and **each relevant shard** that will be modified to `<shard>.bak` before overwriting (must contain old pre-existing data), and ops.log to `ops.log.bak` if exists. Must create legacy backup at specified path and each modified shard `.bak`. Checks duplicate-warning stderr.
-
-- **Corrupted handling**: as above, during migration, corrupted shard (invalid JSON, checksum mismatch, missing checksum, shard_id mismatch, missing version, version <0) → backup `.corrupt.` + warning, treat as empty version 0 and continue migration.
-
-- **Large value handling**: must handle 1MB+ JSON value atomically with valid checksum and no HTML escaping.
-
-- **Bad args**: unknown migrate flag, bare unknown arg after migrate → exit 2. **Migrate with bad config** (duplicate id, empty path, weight<=0, negative id, id>=count) → exit 2, no stdout (only stderr), per R06.
-
-- **Invalid config no stdout**: for both proxy and migrate with bad config, stdout empty, only stderr, exit 2.
-
-- Exit codes: 0 success (help 0, get null 0, empty legacy 0), 1 missing legacy/invalid legacy/I/O, 2 invalid config/args/unknown flags
+Other semantics: preserve existing shard keys unless `--force`, in which case overwrite and log `Overwriting key 'X' in shard Y`. Dry-run prints plan with total legacy keys, per-shard counts, misplaced/dup/ops counts mentioning cleanup/version/shard_id, but must not modify any file. Backup: with `--backup`, copy legacy to backup path (mkdir -p), each modified shard to `<shard>.bak` containing old data, and ops.log to `.bak` if exists. Handle corrupted shards during migration same as init. Must handle 1MB+ JSON values atomically. Bad args or bad config (duplicate id, empty path, negative id, id>=count, weight<=0, etc.) → exit 2 no stdout. Exit codes: 0 success (including help, get null, empty legacy), 1 missing/invalid legacy/I-O, 2 invalid config/args.
 
 ### 3. Post-migration
 
-- New writes work (weighted, global, version increment, ops.log with version)
-- After migration, proxy gets all legacy keys (including global) even if legacy removed
-- Shard files in new versioned format `shard_id, version, data, checksum` with valid checksum (no HTML escaping, sorted keys, separators) and version incremented, shard_id matches
-- No wrong-shard non-global keys left; global keys replicated to all shards
-- `distribution` includes zero counts, counts include broadcast keys, length == shard_count
-- `list-keys` sorted exact, deduped, includes legacy+shards
-- `ops-log` prints JSON array skipping invalid lines with warning
+- New writes work with weighted routing, broadcast, version increment, ops.log.
+- After migration, proxy can serve all legacy keys (including global) even if legacy file removed.
+- Shard files valid versioned format with correct shard_id, version incremented, valid checksum.
+- No wrong-shard non-global keys; global keys replicated.
+- distribution, list-keys, ops-log behave as described.
 
 ### Constraints
 
-- Go stdlib only: `go.mod` no external requires and `go list -f '{{join .Imports " "}}'` no dot imports
+- Go stdlib only, `go.mod` no external requires.
 - Build via `go build -o <binary> .`
-- Same weighted MD5 big-endian, no HTML escaping, broadcast, versioned integrity
-- Atomic via temporary file in same directory then rename, batched grouping per shard (one write per shard, not per-key)
-- No hardcoded `/tmp/proxy`, use `/tmp/codimango` if tmp needed
-- Must use `bufio.Scanner` for ops.log to avoid `json.Decoder` infinite loop on corrupt line
+- Weighted MD5 big-endian, no HTML escaping, broadcast, versioned integrity, atomic temp file then rename, batched per shard grouping.
+- Use `/tmp/codimango` for temp files, not hardcoded `/tmp/proxy`.
+- ops.log must avoid Decoder infinite loop.
 
 ### Example
 
 ```bash
 go build -o ./proxy .
-
 ./proxy --config /app/config.json set user:1 '{"id":1}'
 ./proxy --config /app/config.json set global:cfg '{"val":1}'
-./proxy --config /app/config.json get global:cfg
 ./proxy --config /app/config.json get-shard-id ""
 ./proxy --help
 ./proxy migrate --help
-
 ./proxy --config /app/config.json --legacy /app/data/legacy.json --ops-log /app/data/ops.log migrate --dry-run
-./proxy --config /app/config.json --legacy /app/data/legacy.json migrate --backup /tmp/codimango/backup.json --force
+./proxy migrate --config /app/config.json --legacy /app/data/legacy.json --backup /tmp/codimango/backup.json --force
 ```
 
-Implement at `/app/` – Turn1 solution replayed via prior `solve.sh` before grading (inherit_prior_session=true).
+Implement at `/app/` – Turn1 solution replayed before grading (inherit_prior_session=true).
