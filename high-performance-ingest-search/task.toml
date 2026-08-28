@@ -1,0 +1,64 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/high-performance-ingest-search"
+description = "Two-step Go task: Step 1 builds a log ingest and full-text search HTTP service with persistence and WAL; Step 2 optimizes it for high throughput (bulk ingest, sharded index, worker pool, query cache) to meet latency and throughput SLOs."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "ingest", "search", "high-performance", "concurrency", "inverted-index"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+difficulty = "hard"
+category = "iterate_on_feature"
+category_usecase = "new_feature"
+category_subdomain = "database_internals"
+reward_type = "binary"
+languages = ["go"]
+tags = ["multi-turn", "go", "ingest", "search", "high-performance", "concurrency", "sharding", "caching", "wal", "bulk"]
+expert_time_estimate_min = 90.0
+junior_time_estimate_min = 240.0
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 1800.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[verifier.env]
+[environment.env]
+[solution.env]
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 1800.0
