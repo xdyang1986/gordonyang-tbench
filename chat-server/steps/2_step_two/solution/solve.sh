@@ -3369,7 +3369,7 @@ weights=[1,2,1,1]
 for i in range(4):
     p=f"/app/data/shard_{i}.json"
     shards.append({"id": i, "path": p, "weight": weights[i]})
-    write_with_checksum(p, {"rooms": {}, "deleted_rooms": {}, "seen_users": {}})
+    write_with_checksum(p, {"next_id": 1, "rooms": {}, "deleted_rooms": {}, "seen_users": {}})
 cfg={"shard_count": 4, "shards": shards, "rate_limit": {"messages_per_second": 1000, "burst": 10000}, "presence_ttl_seconds": 2, "ops_log": "/app/data/chat_ops.log", "private_path": "/app/data/private.json", "presence_path": "/app/data/presence.json", "rate_limit_path": "/app/data/rate_limit.json", "counter_path": "/app/data/counter.json", "users_path": "/app/data/users.json", "assignments_path": "/app/data/assignments.json"}
 import json as js
 with open("/app/config.json","w") as f: js.dump(cfg,f,indent=2)

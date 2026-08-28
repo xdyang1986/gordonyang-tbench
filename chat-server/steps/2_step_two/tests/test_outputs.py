@@ -1004,7 +1004,9 @@ def test_checksum_integrity_all_sharded_files():
         expected = hashlib.md5(
             json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        assert obj["checksum"] == expected
+        assert obj["checksum"] == expected, (
+            f"{path} checksum mismatch: expected {expected} got {obj['checksum']}"
+        )
 
 
 def test_checksum_all_files_after_many_ops():
@@ -1032,6 +1034,8 @@ def test_checksum_all_files_after_many_ops():
             == hashlib.md5(
                 json.dumps(obj["data"], sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
+        ), (
+            f"{path} checksum mismatch: expected {hashlib.md5(json.dumps(obj['data'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()} got {obj['checksum']}"
         )
 
 
