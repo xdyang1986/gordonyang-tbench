@@ -64,7 +64,8 @@ delete-room retains history: the room's members and messages move to deleted_roo
 Concurrency: The files must never be observed as invalid JSON during concurrent operations. Parallel sends to same room and different rooms, as well as parallel joins, must preserve every message and user with unique IDs. File locks must be cleaned up after each operation, and no temporary files may remain.
 
 Edge handling:
-- Empty roomID or userID after TrimSpace → exit2
+- Identifier validation happens before any existence check or idempotent handling: if a roomID or userID argument is empty after strings.TrimSpace, the command exits 2 without reading or writing state, including for otherwise-idempotent commands (delete-room, leave, purge) and read commands (list-users, get-messages, get-private).
+- Empty roomID or userID after TrimSpace → exit2 (see precedence above)
 - `leave` idempotent exit0 even if room/user not exist; after leaving all users, `list-users` returns `[]`; `send` after leave fails exit2
 - `get-messages` for nonexistent room returns `[]` exit0, not error
 - Invalid limit (non-integer, negative) → exit2 for both `get-messages` and `get-private`

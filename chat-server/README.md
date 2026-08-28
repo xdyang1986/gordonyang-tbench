@@ -4,7 +4,7 @@
 
 **Task Goal**: Production-grade Go chat server in two hard-balanced steps – oracle 100% with per-step balance gate passing (at `adf4384`: avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83) but zero end-to-end for frontier model due to Turn1→Turn2 code extension, not per-step difficulty.
 
-**Turn 1 – Core (65 tests)**: CLI at `/app` module `chat-server` manages rooms, users, messages with durable split-file persistence and integrity.
+**Turn 1 – Core (66 tests)**: CLI at `/app` module `chat-server` manages rooms, users, messages with durable split-file persistence and integrity.
 
 Split persistence (mirrors sharded layout): three files in same dir as `--data`, each wrapper `{"data":<Data>,"checksum":md5 canonical}` canonical=`json.dumps(data, sort_keys=True, separators=(',',':'))` no HTML escape via `SetEscapeHTML(false)`:
 - **chat.json**: `{"rooms":{roomID:{users:[]sorted,messages:[]sorted by id}}, "deleted_rooms":{roomID:{users:[],messages:[],deleted_at:int64 nano}}, "seen_users":{userID:bool}}`
@@ -17,7 +17,7 @@ Persistence integrity: atomic CreateTemp same dir + Rename inode check (determin
 
 Concurrency: 30×2KB small-payload (not 20KB) to avoid Daytona 50× slower flake, file never invalid JSON, unique IDs preserved.
 
-**Turn 2 – Large Scale (68 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1 split-file compatibility).
+**Turn 2 – Large Scale (69 tests)**: Extends binary to sharded mode via `--config /app/config.json` (inherits Turn1 split-file compatibility).
 
 Flags:
 - `--data` default `/app/data/chat.json` – Turn1 compatibility mode, used when --config is not supplied. Persistence keeps Turn1 split-file layout: chat.json (rooms+deleted_rooms+seen_users), private.json, counter.json.
@@ -35,9 +35,11 @@ Rate limiting 0.05/s low rate to avoid wall-clock race, shared bucket send+send-
 
 Presence includes last_seen_seconds_ago, TTL testable, stdlib checked both steps.
 
+Identifier validation precedence: blank after TrimSpace → exit2 before any existence check or idempotent handling (delete-room, leave, purge, list-users, get-messages, get-private, heartbeat, get-presence, get-shard-id, get-shard-path). Blank send-private must not modify private.json.
+
 ## Completion Rates
 
-### Latest — HEAD after AFTR fixes (65 + 68 tests)
+### Latest — HEAD after AFTR fixes (66 + 69 tests)
 
 Validation passing at `adf4384` (65+66) with balance gate passed avocado 0.8/0.33 opus 1.0/0.6. AFTR at adf4384 flagged BAD_GOLDEN (step2 --data mode wrote single file ['deleted_rooms','next_id','private_messages','rooms','seen_users'] not split), BAD_GRADING_WRONG (test_global_lock_mandated assumed file exists ⇒ held, but flock implementation valid), BAD_GRADING_WEAK (stdlib step2 missing, config validation partial), BAD_AMBIGUOUS (single-file wording for split layout).
 
@@ -48,7 +50,7 @@ Fixes in this commit:
 - Tests: added Turn1 split-file mode assertions (private.json+counter.json exist with valid wrapper checksums, chat.json must NOT contain private_messages/next_id, deleted_rooms key present) + config missing file explicit exits 2 + empty shards, id>=shard_count, negative/zero/non-numeric rate, burst<=0/non-numeric, TTL negative/non-numeric.
 - Cosmetic: rename "single mode"/"single-file mode"/"hi from single mode" to "Turn1 split-file mode" in 8 places.
 
-Oracle locally: Turn1 65/65 (9.1s), Turn2 68/68 (45s) after fixes.
+Oracle locally: Turn1 66/66 (20s), Turn2 69/69 (45s) after fixes (including blank-ID precedence).
 
 Balance gate at adf4384: avocado 0.8/0.33, opus 1.0/0.6, gpt 0.6/0.83 – saturation fixed by tombstone under-spec (1 invariant) + sticky hint removal.
 
@@ -68,7 +70,7 @@ End-to-end vs per-step: Per-step gate passed, but full multi-turn at adf4384 was
 
 ## Model Analysis
 
-Failure categorization (65+68):
+Failure categorization (66+69):
 - Checksum+HTML: SetEscapeHTML(false)+canonical MD5 including deleted_rooms+assignments.
 - Atomic+Lock O_EXCL: CreateTemp+Rename inode replacement, global.lock O_CREATE|O_EXCL retry fail, lock cleaned, tmp residue, 30×2KB.
 - Spaces+Large+Unicode: Join, 10KB, emoji.
@@ -76,7 +78,7 @@ Failure categorization (65+68):
 - Weighted+Sticky+Broadcast: MD5 weighted, sticky persistence via assignments.json survives reweight+snapshot, global -1 same ID dedup, single token + byte-identical atomic.
 - Rate+Presence+Pagination+Snapshot+Config: refill multiple cycles, no side effects, per-user, format-agnostic, fractional float64, shared bucket, presence TTL+seconds_ago, offset pagination, snapshot dir copies config+assignments+deleted_rooms, counter exact restore, config validation (empty shards, id>=count, duplicate, empty path, weight<=0, rate negative/zero/non-numeric, burst<=0/non-numeric, TTL negative/non-numeric, invalid JSON, mismatch lenient) + unknown tolerance.
 
-Cross-model: Turn1 65, Turn2 68. Per-step balanced, multi-turn 0/10 opus expected due to Turn1 filter extending own code.
+Cross-model: Turn1 66, Turn2 69. Per-step balanced, multi-turn 0/10 opus expected due to Turn1 filter extending own code.
 
 ## Anti-Cheating
 
@@ -92,8 +94,8 @@ Reward provenance ctrf-derived python -I -S.
 |-------|-------|
 | Validation | passing at adf4384, fixes make it pass AFTR (BAD_GOLDEN, BAD_GRADING_WRONG, BAD_GRADING_WEAK, BAD_AMBIGUOUS) |
 | Structural | 10/10 |
-| Oracle | 3/3 locally 65+68 |
+| Oracle | 3/3 locally 66+69 |
 | Balance gate | passed 0.8/0.33 avocado, 1.0/0.6 opus |
 | AFTR | fixed: lock protocol O_EXCL, stdlib step2, config validation empty shards/id>=count/rate/burst/TTL, single-file wording → split-file, README, split-file test |
-| Test counts | 65 + 68 |
+| Test counts | 66 + 69 |
 | Note | per-step vs multi-turn: step2 runs on seeded ref per-step, multi-turn extends own step1 code → opus 0/10 end-to-end is expected, not per-step difficulty |

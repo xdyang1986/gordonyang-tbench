@@ -62,7 +62,14 @@ def _reset_data():
     dirn = os.path.dirname(DATA_PATH)
     # Clean all Chat data files and locks and corrupt backups
     for fname in os.listdir(dirn):
-        if fname.startswith("chat.") or fname.startswith("private.") or fname.startswith("counter.") or fname.endswith(".lock") or ".corrupt." in fname or fname.startswith("tmp-"):
+        if (
+            fname.startswith("chat.")
+            or fname.startswith("private.")
+            or fname.startswith("counter.")
+            or fname.endswith(".lock")
+            or ".corrupt." in fname
+            or fname.startswith("tmp-")
+        ):
             try:
                 os.remove(os.path.join(dirn, fname))
             except:
@@ -329,7 +336,9 @@ def test_checksum_integrity_strict():
         assert "data" in obj and "checksum" in obj, f"{fname} must use wrapper"
         data_json = json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
         expected = hashlib.md5(data_json.encode()).hexdigest()
-        assert obj["checksum"] == expected, f"{fname} checksum mismatch: expected {expected} got {obj['checksum']}"
+        assert obj["checksum"] == expected, (
+            f"{fname} checksum mismatch: expected {expected} got {obj['checksum']}"
+        )
         # Must contain literal < not escaped if special chars present? At least check SetEscapeHTML
         # For chat file with special chars, raw must contain "<"
     # Also check chat file still has literal < for special chars test
@@ -442,7 +451,15 @@ def test_atomic_behavior_concurrent():
     procs = []
     for i in range(30):
         p = subprocess.Popen(
-            [BIN, "--data", DATA_PATH, "send", "general", "alice", f"cmsg{i}_" + "X"*2048],
+            [
+                BIN,
+                "--data",
+                DATA_PATH,
+                "send",
+                "general",
+                "alice",
+                f"cmsg{i}_" + "X" * 2048,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -460,12 +477,17 @@ def test_atomic_behavior_concurrent():
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
-    assert len(msgs) == 30, f"Expected all 30 msgs after concurrent 2KB sends, got {len(msgs)}"
+    assert len(msgs) == 30, (
+        f"Expected all 30 msgs after concurrent 2KB sends, got {len(msgs)}"
+    )
     assert len({m["id"] for m in msgs}) == len(msgs)
     # Deterministic residue checks: no tmp files and no lock left (I/O-free strictness)
     import glob as _glob
+
     tmp_residue = _glob.glob(os.path.join(os.path.dirname(DATA_PATH), "tmp-*.json"))
-    assert len(tmp_residue) == 0, f"tmp residue left in data dir after concurrent burst: {tmp_residue}"
+    assert len(tmp_residue) == 0, (
+        f"tmp residue left in data dir after concurrent burst: {tmp_residue}"
+    )
     assert not os.path.exists(DATA_PATH + ".lock"), "lock file must be cleaned up"
 
 
@@ -651,7 +673,9 @@ def test_private_special_chars_no_escape():
         == special
     )
     dirn = os.path.dirname(DATA_PATH)
-    assert "<" in open(os.path.join(dirn, "private.json")).read(), "private.json must use SetEscapeHTML(false)"
+    assert "<" in open(os.path.join(dirn, "private.json")).read(), (
+        "private.json must use SetEscapeHTML(false)"
+    )
 
 
 def test_invalid_limit_exit_2():
@@ -743,7 +767,9 @@ def test_next_id_after_corruption_resets():
     r = _cli("list-rooms")
     assert r.returncode == 0
     data = _load_data()
-    assert data["next_id"] == 1, f"counter corruption should reset next_id to 1, got {data['next_id']}"
+    assert data["next_id"] == 1, (
+        f"counter corruption should reset next_id to 1, got {data['next_id']}"
+    )
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     r2 = _cli("send", "general", "alice", "after corruption")
@@ -848,7 +874,9 @@ def test_message_timestamp_nanoseconds():
     ts = msg.get("timestamp")
     assert isinstance(ts, int), f"timestamp must be int, got {type(ts)}"
     # Nanoseconds since epoch ~1.7e18, seconds ~1.7e9
-    assert ts > 1e15, f"timestamp should be nanoseconds (>1e15), got {ts} – emitting seconds fails this"
+    assert ts > 1e15, (
+        f"timestamp should be nanoseconds (>1e15), got {ts} – emitting seconds fails this"
+    )
     # Two messages should have increasing timestamps
     r2 = _cli("send", "general", "alice", "second")
     ts2 = json.loads(r2.stdout.strip()).get("timestamp")
@@ -863,7 +891,9 @@ def test_get_private_limit_latest_n():
     msgs = json.loads(_cli("get-private", "alice", "bob", "2").stdout.strip())
     assert len(msgs) == 2
     # Reference returns two newest: priv3, priv4
-    assert msgs[0]["content"] == "priv3" and msgs[1]["content"] == "priv4", f"get-private limit should return latest N, got {[m['content'] for m in msgs]}"
+    assert msgs[0]["content"] == "priv3" and msgs[1]["content"] == "priv4", (
+        f"get-private limit should return latest N, got {[m['content'] for m in msgs]}"
+    )
 
 
 def test_empty_data_file_not_corruption():
@@ -873,10 +903,15 @@ def test_empty_data_file_not_corruption():
     with open(DATA_PATH, "w") as f:
         f.write("   \n  ")
     r = _cli("list-rooms")
-    assert r.returncode == 0, f"empty file should be treated as empty store, got {r.returncode}"
-    assert json.loads(r.stdout.strip()) == [], f"empty file should give empty rooms, got {r.stdout}"
+    assert r.returncode == 0, (
+        f"empty file should be treated as empty store, got {r.returncode}"
+    )
+    assert json.loads(r.stdout.strip()) == [], (
+        f"empty file should give empty rooms, got {r.stdout}"
+    )
     # Should NOT create corrupt backup for empty file
     import os as _os
+
     # Clean any existing corrupt files first
     for fname in _os.listdir(os.path.dirname(DATA_PATH)):
         if "corrupt" in fname:
@@ -885,20 +920,27 @@ def test_empty_data_file_not_corruption():
         f.write("   ")
     _cli("list-rooms")
     corrupts = [f for f in _os.listdir(os.path.dirname(DATA_PATH)) if "corrupt" in f]
-    assert len(corrupts) == 0, f"empty file should NOT create corrupt backup, found {corrupts}"
+    assert len(corrupts) == 0, (
+        f"empty file should NOT create corrupt backup, found {corrupts}"
+    )
 
 
 def test_whitespace_trim_identifiers():
     # CHAT-008: identifiers with only spaces should be rejected (TrimSpace)
     _reset_data()
-    assert _cli("create-room", "   ").returncode == 2, "create-room with spaces only should exit 2"
+    assert _cli("create-room", "   ").returncode == 2, (
+        "create-room with spaces only should exit 2"
+    )
     _cli("create-room", "general")
-    assert _cli("join", "general", "   ").returncode == 2, "join with spaces-only userID should exit 2"
-    assert _cli("join", "   ", "alice").returncode == 2, "join with spaces-only roomID should exit 2"
+    assert _cli("join", "general", "   ").returncode == 2, (
+        "join with spaces-only userID should exit 2"
+    )
+    assert _cli("join", "   ", "alice").returncode == 2, (
+        "join with spaces-only roomID should exit 2"
+    )
     # Ensure no room named with spaces was created
     rooms = json.loads(_cli("list-rooms").stdout.strip())
     assert "   " not in rooms and "" not in rooms
-
 
 
 def test_delete_room_tombstone_moves_to_deleted_rooms():
@@ -912,6 +954,7 @@ def test_delete_room_tombstone_moves_to_deleted_rooms():
     assert r.returncode == 0 and r.stdout.strip() == "true"
     # Verify tombstone exists in chat.json with messages, users, deleted_at
     import json as _json, os as _os
+
     with open(DATA_PATH) as f:
         wrapper = _json.load(f)
         data = wrapper["data"]
@@ -960,7 +1003,9 @@ def test_recreate_same_id_keeps_tombstone():
     # Tombstone still exists
     with open(DATA_PATH) as f:
         data = json.load(f)["data"]
-        assert "general" in data["deleted_rooms"], "re-creating must NOT clear tombstone"
+        assert "general" in data["deleted_rooms"], (
+            "re-creating must NOT clear tombstone"
+        )
         assert len(data["deleted_rooms"]["general"]["messages"]) == 1
 
 
@@ -993,6 +1038,7 @@ def test_tombstone_participates_in_checksum_and_corruption():
         assert "deleted_rooms" in data
         # Compute expected checksum
         import hashlib
+
         data_json = json.dumps(data, sort_keys=True, separators=(",", ":"))
         expected = hashlib.md5(data_json.encode()).hexdigest()
         assert wrapper["checksum"] == expected
@@ -1003,5 +1049,59 @@ def test_tombstone_participates_in_checksum_and_corruption():
     assert r.returncode == 0 and json.loads(r.stdout.strip()) == []
     with open(DATA_PATH) as f:
         data = json.load(f)["data"]
-        assert data.get("deleted_rooms", {}) == {}, "corruption should reset deleted_rooms too"
+        assert data.get("deleted_rooms", {}) == {}, (
+            "corruption should reset deleted_rooms too"
+        )
 
+
+def test_blank_id_precedence():
+    # Identifier validation must happen before existence/idempotent handling
+    _reset_data()
+    # delete-room with blank ID must be exit2, not false/true idempotent path
+    assert _cli("delete-room", "").returncode == 2
+    assert _cli("delete-room", " ").returncode == 2
+    assert _cli("delete-room", "   ").returncode == 2
+    # purge blank -> exit2
+    assert _cli("purge", "").returncode == 2
+    assert _cli("purge", " ").returncode == 2
+    # list-users blank -> exit2, not []
+    assert _cli("list-users", "").returncode == 2
+    assert _cli("list-users", " ").returncode == 2
+    # get-messages blank -> exit2, not []
+    assert _cli("get-messages", "").returncode == 2
+    assert _cli("get-messages", " ").returncode == 2
+    # leave blank in both positions -> exit2
+    assert _cli("leave", "", "alice").returncode == 2
+    assert _cli("leave", " ", "alice").returncode == 2
+    assert _cli("leave", "general", "").returncode == 2
+    assert _cli("leave", "general", " ").returncode == 2
+    # send blank room and blank user -> exit2
+    assert _cli("send", "", "alice", "hi").returncode == 2
+    assert _cli("send", " ", "alice", "hi").returncode == 2
+    assert _cli("send", "general", "", "hi").returncode == 2
+    assert _cli("send", "general", " ", "hi").returncode == 2
+    # join blank
+    assert _cli("join", "", "alice").returncode == 2
+    assert _cli("join", "general", "").returncode == 2
+    # send-private blank in both positions must be exit2 and leave private.json unchanged
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    _cli("send-private", "alice", "bob", "orig")
+    import os as _os, json as _json
+
+    private_path = "/app/data/private.json"
+    with open(private_path) as f:
+        before = f.read()
+    assert _cli("send-private", "", "bob", "msg").returncode == 2
+    assert _cli("send-private", " ", "bob", "msg").returncode == 2
+    assert _cli("send-private", "alice", "", "msg").returncode == 2
+    assert _cli("send-private", "alice", " ", "msg").returncode == 2
+    with open(private_path) as f:
+        after = f.read()
+    assert before == after, "blank send-private must not modify private.json"
+    # get-private blank
+    assert _cli("get-private", "", "bob").returncode == 2
+    assert _cli("get-private", " ", "bob").returncode == 2
+    assert _cli("get-private", "alice", "").returncode == 2
+    assert _cli("get-private", "alice", " ").returncode == 2

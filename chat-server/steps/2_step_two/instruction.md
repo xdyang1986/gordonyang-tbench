@@ -185,8 +185,12 @@ Every model's instinct is `shard = f(roomID, weights)`, but this forces persiste
   - Different rooms concurrent sends hashing to different shards must preserve all with unique IDs using global lock to avoid counter races
   - Concurrent joins must preserve all users sorted
 
+### Edge handling
+
+Identifier validation happens before any existence check or idempotent handling: if a roomID or userID argument is empty after strings.TrimSpace, the command exits 2 without reading or writing state, including for otherwise-idempotent commands (delete-room, leave, purge) and read commands (list-users, get-messages, get-private, get-presence, get-shard-id, get-shard-path, heartbeat).
+
 ### Exit Codes
-0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, empty IDs, invalid limit/offset, missing message). Leave idempotent exit0 even if room not exist.
+0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, empty IDs, invalid limit/offset, missing message). Leave idempotent exit0 even if room not exist. Empty ID precedence: blank after TrimSpace is exit2, not the idempotent []/false path.
 
 ### Examples
 ```bash
