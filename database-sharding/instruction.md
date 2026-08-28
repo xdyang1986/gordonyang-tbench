@@ -85,4 +85,4 @@ go build -o ./proxy .
 ./proxy migrate --config /app/config.json --legacy /app/data/legacy.json --backup /tmp/backup.json --force
 ```
 
-Implement at `/app/` – image already contains Turn1 proxy, reference solution is Turn2 migration.
+Implement at `/app/` – the image already contains a working proxy that handles basic sharding; extend it to handle versioned integrity and legacy migration.
