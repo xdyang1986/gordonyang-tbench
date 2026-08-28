@@ -944,3 +944,10 @@ def test_credit_off_by_one():
         ],
     )
     assert out == ["2,5,1"]
+
+
+def test_group_cap_is_cost_based_not_count_based():
+    # g_cap 10 with a cost-3 subscriber allows 3 messages, not 10.
+    # Rejects rewrites that treat g_cap as a message count.
+    out = run_case(2, [10, 10], [(0, 0, 1, 10, 0, 0)], [(0, 0, 0, 1, 100, 0, 0, 3)])
+    assert out == ["3", "0"]

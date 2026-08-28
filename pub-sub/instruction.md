@@ -29,6 +29,8 @@ Write to standard output exactly `T` lines. Each line is `S` comma-separated int
 the count allocated to each subscriber for that batch, in input order, no spaces. Counts
 may be negative when a load is negative.
 
+A group's g_cap is converted to message capacity as floor(remaining_group_cap / min_member_cost). In heterogeneous-cost groups cumulative group cost may therefore exceed g_cap.
+
 Build: `cd /app && go build -o /app/allocator .` Standard library only.
 
 ## Invariants
@@ -147,6 +149,27 @@ Correct output:
 ```
 
 Shipped prints `1,6,0` / `0,11,0`. No rates, bursts or costs are involved here; the first batch matches and only the second diverges.
+
+Input:
+
+```
+1
+12
+1
+0 0 2 42 0 0
+3
+0 0 0 3 14 0 0 1
+0 0 0 4 3 0 0 1
+0 0 0 1 13 0 0 1
+```
+
+Correct output:
+
+```
+7,3,2
+```
+
+Shipped prints `8,3,1`. This input is a single batch.
 
 ## Task
 
