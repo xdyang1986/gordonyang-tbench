@@ -1,6 +1,6 @@
 # Database Sharding Proxy – Multi-Turn Hard Task
 
-This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go with weighted routing, broadcast keys, checksum integrity, corruption handling, self-healing, ops.log, and legacy migration. The task is hard but solvable, with 28 and 76 tests (104 total after under-specifying Turn1, relaxing staging, adding ops-log/post-flag/1MB coverage).
+This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go with weighted routing, broadcast keys, checksum integrity, corruption handling, self-healing, ops.log, and legacy migration. The task is hard but solvable, with 28 and 81 tests (109 total after under-specifying Turn1&2, staging durable+byte-equal, R06/R07 coverage).
 
 ## Overview
 
@@ -10,7 +10,7 @@ This is a **two-turn** Terminal-Bench task implementing a sharding proxy in Go w
 
   See full spec: `steps/1_step_one/instruction.md`
 
-- **Turn 2 (2_step_two, 76 tests, dependencies [1_step_one], inherit_prior_session true):** Upgrade proxy to versioned integrity `{"shard_id":id,"version":ver,"data":...,"checksum":...}` where shard_id must match expected id, version increments on each set/delete/migration/replay, checksum without HTML escaping. On read/init validate every shard before any command: missing/empty → empty, version 0, correct shard_id; invalid JSON → corruption; missing checksum → corruption; shard_id present → require checksum and version>=0 and shard_id==expected else corruption; checksum mismatch → corruption; old formats backward compat. Corruption → backup with timestamp + warning containing corrupt/checksum/shard_id/version, then recreate empty versioned. Staging relaxed: locate staged file by shard_id match, byte-equality with final shard (no filename coupling).
+- **Turn 2 (2_step_two, 81 tests, dependencies [1_step_one], inherit_prior_session true):** Upgrade proxy to versioned integrity `{"shard_id":id,"version":ver,"data":...,"checksum":...}` where shard_id must match expected id, version increments on each set/delete/migration/replay, checksum without HTML escaping. On read/init validate every shard before any command: missing/empty → empty, version 0, correct shard_id; invalid JSON → corruption; missing checksum → corruption; shard_id present → require checksum and version>=0 and shard_id==expected else corruption; checksum mismatch → corruption; old formats backward compat. Corruption → backup with timestamp + warning containing corrupt/checksum/shard_id/version, then recreate empty versioned. Staging relaxed: locate staged file by shard_id match, byte-equality with final shard (no filename coupling).
 
   Proxy fallback to legacy `--legacy`, global broadcast (set all, get first-found id order, delete all, get-shard-id -1, get-shard-path comma-separated sorted), weighted routing same as Turn1 (totalWeight sum, hash MD5 big-endian mod totalWeight iterate id order subtracting weight), list-keys union sorted deduped, distribution including zeros counting broadcast, ops.log with version, **ts-sorted replay**: replay entries in ascending ts order, stable for ties (abstract requirement – no v1/v2/100/50 walkthrough that mirrors test), raw-string handling same table as Turn1.
 
@@ -52,7 +52,7 @@ After fixes in this patch (under-specify Turn1 + staging relaxed + calibration n
 
 Current HEAD validation (expected after docker verify):
 - Step1: 28/28 PASS under-specified (raw-string invariant, no table, no weighted example, success collapsed)
-- Step2: 76/76 PASS with golden (staging byte-equality relaxed raw bytes, calibration notes stripped, tautologies fixed, --ops-log/post-flag/1MB via legacy coverage added)
+- Step2: 81/81 PASS with golden (staging byte-equality relaxed raw bytes, calibration notes stripped, tautologies fixed, --ops-log/post-flag/1MB via legacy, R06/R07 global path/conflict/missing config/empty shards/ops.log count)
 - Combined multi-turn OK with inherit_prior_session true
 - Source-inspection promises removed, calibration notes removed, Turn1 under-specified
 

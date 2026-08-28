@@ -2346,3 +2346,114 @@ def test_migrate_1mb_value_via_legacy():
     finally:
         shutil.rmtree(tmpdir)
 
+
+def test_global_get_shard_path_comma_separated_id_sorted():
+    # R06/R07 coverage: global get-shard-path must return comma-separated id-sorted list
+    _reset_shards()
+    cfg = _load_config()
+    r = _proxy_cli("get-shard-path", "global:test-path")
+    assert r.returncode == 0, f"get-shard-path for global should succeed, stderr={r.stderr}"
+    out = r.stdout.strip()
+    # Should be comma-separated
+    assert "," in out, f"Global get-shard-path should be comma-separated, got {out}"
+    parts = out.split(",")
+    expected_paths = [s["path"] for s in sorted(cfg["shards"], key=lambda x: x["id"])]
+    assert parts == expected_paths, f"Expected id-sorted paths {expected_paths}, got {parts}"
+    # Also check that all paths are present
+    assert len(parts) == cfg["shard_count"]
+
+
+def test_global_get_picks_first_shard_id_order_on_conflict():
+    # R06/R07: global get must pick first shard in id order when replicated values conflict
+    _reset_shards()
+    cfg = _load_config()
+    # Seed different values for same global key across shards
+    conflict_key = "global:conflict-key"
+    # Write shard 0: val0, shard1: val1, etc.
+    for idx, s in enumerate(sorted(cfg["shards"], key=lambda x: x["id"])):
+        _write_shard_versioned(s["path"], {conflict_key: f"val{idx}"}, s["id"], idx)
+    r = _proxy_cli("get", conflict_key)
+    assert r.returncode == 0
+    got = json.loads(r.stdout.strip())
+    # Should be val0 from first shard id order
+    assert got == "val0", f"Global get should return first shard in id order (val0), got {got}"
+
+    # Delete from shard 0, then get should return val1 from shard 1
+    _write_shard_versioned(cfg["shards"][0]["path"], {}, 0, 5)
+    r = _proxy_cli("get", conflict_key)
+    assert r.returncode == 0
+    got = json.loads(r.stdout.strip())
+    assert got == "val1", f"After deleting from shard 0, global get should return val1 from shard 1, got {got}"
+
+
+def test_missing_config_file_exit_2_no_stdout():
+    # R06: missing config file should exit 2 no stdout
+    tmpdir = tempfile.mkdtemp()
+    try:
+        missing_cfg = os.path.join(tmpdir, "nonexistent.json")
+        r = _proxy_cli("list-keys", config_path=missing_cfg)
+        assert r.returncode == 2, f"Missing config should exit 2, got {r.returncode}"
+        assert r.stdout.strip() == "", f"Missing config should produce no stdout, got {r.stdout!r}"
+        assert r.stderr.strip() != "", "Missing config should have stderr"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_invalid_config_empty_shard_list_exit_2():
+    # R06: empty shard list should be invalid config exit 2
+    tmpdir = tempfile.mkdtemp()
+    try:
+        bad_cfg_path = os.path.join(tmpdir, "bad.json")
+        # Empty shards list
+        bad_cfg = {"shard_count": 0, "shards": []}
+        with open(bad_cfg_path, "w") as f:
+            json.dump(bad_cfg, f)
+        r = _proxy_cli("list-keys", config_path=bad_cfg_path)
+        assert r.returncode == 2, f"Empty shard list should exit 2, got {r.returncode}"
+        assert r.stdout.strip() == "", f"Empty shard list should produce no stdout, got {r.stdout!r}"
+
+        # Also test config with shard_count>0 but empty shards
+        bad_cfg2 = {"shard_count": 4, "shards": []}
+        with open(bad_cfg_path, "w") as f:
+            json.dump(bad_cfg2, f)
+        r = _proxy_cli("list-keys", config_path=bad_cfg_path)
+        assert r.returncode == 2
+        assert r.stdout.strip() == ""
+
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_exact_ops_log_count_global_set_delete():
+    # R07: exact ops.log count for global set/delete - global set should log shard_count entries
+    _reset_shards()
+    cfg = _load_config()
+    ops_path = "/app/data/ops.log"
+    # Ensure ops.log empty
+    open(ops_path, "w").write("")
+    r = _proxy_cli("set", "global:count-test", json.dumps("gval"))
+    assert r.returncode == 0, f"Global set should succeed, stderr={r.stderr}"
+    lines = [l for l in open(ops_path).read().strip().splitlines() if l.strip() != ""]
+    # Global set writes to all shards, each appends ops.log with shard_id -1
+    # So count should be shard_count (4) entries
+    assert len(lines) == cfg["shard_count"], f"Global set should append {cfg['shard_count']} entries to ops.log, got {len(lines)}: {lines}"
+    for line in lines:
+        entry = json.loads(line)
+        assert entry["op"] == "set"
+        assert entry["key"] == "global:count-test"
+        assert entry["shard_id"] == -1
+        assert "version" in entry and "ts" in entry
+
+    # Delete global key - should append shard_count entries if key existed in all shards
+    r = _proxy_cli("delete", "global:count-test")
+    assert r.returncode == 0
+    assert r.stdout.strip() == "true"
+    lines_after = [l for l in open(ops_path).read().strip().splitlines() if l.strip() != ""]
+    # After set (4) + delete (4) = 8 total
+    assert len(lines_after) == cfg["shard_count"] * 2, f"After global set+delete, ops.log should have {cfg['shard_count']*2} entries, got {len(lines_after)}"
+    delete_entries = [json.loads(l) for l in lines_after if json.loads(l)["op"] == "delete"]
+    assert len(delete_entries) == cfg["shard_count"]
+    for entry in delete_entries:
+        assert entry["shard_id"] == -1
+        assert entry["key"] == "global:count-test"
+
