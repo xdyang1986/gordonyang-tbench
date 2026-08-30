@@ -1517,3 +1517,32 @@ def test_rate_limit_future_last_refill_clamped():
     assert abs(data["alice"]["tokens"] - 2.0) < 0.01, \
         f"future last_refill must clamp elapsed to 0, got {data['alice']['tokens']}"
     assert data["alice"]["last_refill"] <= time.time_ns()
+
+
+def test_empty_containers_never_null():
+    _reset_data()
+    def _expect_empty_array(*args):
+        r = _cli(*args)
+        assert r.returncode == 0, f"{args} exited {r.returncode}"
+        assert r.stdout.strip() == "[]", f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+    _expect_empty_array("list-rooms")
+    _expect_empty_array("list-all-users")
+    _expect_empty_array("get-private", "alice", "bob")
+    _expect_empty_array("get-messages", "noSuchRoom")
+    _cli("create-room", "general")
+    _expect_empty_array("list-users", "general")
+    _expect_empty_array("get-messages", "general")
+    _expect_empty_array("get-messages", "general", "5")
+    _expect_empty_array("get-messages", "general", "0")
+    _cli("join", "general", "alice")
+    _cli("leave", "general", "alice")
+    _expect_empty_array("list-users", "general")
+    _cli("delete-room", "general")
+    _expect_empty_array("list-rooms")
+    _expect_empty_array("get-messages", "general")
+    _cli("purge", "general")
+    data = json.load(open(DATA_PATH))["data"]
+    for k in ("rooms", "deleted_rooms"):
+        assert data[k] == {}, f"{k} must serialize as {{}} when empty, got {data[k]!r}"
+    assert isinstance(data["seen_users"], dict), f"seen_users must be dict not null, got {data['seen_users']!r}"
+    assert json.load(open(os.path.join(os.path.dirname(DATA_PATH), "private.json")))["data"]["private_messages"] == []

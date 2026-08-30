@@ -90,6 +90,7 @@ Edge handling:
 - Message content must be obtained via `strings.Join(remainingArgs, " ")` to support spaces
 - Must preserve `<>&` without HTML escaping and preserve Unicode emoji and newlines/tabs
 - Must handle large messages (10KB) and large histories efficiently (<2s for 1000 messages)
+- Every command that prints a JSON array prints `[]` when the result is empty, never `null`. Every map-valued field in a persisted file serializes as `{}` when empty and every array-valued field as `[]`, never `null`.
 
 ### Exit Codes
 0 success, 1 I/O error, 2 invalid input. `leave` and `delete-room` for nonexistent targets still exit0 (with appropriate output), but `join` and `send` fail with exit2 for invalid state.

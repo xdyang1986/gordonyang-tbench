@@ -180,6 +180,8 @@ A room's shard is decided once, at creation, and recorded in the store. `get-sha
 
 Identifier validation happens before any existence check or idempotent handling: if a roomID or userID argument is empty after strings.TrimSpace, the command exits 2 without reading or writing state, including for otherwise-idempotent commands (delete-room, leave, purge) and read commands (list-users, get-messages, get-private, get-presence, get-shard-id, get-shard-path, heartbeat).
 
+Every command that prints a JSON array prints `[]` when the result is empty, never `null`. Every map-valued field in a persisted file serializes as `{}` when empty and every array-valued field as `[]`, never `null`.
+
 ### Exit Codes
 0 success, 1 I/O or rate-limited (rate limit → exit1 stderr "rate limit"), 2 invalid input (bad config, room not exist for join, empty IDs, invalid limit/offset, missing message). Leave idempotent exit0 even if room not exist. Empty ID precedence: blank after TrimSpace is exit2, not the idempotent []/false path.
 

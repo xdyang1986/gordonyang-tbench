@@ -1668,3 +1668,18 @@ def test_global_room_pinned_to_creation_shard_set():
     # a NEW global room uses all five
     _cli("create-room", "global:second")
     assert len(_cli("get-shard-path", "global:second").stdout.strip().split(",")) == 5
+
+def test_empty_containers_never_null_sharded():
+    _reset_sharded()
+    def _expect_empty_array(*args):
+        r = _cli(*args)
+        assert r.returncode == 0, f"{args} exited {r.returncode}"
+        assert r.stdout.strip() == "[]", f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+    _expect_empty_array("list-rooms")
+    _expect_empty_array("list-online")
+    _expect_empty_array("list-all-users")
+    _expect_empty_array("get-private", "alice", "bob")
+    _expect_empty_array("ops-log")
+    out = _cli("distribution").stdout.strip()
+    assert out != "null", "distribution must print a JSON object when empty, not null"
+    assert json.loads(out) == {} or isinstance(json.loads(out), dict)
