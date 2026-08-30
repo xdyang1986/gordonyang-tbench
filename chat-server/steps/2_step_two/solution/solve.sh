@@ -938,7 +938,7 @@ func loadGlobalAssignmentsData(path string) (GlobalAssignmentsData, bool, error)
 }
 
 func acquireLock(lockPath string) error {
-	for i := 0; i < 2000; i++ {
+	for i := 0; i < 500; i++ {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 		if err == nil {
 			f.Close()
