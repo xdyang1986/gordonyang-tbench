@@ -493,7 +493,7 @@ def test_atomic_write_replaces_file_not_truncates_sharded():
 
 
 def test_atomic_write_no_torn_json_sharded():
-    # Modest concurrency 30x2KB for sharded – same treatment as Turn1 split-file
+    # Atomic write must prevent torn reads in sharded mode - must use CreateTemp+Rename, not truncate-and-write
     _reset_sharded()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
@@ -514,18 +514,21 @@ def test_atomic_write_no_torn_json_sharded():
             text=True,
         )
         procs.append(proc)
-    for _ in range(200):
+    torn = 0
+    for _ in range(4000):
         try:
             cfg = _load_config()
             for s in cfg["shards"]:
                 if os.path.exists(s["path"]):
                     with open(s["path"]) as f:
-                        json.load(f)
+                        obj = json.load(f)
+                        assert "data" in obj and "checksum" in obj
         except Exception:
-            pass
-        time.sleep(0.001)
+            torn += 1
+        time.sleep(0.0005)
     for proc in procs:
         proc.wait(timeout=180)
+    assert torn == 0, f"Sharded atomicity violated: {torn} torn reads during concurrent burst - must use CreateTemp+Rename, truncate-and-write causes torn JSON"
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
@@ -533,7 +536,6 @@ def test_atomic_write_no_torn_json_sharded():
         f"Expected 30 msgs after concurrent 2KB sharded, got {len(msgs)}"
     )
     import glob as _glob
-
     tmp_residue = _glob.glob("/app/data/tmp-*.json") + _glob.glob(
         "/tmp/codimango/tmp-*.json"
     )
@@ -569,13 +571,16 @@ def test_rate_limit_rejection_exit1_no_side_effects():
     assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 2
     r3 = _cli("send", "general", "alice", "third")
     assert r3.returncode == 1
-    assert "rate limit" in (r3.stdout + r3.stderr).lower()
+    assert r3.stdout.strip() == "", f"rate-limited must have empty stdout, got {r3.stdout!r}"
+    assert "rate limit" in r3.stderr.lower()
     assert _read_counter() == cnt_after_2
     assert _read_ops_log_count() == ops_after_2
     _cli("join", "general", "bob")
     assert _cli("send", "general", "bob", "bob first").returncode == 0
     r_priv = _cli("send-private", "alice", "bob", "should fail")
     assert r_priv.returncode == 1
+    assert r_priv.stdout.strip() == "", f"rate-limited private must have empty stdout, got {r_priv.stdout!r}"
+    assert "rate limit" in r_priv.stderr.lower()
 
 
 def test_rate_limit_refill():
@@ -1445,10 +1450,11 @@ def test_global_lock_mandated():
         try:
             proc.wait(timeout=5)
         except _sp.TimeoutExpired:
-            # Blocking is also acceptable – it means it's respecting the lock
             proc.kill()
-            return
-        # If it returned quickly, it must have failed (lock held)
+            assert False, (
+                "create-room blocked indefinitely while global.lock held - spec L62 requires retry and ultimately fail, not block forever. A timeout is a failure."
+            )
+        # Must return within bounded time with nonzero exit (fail, not succeed)
         assert proc.returncode != 0, (
             "create-room should not succeed while global.lock is held (must use mandated global lock)"
         )
@@ -1530,7 +1536,9 @@ def test_global_broadcast_rate_limit_single_token_cost():
         assert len(msgs) == 2, f"shard {s['id']} should have 2 msgs, got {len(msgs)}"
         assert {m["id"] for m in msgs} == {id1, id2}
     r3 = _cli("send", "global:rate", "alice", "third should be limited")
-    assert r3.returncode == 1 and "rate limit" in (r3.stdout + r3.stderr).lower()
+    assert r3.returncode == 1
+    assert r3.stdout.strip() == "", f"rate-limited global must have empty stdout, got {r3.stdout!r}"
+    assert "rate limit" in r3.stderr.lower()
     # No extra messages added on rate-limited attempt
     assert len(json.loads(_cli("get-messages", "global:rate").stdout.strip())) == 2
 
@@ -1552,7 +1560,9 @@ def test_global_broadcast_rate_limit_atomic_no_partial():
     ops_before = _read_ops_log_count()
     # Second send should be rate-limited (burst1 drained)
     r2 = _cli("send", "global:atomic", "alice", "second should fail")
-    assert r2.returncode == 1 and "rate limit" in (r2.stdout + r2.stderr).lower()
+    assert r2.returncode == 1
+    assert r2.stdout.strip() == "", f"rate-limited must have empty stdout, got {r2.stdout!r}"
+    assert "rate limit" in r2.stderr.lower()
     # Shards must be unchanged byte-identical
     for s in cfg["shards"]:
         with open(s["path"], "rb") as f:
@@ -1578,9 +1588,13 @@ def test_global_broadcast_rate_limit_shared_with_private():
     assert _cli("send-private", "alice", "bob", "private 1").returncode == 0
     # Both tokens consumed, third attempt (either type) must be rate-limited
     r_g = _cli("send", "global:shared", "alice", "global 2 should fail")
-    assert r_g.returncode == 1 and "rate limit" in (r_g.stdout + r_g.stderr).lower()
+    assert r_g.returncode == 1
+    assert r_g.stdout.strip() == "", f"rate-limited global must have empty stdout, got {r_g.stdout!r}"
+    assert "rate limit" in r_g.stderr.lower()
     r_p = _cli("send-private", "alice", "bob", "private 2 should fail")
     assert r_p.returncode == 1
+    assert r_p.stdout.strip() == "", f"rate-limited private must have empty stdout, got {r_p.stdout!r}"
+    assert "rate limit" in r_p.stderr.lower()
     # Bob's bucket is independent
     assert (
         _cli("send-private", "bob", "alice", "bob private should succeed").returncode

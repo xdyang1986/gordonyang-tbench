@@ -455,9 +455,8 @@ def test_atomic_write_replaces_file_not_truncates():
 
 
 def test_atomic_behavior_concurrent():
-    # Modest concurrency: 30 x 2KB (small payload, ~65KB file) keeps strict all-N but avoids 50x slower Daytona I/O
-    # Previously 30x20KB took 0.4s local and >20s on Daytona – unsafe. 2KB is order magnitude less I/O.
-    # Now with rate limiting moved to step1, need high rate flags to avoid limiting during concurrency test
+    # Atomic write must prevent torn reads: file must never be observed as invalid JSON during concurrent burst
+    # Reviewer measured ~1 tear per 4000 polls for truncate-and-write, so 200 polls is too few - use 4000
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
@@ -482,15 +481,19 @@ def test_atomic_behavior_concurrent():
             text=True,
         )
         procs.append(p)
-    for _ in range(200):
+    torn = 0
+    for _ in range(4000):
         try:
             with open(DATA_PATH) as f:
-                json.load(f)
+                obj = json.load(f)
+                assert "data" in obj and "checksum" in obj
+                json.dumps(obj["data"], sort_keys=True, separators=(",", ":"))
         except Exception:
-            pass
-        time.sleep(0.001)
+            torn += 1
+        time.sleep(0.0005)
     for proc in procs:
         proc.wait(timeout=180)
+    assert torn == 0, f"Atomicity violated: observed {torn} torn reads during concurrent burst (file was invalid JSON or missing wrapper) - must use CreateTemp+Rename"
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
@@ -498,9 +501,7 @@ def test_atomic_behavior_concurrent():
         f"Expected all 30 msgs after concurrent 2KB sends, got {len(msgs)}"
     )
     assert len({m["id"] for m in msgs}) == len(msgs)
-    # Deterministic residue checks: no tmp files and no lock left (I/O-free strictness)
     import glob as _glob
-
     tmp_residue = _glob.glob(os.path.join(os.path.dirname(DATA_PATH), "tmp-*.json"))
     assert len(tmp_residue) == 0, (
         f"tmp residue left in data dir after concurrent burst: {tmp_residue}"
@@ -1238,9 +1239,9 @@ def test_rate_limit_rejection_exit1_no_side_effects():
         "alice",
         "msg3 should be limited",
     )
-    assert r.returncode == 1 and "rate limit" in (r.stdout + r.stderr).lower(), (
-        f"should be rate limited, got {r.returncode}"
-    )
+    assert r.returncode == 1, f"should be rate limited, got {r.returncode}"
+    assert r.stdout.strip() == "", f"rate-limited send must have empty stdout, got {r.stdout!r}"
+    assert "rate limit" in r.stderr.lower(), f"stderr must contain 'rate limit', got {r.stderr!r}"
     # counter must not advance
     counter_after = json.load(open(os.path.join(dirn, "counter.json")))["data"][
         "next_id"
@@ -1500,8 +1501,11 @@ def test_rate_limit_not_consumed_by_rejected_send():
     for i in range(2):
         assert _cli("--messages-per-second", "0.01", "--burst", "3",
                     "send", "general", "alice", f"ok{i}").returncode == 0
-    assert _cli("--messages-per-second", "0.01", "--burst", "3",
-                "send", "general", "alice", "over").returncode == 1
+    r_over = _cli("--messages-per-second", "0.01", "--burst", "3",
+                "send", "general", "alice", "over")
+    assert r_over.returncode == 1
+    assert r_over.stdout.strip() == "", f"rate-limited must have empty stdout, got {r_over.stdout!r}"
+    assert "rate limit" in r_over.stderr.lower()
 
 
 def test_rate_limit_future_last_refill_clamped():
