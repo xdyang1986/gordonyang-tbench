@@ -31,8 +31,7 @@ Stdlib only.
   "presence_path": "/app/data/presence.json",
   "rate_limit_path": "/app/data/rate_limit.json",
   "counter_path": "/app/data/counter.json",
-  "users_path": "/app/data/users.json",
-  "assignments_path": "/app/data/assignments.json"
+  "users_path": "/app/data/users.json"
 }
 ```
 
@@ -58,7 +57,6 @@ All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where c
 - `rate_limit_path`: token-bucket map per user. Implementations may store as flat map `{"alice": {"tokens": float, "last_refill": int64}}` or nested; persistence is verified behaviorally and format-agnostically, but file must still use wrapper checksum and atomic writes
 - `counter_path`: `{"next_id": int64}` global counter shared across shards and private messages
 - `users_path`: `{"alice": true, ...}` global seen users
-- `assignments_path` (default `/app/data/assignments.json`): `{"roomID": shardID, ...}` mapping room to its sticky shard assignment, e.g., `{"general": 2}`. Global rooms may be absent or -1. Must use wrapper checksum, atomic write, corruption handling.
 - `ops_log`: append-only JSON-lines file (not wrapper), each line is a JSON object
 
 All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding.
@@ -84,7 +82,7 @@ delete-room retains history: the room's members and messages move to deleted_roo
 
 ### Rate Limiting
 
-Token bucket per user, single bucket shared across all message sends (`send` and `send-private` share the same quota per user). This is intentional: if a user is rate-limited for `send`, their `send-private` must also be rate-limited.
+Token bucket per user, single bucket shared across all message sends (`send` and `send-private` share the same quota per user).
 
 - State: per user `tokens = burst` initially, `last_refill = now nano`
 - Refill: `elapsed = (now - last_refill)/1e9` seconds, `tokens = min(burst, tokens + elapsed*rate)`, update `last_refill=now`
@@ -93,7 +91,6 @@ Token bucket per user, single bucket shared across all message sends (`send` and
 - Persistence in `rate_limit_path` wrapper checksum, atomic via CreateTemp+Rename, corruption handling: invalid JSON or checksum mismatch → reset bucket (allow next send to succeed)
 - Exit semantics: if rate-limited, exit code 1, stderr must contain case-insensitive "rate limit", no stdout, must NOT increment global `next_id` (counter) and must NOT append to ops log
 - Config: `rate_limit.messages_per_second` may be fractional (e.g., 0.05 means 1 token per 20s), so Go struct should use float64 for this field.
-- Global broadcast cost and atomicity: A send to a `global:` room consumes exactly one token from the per-user bucket, not one per shard. The operation is atomic under the global lock: if the send is rate-limited (exit1), all shard files must remain byte-identical to before the attempt – no partial replication is allowed.
 
 ### Presence
 
@@ -153,16 +150,11 @@ Help must contain keywords: `create-room`, `delete-room`, `purge`, `list-rooms`,
 - Hash: MD5 of roomID bytes, interpreted as big-endian integer: Python `int(hashlib.md5(key.encode()).hexdigest(),16)`, Go equivalent using `math/big` `SetBytes(md5.Sum([]byte(key))[:])`
 - `weighted_index = hashInt % totalWeight`
 - Iterate shards sorted by id asc subtracting weight: if weighted_index < shard.weight → pick that shard id else subtract weight and continue
-- Example: shards [{id0,w1},{id1,w2},{id2,w1},{id3,w1}] total 5 → mapping: index 0→0, 1→1, 2→1, 3→2, 4→3
 - `global:` prefix → shard id -1 broadcast, get-shard-path returns comma-separated sorted list of all shard paths
 
 ### Shard Assignment Stability (Sticky)
 
-A room's shard is decided once, at creation, and recorded in the store. `get-shard-id`, `get-shard-path`, `distribution`, and all read/write paths must use the recorded assignment for existing rooms. If the config's shard weights or shard set change afterwards, existing rooms MUST stay on their original shard — they are never rehashed or migrated. Only rooms created after the change use the new weights. `global:` rooms remain in all shards.
-
-Implementation must persist this mapping (e.g., `/app/data/assignments.json` with wrapper checksum) and consult it for every operation on existing rooms. The assignment must survive restarts and be included in snapshots.
-
-Every model's instinct is `shard = f(roomID, weights)`, but this forces persisted assignment. Tests: create rooms under weights [1,2,1,1], record `get-shard-id` per room and `distribution`; rewrite config to [3,1,1,1]; assert every pre-existing room's shard id and its messages are unchanged, and that newly created rooms follow the new weighted formula. That's the same shape as the sticky-leadership rule.
+A room's shard is decided once, at creation, and recorded in the store. `get-shard-id`, `get-shard-path`, `distribution`, and all read/write paths must use the recorded assignment for existing rooms. If the config's shard weights or shard set change afterwards, existing rooms MUST stay on their original shard — they are never rehashed or migrated. Only rooms created after the change use the new weights. `global:` rooms remain in all shards. The assignment must survive restarts and be included in snapshots.
 
 ### Pagination
 
@@ -171,7 +163,6 @@ Every model's instinct is `shard = f(roomID, weights)`, but this forces persiste
   - With 2 args (roomID, limit): if limit==0 returns all, if limit>0 returns latest N (suffix) – preserves Turn-1 behavior for backward compatibility
   - With 3 args (roomID, limit, offset): offset defaults to 0, returns slice `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]` – this is the extended form for sharded mode
   - Same rules apply to `get-private`
-- The two-argument form returning latest N vs the three-argument form returning slice from offset is intentional to keep Turn-1 compatibility while adding offset support. Implementations must distinguish by argument count.
 - Must handle spaces via Join
 - Must be O(n) slicing not O(n²), performance <2s for 1000+ messages
 
