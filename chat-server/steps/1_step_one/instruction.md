@@ -10,7 +10,7 @@ Stdlib only: `go list -f '{{join .Imports " "}}' .` must contain no dotted impor
 
 ### CLI
 
-Global flag: `--data` default `/app/data/chat.json`
+Global flags: `--data` default `/app/data/chat.json`, `--messages-per-second <float>` default 5, `--burst <int>` default 10. Flags must be accepted in both `--flag value` and `--flag=value` form. Non-numeric or non-positive values for rate/burst → exit2.
 
 Help: bare binary no args must print help containing keywords `create-room`, `delete-room`, `purge`, `list-rooms`, `join`, `leave`, `list-users`, `send`, `get-messages`, `send-private`, `get-private`, `data`, `checksum` exit0. `--help`, `-h`, `help` also help exit0. Unknown command → exit2, missing required args → exit2, empty roomID or userID (after TrimSpace) → exit2, invalid limit → exit2, missing message → exit2.
 
@@ -39,9 +39,9 @@ IDs: globally incrementing int64 starting at 1, unique across room and private m
 
 ### Persistence with Integrity – Split Files (Realistic Layout)
 
-To mirror production sharded layout, persistence is split across three files in the same directory as `--data`, each with its own wrapper `{"data": <Data>, "checksum": "<md5 hex>"}` where checksum is MD5 of canonical JSON `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping. In Go, `json.Encoder.SetEscapeHTML(false)` must be used both for checksum computation and file write, so raw files must contain literal "<" and emoji, not `\u003c`.
+To mirror production sharded layout, persistence is split across four files in the same directory as `--data`, each with its own wrapper `{"data": <Data>, "checksum": "<md5 hex>"}` where checksum is MD5 of canonical JSON `json.dumps(data, sort_keys=True, separators=(',',':'))` with no HTML escaping. In Go, `json.Encoder.SetEscapeHTML(false)` must be used both for checksum computation and file write, so raw files must contain literal "<" and emoji, not `\u003c`.
 
-Derived paths: if `--data` is `/app/data/chat.json`, then private messages are at `/app/data/private.json` (same dir, basename `private.json`) and counter at `/app/data/counter.json`. Custom `--data` paths use their directory.
+Derived paths: if `--data` is `/app/data/chat.json`, then private messages are at `/app/data/private.json` (same dir, basename `private.json`), counter at `/app/data/counter.json`, and rate limiting at `/app/data/rate_limit.json`. Custom `--data` paths use their directory.
 
 File formats:
 
@@ -49,13 +49,29 @@ File formats:
   - Room object: `users` sorted array, `messages` sorted by id asc
 - **private.json**: `Data = {"private_messages": []Message}`
 - **counter.json**: `Data = {"next_id": int64}` starting at 1, globally monotonic across room and private messages
+- **rate_limit.json**: `Data = {"<userID>": {"tokens": float, "last_refill": int64}}`, empty object `{}` when no user has sent yet. See Rate Limiting section.
 
-All three files must use wrapper checksum, atomic write via `os.CreateTemp` in same directory + `os.Rename`, plus file locking. A global lock file `/app/data/global.lock` (in data directory) must be used for any operation touching multiple files (send, send-private, delete-room, purge) to keep ordering and avoid races; per-file `.lock` files are also allowed but global lock is mandatory for multi-file atomicity. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding. Lock files must be cleaned after each command (must not remain) and no `tmp-*.json` residue must remain after a burst.
+All four files must use wrapper checksum, atomic write via `os.CreateTemp` in same directory + `os.Rename`, plus file locking. A global lock file `/app/data/global.lock` (in data directory) must be used for any operation touching multiple files (send, send-private, delete-room, purge) to keep ordering and avoid races; per-file `.lock` files are also allowed but global lock is mandatory for multi-file atomicity. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding. Lock files must be cleaned after each command (must not remain) and no `tmp-*.json` residue must remain after a burst.
 
 On read per file:
-- Missing file → empty data: chat → `{"rooms":{},"deleted_rooms":{},"seen_users":{}}`, private → `{"private_messages":[]}`, counter → `{"next_id":1}`
+- Missing file → empty data: chat → `{"rooms":{},"deleted_rooms":{},"seen_users":{}}`, private → `{"private_messages":[]}`, counter → `{"next_id":1}`, rate_limit → `{}`
 - Empty file (TrimSpace empty) → empty data (same as missing)
 - Wrapper missing `checksum`, empty checksum, checksum mismatch, or invalid JSON → corruption: backup to `<original>.corrupt.<nanosec>` integer `UnixNano()`, stderr warning containing "corrupt" or "checksum", recreate empty valid wrapper
+
+### Rate Limiting
+
+Global flags: `--messages-per-second <float>` (default 5) and `--burst <int>` (default 10). Both must be accepted in `--flag value` and `--flag=value` form. Non-numeric or non-positive values → exit2.
+
+Token bucket per user, single bucket shared across all message sends (`send` and `send-private` share the same quota per user): if a user is rate-limited for `send`, their `send-private` is also rate-limited.
+
+- State: per user `tokens = burst` initially, `last_refill = now nano`
+- Refill: `elapsed = (now - last_refill)/1e9` seconds, `tokens = min(burst, tokens + elapsed*rate)`, update `last_refill = now`
+- Consume: if `tokens >= 1`, `tokens -= 1`, allow and persist; else fail rate-limited and persist the refilled tokens
+- Per-user independent (bob succeeds when alice is limited)
+- Persistence: `rate_limit.json`, in the same directory as `--data`, with the same `{"data": ..., "checksum": ...}` wrapper, atomic CreateTemp+Rename, and the same corruption handling as the other files. Corruption → reset the bucket, so the next send succeeds.
+- `Data = {"<userID>": {"tokens": float, "last_refill": int64}}`, empty object `{}` when no user has sent yet
+- Exit semantics: if rate-limited, exit code 1, stderr contains case-insensitive "rate limit", no stdout, and the global `next_id` counter must NOT be incremented
+- `--messages-per-second` may be fractional (e.g. 0.05 means 1 token per 20s), so use float64
 
 ### Tombstone deletion
 

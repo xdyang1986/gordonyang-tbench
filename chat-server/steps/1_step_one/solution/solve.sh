@@ -59,8 +59,8 @@ type CounterData struct {
 }
 
 type RateBucket struct {
-	Tokens float64 `json:"tokens"`
-	LastRefill int64 `json:"last_refill"`
+	LastRefill int64   `json:"last_refill"`
+	Tokens     float64 `json:"tokens"`
 }
 
 func loadRateLimitData(path string) (map[string]*RateBucket, bool, error) {
@@ -425,10 +425,12 @@ Commands:
   list-all-users                                JSON array sorted unique users seen (includes deleted)
 Flags:
   --data <path> (default /app/data/chat.json)
+  --messages-per-second <float> (default 5) --burst <int> (default 10) rate limiting token bucket per user shared across send and send-private
   --help -h help
   checksum integrity, atomic write via CreateTemp and Rename, file locking via .lock and global.lock
-  data split: chat.json rooms+deleted_rooms+seen_users, private.json private_messages, counter.json next_id
+  data split: chat.json rooms+deleted_rooms+seen_users, private.json private_messages, counter.json next_id, rate_limit.json tokens+last_refill
   tombstone: delete-room moves to deleted_rooms with deleted_at timestamp, purge removes tombstone
+  rate limit: exit1 stderr rate limit, no stdout, next_id not incremented, per-user independent, fractional rate
   IDs globally monotonic
 `)
 }
@@ -494,6 +496,34 @@ func main() {
 	}
 	cmd := filtered[0]
 	cmdArgs := filtered[1:]
+	// Identifier validation before existence/idempotent handling – blank ID precedence
+	isBlank := func(s string) bool { return strings.TrimSpace(s) == "" }
+	switch cmd {
+	case "create-room", "delete-room", "purge", "list-users", "get-messages":
+		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
+			fmt.Fprintln(os.Stderr, "empty room/user ID")
+			os.Exit(2)
+		}
+	case "join", "leave", "send":
+		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
+			fmt.Fprintln(os.Stderr, "empty room")
+			os.Exit(2)
+		}
+		if len(cmdArgs) >= 2 && isBlank(cmdArgs[1]) {
+			fmt.Fprintln(os.Stderr, "empty user")
+			os.Exit(2)
+		}
+	case "send-private", "get-private":
+		if len(cmdArgs) >= 1 && isBlank(cmdArgs[0]) {
+			fmt.Fprintln(os.Stderr, "empty from")
+			os.Exit(2)
+		}
+		if len(cmdArgs) >= 2 && isBlank(cmdArgs[1]) {
+			fmt.Fprintln(os.Stderr, "empty to")
+			os.Exit(2)
+		}
+	}
+
 	dir := filepath.Dir(dataPath)
 	_ = os.MkdirAll(dir, 0755)
 	privatePath := filepath.Join(dir, "private.json")
