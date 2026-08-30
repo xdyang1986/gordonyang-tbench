@@ -7,7 +7,7 @@ Build a database reliability monitoring system in Go with two iterative steps.
 
 **Steps:**
 - **Step1 Reactive Monitoring:** Implement a monitor that tracks per-node health via `CheckResult` feed, maintains sliding window (error rate, avg latency), detects failures (consecutive failures → node_down), emits alerts (high_latency, replication_lag, connection_exhaustion, high_error_rate) with deterministic ordering, provides `GetNodeStatus`, `GetAlerts`, `IsHealthy`, `Reset`, `GetUptimePercentage`, and is concurrency-safe (`sync.RWMutex`, `-race` tested).
-- **Step2 Proactive Scoring:** Extend Step1 with health scoring (0-100) using weighted deductions (error_rate*50, latency over*20 cap30, lag over*15 cap20, consec*10 cap40, connections 15/5), trend analysis (latency, error_rate, replication_lag, connections) via older/newer half avg comparison 1.1/0.9 thresholds, failure prediction (RiskLow/Medium/High/Critical with probabilities 0.1/0.35/0.6-0.7/0.8-0.95 and durations 4h/1h/15m/5m), and reliability report (OverallScore avg, ClusterHealth healthy/degraded/unhealthy/critical, Recommendations with required substrings).
+- **Step2 Proactive Scoring:** Extend Step1 with health scoring (0-100) derived from worked input->Score examples (independent per-factor penalties each saturating, invariant 100 minus sum), trend analysis (latency, error_rate, replication_lag, connections) with outage exclusion (skip down-period checks) via older/newer half avg comparison, failure prediction with 4 risk levels and durations, and reliability report with recommendations. See step2 instruction for examples.
 
 **Module:** `db-reliability`, package `db-reliability/reliability`, stdlib only, `go vet` clean, thread-safe.
 
