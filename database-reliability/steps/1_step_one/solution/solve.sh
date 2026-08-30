@@ -135,6 +135,7 @@ type nodeData struct {
 	lastCheck time.Time
 	currentConnections int
 	lastReplicationLag float64
+	highLatencySuppressed bool
 }
 
 type Monitor struct {
@@ -174,15 +175,17 @@ func (m *Monitor) RecordCheck(result CheckResult) []Alert {
 	maxHist := m.cfg.WindowSize*2
 	if maxHist < 20 { maxHist = 20 }
 	if len(nd.history) > maxHist { nd.history = nd.history[len(nd.history)-maxHist:] }
-	windowSize := m.cfg.WindowSize
-	histLen := len(nd.history)
-	startIdx := 0
-	if histLen > windowSize { startIdx = histLen - windowSize }
-	window := nd.history[startIdx:]
-	failedInWindow := 0
-	for _, r := range window { if !r.Success { failedInWindow++ } }
+	var timeWindow []checkRecord
+	cutoff := ts.Add(-60 * time.Second)
+	for _, r := range nd.history {
+		if !r.Timestamp.Before(cutoff) {
+			timeWindow = append(timeWindow, r)
+		}
+	}
+	failedInTimeWindow := 0
+	for _, r := range timeWindow { if !r.Success { failedInTimeWindow++ } }
 	errorRate := 0.0
-	if len(window) > 0 { errorRate = float64(failedInWindow)/float64(len(window)) }
+	if len(timeWindow) > 0 { errorRate = float64(failedInTimeWindow)/float64(len(timeWindow)) }
 	var alerts []Alert
 	if nd.consecutiveFailures == m.cfg.DownThreshold {
 		id := fmt.Sprintf("%s-%s-%d", result.NodeID, AlertNodeDown, atomic.AddUint64(&m.alertCounter, 1))
@@ -191,10 +194,17 @@ func (m *Monitor) RecordCheck(result CheckResult) []Alert {
 		alerts = append(alerts, alert)
 	}
 	if latency > m.cfg.LatencyThresholdMs {
-		id := fmt.Sprintf("%s-%s-%d", result.NodeID, AlertHighLatency, atomic.AddUint64(&m.alertCounter, 1))
-		alert := Alert{ID: id, NodeID: result.NodeID, Type: AlertHighLatency, Severity: SeverityWarning, Timestamp: ts, Message: fmt.Sprintf("High latency on node %s: %.2fms > %.2fms", result.NodeID, latency, m.cfg.LatencyThresholdMs), Value: latency}
-		m.alerts = append(m.alerts, alert)
-		alerts = append(alerts, alert)
+		if !nd.highLatencySuppressed {
+			id := fmt.Sprintf("%s-%s-%d", result.NodeID, AlertHighLatency, atomic.AddUint64(&m.alertCounter, 1))
+			alert := Alert{ID: id, NodeID: result.NodeID, Type: AlertHighLatency, Severity: SeverityWarning, Timestamp: ts, Message: fmt.Sprintf("High latency on node %s: %.2fms > %.2fms", result.NodeID, latency, m.cfg.LatencyThresholdMs), Value: latency}
+			m.alerts = append(m.alerts, alert)
+			alerts = append(alerts, alert)
+			nd.highLatencySuppressed = true
+		}
+	} else {
+		if latency < m.cfg.LatencyThresholdMs*0.8 {
+			nd.highLatencySuppressed = false
+		}
 	}
 	if repLag > m.cfg.ReplicationLagThresholdMs {
 		id := fmt.Sprintf("%s-%s-%d", result.NodeID, AlertReplicationLag, atomic.AddUint64(&m.alertCounter, 1))
@@ -208,7 +218,7 @@ func (m *Monitor) RecordCheck(result CheckResult) []Alert {
 		m.alerts = append(m.alerts, alert)
 		alerts = append(alerts, alert)
 	}
-	if len(window) >= 3 && errorRate > m.cfg.ErrorRateThreshold {
+	if len(timeWindow) >= 3 && errorRate > m.cfg.ErrorRateThreshold {
 		id := fmt.Sprintf("%s-%s-%d", result.NodeID, AlertHighErrorRate, atomic.AddUint64(&m.alertCounter, 1))
 		alert := Alert{ID: id, NodeID: result.NodeID, Type: AlertHighErrorRate, Severity: SeverityWarning, Timestamp: ts, Message: fmt.Sprintf("High error rate on node %s: %.2f%% > %.2f%%", result.NodeID, errorRate*100, m.cfg.ErrorRateThreshold*100), Value: errorRate}
 		m.alerts = append(m.alerts, alert)
@@ -294,11 +304,23 @@ func (m *Monitor) computeHealthScoreLocked(nd *nodeData) HealthScore {
 	startIdx := 0
 	if histLen > windowSize { startIdx = histLen - windowSize }
 	window := nd.history[startIdx:]
-	failedInWindow := 0
+	var timeWindow []checkRecord
+	if len(nd.history) > 0 {
+		cutoff := nd.lastCheck.Add(-60*time.Second)
+		for _, r := range nd.history {
+			if !r.Timestamp.Before(cutoff) {
+				timeWindow = append(timeWindow, r)
+			}
+		}
+	}
+	failedInTimeWindow := 0
+	for _, r := range timeWindow { if !r.Success { failedInTimeWindow++ } }
+	errorRate := 0.0
+	if len(timeWindow) > 0 { errorRate = float64(failedInTimeWindow)/float64(len(timeWindow)) }
 	var sumLat, sumLag float64
-	for _, r := range window { if !r.Success { failedInWindow++ }; sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
-	errorRate:=0.0; avgLat:=0.0; avgLag:=0.0
-	if len(window)>0 { errorRate=float64(failedInWindow)/float64(len(window)); avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
+	for _, r := range window { sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
+	avgLat:=0.0; avgLag:=0.0
+	if len(window)>0 { avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
 	factors:=make(map[string]float64)
 	var errDeduction float64; if errorRate>0 { errDeduction=errorRate*50.0 }; factors["error_rate"]=errDeduction
 	var latDeduction float64
@@ -329,6 +351,18 @@ func (m *Monitor) computeOverallTrendLocked(nd *nodeData) string {
 func (m *Monitor) getTrendLocked(nd *nodeData, metric string) string {
 	if nd==nil { return "stable" }
 	hist:=nd.history; n:=len(hist); if n<4 { return "stable" }
+	var filtered []checkRecord
+	consec := 0
+	for _, r := range hist {
+		if !r.Success { consec++ } else { consec=0 }
+		isDown := consec >= m.cfg.DownThreshold
+		if !isDown {
+			filtered = append(filtered, r)
+		}
+	}
+	hist = filtered
+	n = len(hist)
+	if n<4 { return "stable" }
 	half:=n/2; older:=hist[:half]; newer:=hist[n-half:]
 	var olderAvg, newerAvg float64
 	switch metric {
@@ -383,10 +417,23 @@ func (m *Monitor) PredictFailure(nodeID string) (FailurePrediction, bool) {
 	windowSize:=m.cfg.WindowSize; histLen:=len(nd.history); startIdx:=0
 	if histLen>windowSize { startIdx=histLen-windowSize }
 	window:=nd.history[startIdx:]
-	failedInWindow:=0; var sumLat,sumLag float64
-	for _, r:=range window { if !r.Success { failedInWindow++ }; sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
-	errorRate:=0.0; avgLat:=0.0; avgLag:=0.0
-	if len(window)>0 { errorRate=float64(failedInWindow)/float64(len(window)); avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
+	var timeWindow []checkRecord
+	if len(nd.history)>0 {
+		cutoff:=nd.lastCheck.Add(-60*time.Second)
+		for _, r:=range nd.history {
+			if !r.Timestamp.Before(cutoff) {
+				timeWindow=append(timeWindow, r)
+			}
+		}
+	}
+	failedInTimeWindow:=0
+	for _, r:=range timeWindow { if !r.Success { failedInTimeWindow++ } }
+	errorRate:=0.0
+	if len(timeWindow)>0 { errorRate=float64(failedInTimeWindow)/float64(len(timeWindow)) }
+	var sumLat,sumLag float64
+	for _, r:=range window { sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
+	avgLat:=0.0; avgLag:=0.0
+	if len(window)>0 { avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
 	var risk RiskLevel; var prob float64
 	if nd.consecutiveFailures>=m.cfg.DownThreshold { risk=RiskCritical; prob=0.95 } else if score<20 { risk=RiskCritical; prob=0.9 } else if score<40 { risk=RiskCritical; prob=0.8 } else if score<50 { risk=RiskHigh; prob=0.7 } else if score<60 { risk=RiskHigh; prob=0.6 } else if score<75 {
 		if trend=="degrading" { risk=RiskMedium; prob=0.4 } else { risk=RiskLow; prob=0.2 }
@@ -423,10 +470,21 @@ func (m *Monitor) GetReliabilityReport() ReliabilityReport {
 		windowSize:=m.cfg.WindowSize; histLen:=len(nd.history); startIdx:=0
 		if histLen>windowSize { startIdx=histLen-windowSize }
 		window:=nd.history[startIdx:]
-		failedInWindow:=0; var sumLat,sumLag float64
-		for _, r:=range window { if !r.Success { failedInWindow++ }; sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
-		errorRate:=0.0; avgLat:=0.0; avgLag:=0.0
-		if len(window)>0 { errorRate=float64(failedInWindow)/float64(len(window)); avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
+		var timeWindow []checkRecord
+		if len(nd.history)>0 {
+			cutoff:=nd.lastCheck.Add(-60*time.Second)
+			for _, r:=range nd.history {
+				if !r.Timestamp.Before(cutoff) { timeWindow=append(timeWindow, r) }
+			}
+		}
+		failedInTimeWindow:=0
+		for _, r:=range timeWindow { if !r.Success { failedInTimeWindow++ } }
+		errorRate:=0.0
+		if len(timeWindow)>0 { errorRate=float64(failedInTimeWindow)/float64(len(timeWindow)) }
+		var sumLat,sumLag float64
+		for _, r:=range window { sumLat+=r.LatencyMs; sumLag+=r.ReplicationLagMs }
+		avgLat:=0.0; avgLag:=0.0
+		if len(window)>0 { avgLat=sumLat/float64(len(window)); avgLag=sumLag/float64(len(window)) }
 		score:=hs.Score; trend:=hs.Trend
 		var risk RiskLevel; var prob float64
 		if nd.consecutiveFailures>=m.cfg.DownThreshold { risk=RiskCritical; prob=0.95 } else if score<20 { risk=RiskCritical; prob=0.9 } else if score<40 { risk=RiskCritical; prob=0.8 } else if score<50 { risk=RiskHigh; prob=0.7 } else if score<60 { risk=RiskHigh; prob=0.6 } else if score<75 {
@@ -479,4 +537,4 @@ func joinList(list []string) string {
 GOCODE
 go mod tidy
 go vet ./... || true
-echo "solution applied"
+echo "solution applied step1"
