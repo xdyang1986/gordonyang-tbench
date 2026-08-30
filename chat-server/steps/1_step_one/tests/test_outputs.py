@@ -1478,3 +1478,42 @@ def test_invalid_rate_burst_args():
         _cli("--messages-per-second", "5", "--burst", "-1", "list-rooms").returncode
         == 2
     )
+
+def test_rate_limit_not_consumed_by_rejected_send():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
+    # prime the bucket with one successful send, then snapshot the file
+    _cli("--messages-per-second", "0.01", "--burst", "3", "send", "general", "alice", "one")
+    before = open(rate_path, "rb").read()
+    # 10 rejected sends: non-member, blank user, missing message
+    for _ in range(10):
+        assert _cli("--messages-per-second", "0.01", "--burst", "3",
+                    "send", "general", "mallory", "hi").returncode == 2
+    assert _cli("--messages-per-second", "0.01", "--burst", "3",
+                "send", "general", "", "hi").returncode == 2
+    assert _cli("--messages-per-second", "0.01", "--burst", "3",
+                "send", "general", "alice").returncode == 2
+    assert open(rate_path, "rb").read() == before, "rejected send must not touch rate_limit.json"
+    # the two remaining tokens must still be there 
+    for i in range(2):
+        assert _cli("--messages-per-second", "0.01", "--burst", "3",
+                    "send", "general", "alice", f"ok{i}").returncode == 0
+    assert _cli("--messages-per-second", "0.01", "--burst", "3",
+                "send", "general", "alice", "over").returncode == 1
+
+
+def test_rate_limit_future_last_refill_clamped():
+    _reset_data()
+    _cli("create-room", "general")
+    _cli("join", "general", "alice")
+    rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
+    future = time.time_ns() + 5_000_000_000
+    _write_with_checksum(rate_path, {"alice": {"tokens": 3, "last_refill": future}})
+    assert _cli("--messages-per-second", "1", "--burst", "10",
+                "send", "general", "alice", "hi").returncode == 0
+    data = json.load(open(rate_path))["data"]
+    assert abs(data["alice"]["tokens"] - 2.0) < 0.01, \
+        f"future last_refill must clamp elapsed to 0, got {data['alice']['tokens']}"
+    assert data["alice"]["last_refill"] <= time.time_ns()

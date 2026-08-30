@@ -801,6 +801,20 @@ func main() {
 					return fmt.Errorf("room not exist")
 				}
 			}
+			room, exists := chat.Rooms[roomID]
+			if !exists {
+				return fmt.Errorf("room not exist")
+			}
+			isMember := false
+			for _, u := range room.Users {
+				if u == userID {
+					isMember = true
+					break
+				}
+			}
+			if !isMember {
+				return fmt.Errorf("user not member")
+			}
 			counter, _, err := loadCounterData(counterPath)
 			if err != nil {
 				return err
@@ -816,6 +830,9 @@ func main() {
 				rl[userID] = bucket
 			}
 			elapsed := float64(now-bucket.LastRefill) / 1e9
+			if elapsed < 0 {
+				elapsed = 0
+			}
 			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
 			bucket.LastRefill = now
 			if bucket.Tokens < 1 {
@@ -823,20 +840,6 @@ func main() {
 				return fmt.Errorf("rate limited")
 			}
 			bucket.Tokens -= 1
-			room, exists := chat.Rooms[roomID]
-			if !exists {
-				return fmt.Errorf("room not exist")
-			}
-			isMember := false
-			for _, u := range room.Users {
-				if u == userID {
-					isMember = true
-					break
-				}
-			}
-			if !isMember {
-				return fmt.Errorf("user not member")
-			}
 			msg := Message{
 				Content:   content,
 				From:      userID,
@@ -962,6 +965,9 @@ func main() {
 				rl[fromUser] = bucket
 			}
 			elapsed := float64(now-bucket.LastRefill) / 1e9
+			if elapsed < 0 {
+				elapsed = 0
+			}
 			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
 			bucket.LastRefill = now
 			if bucket.Tokens < 1 {

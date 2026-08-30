@@ -65,13 +65,14 @@ Global flags: `--messages-per-second <float>` (default 5) and `--burst <int>` (d
 Token bucket per user, single bucket shared across all message sends (`send` and `send-private` share the same quota per user): if a user is rate-limited for `send`, their `send-private` is also rate-limited.
 
 - State: per user `tokens = burst` initially, `last_refill = now nano`
-- Refill: `elapsed = (now - last_refill)/1e9` seconds, `tokens = min(burst, tokens + elapsed*rate)`, update `last_refill = now`
+- Refill: `elapsed = max(0, (now - last_refill)/1e9)` seconds, `tokens = min(burst, tokens + elapsed*rate)`, update `last_refill = now`
 - Consume: if `tokens >= 1`, `tokens -= 1`, allow and persist; else fail rate-limited and persist the refilled tokens
 - Per-user independent (bob succeeds when alice is limited)
 - Persistence: `rate_limit.json`, in the same directory as `--data`, with the same `{"data": ..., "checksum": ...}` wrapper, atomic CreateTemp+Rename, and the same corruption handling as the other files. Corruption → reset the bucket, so the next send succeeds.
 - `Data = {"<userID>": {"tokens": float, "last_refill": int64}}`, empty object `{}` when no user has sent yet
 - Exit semantics: if rate-limited, exit code 1, stderr contains case-insensitive "rate limit", no stdout, and the global `next_id` counter must NOT be incremented
 - `--messages-per-second` may be fractional (e.g. 0.05 means 1 token per 20s), so use float64
+- A token is consumed only when a message is actually appended. All exit-2 validation for a send (blank IDs, missing message, non-member, nonexistent or tombstoned room) is decided before the bucket is read, and a rejected send leaves `rate_limit.json` byte-identical.
 
 ### Tombstone deletion
 
