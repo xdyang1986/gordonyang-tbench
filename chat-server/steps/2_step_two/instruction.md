@@ -154,7 +154,7 @@ Help must contain keywords: `create-room`, `delete-room`, `purge`, `list-rooms`,
 
 ### Shard Assignment Stability (Sticky)
 
-A room's shard is decided once, at creation, and recorded in the store. `get-shard-id`, `get-shard-path`, `distribution`, and all read/write paths must use the recorded assignment for existing rooms. If the config's shard weights or shard set change afterwards, existing rooms MUST stay on their original shard — they are never rehashed or migrated. Only rooms created after the change use the new weights. `global:` rooms remain in all shards. The assignment must survive restarts and be included in snapshots.
+A room's shard is decided once, at creation, and recorded in the store. `get-shard-id`, `get-shard-path`, `distribution`, and all read/write paths must use the recorded assignment for existing rooms. If the config's shard weights or shard set change afterwards, existing rooms MUST stay on their original shard — they are never rehashed or migrated. Only rooms created after the change use the new weights. A `global:` room is replicated to the shard set present when it was created. Shards added later receive no backfill, and `get-shard-path`, `list-users`, `get-messages`, and `distribution` for that room cover only its recorded shards. `get-shard-id` still prints -1. The assignment must survive restarts and be included in snapshots.
 
 ### Pagination
 

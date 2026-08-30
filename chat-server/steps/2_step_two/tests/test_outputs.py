@@ -1641,3 +1641,30 @@ def test_blank_id_precedence_sharded():
     assert _cli("get-shard-id", " ").returncode == 2
     assert _cli("get-shard-path", "").returncode == 2
     assert _cli("get-shard-path", " ").returncode == 2
+
+def test_global_room_pinned_to_creation_shard_set():
+    _reset_sharded(shard_count=3, weights=[1, 1, 1])
+    _cli("create-room", "global:announce")
+    _cli("join", "global:announce", "alice")
+    _cli("send", "global:announce", "alice", "hello all")
+    cfg = _load_config()
+    old_paths = sorted(s["path"] for s in cfg["shards"])
+    # grow to 5 shards
+    for i in (3, 4):
+        p = f"/app/data/shard_{i}.json"
+        _write_with_checksum(p, {"rooms": {}, "deleted_rooms": {}, "seen_users": {}})
+        cfg["shards"].append({"id": i, "path": p, "weight": 1})
+    cfg["shard_count"] = 5
+    json.dump(cfg, open(CONFIG_PATH, "w"), indent=2)
+
+    assert int(_cli("get-shard-id", "global:announce").stdout.strip()) == -1
+    got = sorted(_cli("get-shard-path", "global:announce").stdout.strip().split(","))
+    assert got == old_paths, f"global room must stay on its creation shard set: {got}"
+    assert json.loads(_cli("list-users", "global:announce").stdout.strip()) == ["alice"]
+    assert len(json.loads(_cli("get-messages", "global:announce").stdout.strip())) == 1
+    for i in (3, 4):
+        d = json.load(open(f"/app/data/shard_{i}.json"))["data"]
+        assert "global:announce" not in d.get("rooms", {})
+    # a NEW global room uses all five
+    _cli("create-room", "global:second")
+    assert len(_cli("get-shard-path", "global:second").stdout.strip().split(",")) == 5

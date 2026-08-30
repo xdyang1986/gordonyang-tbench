@@ -84,6 +84,7 @@ type Config struct {
 }
 
 type AssignmentsData map[string]int
+type GlobalAssignmentsData map[string][]int
 
 // File data types for sharded mode, alphabetical order
 
@@ -893,6 +894,49 @@ func loadAssignmentsData(path string) (AssignmentsData, bool, error) {
 
 // ---------- Lock helpers ----------
 
+func loadGlobalAssignmentsData(path string) (GlobalAssignmentsData, bool, error) {
+	empty := GlobalAssignmentsData{}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return empty, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return empty, false, err
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return empty, false, nil
+	}
+	var wrapper struct {
+		Data     GlobalAssignmentsData `json:"data"`
+		Checksum string              `json:"checksum"`
+	}
+	if err := json.Unmarshal(b, &wrapper); err != nil {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: global assignments file %s corrupt, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if wrapper.Checksum == "" {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: global assignments file %s missing checksum, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if computeChecksumGeneric(wrapper.Data) != wrapper.Checksum {
+		backup := fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())
+		_ = copyFile(path, backup)
+		fmt.Fprintf(os.Stderr, "Warning: global assignments file %s checksum mismatch, backup to %s\n", path, backup)
+		_ = atomicWriteGeneric(path, empty)
+		return empty, true, nil
+	}
+	if wrapper.Data == nil {
+		wrapper.Data = GlobalAssignmentsData{}
+	}
+	return wrapper.Data, false, nil
+}
+
 func acquireLock(lockPath string) error {
 	for i := 0; i < 2000; i++ {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
@@ -1020,22 +1064,51 @@ func getAssignmentsPath(cfg Config) string {
 	return "/app/data/assignments.json"
 }
 
+func getGlobalAssignmentsPath() string {
+	return "/app/data/global_assignments.json"
+}
+
+func getPinnedShardsForGlobal(roomID string, cfg Config) []Shard {
+	gPath := getGlobalAssignmentsPath()
+	gAssign, _, _ := loadGlobalAssignmentsData(gPath)
+	if gAssign != nil {
+		if pinnedIDs, ok := gAssign[roomID]; ok && len(pinnedIDs) > 0 {
+			idSet := map[int]bool{}
+			for _, id := range pinnedIDs {
+				idSet[id] = true
+			}
+			var result []Shard
+			for _, s := range cfg.Shards {
+				if idSet[s.ID] {
+					result = append(result, s)
+				}
+			}
+			if len(result) > 0 {
+				return result
+			}
+		}
+	}
+	return cfg.Shards
+}
+
 func getShardPathForRoom(roomID string, cfg Config) (string, error) {
 	if isGlobalRoom(roomID) {
+		shards := getPinnedShardsForGlobal(roomID, cfg)
 		paths := []string{}
-		sorted := make([]Shard, len(cfg.Shards))
-		copy(sorted, cfg.Shards)
+		sorted := make([]Shard, len(shards))
+		copy(sorted, shards)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 		for _, s := range sorted {
 			paths = append(paths, s.Path)
 		}
+		sort.Strings(paths)
 		return strings.Join(paths, ","), nil
 	}
 	// Sticky assignment: if room already assigned, use recorded shard
 	assignmentsPath := getAssignmentsPath(cfg)
 	if assignments, _, _ := loadAssignmentsData(assignmentsPath); assignments != nil {
 		if assignedID, ok := assignments[roomID]; ok {
-			for _, s := range cfg.Shards {
+			for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 				if s.ID == assignedID {
 					return s.Path, nil
 				}
@@ -1043,7 +1116,7 @@ func getShardPathForRoom(roomID string, cfg Config) (string, error) {
 		}
 	}
 	sid := hashRoomWeighted(roomID, cfg)
-	for _, s := range cfg.Shards {
+	for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 		if s.ID == sid {
 			return s.Path, nil
 		}
@@ -1092,15 +1165,16 @@ func checkRateLimit(userID string, cfg Config, rateLimitPath string) (bool, erro
 		}
 		state[userID] = bkt
 	}
-	// refill
+	// refill with clamp D2
 	elapsedSec := float64(now-bkt.LastRefill) / 1e9
-	if elapsedSec > 0 {
-		bkt.Tokens += elapsedSec * rate
-		if bkt.Tokens > float64(burst) {
-			bkt.Tokens = float64(burst)
-		}
-		bkt.LastRefill = now
+	if elapsedSec < 0 {
+		elapsedSec = 0
 	}
+	bkt.Tokens += elapsedSec * rate
+	if bkt.Tokens > float64(burst) {
+		bkt.Tokens = float64(burst)
+	}
+	bkt.LastRefill = now
 	if bkt.Tokens < 1.0 {
 		// rate limited, persist refilled tokens
 		state[userID] = bkt
@@ -1711,6 +1785,20 @@ func main() {
 					return fmt.Errorf("room not exist")
 				}
 			}
+			room, exists := chat.Rooms[roomID]
+			if !exists {
+				return fmt.Errorf("room not exist")
+			}
+			isMember := false
+			for _, u := range room.Users {
+				if u == userID {
+					isMember = true
+					break
+				}
+			}
+			if !isMember {
+				return fmt.Errorf("user not member")
+			}
 			counter, _, err := loadCounterData(counterPath)
 			if err != nil {
 				return err
@@ -1726,6 +1814,9 @@ func main() {
 				rl[userID] = bucket
 			}
 			elapsed := float64(now-bucket.LastRefill) / 1e9
+			if elapsed < 0 {
+				elapsed = 0
+			}
 			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
 			bucket.LastRefill = now
 			if bucket.Tokens < 1 {
@@ -1733,20 +1824,6 @@ func main() {
 				return fmt.Errorf("rate limited")
 			}
 			bucket.Tokens -= 1
-			room, exists := chat.Rooms[roomID]
-			if !exists {
-				return fmt.Errorf("room not exist")
-			}
-			isMember := false
-			for _, u := range room.Users {
-				if u == userID {
-					isMember = true
-					break
-				}
-			}
-			if !isMember {
-				return fmt.Errorf("user not member")
-			}
 			msg := Message{
 				Content:   content,
 				From:      userID,
@@ -2056,8 +2133,21 @@ func main() {
 		}
 		err := withGlobalLock(func() error {
 			if isGlobalRoom(roomID) {
-				// create in all shards
-				for _, s := range cfg.Shards {
+				// D4: record creation-time shard set
+				gPath := getGlobalAssignmentsPath()
+				gAssign, _, _ := loadGlobalAssignmentsData(gPath)
+				if gAssign == nil {
+					gAssign = GlobalAssignmentsData{}
+				}
+				if _, exists := gAssign[roomID]; !exists {
+					var ids []int
+					for _, s := range cfg.Shards {
+						ids = append(ids, s.ID)
+					}
+					gAssign[roomID] = ids
+					_ = atomicWriteGeneric(gPath, gAssign)
+				}
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2114,7 +2204,7 @@ func main() {
 		err := withGlobalLock(func() error {
 			if isGlobalRoom(roomID) {
 				deleted = false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2195,7 +2285,12 @@ func main() {
 		err := withGlobalLock(func() error {
 			// Remove tombstone from whichever shard holds it, and remove sticky assignment
 			had = false
-			for _, s := range cfg.Shards {
+			// For global rooms, use pinned shards
+			shardsToCheck := cfg.Shards
+			if isGlobalRoom(roomID) {
+				shardsToCheck = getPinnedShardsForGlobal(roomID, cfg)
+			}
+			for _, s := range shardsToCheck {
 				data, _, err := loadShardFileData(s.Path)
 				if err != nil {
 					return err
@@ -2218,6 +2313,16 @@ func main() {
 					delete(assignments, roomID)
 					had = true
 					_ = atomicWriteGeneric(assignmentsPath, assignments)
+				}
+			}
+			// Remove global assignment for global rooms
+			gPath := getGlobalAssignmentsPath()
+			gAssign, _, _ := loadGlobalAssignmentsData(gPath)
+			if gAssign != nil {
+				if _, ok := gAssign[roomID]; ok {
+					delete(gAssign, roomID)
+					had = true
+					_ = atomicWriteGeneric(gPath, gAssign)
 				}
 			}
 			return nil
@@ -2274,7 +2379,7 @@ func main() {
 			// check room exists
 			if isGlobalRoom(roomID) {
 				found := false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2286,7 +2391,7 @@ func main() {
 				if !found {
 					return fmt.Errorf("room not exist")
 				}
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2386,7 +2491,7 @@ func main() {
 		err := withGlobalLock(func() error {
 			if isGlobalRoom(roomID) {
 				foundAny := false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2398,7 +2503,7 @@ func main() {
 				if !foundAny {
 					return nil
 				}
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2461,7 +2566,7 @@ func main() {
 			if isGlobalRoom(roomID) {
 				set := map[string]bool{}
 				found := false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2530,9 +2635,79 @@ func main() {
 		roomID := cmdArgs[0]
 		userID := cmdArgs[1]
 		content := strings.Join(cmdArgs[2:], " ")
+		if strings.TrimSpace(content) == "" {
+			fmt.Fprintln(os.Stderr, "missing message")
+			os.Exit(2)
+		}
 		var msgOut Message
 		err := withGlobalLock(func() error {
-			// rate limit
+			// Validation before rate limiting - D1
+			if isGlobalRoom(roomID) {
+				found := false
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
+					data, _, err := loadShardFileData(s.Path)
+					if err != nil {
+						return err
+					}
+					if _, exists := data.Rooms[roomID]; exists {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("room not exist")
+				}
+				isMember := false
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
+					data, _, err := loadShardFileData(s.Path)
+					if err != nil {
+						return err
+					}
+					if room, exists := data.Rooms[roomID]; exists {
+						for _, u := range room.Users {
+							if u == userID {
+								isMember = true
+								break
+							}
+						}
+					}
+					if isMember {
+						break
+					}
+				}
+				if !isMember {
+					return fmt.Errorf("user not member")
+				}
+			} else {
+				shardPath, err := getShardPathForRoom(roomID, cfg)
+				if err != nil {
+					return err
+				}
+				data, _, err := loadShardFileData(shardPath)
+				if err != nil {
+					return err
+				}
+				if data.DeletedRooms != nil {
+					if _, isDeleted := data.DeletedRooms[roomID]; isDeleted {
+						return fmt.Errorf("room not exist")
+					}
+				}
+				room, exists := data.Rooms[roomID]
+				if !exists {
+					return fmt.Errorf("room not exist")
+				}
+				isMember := false
+				for _, u := range room.Users {
+					if u == userID {
+						isMember = true
+						break
+					}
+				}
+				if !isMember {
+					return fmt.Errorf("user not member")
+				}
+			}
+			// rate limit after validation
 			allowed, err := checkRateLimit(userID, cfg, rateLimitPath)
 			if err != nil {
 				return err
@@ -2553,7 +2728,7 @@ func main() {
 			if isGlobalRoom(roomID) {
 				// check existence at least in one shard
 				found := false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2568,7 +2743,7 @@ func main() {
 				}
 				// check membership across shards union for global rooms
 				isMember := false
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2596,7 +2771,7 @@ func main() {
 					Timestamp: time.Now().UnixNano(),
 				}
 				msgOut = msg
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -2733,7 +2908,7 @@ func main() {
 				// collect from all shards, dedup by ID
 				all := []Message{}
 				seenIDs := map[int64]bool{}
-				for _, s := range cfg.Shards {
+				for _, s := range getPinnedShardsForGlobal(roomID, cfg) {
 					data, _, err := loadShardFileData(s.Path)
 					if err != nil {
 						return err
@@ -3178,6 +3353,8 @@ func main() {
 				combined["users"] = usersData
 				assignmentsData, _, _ := loadAssignmentsData(getAssignmentsPath(cfg))
 				combined["assignments"] = assignmentsData
+				globalAssignData, _, _ := loadGlobalAssignmentsData(getGlobalAssignmentsPath())
+				combined["global_assignments"] = globalAssignData
 				// ops log content
 				opsEntries, _ := readOpsLog(opsLogPath)
 				combined["ops_log"] = opsEntries
@@ -3206,7 +3383,7 @@ func main() {
 					}
 				}
 			}
-			for _, p := range []string{privatePath, presencePath, rateLimitPath, counterPath, usersPath, opsLogPath, getAssignmentsPath(cfg)} {
+			for _, p := range []string{privatePath, presencePath, rateLimitPath, counterPath, usersPath, opsLogPath, getAssignmentsPath(cfg), getGlobalAssignmentsPath()} {
 				if p == "" {
 					continue
 				}
@@ -3319,6 +3496,10 @@ func main() {
 						if err := copyFile(src, getAssignmentsPath(cfg)); err != nil {
 							return err
 						}
+					case "global_assignments.json":
+						if err := copyFile(src, getGlobalAssignmentsPath()); err != nil {
+							return err
+						}
 					case "chat.json":
 						// single mode chat.json not needed for sharded restore, ignore if present in backup
 					}
@@ -3381,6 +3562,12 @@ func main() {
 				var assignments AssignmentsData
 				if err := json.Unmarshal(raw, &assignments); err == nil {
 					_ = atomicWriteGeneric(getAssignmentsPath(cfg), assignments)
+				}
+			}
+			if raw, ok := combined["global_assignments"]; ok {
+				var gAssign GlobalAssignmentsData
+				if err := json.Unmarshal(raw, &gAssign); err == nil {
+					_ = atomicWriteGeneric(getGlobalAssignmentsPath(), gAssign)
 				}
 			}
 			if raw, ok := combined["ops_log"]; ok {
@@ -3458,6 +3645,7 @@ write_with_checksum("/app/data/rate_limit.json", {})
 write_with_checksum("/app/data/counter.json", {"next_id": 1})
 write_with_checksum("/app/data/users.json", {})
 write_with_checksum("/app/data/assignments.json", {})
+write_with_checksum("/app/data/global_assignments.json", {})
 open("/app/data/chat_ops.log","w").write("")
 write_with_checksum("/app/data/chat.json", {"rooms": {}, "deleted_rooms": {}, "seen_users": {}})
 print("Reset sharded data + Turn1 split")
