@@ -528,7 +528,9 @@ def test_atomic_write_no_torn_json_sharded():
         time.sleep(0.0005)
     for proc in procs:
         proc.wait(timeout=180)
-    assert torn == 0, f"Sharded atomicity violated: {torn} torn reads during concurrent burst - must use CreateTemp+Rename, truncate-and-write causes torn JSON"
+    assert torn == 0, (
+        f"Sharded atomicity violated: {torn} torn reads during concurrent burst - must use CreateTemp+Rename, truncate-and-write causes torn JSON"
+    )
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
@@ -536,6 +538,7 @@ def test_atomic_write_no_torn_json_sharded():
         f"Expected 30 msgs after concurrent 2KB sharded, got {len(msgs)}"
     )
     import glob as _glob
+
     tmp_residue = _glob.glob("/app/data/tmp-*.json") + _glob.glob(
         "/tmp/codimango/tmp-*.json"
     )
@@ -571,7 +574,9 @@ def test_rate_limit_rejection_exit1_no_side_effects():
     assert len(json.loads(_cli("get-messages", "general").stdout.strip())) == 2
     r3 = _cli("send", "general", "alice", "third")
     assert r3.returncode == 1
-    assert r3.stdout.strip() == "", f"rate-limited must have empty stdout, got {r3.stdout!r}"
+    assert r3.stdout.strip() == "", (
+        f"rate-limited must have empty stdout, got {r3.stdout!r}"
+    )
     assert "rate limit" in r3.stderr.lower()
     assert _read_counter() == cnt_after_2
     assert _read_ops_log_count() == ops_after_2
@@ -579,7 +584,9 @@ def test_rate_limit_rejection_exit1_no_side_effects():
     assert _cli("send", "general", "bob", "bob first").returncode == 0
     r_priv = _cli("send-private", "alice", "bob", "should fail")
     assert r_priv.returncode == 1
-    assert r_priv.stdout.strip() == "", f"rate-limited private must have empty stdout, got {r_priv.stdout!r}"
+    assert r_priv.stdout.strip() == "", (
+        f"rate-limited private must have empty stdout, got {r_priv.stdout!r}"
+    )
     assert "rate limit" in r_priv.stderr.lower()
 
 
@@ -1537,7 +1544,9 @@ def test_global_broadcast_rate_limit_single_token_cost():
         assert {m["id"] for m in msgs} == {id1, id2}
     r3 = _cli("send", "global:rate", "alice", "third should be limited")
     assert r3.returncode == 1
-    assert r3.stdout.strip() == "", f"rate-limited global must have empty stdout, got {r3.stdout!r}"
+    assert r3.stdout.strip() == "", (
+        f"rate-limited global must have empty stdout, got {r3.stdout!r}"
+    )
     assert "rate limit" in r3.stderr.lower()
     # No extra messages added on rate-limited attempt
     assert len(json.loads(_cli("get-messages", "global:rate").stdout.strip())) == 2
@@ -1561,7 +1570,9 @@ def test_global_broadcast_rate_limit_atomic_no_partial():
     # Second send should be rate-limited (burst1 drained)
     r2 = _cli("send", "global:atomic", "alice", "second should fail")
     assert r2.returncode == 1
-    assert r2.stdout.strip() == "", f"rate-limited must have empty stdout, got {r2.stdout!r}"
+    assert r2.stdout.strip() == "", (
+        f"rate-limited must have empty stdout, got {r2.stdout!r}"
+    )
     assert "rate limit" in r2.stderr.lower()
     # Shards must be unchanged byte-identical
     for s in cfg["shards"]:
@@ -1589,11 +1600,15 @@ def test_global_broadcast_rate_limit_shared_with_private():
     # Both tokens consumed, third attempt (either type) must be rate-limited
     r_g = _cli("send", "global:shared", "alice", "global 2 should fail")
     assert r_g.returncode == 1
-    assert r_g.stdout.strip() == "", f"rate-limited global must have empty stdout, got {r_g.stdout!r}"
+    assert r_g.stdout.strip() == "", (
+        f"rate-limited global must have empty stdout, got {r_g.stdout!r}"
+    )
     assert "rate limit" in r_g.stderr.lower()
     r_p = _cli("send-private", "alice", "bob", "private 2 should fail")
     assert r_p.returncode == 1
-    assert r_p.stdout.strip() == "", f"rate-limited private must have empty stdout, got {r_p.stdout!r}"
+    assert r_p.stdout.strip() == "", (
+        f"rate-limited private must have empty stdout, got {r_p.stdout!r}"
+    )
     assert "rate limit" in r_p.stderr.lower()
     # Bob's bucket is independent
     assert (
@@ -1656,6 +1671,7 @@ def test_blank_id_precedence_sharded():
     assert _cli("get-shard-path", "").returncode == 2
     assert _cli("get-shard-path", " ").returncode == 2
 
+
 def test_global_room_pinned_to_creation_shard_set():
     _reset_sharded(shard_count=3, weights=[1, 1, 1])
     _cli("create-room", "global:announce")
@@ -1683,12 +1699,17 @@ def test_global_room_pinned_to_creation_shard_set():
     _cli("create-room", "global:second")
     assert len(_cli("get-shard-path", "global:second").stdout.strip().split(",")) == 5
 
+
 def test_empty_containers_never_null_sharded():
     _reset_sharded()
+
     def _expect_empty_array(*args):
         r = _cli(*args)
         assert r.returncode == 0, f"{args} exited {r.returncode}"
-        assert r.stdout.strip() == "[]", f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+        assert r.stdout.strip() == "[]", (
+            f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+        )
+
     _expect_empty_array("list-rooms")
     _expect_empty_array("list-online")
     _expect_empty_array("list-all-users")
@@ -1697,3 +1718,96 @@ def test_empty_containers_never_null_sharded():
     out = _cli("distribution").stdout.strip()
     assert out != "null", "distribution must print a JSON object when empty, not null"
     assert json.loads(out) == {} or isinstance(json.loads(out), dict)
+
+
+def test_snapshot_preserves_sticky_and_global_pinned():
+    # D5: assignments and global_assignments must survive snapshot/restore, sticky must be preserved across restore
+    _reset_sharded(shard_count=4, weights=[1, 2, 1, 1])
+    rooms = [f"snap-sticky-{i}" for i in range(15)]
+    for r in rooms:
+        assert _cli("create-room", r).returncode == 0
+        _cli("join", r, "alice")
+        _cli("send", r, "alice", f"msg in {r}")
+    old_ids = {r: int(_cli("get-shard-id", r).stdout.strip()) for r in rooms}
+    # global rooms
+    _cli("create-room", "global:snap")
+    _cli("join", "global:snap", "bob")
+    _cli("send", "global:snap", "bob", "global msg")
+    cfg_before = _load_config()
+    old_global_paths = sorted(
+        _cli("get-shard-path", "global:snap").stdout.strip().split(",")
+    )
+    # snapshot dir mode – must include assignments and global_assignments per D5 spec
+    backup_dir = "/tmp/codimango/snap_sticky_test"
+    if os.path.exists(backup_dir):
+        shutil.rmtree(backup_dir)
+    assert _cli("snapshot", backup_dir).returncode == 0
+    assert os.path.exists(os.path.join(backup_dir, "assignments.json")), (
+        "dir snapshot must include assignments.json (sticky must survive)"
+    )
+    assert os.path.exists(os.path.join(backup_dir, "global_assignments.json")), (
+        "dir snapshot must include global_assignments.json (pinned must survive)"
+    )
+    assert os.path.exists(os.path.join(backup_dir, "config.json")), (
+        "dir snapshot must include config.json"
+    )
+    # verify assignments file has wrapper checksum
+    for fname in ["assignments.json", "global_assignments.json"]:
+        p = os.path.join(backup_dir, fname)
+        with open(p) as f:
+            obj = json.load(f)
+            assert "data" in obj and "checksum" in obj, (
+                f"{fname} in backup must have wrapper checksum"
+            )
+    # Mutate after snapshot: create new rooms, delete some files to simulate crash
+    for r in ["post-snap-1", "post-snap-2"]:
+        _cli("create-room", r)
+    # Remove assignments files to ensure restore brings them back
+    for extra in ["/app/data/assignments.json", "/app/data/global_assignments.json"]:
+        try:
+            os.remove(extra)
+        except:
+            pass
+    # Restore dir mode
+    assert _cli("restore", backup_dir).returncode == 0
+    # After restore, post-snap rooms must be gone, old rooms must stay on original shards
+    all_rooms = json.loads(_cli("list-rooms").stdout.strip())
+    assert "post-snap-1" not in all_rooms and "post-snap-2" not in all_rooms, (
+        "post-snapshot rooms must be gone after restore"
+    )
+    for r in rooms:
+        nid = int(_cli("get-shard-id", r).stdout.strip())
+        assert nid == old_ids[r], (
+            f"room {r} migrated after restore: was {old_ids[r]} now {nid} – assignments must survive"
+        )
+        msgs = json.loads(_cli("get-messages", r).stdout.strip())
+        assert len(msgs) == 1 and msgs[0]["content"] == f"msg in {r}"
+    # Global pinned must survive restore
+    assert int(_cli("get-shard-id", "global:snap").stdout.strip()) == -1
+    got_paths = sorted(_cli("get-shard-path", "global:snap").stdout.strip().split(","))
+    assert got_paths == old_global_paths, (
+        f"global pinned path changed after restore: {got_paths} vs {old_global_paths}"
+    )
+    # File mode snapshot must also include assignments
+    backup_file = "/tmp/codimango/snap_sticky_file.json"
+    if os.path.exists(backup_file):
+        os.remove(backup_file)
+    assert _cli("snapshot", backup_file).returncode == 0
+    with open(backup_file) as f:
+        combined = json.load(f)
+        assert "assignments" in combined, "file snapshot must include assignments key"
+        assert "global_assignments" in combined, (
+            "file snapshot must include global_assignments key"
+        )
+        assert "counter" in combined and combined["counter"]["next_id"] > 1
+    # After file restore, counter exactness + assignments preserved
+    _cli("create-room", "after-file-snap")
+    assert _cli("restore", backup_file).returncode == 0
+    assert "after-file-snap" not in json.loads(_cli("list-rooms").stdout.strip())
+    # Counter must be exact snapshot value
+    cnt_before = combined["counter"]["next_id"]
+    # Next send should get id == cnt_before
+    _cli("create-room", "check-counter")
+    _cli("join", "check-counter", "alice")
+    r = _cli("send", "check-counter", "alice", "counter check")
+    assert json.loads(r.stdout.strip())["id"] == cnt_before
