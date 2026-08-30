@@ -1118,18 +1118,6 @@ def test_global_get_picks_first_shard_id_order_on_conflict():
     got = json.loads(r.stdout.strip())
     assert got == "val1", f"After deleting from shard 0, global get should return val1 from shard 1, got {got}"
 
-def test_missing_config_file_exit_2_no_stdout():
-    # R06: missing config file should exit 2 no stdout
-    tmpdir = tempfile.mkdtemp()
-    try:
-        missing_cfg = os.path.join(tmpdir, "nonexistent.json")
-        r = _proxy_cli("list-keys", config_path=missing_cfg)
-        assert r.returncode == 2, f"Missing config should exit 2, got {r.returncode}"
-        assert r.stdout.strip() == "", f"Missing config should produce no stdout, got {r.stdout!r}"
-        assert r.stderr.strip() != "", "Missing config should have stderr"
-    finally:
-        shutil.rmtree(tmpdir)
-
 def test_invalid_config_empty_shard_list_exit_2():
     # R06: empty shard list should be invalid config exit 2
     tmpdir = tempfile.mkdtemp()

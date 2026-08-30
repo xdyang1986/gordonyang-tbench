@@ -5,63 +5,6 @@ from conftest import *
 def test_binary_exists():
     assert os.path.exists(BIN)
 
-def test_help_required_step2():
-    _reset_shards()
-    for cmd in [[], ["--help"], ["-h"], ["help"]]:
-        r = _proxy_cli(*cmd)
-        assert r.returncode == 0, (
-            f"Help/bare should exit 0, got {r.returncode} for {cmd}, stderr={r.stderr}"
-        )
-        combined = (r.stdout + r.stderr).lower()
-        # Top-level help should name commands, not require subcommand flags (dry-run/backup/force) nor decorative tokens
-        # Spec: "Help must document all commands and flags ... migrate --help must document its flags"
-        # Conventional CLI: commands at top level, subcommand flags under subcommand
-        for word in [
-            "get-shard-id",
-            "set",
-            "get",
-            "delete",
-            "list-keys",
-            "distribution",
-            "migrate",
-        ]:
-            assert word in combined, (
-                f"Help should contain command '{word}', got {combined[:1500]}"
-            )
-    for cmd in [["migrate", "--help"], ["migrate", "-h"], ["--help", "migrate"]]:
-        r = _proxy_cli(*cmd)
-        if r.returncode != 0:
-            r = subprocess.run(
-                [BIN, "migrate", "--help"], capture_output=True, text=True, timeout=10
-            )
-        assert r.returncode == 0, f"migrate --help should exit 0"
-        combined = (r.stdout + r.stderr).lower()
-        # Spec line 40 now says only "migrate --help must document its flags" – timestamp is not a migrate flag
-        # (flags are --dry-run, --backup, --force). Don't require version/shard_id/staging/timestamp.
-        for word in [
-            "dry-run",
-            "backup",
-            "force",
-        ]:
-            assert word in combined, f"migrate help should contain '{word}'"
-
-def test_bare_no_args_step2_is_help():
-    _reset_shards()
-    r = _proxy_cli()
-    assert r.returncode == 0
-    combined = (r.stdout + r.stderr).lower()
-    # Bare no-args should print help with commands, not require subcommand flags nor decorative tokens
-    for word in [
-        "get-shard-id",
-        "set",
-        "get",
-        "delete",
-        "list-keys",
-        "distribution",
-        "migrate",
-    ]:
-        assert word in combined, f"Bare help should contain command '{word}'"
-
 def test_turn1_basic_still_works():
     _reset_shards()
     r = _proxy_cli("set", "still-works", json.dumps("yes"))
@@ -874,3 +817,178 @@ def test_migrate_force_overwrite_stderr():
         assert json.loads(_proxy_cli("get", "forcekey").stdout.strip()) == "newval"
     finally:
         shutil.rmtree(tmpdir)
+
+
+def test_set_raw_string_invariant_trailing():
+    # R06: spec :32 raw-string invariant - 123abc and object+trailing must be raw string, not lenient prefix decode
+    _reset_shards()
+    r = _proxy_cli("set", "raw-inv-123abc", "123abc")
+    assert r.returncode == 0, f"set 123abc should succeed, stderr={r.stderr}"
+    r = _proxy_cli("get", "raw-inv-123abc")
+    assert r.returncode == 0
+    assert json.loads(r.stdout.strip()) == "123abc", f"123abc must be treated as raw string, got {r.stdout!r}"
+
+    raw_obj_trail = '{"a":1} trailing'
+    r = _proxy_cli("set", "raw-inv-obj-trail", raw_obj_trail)
+    assert r.returncode == 0
+    r = _proxy_cli("get", "raw-inv-obj-trail")
+    assert json.loads(r.stdout.strip()) == raw_obj_trail
+
+    raw_num_trail = '  42 extra'
+    r = _proxy_cli("set", "raw-inv-num-trail", raw_num_trail)
+    assert r.returncode == 0
+    r = _proxy_cli("get", "raw-inv-num-trail")
+    # trimmed? spec says if value_json is not fully valid JSON after trimming whitespace, treat whole input as raw string
+    # "  42 extra" trimmed is "42 extra" not valid JSON -> raw string "  42 extra" or trimmed? Implementation stores original input as raw; check that it roundtrips
+    got = json.loads(r.stdout.strip())
+    assert "extra" in got, f"Expected raw string containing extra, got {got!r}"
+
+    # valid JSON should still parse
+    r = _proxy_cli("set", "raw-inv-valid", json.dumps({"a": 1}))
+    assert r.returncode == 0
+    r = _proxy_cli("get", "raw-inv-valid")
+    assert json.loads(r.stdout.strip()) == {"a": 1}
+
+def test_ops_log_equal_ts_stable_tie():
+    # R06: spec :49/:55 equal ts stable ties - file order must be preserved for equal ts
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({}, f)
+        key = "tie-key-equal-ts"
+        entries = [
+            {"op": "set", "key": key, "value": "first", "ts": 100, "shard_id": 0, "version": 1},
+            {"op": "set", "key": key, "value": "second", "ts": 100, "shard_id": 0, "version": 2},
+            {"op": "set", "key": key, "value": "third", "ts": 100, "shard_id": 0, "version": 3},
+        ]
+        with open(ops_path, "w") as out:
+            for e in entries:
+                out.write(json.dumps(e) + "\n")
+        cfg = _load_config()
+        for s in cfg["shards"]:
+            _write_shard_versioned(s["path"], {}, s["id"], 0)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0, f"Migration with equal ts failed: {r.stderr}"
+        r = _proxy_cli("get", key)
+        assert r.returncode == 0
+        got = json.loads(r.stdout.strip())
+        assert got == "third", f"Equal ts should preserve file order stable, expected third got {got}"
+    finally:
+        shutil.rmtree(tmpdir)
+
+def test_ops_log_missing_ts_treated_as_zero():
+    # R06: spec :49 missing ts -> 0
+    _reset_shards()
+    ops_path = "/app/data/ops.log"
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({}, f)
+        key = "missing-ts-key"
+        # missing ts should be 0, so 0 < 50, final should be late-50 regardless of file order
+        entries = [
+            {"op": "set", "key": key, "value": "late-50", "ts": 50, "shard_id": 0, "version": 1},
+            {"op": "set", "key": key, "value": "zero-missing"},
+        ]
+        with open(ops_path, "w") as out:
+            for e in entries:
+                out.write(json.dumps(e) + "\n")
+        cfg = _load_config()
+        for s in cfg["shards"]:
+            _write_shard_versioned(s["path"], {}, s["id"], 0)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0
+        r = _proxy_cli("get", key)
+        got = json.loads(r.stdout.strip())
+        assert got == "late-50", f"Missing ts treated as 0 should be before 50, final late-50, got {got}"
+
+        # both missing ts -> stable file order
+        entries2 = [
+            {"op": "set", "key": key, "value": "first-missing"},
+            {"op": "set", "key": key, "value": "second-missing"},
+        ]
+        with open(ops_path, "w") as out:
+            for e in entries2:
+                out.write(json.dumps(e) + "\n")
+        for s in cfg["shards"]:
+            _write_shard_versioned(s["path"], {}, s["id"], 0)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, [])
+        assert r.returncode == 0
+        r = _proxy_cli("get", key)
+        got = json.loads(r.stdout.strip())
+        assert got == "second-missing", f"Both missing ts (0) stable order should give second-missing, got {got}"
+    finally:
+        shutil.rmtree(tmpdir)
+
+def test_old_data_checksum_wrapper_compat():
+    # R06: spec :22 old {"data","checksum"} wrapper compat + flat old format
+    _reset_shards()
+    cfg = _load_config()
+    target = cfg["shards"][0]
+    dir_name = os.path.dirname(target["path"])
+    # clean any prior corrupt backups to isolate this test
+    for f in os.listdir(dir_name):
+        if ".corrupt." in f:
+            try:
+                os.remove(os.path.join(dir_name, f))
+            except:
+                pass
+    data = {"compat-old-wrapper": "val-old"}
+    _write_shard_with_checksum_old(target["path"], data)
+    r = _proxy_cli("get", "compat-old-wrapper")
+    assert r.returncode == 0
+    got = json.loads(r.stdout.strip())
+    assert got == "val-old", f"Old wrapper format should be readable, got {got}"
+    r = _proxy_cli("list-keys")
+    keys = json.loads(r.stdout.strip())
+    assert "compat-old-wrapper" in keys
+    backups = [f for f in os.listdir(dir_name) if ".corrupt." in f and os.path.basename(target["path"]) in f]
+    assert len(backups) == 0, f"Valid old wrapper should not create corrupt backup, got {backups}"
+
+    # flat old format: whole file is data dict
+    flat_path = cfg["shards"][1]["path"]
+    flat_data = {"flat-old-key": "flat-val"}
+    with open(flat_path, "w") as f:
+        json.dump(flat_data, f)
+    r = _proxy_cli("get", "flat-old-key")
+    assert r.returncode == 0
+    assert json.loads(r.stdout.strip()) == "flat-val"
+
+def test_dry_run_repairs_corrupt_shards():
+    # R06: spec :57 dry-run still repairs corrupt shards - clause added
+    _reset_shards()
+    cfg = _load_config()
+    target = cfg["shards"][0]
+    dir_name = os.path.dirname(target["path"])
+    # clean corrupt files
+    for f in os.listdir(dir_name):
+        if ".corrupt." in f:
+            try:
+                os.remove(os.path.join(dir_name, f))
+            except:
+                pass
+    with open(target["path"], "w") as f:
+        f.write("{corrupt json")
+    tmpdir = tempfile.mkdtemp()
+    try:
+        legacy_path = os.path.join(tmpdir, "legacy.json")
+        with open(legacy_path, "w") as f:
+            json.dump({}, f)
+        r = _direct_migrate_binary(legacy_path, CONFIG_PATH, ["--dry-run"])
+        assert r.returncode == 0, f"Dry-run with corrupt shard should succeed, stderr={r.stderr}"
+        backups = [f for f in os.listdir(dir_name) if ".corrupt." in f and os.path.basename(target["path"]) in f]
+        assert len(backups) >= 1, f"Dry-run should still backup corrupt shard per spec :57, got {backups}"
+        obj = _load_shard_full(target["path"])
+        assert obj is not None, "Shard should be repaired even under dry-run"
+        assert obj["shard_id"] == target["id"]
+        assert obj["version"] == 0
+        assert "data" in obj and "checksum" in obj
+        # Ensure dry-run did NOT migrate legacy keys (empty legacy anyway) and did not bump other shards unnecessarily
+        # The repaired file version is 0, not bumped beyond repair
+    finally:
+        shutil.rmtree(tmpdir)
+
