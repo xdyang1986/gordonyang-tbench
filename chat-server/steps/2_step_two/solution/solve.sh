@@ -1942,14 +1942,17 @@ func main() {
 			if err != nil {
 				return err
 			}
-			now := time.Now().UnixNano()
-			bucket, ok := rl[fromUser]
-			if !ok {
-				bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
-				rl[fromUser] = bucket
-			}
-			elapsed := float64(now-bucket.LastRefill) / 1e9
-			bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
+				now := time.Now().UnixNano()
+				bucket, ok := rl[fromUser]
+				if !ok {
+					bucket = &RateBucket{Tokens: float64(burst), LastRefill: now}
+					rl[fromUser] = bucket
+				}
+				elapsed := float64(now-bucket.LastRefill) / 1e9
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				bucket.Tokens = math.Min(float64(burst), bucket.Tokens+elapsed*rate)
 			bucket.LastRefill = now
 			if bucket.Tokens < 1 {
 				_ = atomicWriteGeneric(rateLimitPath, rl)
@@ -2985,17 +2988,21 @@ func main() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(msgs)
-	case "send-private":
-		if len(cmdArgs) < 3 {
-			fmt.Fprintln(os.Stderr, "requires <fromUser> <toUser> <message>")
-			os.Exit(2)
-		}
-		fromUser := cmdArgs[0]
-		toUser := cmdArgs[1]
-		content := strings.Join(cmdArgs[2:], " ")
-		var msgOut Message
-		err := withGlobalLock(func() error {
-			allowed, err := checkRateLimit(fromUser, cfg, rateLimitPath)
+		case "send-private":
+			if len(cmdArgs) < 3 {
+				fmt.Fprintln(os.Stderr, "requires <fromUser> <toUser> <message>")
+				os.Exit(2)
+			}
+			fromUser := cmdArgs[0]
+			toUser := cmdArgs[1]
+			content := strings.Join(cmdArgs[2:], " ")
+			if strings.TrimSpace(content) == "" {
+				fmt.Fprintln(os.Stderr, "missing message")
+				os.Exit(2)
+			}
+			var msgOut Message
+			err := withGlobalLock(func() error {
+				allowed, err := checkRateLimit(fromUser, cfg, rateLimitPath)
 			if err != nil {
 				return err
 			}

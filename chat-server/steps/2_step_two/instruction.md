@@ -118,8 +118,8 @@ Each line is a JSON object (JSON-lines, not JSON array), with at least:
 ### Snapshot / Restore
 
 - `snapshot <backup_path>`:
-  - Dir mode: if path does not end with `.json` or is an existing directory, `mkdir -p` and copy all shard files (if exist), private, presence, counter, users, rate_limit, ops_log, and config.json into backup dir preserving basename
-  - File mode: if path ends with `.json`, writes combined JSON file with keys `shards` (map shard_id string → ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log` where `ops_log` is a JSON array of the parsed valid log entries. Must include counter exact value so that restore can set `next_id` precisely.
+  - Dir mode: if path does not end with `.json` or is an existing directory, `mkdir -p` and copy all shard files (if exist), private, presence, counter, users, rate_limit, ops_log, assignments, global_assignments, and config.json into backup dir preserving basename
+  - File mode: if path ends with `.json`, writes combined JSON file with keys `shards` (map shard_id string → ShardFileData), `private`, `presence`, `rate_limit`, `counter`, `users`, `ops_log`, `assignments`, `global_assignments` where `ops_log` is a JSON array of the parsed valid log entries. Must include counter exact value so that restore can set `next_id` precisely, and sticky assignments (including global pinned sets) must survive snapshot/restore so that existing rooms stay on their original shards after restore.
 - `restore <backup_path>`:
   - Dir mode: copy files back, overwriting, via atomic writes
   - File mode: reads combined JSON and restores each component via atomic writes
