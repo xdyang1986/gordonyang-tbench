@@ -54,7 +54,7 @@ All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where c
   - Room object identical to Turn1: must have keys `users` (sorted array) and `messages` (array sorted by id asc)
 - `private_path`: `{"private_messages": []Message}`
 - `presence_path`: `{"<userID>": last_seen_nano}` where map value is int64 nanoseconds from `UnixNano()`, or empty object `{}`
-- `rate_limit_path`: token-bucket map per user. Implementations may store as flat map `{"alice": {"tokens": float, "last_refill": int64}}` or nested; persistence is verified behaviorally and format-agnostically, but file must still use wrapper checksum and atomic writes
+- `rate_limit_path`: per-user token bucket state. Wrapper checksum and atomic writes required like every other file.
 - `counter_path`: `{"next_id": int64}` global counter shared across shards and private messages
 - `users_path`: `{"alice": true, ...}` global seen users
 - `ops_log`: append-only JSON-lines file (not wrapper), each line is a JSON object
@@ -72,7 +72,7 @@ All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for c
 - `list-rooms`: unions all shards, deduplicated, sorted lexicographically. Must handle many rooms sorted.
 - `list-users <roomID>`: for normal room, returns users from its shard; for global, unions across shards (since room replicated in all shards) sorted. Exit2 if room does not exist.
 - `send <roomID> <userID> <message>`: Requires membership (user in room) else exit2. Message obtained via `strings.Join(remainingArgs, " ")`, requires message else exit2. For normal room, appends to that shard's room with global unique ID from counter; for global, replicates same message (same ID) to all shards. Prints message JSON. Must handle large messages (10KB), special chars `<>&` without HTML escaping, Unicode emoji preservation.
-- `get-messages <roomID> [limit] [offset]`: Returns messages sorted by id asc. Pagination: `offset` default 0, `limit` default 0 meaning all. If `limit>0`, returns `sorted[offset:offset+limit]`; else returns `[offset:]`. Invalid limit/offset (non-int, negative) → exit2. Nonexistent room → `[]` exit0 (not error). For global rooms, must dedupe by ID (since replicated) and return sorted unique list. Must be efficient for large histories (<2s for 1000+ messages).
+- `get-messages <roomID> [limit] [offset]`: Returns messages sorted by id asc. Pagination: `offset` default 0, `limit` default 0 meaning all. If `limit>0`, returns messages starting from offset limited to limit count; else returns from offset onward. Invalid limit/offset (non-int, negative) → exit2. Nonexistent room → `[]` exit0 (not error). For global rooms, must dedupe by ID (since replicated) and return sorted unique list. Must be efficient for large histories.
 - Private messages stored in `private_path` file, with global lock, atomic, checksum, corruption handling. `send-private <from> <to> <msg>` always allowed (no membership requirement), tracks seen users, message via Join, requires message else exit2, handles spaces, special chars, Unicode, large 10KB.
 - `get-private <u1> <u2> [limit] [offset]`: Both directions, sorted asc, same pagination semantics as `get-messages`, limit/offset validation exit2, limit zero all, isolation between conversation pairs.
 
@@ -112,7 +112,7 @@ Each line is a JSON object (JSON-lines, not JSON array), with at least:
 `ops-log` command:
 - Reads the log file, skips invalid JSON lines, prints warning to stderr containing case-insensitive "corrupt" or "skip" or "warning" for each skipped line
 - Prints remaining valid entries as JSON array (preserving original file order) to stdout, exit0
-- Must handle large log (100 entries)
+- Must handle large logs
 - Content must preserve order, and must include entries for `create-room`, `join`, `send`, `send-private` in order of execution
 
 ### Snapshot / Restore
@@ -160,11 +160,11 @@ A room's shard is decided once, at creation, and recorded in the store. `get-sha
 
 - `get-messages <roomID> [limit] [offset]`: 
   - With 1 arg (roomID): returns all messages sorted by id asc
-  - With 2 args (roomID, limit): if limit==0 returns all, if limit>0 returns latest N (suffix) – preserves Turn-1 behavior for backward compatibility
-  - With 3 args (roomID, limit, offset): offset defaults to 0, returns slice `sorted[offset:offset+limit]` if limit>0 else `sorted[offset:]` – this is the extended form for sharded mode
+  - With 2 args (roomID, limit): if limit==0 returns all, if limit>0 returns latest N – preserves Turn-1 behavior for backward compatibility
+  - With 3 args (roomID, limit, offset): offset defaults to 0, returns messages starting from offset, limited to limit when positive, otherwise from offset onward – extended form for sharded mode
   - Same rules apply to `get-private`
 - Must handle spaces via Join
-- Must be O(n) slicing not O(n²), performance <2s for 1000+ messages
+- Must be efficient and avoid quadratic behavior for large histories
 
 ### Integrity & Concurrency
 
