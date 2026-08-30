@@ -43,12 +43,13 @@ Flags:
   --dir string      Directory to scan recursively
   --output string   Output JSON file path
   --workers int     Number of worker goroutines (default NumCPU)
+  --relative        When set, output paths are relative to --dir
   --help, -h        Show help
   help              Show help
 
 Examples:
-  file-analyzer --dir /tmp/data --output /tmp/out.json
-  file-analyzer --dir /tmp/data --output /tmp/out.json --workers 4
+  file-analyzer --dir /data --output /tmp/out.json
+  file-analyzer --dir /data --output /tmp/out.json --workers 4 --relative
   file-analyzer --help`)
 }
 
@@ -66,10 +67,7 @@ func isValidSSN(ssn string) bool {
 	if area == 0 || area == 666 || area >= 900 {
 		return false
 	}
-	if group == 0 {
-		return false
-	}
-	if serial == 0 {
+	if group == 0 || serial == 0 {
 		return false
 	}
 	return true
@@ -119,7 +117,7 @@ func main() {
 	}
 
 	known := map[string]bool{
-		"--dir": true, "--output": true, "--help": true, "-h": true, "--workers": true,
+		"--dir": true, "--output": true, "--help": true, "-h": true, "--workers": true, "--relative": true,
 	}
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
@@ -128,7 +126,7 @@ func main() {
 				key = a[:idx]
 			}
 			if !known[key] {
-				if strings.HasPrefix(a, "--dir=") || strings.HasPrefix(a, "--output=") || strings.HasPrefix(a, "--workers=") {
+				if strings.HasPrefix(a, "--dir=") || strings.HasPrefix(a, "--output=") || strings.HasPrefix(a, "--workers=") || strings.HasPrefix(a, "--relative=") {
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "unknown flag %s\n", a)
@@ -141,6 +139,7 @@ func main() {
 	dirFlag := fset.String("dir", "", "Directory to scan")
 	outputFlag := fset.String("output", "", "Output JSON file")
 	workersFlag := fset.Int("workers", runtime.NumCPU(), "Number of workers")
+	relativeFlag := fset.Bool("relative", false, "Output relative paths")
 	fset.SetOutput(os.Stderr)
 	if err := fset.Parse(args); err != nil {
 		os.Exit(2)
@@ -175,8 +174,8 @@ func main() {
 	emailRe := regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
 	phoneRe1 := regexp.MustCompile(`\b\d{3}[-.]?\d{3}[-.]?\d{4}\b`)
 	phoneRe2 := regexp.MustCompile(`\(\d{3}\)\s*\d{3}[-.]\d{4}`)
-	ccRe := regexp.MustCompile(`\b(?:\d[-\s]*){13,19}\b`)
 	ccStrictRe := regexp.MustCompile(`\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`)
+	ccRe := regexp.MustCompile(`\b(?:\d[-\s]*){13,19}\b`)
 	financialDollarRe := regexp.MustCompile(`\$\s*\d`)
 	financialPercentRe := regexp.MustCompile(`\b\d+(\.\d+)?\s*%`)
 	logLineRe := regexp.MustCompile(`(?i)(^\d{4}-\d{2}-\d{2}|^\[?\d{2}:\d{2}:\d{2}|\b(INFO|DEBUG|WARN|ERROR|TRACE)\b)`)
@@ -202,10 +201,6 @@ func main() {
 		"shareholder",
 	}
 
-	extNonEssential := map[string]bool{
-		".log": true, ".tmp": true, ".cache": true, ".bak": true, ".old": true, ".swp": true, ".temp": true,
-	}
-
 	var filePaths []string
 	err = filepath.WalkDir(*dirFlag, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -225,6 +220,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	logCount := 0
+	for _, p := range filePaths {
+		if strings.ToLower(filepath.Ext(p)) == ".log" {
+			logCount++
+		}
+	}
+	total := len(filePaths)
+	logHeavy := false
+	if total > 0 && float64(logCount)/float64(total) > 0.7 {
+		logHeavy = true
+	}
+
 	jobs := make(chan string, len(filePaths))
 	resultsCh := make(chan Result, len(filePaths))
 	var wg sync.WaitGroup
@@ -232,9 +239,27 @@ func main() {
 	worker := func() {
 		defer wg.Done()
 		for path := range jobs {
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext == ".bak" {
+				outFile := path
+				if *relativeFlag {
+					rel, err := filepath.Rel(*dirFlag, path)
+					if err == nil {
+						outFile = rel
+					}
+				}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.9, Reasons: []string{"extension .bak precedence inversion: always non-essential even with PII"}}
+				continue
+			}
+
 			f, err := os.Open(path)
 			if err != nil {
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: 0.6, Reasons: []string{"unreadable file"}}
+				outFile := path
+				if *relativeFlag {
+					rel, _ := filepath.Rel(*dirFlag, path)
+					outFile = rel
+				}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.6, Reasons: []string{"unreadable file"}}
 				continue
 			}
 			reader := bufio.NewReader(f)
@@ -260,56 +285,48 @@ func main() {
 			f.Close()
 			content := sb.String()
 			trimmed := strings.TrimSpace(content)
-			ext := strings.ToLower(filepath.Ext(path))
-			isExtNonEssential := extNonEssential[ext]
+			outFile := path
+			if *relativeFlag {
+				rel, err := filepath.Rel(*dirFlag, path)
+				if err == nil {
+					outFile = rel
+				}
+			}
 
 			if trimmed == "" {
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: 0.95, Reasons: []string{"empty file"}}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.95, Reasons: []string{"empty file"}}
 				continue
 			}
 
 			reasonsPII := []string{}
 			isPII := false
 
-			ssnMatches := ssnRe.FindAllString(content, -1)
-			for _, m := range ssnMatches {
+			for _, m := range ssnRe.FindAllString(content, -1) {
 				if isValidSSN(m) {
 					isPII = true
 					reasonsPII = append(reasonsPII, fmt.Sprintf("ssn pattern %s", m))
 				}
 			}
-
-			emailMatches := emailRe.FindAllString(content, -1)
-			for _, m := range emailMatches {
+			for _, m := range emailRe.FindAllString(content, -1) {
 				if strings.Contains(m, "..") {
 					continue
 				}
 				parts := strings.Split(m, "@")
-				if len(parts) != 2 {
-					continue
-				}
-				domain := parts[1]
-				if !strings.Contains(domain, ".") {
-					continue
-				}
-				if len(domain) < 3 {
+				if len(parts) != 2 || !strings.Contains(parts[1], ".") {
 					continue
 				}
 				isPII = true
 				reasonsPII = append(reasonsPII, fmt.Sprintf("email pattern %s", m))
 			}
-
 			if phoneRe1.MatchString(content) || phoneRe2.MatchString(content) {
-				matches1 := phoneRe1.FindAllString(content, -1)
-				for _, mm := range matches1 {
+				for _, mm := range phoneRe1.FindAllString(content, -1) {
 					digits := regexp.MustCompile(`\D`).ReplaceAllString(mm, "")
 					if len(digits) >= 10 && !isAllSameDigit(digits) {
 						isPII = true
 						reasonsPII = append(reasonsPII, fmt.Sprintf("phone pattern %s", mm))
 					}
 				}
-				matches2 := phoneRe2.FindAllString(content, -1)
-				for _, mm := range matches2 {
+				for _, mm := range phoneRe2.FindAllString(content, -1) {
 					digits := regexp.MustCompile(`\D`).ReplaceAllString(mm, "")
 					if len(digits) >= 10 && !isAllSameDigit(digits) {
 						isPII = true
@@ -317,20 +334,16 @@ func main() {
 					}
 				}
 			}
-
 			ccCandidates := ccStrictRe.FindAllString(content, -1)
 			if len(ccCandidates) == 0 {
 				ccCandidates = ccRe.FindAllString(content, -1)
 			}
 			for _, cand := range ccCandidates {
+				if phoneRe1.MatchString(cand) || phoneRe2.MatchString(cand) {
+					continue
+				}
 				digits := regexp.MustCompile(`\D`).ReplaceAllString(cand, "")
-				if len(digits) < 13 || len(digits) > 19 {
-					continue
-				}
-				if isAllSameDigit(digits) {
-					continue
-				}
-				if !luhnCheck(digits) {
+				if len(digits) < 13 || len(digits) > 19 || isAllSameDigit(digits) || !luhnCheck(digits) {
 					continue
 				}
 				isPII = true
@@ -342,12 +355,12 @@ func main() {
 				if len(reasonsPII) >= 2 {
 					conf = 0.95
 				}
-				resultsCh <- Result{File: path, Category: "pii", Confidence: conf, Reasons: reasonsPII}
+				resultsCh <- Result{File: outFile, Category: "pii", Confidence: conf, Reasons: reasonsPII}
 				continue
 			}
 
 			if hasNull {
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: 0.85, Reasons: []string{"binary file detected"}}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.85, Reasons: []string{"binary file detected"}}
 				continue
 			}
 
@@ -355,34 +368,28 @@ func main() {
 			distinct := 0
 			totalOcc := 0
 			bizReasons := []string{}
-			seenKw := map[string]bool{}
+			seen := map[string]bool{}
 			for _, kw := range keywords {
-				count := strings.Count(lower, kw)
-				if count > 0 {
-					if !seenKw[kw] {
+				c := strings.Count(lower, kw)
+				if c > 0 {
+					if !seen[kw] {
 						distinct++
-						seenKw[kw] = true
+						seen[kw] = true
 					}
-					totalOcc += count
-					bizReasons = append(bizReasons, fmt.Sprintf("keyword '%s' found %d times", kw, count))
+					totalOcc += c
+					bizReasons = append(bizReasons, fmt.Sprintf("keyword '%s' found %d times", kw, c))
 				}
 			}
-
 			hasFinancial := financialDollarRe.MatchString(content) || financialPercentRe.MatchString(content)
 			if hasFinancial {
 				bizReasons = append(bizReasons, "financial pattern detected")
 			}
+			isBiz := distinct >= 2 || totalOcc >= 2 || (distinct >= 1 && hasFinancial)
 
-			isBiz := false
-			if distinct >= 2 || totalOcc >= 2 || (distinct >= 1 && hasFinancial) {
-				isBiz = true
-			}
-
-			isLog := false
+			isLogContent := false
 			lines := strings.Split(content, "\n")
 			if len(lines) >= 3 {
-				matched := 0
-				nonEmpty := 0
+				matched, nonEmpty := 0, 0
 				for _, line := range lines {
 					if strings.TrimSpace(line) == "" {
 						continue
@@ -393,26 +400,19 @@ func main() {
 					}
 				}
 				if nonEmpty > 0 && float64(matched)/float64(nonEmpty) > 0.5 {
-					isLog = true
+					isLogContent = true
 				}
 			}
 
-			if isExtNonEssential {
-				conf := 0.9
-				reason := []string{fmt.Sprintf("extension %s", ext)}
-				if isLog {
-					reason = append(reason, "log pattern detected")
-					conf = 0.8
-				}
+			extNonEss := map[string]bool{".log": true, ".tmp": true, ".cache": true, ".old": true, ".swp": true, ".temp": true}
+			if extNonEss[ext] {
 				if isBiz {
-					reason = append(reason, bizReasons...)
-					reason = append(reason, "but overridden by extension rule")
+					resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.9, Reasons: append(bizReasons, fmt.Sprintf("extension %s overrides business", ext))}
+					continue
 				}
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: conf, Reasons: reason}
-				continue
 			}
 
-			if isLog {
+			if isLogContent {
 				if isBiz && distinct >= 2 && hasFinancial {
 					conf := 0.6 + float64(distinct)*0.1
 					if conf > 0.9 {
@@ -424,10 +424,15 @@ func main() {
 							conf = 0.95
 						}
 					}
-					resultsCh <- Result{File: path, Category: "business-critical", Confidence: conf, Reasons: append(bizReasons, "log pattern but strong business signals")}
+					resultsCh <- Result{File: outFile, Category: "business-critical", Confidence: conf, Reasons: append(bizReasons, "log pattern but strong business")}
 					continue
 				}
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: 0.8, Reasons: []string{"log pattern detected", fmt.Sprintf("%d lines log-like", len(lines))}}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.8, Reasons: []string{"predominantly log lines"}}
+				continue
+			}
+
+			if logHeavy && ext != ".log" && isBiz {
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.85, Reasons: append(bizReasons, "sibling-dependent downgrade: >70% logs in directory")}
 				continue
 			}
 
@@ -445,9 +450,9 @@ func main() {
 						conf = 0.95
 					}
 				}
-				resultsCh <- Result{File: path, Category: "business-critical", Confidence: conf, Reasons: bizReasons}
+				resultsCh <- Result{File: outFile, Category: "business-critical", Confidence: conf, Reasons: bizReasons}
 			} else {
-				resultsCh <- Result{File: path, Category: "non-essential", Confidence: 0.6, Reasons: []string{"no sensitive content"}}
+				resultsCh <- Result{File: outFile, Category: "non-essential", Confidence: 0.6, Reasons: []string{"no sensitive content"}}
 			}
 		}
 	}
@@ -498,13 +503,11 @@ func main() {
 	if err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "write error: %v\n", err)
 		os.Exit(2)
 	}
 	tmpFile.Close()
 	if err := os.Rename(tmpPath, *outputFlag); err != nil {
 		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "rename error: %v\n", err)
 		os.Exit(2)
 	}
 }
@@ -512,4 +515,3 @@ GOMAIN
 
 go build -o file-analyzer .
 echo "Solution built for step2"
-

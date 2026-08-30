@@ -12,7 +12,7 @@ workstream = "swe_public_repo"
 difficulty = "hard"
 category = "software-engineering"
 category_usecase = "implement_new_feature"
-category_subdomain = "security_and_compliance"
+category_subdomain = "security_and_privacy"
 reward_type = "binary"
 tags = ["iterate_on_feature", "go", "file-analysis", "pii", "classification", "concurrency", "security"]
 author_name = "Gordon Yang"
@@ -20,12 +20,6 @@ author_email = "gordonyang@meta.com"
 expert_time_estimate_min = 45
 junior_time_estimate_min = 120
 languages = ["go"]
-
-[verifier]
-timeout_sec = 600.0
-
-[agent]
-timeout_sec = 1800.0
 
 [environment]
 build_timeout_sec = 600.0
@@ -35,12 +29,6 @@ storage_mb = 10240
 gpus = 0
 allow_internet = true
 mcp_servers = []
-
-[verifier.env]
-
-[environment.env]
-
-[solution.env]
 
 [[steps]]
 name = "1_step_one"

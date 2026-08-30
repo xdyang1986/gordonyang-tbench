@@ -1,6 +1,6 @@
 # File Relevance Analyzer – Multi-Turn Go Task
 
-Multi-turn: Turn1 builds core file classification (see steps/1_step_one/instruction.md), Turn2 improves efficiency with worker-pool concurrency and accuracy with Luhn, SSN validation, extension-aware and log-pattern heuristics (see steps/2_step_two/instruction.md).
+Multi-turn: Step1 core classification by content relevance (see steps/1_step_one/instruction.md). Step2 adds efficiency (worker pool) and accuracy with non-obvious rules: backup precedence inversion, sibling-dependent log downgrade, relative path flag (see steps/2_step_two/instruction.md).
 
-Build: `go build -o file-analyzer .` in `/app/`, module `file-analyzer`, Go stdlib only.
+Build: `go build -o file-analyzer .` in `/app`, module `file-analyzer`, Go stdlib only.
 
