@@ -301,21 +301,24 @@ def test_stdlib_only():
 
 
 def test_bounded_memory_large_file():
-    # 512 MB file with SSN near end, RLIMIT_DATA 256 MiB - only streaming with overlap passes
+    # 96 MB file with SSN near end, RLIMIT_DATA 64 MiB, digit-bearing padding – true memory test, not throughput
+    # Verified: 96 MiB file, 64 MiB limit, digit padding "1234 abcd 5678 efgh " – slurp rc=2, stream rc=0 ~26s
     import resource
 
     with tempfile.TemporaryDirectory() as tmpdir:
         large_path = os.path.join(tmpdir, "large.dat")
-        size = 512 * 1024 * 1024
+        size = 96 * 1024 * 1024
         ssn = "123-45-6789"
-        # Write in 1MiB chunks to avoid large memory in test itself
-        chunk = b"A" * (1024 * 1024)
+        # Digit-bearing padding removes prefilter shortcut, discriminates on memory alone
+        pad_chunk = b"1234 abcd 5678 efgh " * (
+            1024 * 1024 // 20
+        )  # ~1MiB chunk with digits
         remaining = size - len(ssn) - 10
         written = 0
         with open(large_path, "wb") as f:
             while written < remaining:
-                to_write = min(len(chunk), remaining - written)
-                f.write(chunk[:to_write])
+                to_write = min(len(pad_chunk), remaining - written)
+                f.write(pad_chunk[:to_write])
                 written += to_write
             f.write(b"\n")
             f.write(ssn.encode())
@@ -324,8 +327,9 @@ def test_bounded_memory_large_file():
 
         def limit():
             # Use RLIMIT_DATA not RLIMIT_AS for Go (Go reserves large virtual arena)
+            # Do not go below 64 MiB – even hello-world Go dies at 32 MiB
             resource.setrlimit(
-                resource.RLIMIT_DATA, (256 * 1024 * 1024, 256 * 1024 * 1024)
+                resource.RLIMIT_DATA, (64 * 1024 * 1024, 64 * 1024 * 1024)
             )
 
         ensure_binary()
@@ -334,10 +338,10 @@ def test_bounded_memory_large_file():
             preexec_fn=limit,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,
         )
         assert r.returncode == 0, (
-            f"large file must be processed with 256MiB DATA limit, rc={r.returncode} stderr={r.stderr}"
+            f"large file must be processed with 64MiB DATA limit, rc={r.returncode} stderr={r.stderr}"
         )
         with open(out) as f:
             data = json.load(f)

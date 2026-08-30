@@ -514,22 +514,55 @@ def test_preserve_no_newline_file():
 
 
 def test_preserve_boundary_sweep():
-    ssn = "123-45-6789"
-    for k in range(12, 17):  # fewer for speed, 4096..65536
-        offset = (1 << k) - 5
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "boundary.txt")
-            with open(path, "wb") as f:
-                f.write(b"!" * offset)
-                f.write(b" ")
-                f.write(ssn.encode())
-                f.write(b" ")
-                f.write(b"!" * 100)
-            out = os.path.join(tmpdir, "out.json")
-            data = run_analyzer(tmpdir, out)
-            assert [d for d in data if "boundary.txt" in d["file"]][0][
-                "category"
-            ] == "pii"
+    # Verify overlap carry for all PII types + business keyword, not just SSN (R06)
+    cases = {
+        "ssn": b"123-45-6789",
+        "email": b"john@example.com",
+        "phone": b"123-456-7890",
+        "phone_paren": b"(123) 456-7890",
+        "cc": b"4111-1111-1111-1111",
+        "biz_dollar": b"confidential $5000",
+    }
+    for name, pat in cases.items():
+        for k in range(12, 17):  # 4096..65536
+            offset = (1 << k) - 5
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = os.path.join(tmpdir, "boundary.txt")
+                with open(path, "wb") as f:
+                    f.write(b"!" * offset)
+                    f.write(b" ")
+                    f.write(pat)
+                    f.write(b" ")
+                    f.write(b"!" * 100)
+                out = os.path.join(tmpdir, "out.json")
+                data = run_analyzer(tmpdir, out)
+                entry = [d for d in data if "boundary.txt" in d["file"]][0]
+                if name.startswith("biz"):
+                    assert entry["category"] == "business-critical", (
+                        f"{name} at offset {offset} should be business-critical, got {entry['category']}"
+                    )
+                else:
+                    assert entry["category"] == "pii", (
+                        f"{name} at offset {offset} (2^{k}-5) should be pii, got {entry['category']}"
+                    )
+
+
+def test_double_count_avoidance():
+    # R12: keyword in overlap should not be double-counted inflating totalOcc>=2
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "single.txt")
+        filler_len = 32 * 1024 - 2
+        with open(path, "wb") as f:
+            f.write(b"!" * filler_len)
+            f.write(b"confidential")
+            f.write(b"!" * (32 * 1024))
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        assert [d for d in data if "single.txt" in d["file"]][0][
+            "category"
+        ] == "non-essential", (
+            "single keyword should not be double-counted to business-critical"
+        )
 
 
 def test_preserve_symlink_atomic_unknown_stdlib():

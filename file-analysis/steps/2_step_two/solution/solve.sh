@@ -13,6 +13,7 @@ cat > main.go << 'GOMAIN'
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,10 +21,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -54,33 +53,37 @@ Examples:
 }
 
 const (
-	bufSize = 1 * 1024 * 1024
-	overlap = 256
+	bufSize     = 32 * 1024
+	overlap     = 256
 	maxLineFrag = 8192
 )
 
-func isValidSSN(ssn string) bool {
-	parts := strings.Split(ssn, "-")
-	if len(parts) != 3 {
+func isWordChar(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+}
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+func toLower(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 'a' - 'A'
+	}
+	return c
+}
+func isAllSameDigits(d []byte) bool {
+	if len(d) == 0 {
 		return false
 	}
-	area, err1 := strconv.Atoi(parts[0])
-	group, err2 := strconv.Atoi(parts[1])
-	serial, err3 := strconv.Atoi(parts[2])
-	if err1 != nil || err2 != nil || err3 != nil {
-		return false
-	}
-	if area == 0 || area == 666 || area >= 900 || group == 0 || serial == 0 {
-		return false
+	for i := 1; i < len(d); i++ {
+		if d[i] != d[0] {
+			return false
+		}
 	}
 	return true
 }
-
-func luhnCheck(s string) bool {
+func luhnCheck(digits []byte) bool {
 	sum := 0
 	alt := false
-	for i := len(s) - 1; i >= 0; i-- {
-		d := int(s[i] - '0')
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := int(digits[i] - '0')
 		if alt {
 			d *= 2
 			if d > 9 {
@@ -93,25 +96,282 @@ func luhnCheck(s string) bool {
 	return sum%10 == 0
 }
 
-func isAllSameDigit(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-	for i := 1; i < len(s); i++ {
-		if s[i] != s[0] {
-			return false
+func findValidSSN(b []byte) (bool, string) {
+	for i := 0; i+11 <= len(b); i++ {
+		if i > 0 && isWordChar(b[i-1]) {
+			continue
 		}
+		if !isDigit(b[i]) || !isDigit(b[i+1]) || !isDigit(b[i+2]) || b[i+3] != '-' || !isDigit(b[i+4]) || !isDigit(b[i+5]) || b[i+6] != '-' || !isDigit(b[i+7]) || !isDigit(b[i+8]) || !isDigit(b[i+9]) || !isDigit(b[i+10]) {
+			continue
+		}
+		if i+11 < len(b) && isWordChar(b[i+11]) {
+			continue
+		}
+		area := int(b[i]-'0')*100 + int(b[i+1]-'0')*10 + int(b[i+2]-'0')
+		group := int(b[i+4]-'0')*10 + int(b[i+5]-'0')
+		serial := int(b[i+7]-'0')*1000 + int(b[i+8]-'0')*100 + int(b[i+9]-'0')*10 + int(b[i+10]-'0')
+		if area == 0 || area == 666 || area >= 900 || group == 0 || serial == 0 {
+			continue
+		}
+		return true, string(b[i : i+11])
 	}
-	return true
+	return false, ""
 }
 
-func containsDigit(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= '0' && s[i] <= '9' {
+func findValidEmail(b []byte) (bool, string) {
+	for i := 0; i < len(b); i++ {
+		if b[i] != '@' {
+			continue
+		}
+		start := i - 1
+		for start >= 0 {
+			c := b[start]
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '%' || c == '+' || c == '-' {
+				start--
+			} else {
+				break
+			}
+		}
+		start++
+		if i-start < 1 {
+			continue
+		}
+		if start > 0 && isWordChar(b[start-1]) {
+			continue
+		}
+		end := i + 1
+		for end < len(b) {
+			c := b[end]
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' {
+				end++
+			} else {
+				break
+			}
+		}
+		if end-(i+1) < 1 {
+			continue
+		}
+		email := b[start:end]
+		if bytes.Contains(email, []byte("..")) {
+			continue
+		}
+		domain := b[i+1 : end]
+		if !bytes.Contains(domain, []byte(".")) {
+			continue
+		}
+		lastDot := bytes.LastIndex(domain, []byte("."))
+		if lastDot == -1 {
+			continue
+		}
+		tld := domain[lastDot+1:]
+		if len(tld) < 2 {
+			continue
+		}
+		if end < len(b) && isWordChar(b[end]) {
+			continue
+		}
+		return true, string(email)
+	}
+	return false, ""
+}
+
+func findValidPhone(b []byte) (bool, string) {
+	for i := 0; i < len(b); i++ {
+		if !isDigit(b[i]) {
+			continue
+		}
+		if i > 0 && isWordChar(b[i-1]) {
+			continue
+		}
+		if i+2 >= len(b) || !isDigit(b[i+1]) || !isDigit(b[i+2]) {
+			continue
+		}
+		pos := i + 3
+		if pos < len(b) && (b[pos] == '-' || b[pos] == '.') {
+			pos++
+		}
+		if pos+2 >= len(b) || !isDigit(b[pos]) || !isDigit(b[pos+1]) || !isDigit(b[pos+2]) {
+			continue
+		}
+		pos += 3
+		if pos < len(b) && (b[pos] == '-' || b[pos] == '.') {
+			pos++
+		}
+		if pos+3 >= len(b) || !isDigit(b[pos]) || !isDigit(b[pos+1]) || !isDigit(b[pos+2]) || !isDigit(b[pos+3]) {
+			continue
+		}
+		pos += 4
+		if pos < len(b) && isWordChar(b[pos]) {
+			continue
+		}
+		var dig []byte
+		for k := i; k < pos; k++ {
+			if isDigit(b[k]) {
+				dig = append(dig, b[k])
+			}
+		}
+		if len(dig) < 10 {
+			continue
+		}
+		if isAllSameDigits(dig) {
+			continue
+		}
+		return true, string(b[i:pos])
+	}
+	for i := 0; i < len(b); i++ {
+		if b[i] != '(' {
+			continue
+		}
+		if i+4 >= len(b) {
+			continue
+		}
+		if !isDigit(b[i+1]) || !isDigit(b[i+2]) || !isDigit(b[i+3]) || b[i+4] != ')' {
+			continue
+		}
+		pos := i + 5
+		for pos < len(b) && b[pos] == ' ' {
+			pos++
+		}
+		if pos+2 >= len(b) || !isDigit(b[pos]) || !isDigit(b[pos+1]) || !isDigit(b[pos+2]) {
+			continue
+		}
+		pos += 3
+		if pos >= len(b) || (b[pos] != '-' && b[pos] != '.') {
+			continue
+		}
+		pos++
+		if pos+3 >= len(b) || !isDigit(b[pos]) || !isDigit(b[pos+1]) || !isDigit(b[pos+2]) || !isDigit(b[pos+3]) {
+			continue
+		}
+		pos += 4
+		var dig []byte
+		for k := i; k < pos; k++ {
+			if isDigit(b[k]) {
+				dig = append(dig, b[k])
+			}
+		}
+		if len(dig) < 10 {
+			continue
+		}
+		if isAllSameDigits(dig) {
+			continue
+		}
+		return true, string(b[i:pos])
+	}
+	return false, ""
+}
+
+func containsPhonePatternInSlice(b []byte) bool {
+	ok, _ := findValidPhone(b)
+	return ok
+}
+
+func findValidCC(b []byte) (bool, string) {
+	for i := 0; i < len(b); i++ {
+		if !isDigit(b[i]) {
+			continue
+		}
+		if i > 0 && isWordChar(b[i-1]) {
+			continue
+		}
+		digitCount := 0
+		var digits []byte
+		end := i
+		for end < len(b) && end < i+32 {
+			c := b[end]
+			if isDigit(c) {
+				digitCount++
+				digits = append(digits, c)
+				end++
+			} else if c == '-' || c == ' ' {
+				end++
+			} else {
+				break
+			}
+			if digitCount >= 13 && digitCount <= 19 {
+				if end > i && !isDigit(b[end-1]) {
+					continue
+				}
+				if end < len(b) && isWordChar(b[end]) {
+					continue
+				}
+				candSlice := b[i:end]
+				if isAllSameDigits(digits) {
+					continue
+				}
+				if !luhnCheck(digits) {
+					continue
+				}
+				if containsPhonePatternInSlice(candSlice) {
+					continue
+				}
+				return true, string(candSlice)
+			}
+			if digitCount > 19 {
+				break
+			}
+		}
+	}
+	return false, ""
+}
+
+func containsDollar(b []byte) bool {
+	for i := 0; i < len(b); i++ {
+		if b[i] == '$' {
+			j := i + 1
+			for j < len(b) && b[j] == ' ' {
+				j++
+			}
+			if j < len(b) && isDigit(b[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+func containsPercent(b []byte) bool {
+	for i := 0; i < len(b); i++ {
+		if b[i] == '%' {
+			j := i - 1
+			for j >= 0 && b[j] == ' ' {
+				j--
+			}
+			if j < 0 {
+				continue
+			}
+			if !isDigit(b[j]) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
+}
+
+func isLogLine(b []byte) bool {
+	if len(b) >= 10 {
+		if isDigit(b[0]) && isDigit(b[1]) && isDigit(b[2]) && isDigit(b[3]) && b[4] == '-' && isDigit(b[5]) && isDigit(b[6]) && b[7] == '-' && isDigit(b[8]) && isDigit(b[9]) {
+			return true
+		}
+	}
+	if len(b) >= 8 {
+		if isDigit(b[0]) && isDigit(b[1]) && b[2] == ':' && isDigit(b[3]) && isDigit(b[4]) && b[5] == ':' && isDigit(b[6]) && isDigit(b[7]) {
+			return true
+		}
+	}
+	low := bytes.ToLower(b)
+	if bytes.Contains(low, []byte("info")) || bytes.Contains(low, []byte("debug")) || bytes.Contains(low, []byte("warn")) || bytes.Contains(low, []byte("error")) || bytes.Contains(low, []byte("trace")) {
+		return true
+	}
+	return false
+}
+
+func lowerBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		out[i] = toLower(c)
+	}
+	return out
 }
 
 func main() {
@@ -175,20 +435,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	ssnRe := regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
-	emailRe := regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`)
-	phoneRe1 := regexp.MustCompile(`\b\d{3}[-.]?\d{3}[-.]?\d{4}\b`)
-	phoneRe2 := regexp.MustCompile(`\(\d{3}\)\s*\d{3}[-.]\d{4}`)
-	ccStrictRe := regexp.MustCompile(`\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`)
-	ccRe := regexp.MustCompile(`\b(?:\d[-\s]*){13,19}\b`)
-	finDollarRe := regexp.MustCompile(`\$\s*\d`)
-	finPercentRe := regexp.MustCompile(`\b\d+(\.\d+)?\s*%`)
-	logLineRe := regexp.MustCompile(`(?i)(^\d{4}-\d{2}-\d{2}|^\[?\d{2}:\d{2}:\d{2}|\b(INFO|DEBUG|WARN|ERROR|TRACE)\b)`)
-
-	keywords := []string{
-		"confidential", "proprietary", "trade secret", "financial", "revenue", "budget",
-		"forecast", "strategic", "merger", "acquisition", "contract", "nda",
-		"intellectual property", "earnings", "profit", "balance sheet", "board meeting", "shareholder",
+	keywords := [][]byte{
+		[]byte("confidential"), []byte("proprietary"), []byte("trade secret"), []byte("financial"), []byte("revenue"), []byte("budget"),
+		[]byte("forecast"), []byte("strategic"), []byte("merger"), []byte("acquisition"), []byte("contract"), []byte("nda"),
+		[]byte("intellectual property"), []byte("earnings"), []byte("profit"), []byte("balance sheet"), []byte("board meeting"), []byte("shareholder"),
 	}
 
 	var filePaths []string
@@ -206,7 +456,6 @@ func main() {
 		return nil
 	})
 
-	// Global log heavy check
 	logCount := 0
 	for _, p := range filePaths {
 		if strings.ToLower(filepath.Ext(p)) == ".log" {
@@ -247,134 +496,107 @@ func main() {
 			hasNull := false
 			isPII := false
 			reasonsPII := []string{}
+			seenKw := map[string]bool{}
 			distinct := 0
 			totalOcc := 0
-			seenKw := map[string]bool{}
-			bizReasons := []string{}
 			hasFin := false
 			totalLines := 0
 			matchedLines := 0
-			lineRemainder := ""
-			patternCarry := ""
+			lineRemainder := []byte{}
+			patternCarry := []byte{}
 			buf := make([]byte, bufSize)
 
 			for {
-				n, err := f.Read(buf)
+				n, rerr := f.Read(buf)
 				if n > 0 {
-					chunk := string(buf[:n])
+					chunk := buf[:n]
 					if !hasNonWhitespace {
-						for _, r := range chunk {
-							if r != ' ' && r != '\n' && r != '\r' && r != '\t' {
+						for _, b := range chunk {
+							if b != ' ' && b != '\n' && b != '\r' && b != '\t' {
 								hasNonWhitespace = true
 								break
 							}
 						}
 					}
-					if !hasNull && strings.Contains(chunk, "\x00") {
+					if !hasNull && bytes.Contains(chunk, []byte{0}) {
 						hasNull = true
 					}
+					searchBuf := make([]byte, 0, len(patternCarry)+len(chunk))
+					searchBuf = append(searchBuf, patternCarry...)
+					searchBuf = append(searchBuf, chunk...)
 
-					searchBuf := patternCarry + chunk
 					if !isPII {
-						hasDigit := containsDigit(searchBuf)
-						hasAt := strings.Contains(searchBuf, "@")
-						if hasDigit {
-							for _, m := range ssnRe.FindAllString(searchBuf, -1) {
-								if isValidSSN(m) {
-									isPII = true
-									reasonsPII = append(reasonsPII, fmt.Sprintf("ssn pattern %s", m))
-								}
-							}
-							if !isPII {
-								for _, mm := range phoneRe1.FindAllString(searchBuf, -1) {
-									digits := regexp.MustCompile(`\D`).ReplaceAllString(mm, "")
-									if len(digits) >= 10 && !isAllSameDigit(digits) {
-										isPII = true
-										reasonsPII = append(reasonsPII, fmt.Sprintf("phone pattern %s", mm))
-									}
-								}
-							}
-							if !isPII {
-								for _, mm := range phoneRe2.FindAllString(searchBuf, -1) {
-									digits := regexp.MustCompile(`\D`).ReplaceAllString(mm, "")
-									if len(digits) >= 10 && !isAllSameDigit(digits) {
-										isPII = true
-										reasonsPII = append(reasonsPII, fmt.Sprintf("phone pattern %s", mm))
-									}
-								}
-							}
-							if !isPII {
-								cands := ccStrictRe.FindAllString(searchBuf, -1)
-								if len(cands) == 0 {
-									cands = ccRe.FindAllString(searchBuf, -1)
-								}
-								for _, cand := range cands {
-									if phoneRe1.MatchString(cand) || phoneRe2.MatchString(cand) {
-										continue
-									}
-									digits := regexp.MustCompile(`\D`).ReplaceAllString(cand, "")
-									if len(digits) < 13 || len(digits) > 19 || isAllSameDigit(digits) || !luhnCheck(digits) {
-										continue
-									}
-									isPII = true
-									reasonsPII = append(reasonsPII, fmt.Sprintf("valid credit card via Luhn %s", cand))
-								}
-							}
-						}
-						if !isPII && hasAt {
-							for _, m := range emailRe.FindAllString(searchBuf, -1) {
-								if strings.Contains(m, "..") {
-									continue
-								}
-								parts := strings.Split(m, "@")
-								if len(parts) != 2 || !strings.Contains(parts[1], ".") {
-									continue
-								}
-								isPII = true
-								reasonsPII = append(reasonsPII, fmt.Sprintf("email pattern %s", m))
-							}
+						if ok, s := findValidSSN(searchBuf); ok {
+							isPII = true
+							reasonsPII = append(reasonsPII, fmt.Sprintf("ssn pattern %s", s))
+						} else if ok, s := findValidEmail(searchBuf); ok {
+							isPII = true
+							reasonsPII = append(reasonsPII, fmt.Sprintf("email pattern %s", s))
+						} else if ok, s := findValidPhone(searchBuf); ok {
+							isPII = true
+							reasonsPII = append(reasonsPII, fmt.Sprintf("phone pattern %s", s))
+						} else if ok, s := findValidCC(searchBuf); ok {
+							isPII = true
+							reasonsPII = append(reasonsPII, fmt.Sprintf("valid credit card via Luhn %s", s))
 						}
 					}
 
-					// Business keyword tracking with overlap
-					lowSearch := strings.ToLower(searchBuf)
+					lowSearch := lowerBytes(searchBuf)
 					for _, kw := range keywords {
-						c := strings.Count(lowSearch, kw)
-						if c > 0 {
-							if !seenKw[kw] {
-								distinct++
-								seenKw[kw] = true
+						kwStr := string(kw)
+						kwLen := len(kw)
+						idx := 0
+						for idx < len(lowSearch) {
+							pos := bytes.Index(lowSearch[idx:], kw)
+							if pos == -1 {
+								break
 							}
-							totalOcc += c
+							absPos := idx + pos
+							if absPos+kwLen <= len(patternCarry) {
+								idx = absPos + 1
+								continue
+							}
+							if !seenKw[kwStr] {
+								seenKw[kwStr] = true
+								distinct++
+							}
+							totalOcc++
+							idx = absPos + 1
 						}
 					}
+
 					if !hasFin {
-						if finDollarRe.MatchString(searchBuf) || finPercentRe.MatchString(searchBuf) {
+						if containsDollar(searchBuf) || containsPercent(searchBuf) {
 							hasFin = true
 						}
 					}
 
-					combined := lineRemainder + chunk
-					parts := strings.Split(combined, "\n")
-					for i := 0; i < len(parts)-1; i++ {
-						line := parts[i]
-						if strings.TrimSpace(line) == "" {
+					combined := append(lineRemainder, chunk...)
+					start := 0
+					for {
+						nl := bytes.IndexByte(combined[start:], '\n')
+						if nl == -1 {
+							break
+						}
+						line := combined[start : start+nl]
+						start = start + nl + 1
+						if len(bytes.TrimSpace(line)) == 0 {
 							continue
 						}
 						totalLines++
-						if logLineRe.MatchString(line) {
+						if isLogLine(line) {
 							matchedLines++
 						}
 					}
-					lineRemainder = parts[len(parts)-1]
+					lineRemainder = combined[start:]
 					if len(lineRemainder) > maxLineFrag {
 						lineRemainder = lineRemainder[:maxLineFrag]
 					}
 
 					if len(chunk) >= overlap {
-						patternCarry = chunk[len(chunk)-overlap:]
+						patternCarry = append(patternCarry[:0], chunk[len(chunk)-overlap:]...)
 					} else {
-						tmp := patternCarry + chunk
+						tmp := append(patternCarry, chunk...)
 						if len(tmp) > overlap {
 							patternCarry = tmp[len(tmp)-overlap:]
 						} else {
@@ -382,8 +604,8 @@ func main() {
 						}
 					}
 				}
-				if err != nil {
-					if err == io.EOF {
+				if rerr != nil {
+					if rerr == io.EOF {
 						break
 					}
 					break
@@ -391,9 +613,9 @@ func main() {
 			}
 			f.Close()
 
-			if strings.TrimSpace(lineRemainder) != "" {
+			if len(bytes.TrimSpace(lineRemainder)) != 0 {
 				totalLines++
-				if logLineRe.MatchString(lineRemainder) {
+				if isLogLine(lineRemainder) {
 					matchedLines++
 				}
 			}
@@ -415,10 +637,8 @@ func main() {
 				continue
 			}
 
-			// Build biz reasons for confidence output
+			bizReasons := []string{}
 			for kw := range seenKw {
-				// approximate count already tracked via distinct, but we need per keyword reasons
-				// we already counted distinct, for reasons we list seen keywords
 				bizReasons = append(bizReasons, fmt.Sprintf("keyword '%s' found", kw))
 			}
 			if hasFin {
