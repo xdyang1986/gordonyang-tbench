@@ -1,6 +1,6 @@
-# Database Reliability Monitoring — Step 1: Reactive Monitoring (Hardened v2)
+# Database Reliability Monitoring — Step 1: Reactive Monitoring
 
-Build reactive monitoring. Terse spec, prior-violating rules, examples drive inference.
+Build reactive monitoring.
 
 ## Layout
 ```
@@ -53,24 +53,24 @@ func (m *Monitor) GetUptimePercentage(nodeID string) float64
 
 Config: zero/negative → default (100, 0.05, 500, 100, 3, 10).
 
-## RecordCheck – hardened rules
+## RecordCheck – rules
 
 - NodeID=="" → no-op, empty slice, no state.
 - Timestamp zero → time.Now() for LastCheck and alert Timestamp.
 - Latency<0, ReplLag<0, Conn<0 → 0 for avg and checks.
 - Success false: consec++, failed++, total++; Success true: consec=0, healthy, total++.
 - History per node up to max(WindowSize*2,20) for trend future, but:
-  - **Mixed window semantics (prior-violating):** errorRate over **time window** last 60s of timestamps, avgLatency over **count window** last WindowSize. Models unify them – don't.
+  - errorRate over time window last 60s of timestamps (checks where Timestamp >= currentTimestamp-60s, including current check), avgLatency over count window last WindowSize.
 
 - **Alert order deterministic:** NodeDown, HighLatency, ReplicationLag, ConnectionExhaustion, HighErrorRate.
 
 - **NodeDown:** when consec == DownThreshold (transition only). Critical, Value=consec, Message contains "down" case-insensitive. IsHealthy = consec < DownThreshold. Once down, further fails don't re-alert until recovered (success resets).
 
-- **HighLatency with hysteresis (prior-violating):** after high_latency fires for a node, suppress further high_latency alerts until metric drops **well below** threshold (see hysteresis worked example – suppressed range vs reset). Suppression is per-node, survives other alerts, cleared on Reset. Infer reset watermark from examples (e.g., 90 vs 70). Terse.
+- **HighLatency with hysteresis:** after high_latency fires for a node, suppress further high_latency alerts until metric drops well below threshold. Suppression is per-node, survives other alerts, cleared on Reset. Infer reset watermark from examples (e.g., 90 vs 70).
 
 - **ReplicationLag:** if repLag > ReplicationLagThreshold → warning
 - **ConnectionExhaustion:** if conns > ConnectionThreshold → warning
-- **HighErrorRate:** errorRate over **time window** last 60s (checks with Timestamp >= currentTimestamp-60s). If len(timeWindow)>=3 and errorRate > ErrorRateThreshold → warning, Value=errorRate. No alert if window <3. No alert if exactly equals threshold.
+- **HighErrorRate:** errorRate over time window last 60s including current check (checks with Timestamp >= currentTimestamp-60s). If len(timeWindow)>=3 and errorRate > ErrorRateThreshold → warning, Value=errorRate. No alert if window <3. No alert if exactly equals threshold.
 
 - Alert ID non-empty unique (counter), Timestamp = result.Timestamp if non-zero else Now, Message non-empty, copy semantics for getters.
 
@@ -99,11 +99,11 @@ ErrorRate example above used time window, not count window – different!
 
 **Hysteresis:**
 ```
-Threshold 100, 80% =80
+Threshold 100
 Check latency 120 → [high_latency] (fires, suppress on)
-Check 110 → [] (suppressed, 110>100 but still suppressed)
-Check 90 → [] (90<100 but >80, no reset, still suppressed)
-Check 70 → [] (70<80, reset suppression, no alert)
+Check 110 → [] (suppressed, even though >100)
+Check 90 → [] (still suppressed, even though <100)
+Check 70 → [] (no alert, but resets suppression)
 Check 110 → [high_latency] (fires again after reset)
 ```
 If node resets, hysteresis cleared.
@@ -125,7 +125,7 @@ Fails 3 again → [node_down] again
 
 ## Other methods
 
-- GetNodeStatus: IsHealthy = consec < DownThreshold, AvgLatency = avg over **count window** last WindowSize, other fields as stored, false if missing.
+- GetNodeStatus: IsHealthy = consec < DownThreshold, AvgLatency = avg over count window last WindowSize, other fields as stored, false if missing.
 - GetAllNodes: copy, sorted by NodeID for determinism.
 - GetAlerts, GetAlertsByNode: copy, order emission.
 - IsHealthy: false if missing else consec<DownThreshold
@@ -140,4 +140,4 @@ Thread-safe RWMutex. Tests include `go run -race` 100 goroutines.
 
 Stdlib only, `go vet ./...` pass, file `monitor.go` exists, no panics.
 
-Implement reactive monitor with time-window errorRate and hysteresis; scoring is step2.
+Implement reactive monitor with time-window errorRate and hysteresis with well-below reset; scoring is step2.
