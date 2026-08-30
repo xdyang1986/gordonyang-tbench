@@ -70,18 +70,13 @@ Single-factor examples (others zero, consec 0, conn 10, latency 50, lag 100, err
 - conn 70 → Score 100
 
 Combined examples:
-- errorRate 0.2 (deduction 10) + avgLatency 120 (4) + avgLag 600 (3) + consec 1 (10) + conn 90 (5) = deductions 32 → Score 68
+- errorRate 0.2 + avgLatency 120 + avgLag 600 + consec 1 + conn 90 → Score 68
 - errorRate 0.0 + avgLatency 50 + avgLag 100 + consec 0 + conn 10 → Score 100
-- errorRate 0.5 (25) + avgLatency 250 (30 cap) + avgLag 2000 (20 cap) + consec 4 (40 cap) + conn 150 (15) =130 → Score clamped 0
+- errorRate 0.5 + avgLatency 250 + avgLag 2000 + consec 4 + conn 150 → Score 0 (clamped, sum exceeds 100)
 
-From these, infer:
-- error_rate penalty = errorRate*50
-- latency: if avg > threshold: over=(avg-thresh)/thresh, penalty=over*20 cap 30; else if avg > thresh*0.8 penalty 5 else 0
-- lag: if avg > thresh: over*15 cap20 else if >0.8*thresh 3 else 0
-- consec: *10 cap40
-- conn: > thresh 15 else >0.8*thresh 5 else 0
+From these, infer per-factor independent penalties that sum to deduction from 100. Each penalty saturates at a cap. Use examples to fit rule.
 
-Score clamped 0-100.
+Score clamped 0-100. Factors map must contain all 5 keys even if deduction 0.
 
 ### GetTrend – with outage exclusion (prior-violating)
 
