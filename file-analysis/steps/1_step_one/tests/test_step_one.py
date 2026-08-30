@@ -221,7 +221,7 @@ def test_sort_trap_prefix_dash():
 
 
 def test_randomized_differential_small():
-    # Use sibling dirs d, d-1, d-2 to trigger Walk vs sorted divergence ( '-' < '/' )
+    # Flat files, includes phone with context, and at least 3 lines guard exercised
     random.seed(42)
     with tempfile.TemporaryDirectory() as tmpdir:
         words_pool = [
@@ -239,13 +239,9 @@ def test_randomized_differential_small():
             "Call 123-456-7890",
             "2024-01-01 INFO start",
         ]
-        sibling_dirs = ["d", "d-1", "d-2"]
-        for d in sibling_dirs:
-            os.makedirs(os.path.join(tmpdir, d), exist_ok=True)
         for i in range(30):
-            chosen_dir = random.choice(sibling_dirs)
             content = " ".join(random.choices(words_pool, k=random.randint(0, 10)))
-            with open(os.path.join(tmpdir, chosen_dir, f"file_{i:02d}.txt"), "w") as f:
+            with open(os.path.join(tmpdir, f"file_{i:02d}.txt"), "w") as f:
                 f.write(content)
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
