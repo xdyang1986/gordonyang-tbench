@@ -54,7 +54,7 @@ Writes: group legacy keys per shard (normal weighted, global to all), batched on
 
 Tombstone replay: after legacy+cleanup, replay ops.log ascending ts stable ties applying set/delete to correct shards (weighted for normal, all for global), each replay bumps version.
 
-Preserve existing keys unless `--force`, then overwrite and log `Overwriting key 'X' in shard Y` (accepted on either stream). Dry-run prints plan mentioning cleanup/version/shard_id but must not modify files. Backup: with `--backup`, copy legacy to backup path (mkdir -p), each modified shard to `.bak` containing old data, and ops.log to `.bak` if exists. Handle corrupted shards during migration same as init. Handle 1MB+ values atomically via legacy file.
+Preserve existing keys unless `--force`, then overwrite and log `Overwriting key 'X' in shard Y` (accepted on either stream). Dry-run prints plan mentioning cleanup/version/shard_id but must not modify files except for startup corruption repair which still applies even under --dry-run (backup corrupted file to `<path>.corrupt.<nanosec>` with warning, then recreate empty versioned file with correct shard_id, version 0, valid checksum via atomic write in same dir), as required on startup before any command. Backup: with `--backup`, copy legacy to backup path (mkdir -p), each modified shard to `.bak` containing old data, and ops.log to `.bak` if exists. Handle corrupted shards during migration same as init. Handle 1MB+ values atomically via legacy file.
 
 Bad args or bad config (duplicate id, empty path, negative id, id>=count, weight<=0, empty shards) → exit 2 no stdout. Exit codes: 0 success, 1 missing/invalid legacy/I-O, 2 invalid config/args.
 
@@ -68,7 +68,7 @@ Bad args or bad config (duplicate id, empty path, negative id, id>=count, weight
 
 ## Build
 
-`go build -o <binary> .` in `/app/`, module `sharding`, Go stdlib only, no dot imports. Use `/tmp/codimango` for temp files.
+`go build -o <binary> .` in `/app/`, module `sharding`, Go stdlib only, no dot imports. Use `/tmp/codimango` for Go build cache (GOCACHE, GOPATH) and scratch/build temp files only; shard writes must use temp file in same directory then rename for atomic durability and to produce exactly one inotify MOVED_TO event (not /tmp).
 
 ## Example
 

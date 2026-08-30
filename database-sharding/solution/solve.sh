@@ -601,8 +601,10 @@ func readOpsLog(logPath string) ([]map[string]interface{}, error) {
 		if line == "" {
 			continue
 		}
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
 		var e map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
+		if err := dec.Decode(&e); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: ops.log corrupted line skipped: %v (invalid JSON)\n", err)
 			continue
 		}

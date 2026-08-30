@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/golang:1.22-bookworm
+FROM golang:1.22-bookworm
 
 ENV GOTOOLCHAIN=local
 ENV GOFLAGS=-mod=mod
@@ -42,7 +42,7 @@ PY
 # Pre-build Turn-1 proxy into /app at image-build time – entire point of single-turn collapse
 # Turn1 is non-discriminating; grading is migration only. Build it to prove it compiles, then clean up.
 # Uses base64 file to avoid needing steps/ tree (which will be deleted)
-COPY environment/main_go_b64.txt /tmp/main_go_b64.txt
+COPY main_go_b64.txt /tmp/main_go_b64.txt
 RUN printf 'module sharding\n\ngo 1.22\n' > /app/go.mod && \
     base64 -d /tmp/main_go_b64.txt > /app/main.go && \
     echo "Turn1 proxy pre-built" && \
