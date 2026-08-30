@@ -1322,3 +1322,54 @@ def test_index_json_mid_record_truncation():
             pass
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+def test_sort_relevance_ordering(server):
+    """
+    Sort relevance discriminator: 5 docs with varying alpha occurrences.
+    Verifies mixed-direction tie-break: score desc -> timestamp desc -> id asc.
+    Also closes AFTR 'add assertions for response score'.
+    """
+    base = server
+    # Clean any prior state by checking initial empty, but server fixture is fresh per test? Actually server fixture is per-test fresh via autouse? In step1, server is function scoped? In step1, server fixture is function? Let's ingest anyway.
+
+    docs = [
+        {"id": "d-lo", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "alpha"},
+        {"id": "d-hi", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "alpha alpha alpha"},
+        {"id": "d-mid", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "alpha alpha"},
+        {"id": "e-tie", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "alpha alpha"},
+        {"id": "z-tie-new", "timestamp": "2026-07-21T10:00:00Z", "service": "s", "level": "info", "message": "alpha alpha"},
+    ]
+    r = ingest(base, docs)
+    assert r.status_code == 201, f"ingest failed {r.text}"
+    # Relevance: score desc -> timestamp desc -> id asc
+    r = search(base, q="alpha", sort="relevance", limit=10)
+    assert r.status_code == 200, f"relevance search failed {r.text}"
+    j = r.json()
+    assert j["total"] == 5, f"expected 5, got {j['total']}"
+    results = j["results"]
+    ids = [x["id"] for x in results]
+    # Expected order per spec: d-hi(3), z-tie-new(2 newer), d-mid(2), e-tie(2), d-lo(1)
+    expected_relevance = ["d-hi", "z-tie-new", "d-mid", "e-tie", "d-lo"]
+    assert ids == expected_relevance, f"relevance order wrong, expected {expected_relevance}, got {ids}"
+    # Exact score assertions
+    score_map = {x["id"]: x["score"] for x in results}
+    assert score_map["d-hi"] == 3.0, f"d-hi score expected 3, got {score_map['d-hi']}"
+    assert score_map["d-lo"] == 1.0
+    assert score_map["d-mid"] == 2.0
+    assert score_map["e-tie"] == 2.0
+    assert score_map["z-tie-new"] == 2.0
+
+    # Default sort: timestamp:desc -> id asc
+    r = search(base, q="alpha", limit=10)  # default timestamp:desc
+    assert r.status_code == 200
+    j = r.json()
+    ids_default = [x["id"] for x in j["results"]]
+    expected_default = ["z-tie-new", "d-hi", "d-lo", "d-mid", "e-tie"]
+    assert ids_default == expected_default, f"default order wrong, expected {expected_default}, got {ids_default}"
+
+    # Also check timestamp:asc
+    r = search(base, q="alpha", sort="timestamp:asc", limit=10)
+    assert r.status_code == 200
+    ids_asc = [x["id"] for x in r.json()["results"]]
+    expected_asc = ["d-hi", "d-lo", "d-mid", "e-tie", "z-tie-new"]
+    assert ids_asc == expected_asc, f"asc order wrong, expected {expected_asc}, got {ids_asc}"

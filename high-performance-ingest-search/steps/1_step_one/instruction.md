@@ -70,7 +70,9 @@ Query params:
 - `from`, `to`: RFC3339 inclusive, invalid → 400.
 - `limit`: int default 10, max 100 capped not 400, min 0. Negative or non-numeric/float → 400.
 - `offset`: int default 0, >=0 else 400, non-numeric/float → 400.
-- `sort`: `timestamp:asc` or `timestamp:desc` default desc, case-insensitive, invalid → 400. Tie-break id asc.
+- `sort`: one of `timestamp:asc`, `timestamp:desc`, `relevance` (case-insensitive). Default `timestamp:desc`. Invalid → 400.
+  - `timestamp:asc` / `timestamp:desc`: order by timestamp, tie-break id ascending.
+  - `relevance`: order by score descending, then timestamp descending, then id ascending. Note the directions differ per level.
 
 Response 200:
 ```json

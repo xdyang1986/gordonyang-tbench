@@ -102,12 +102,17 @@ Expose:
 ```json
 {
   "ingest": {"total_docs": 20000, "rate_per_sec": 3500.5, "queue_depth": 0, "workers": 4},
-  "search": {"total_queries": 100, "avg_latency_ms": 12.3, "p50_ms": 10, "p99_ms": 45, "cache_hits": 30, "cache_misses": 70, "cache_hit_rate": 0.3, "cache_size": 5},
-  "index": {"docs": 20000, "shards": 4, "terms": 1234}
+  "search": {"total_queries": 100, "avg_latency_ms": 12.3, "p50_ms": 10, "p99_ms": 45, "cache_hits": 30, "cache_misses": 70, "cache_hit_rate": 0.3, "cache_size": 5, "rejected": 0, "max_concurrent": 50},
+  "index": {"docs": 20000, "shards": 4, "shard_docs": [5012, 4988, 5001, 4999], "terms": 1234}
 }
 ```
 
-Minimum: top-level `ingest`, `search`, `index` with listed sub-fields. Types float/int accepted. `ingest.total_docs` must match stats docs. cache hit/miss must evolve.
+Minimum: top-level `ingest`, `search`, `index` with listed sub-fields. New required fields:
+- `index.shard_docs`: per-shard document counts ordered by shard index. Length must equal shards; must sum to docs.
+- `search.max_concurrent`: the effective `server.max_concurrent_search`.
+- `search.rejected`: count of searches shed by admission control.
+
+Types float/int accepted. `ingest.total_docs` must match stats docs. cache hit/miss must evolve. A single-lock implementation that merely reports configured shards/workers without actual partitioning cannot produce correct `shard_docs`.
 
 ### 6. Performance SLOs (graded)
 
@@ -138,6 +143,10 @@ Cache:
 - Fork-safe persistence.
 - Validate `go.mod` still has no forbidden search libraries.
 - WAL must reject bad checksums and skip corrupt lines without crashing.
+
+#### Search Admission Control — Mandatory
+
+`server.max_concurrent_search` is a hard ceiling on concurrently executing searches, enforced with no queueing. A request arriving when the ceiling is already occupied must be rejected immediately with 503, header `Retry-After: 0`, and body `{"error":"search overloaded"}` — do not block, queue, or delay it. Each rejection increments `search.rejected` and must not count toward `search.total_queries`. Rejected searches are not an error condition; shedding load is the required behaviour.
 
 ### 8. Validation Steps (what tests do)
 

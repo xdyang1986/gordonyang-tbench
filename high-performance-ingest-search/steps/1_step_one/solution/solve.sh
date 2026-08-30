@@ -855,7 +855,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		sortParam = "timestamp:desc"
 	}
 	sortParamLower := strings.ToLower(sortParam)
-	if sortParamLower != "timestamp:asc" && sortParamLower != "timestamp:desc" {
+	if sortParamLower != "timestamp:asc" && sortParamLower != "timestamp:desc" && sortParamLower != "relevance" {
 		writeJSON(w, 400, map[string]string{"error": "invalid sort"})
 		return
 	}
@@ -981,8 +981,15 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isAsc := sortParamLower == "timestamp:asc"
+	isRelevance := sortParamLower == "relevance"
 	sort.Slice(scoredList, func(i, j int) bool {
+		if isRelevance && scoredList[i].score != scoredList[j].score {
+			return scoredList[i].score > scoredList[j].score
+		}
 		if !scoredList[i].doc.ParsedTime.Equal(scoredList[j].doc.ParsedTime) {
+			if isRelevance {
+				return scoredList[i].doc.ParsedTime.After(scoredList[j].doc.ParsedTime)
+			}
 			if isAsc {
 				return scoredList[i].doc.ParsedTime.Before(scoredList[j].doc.ParsedTime)
 			}

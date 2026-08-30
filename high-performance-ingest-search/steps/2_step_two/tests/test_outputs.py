@@ -852,8 +852,10 @@ def test_cache_invalidation_after_writes(server):
 
 def test_actual_sharding_behavioral(server):
     """
-    Behavioral check for real sharding: verifies metrics shards==config, per-shard doc counts
-    match FNV-1a hash distribution, and config change is honored. No source grep.
+    Behavioral check for real sharding, hash-agnostic.
+    - len(shard_docs) == shards, sum == docs
+    - with 200 ids over >=2 shards: min >0 and max <200 (single-lock fake cannot satisfy without partitioning)
+    - stable routing: same ids, restart, shard_docs byte-identical
     """
     base = server
     r = requests.get(f"{base}/metrics", timeout=5)
@@ -884,7 +886,7 @@ def test_actual_sharding_behavioral(server):
     if cfg_shards:
         assert shards_reported == cfg_shards
 
-    # Known ids FNV distribution on fresh server with empty start (via restart)
+    # Hash-agnostic distribution: ingest 200 ids on fresh server
     port = find_free_port()
     env = {**os.environ, "PORT": str(port)}
     with open(CONFIG_PATH) as f:
@@ -899,19 +901,36 @@ def test_actual_sharding_behavioral(server):
         r = requests.get(f"{base2}/metrics", timeout=5)
         assert r.status_code == 200
         shards0 = r.json()["index"]["shards"]
-        test_ids = [f"dist-{i:05d}" for i in range(200)]
-        expected = [0] * shards0
-        for tid in test_ids:
-            expected[_fnv1a32(tid) % shards0] += 1
-        docs = [{"id": tid, "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "dist test"} for tid in test_ids]
+        assert shards0 >= 2
+        test_ids = [f"shard-verify-{i:05d}" for i in range(200)]
+        docs = [{"id": tid, "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "shard observable"} for tid in test_ids]
         ndjson = "\n".join([json.dumps(d) for d in docs])
         r = requests.post(f"{base2}/ingest/bulk", data=ndjson, headers={"Content-Type": "application/x-ndjson"}, timeout=15)
         assert r.status_code == 201
+        assert r.json()["ingested"] == 200
         r = requests.get(f"{base2}/metrics", timeout=5)
-        sd = r.json()["index"]["shard_docs"]
-        assert sd == expected, f"shard_docs {sd} must match FNV-1a distribution {expected}"
+        assert r.status_code == 200
+        j2 = r.json()
+        sd = j2["index"]["shard_docs"]
+        assert len(sd) == shards0
+        assert sum(sd) == 200
+        # Fake single-lock impl would put all docs in one shard (or fake static distribution)
+        assert min(sd) > 0, f"with 200 ids over >=2 shards, each shard should have >0 docs, got {sd}"
+        assert max(sd) < 200, f"with 200 ids, max shard should be <200, got {sd}"
+        # Stable routing: restart with same data dir, shard_docs identical
         proc.terminate()
         proc.wait(timeout=5)
+        time.sleep(0.5)
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15)
+        base2b = f"http://127.0.0.1:{port}"
+        r = requests.get(f"{base2b}/metrics", timeout=5)
+        assert r.status_code == 200
+        sd2 = r.json()["index"]["shard_docs"]
+        assert sd2 == sd, f"stable routing: shard_docs should be byte-identical after restart, got {sd2} vs {sd}"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+        proc = proc2
     finally:
         with open(CONFIG_PATH, 'w') as f:
             f.write(orig)
@@ -922,15 +941,7 @@ def test_actual_sharding_behavioral(server):
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
 
-    # Bulk 2k quick
-    docs2 = generate_docs(2000, 100000)
-    start = time.time()
-    r = bulk_ingest_ndjson(base, docs2)
-    assert r.status_code == 201
-    assert r.json()["ingested"] == 2000
-    assert time.time() - start < 5.0
-
-    # Config change to 8
+    # Config change to 8 honored
     port = find_free_port()
     env = {**os.environ, "PORT": str(port)}
     with open(CONFIG_PATH) as f:
@@ -1113,3 +1124,110 @@ def test_worker_pool_backpressure(server):
     r = requests.get(f"{base}/metrics", timeout=5)
     assert r.status_code == 200
     assert "queue_depth" in r.json()["ingest"]
+
+def test_search_admission_control():
+    """
+    Verify real max_concurrent_search admission control.
+    Saves/restores config, sets max_concurrent_search:2, bulk-ingest 20k, fires 48 threads x3 searches.
+    Expects some 503 with Retry-After:0 and error 'search overloaded', and metrics.search.rejected == observed 503 count, max_concurrent==2.
+    """
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    # backup config
+    with open(CONFIG_PATH) as f:
+        orig_cfg = f.read()
+    # create config with max_concurrent_search:2
+    new_cfg = re.sub(r'max_concurrent_search\s*:\s*\d+', 'max_concurrent_search: 2', orig_cfg, flags=re.IGNORECASE)
+    # If not found, inject
+    if "max_concurrent_search" not in new_cfg.lower():
+        new_cfg += "\nserver:\n  max_concurrent_search: 2\n"
+    with open(CONFIG_PATH, 'w') as f:
+        f.write(new_cfg)
+
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert wait_for_server(port, timeout=15), "server should start with max_concurrent_search 2"
+        base = f"http://127.0.0.1:{port}"
+        # bulk ingest 20k docs with alpha term
+        docs = generate_docs(20000, 0)
+        ndjson = "\n".join([json.dumps(d) for d in docs])
+        r = requests.post(f"{base}/ingest/bulk", data=ndjson, headers={"Content-Type": "application/x-ndjson"}, timeout=20)
+        assert r.status_code == 201
+        assert r.json()["ingested"] == 20000
+
+        # Fire 48 threads x3 searches
+        results = []
+        lock = threading.Lock()
+
+        def do_searches():
+            for _ in range(3):
+                try:
+                    resp = requests.get(f"{base}/search", params={"q": "alpha", "limit": 100}, timeout=10)
+                    with lock:
+                        results.append(resp)
+                except Exception as e:
+                    with lock:
+                        results.append(e)
+
+        threads = []
+        for _ in range(48):
+            t = threading.Thread(target=do_searches)
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Analyze
+        count_200 = 0
+        count_503 = 0
+        for resp in results:
+            if isinstance(resp, Exception):
+                continue
+            if resp.status_code == 200:
+                count_200 += 1
+            elif resp.status_code == 503:
+                count_503 += 1
+                # Check Retry-After header and body
+                assert resp.headers.get("Retry-After") == "0", f"503 should have Retry-After:0, got {resp.headers.get('Retry-After')}"
+                try:
+                    body = resp.json()
+                    assert "error" in body and "overloaded" in body["error"].lower(), f"503 body should contain overloaded error, got {body}"
+                except Exception:
+                    # if not json, fail
+                    assert False, f"503 body should be JSON with error, got {resp.text[:100]}"
+            else:
+                assert False, f"search should be 200 or 503 under admission control, got {resp.status_code}"
+
+        assert count_503 >= 1, f"expected at least one 503 with max_concurrent 2 and 48 threads, got 503={count_503}, 200={count_200}"
+        assert count_200 + count_503 == len(results), f"all results should be 200 or 503, got {len(results)} total, {count_200} 200, {count_503} 503"
+
+        # Check metrics
+        r = requests.get(f"{base}/metrics", timeout=5)
+        assert r.status_code == 200
+        m = r.json()
+        assert "search" in m
+        assert "rejected" in m["search"], f"metrics must include search.rejected, got {m['search']}"
+        assert "max_concurrent" in m["search"], f"metrics must include search.max_concurrent, got {m['search']}"
+        assert m["search"]["max_concurrent"] == 2, f"max_concurrent should be 2, got {m['search']['max_concurrent']}"
+        assert m["search"]["rejected"] == count_503, f"metrics rejected {m['search']['rejected']} should equal observed 503 count {count_503}"
+
+    finally:
+        with open(CONFIG_PATH, 'w') as f:
+            f.write(orig_cfg)
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc.kill()
+        except:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)

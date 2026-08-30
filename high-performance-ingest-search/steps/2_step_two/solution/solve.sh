@@ -1030,13 +1030,20 @@ func (c *LRUCache) Size() int {
 
 // ---------- Metrics ----------
 type Metrics struct {
-	mu           sync.Mutex
-	ingestTotal  int
-	startTime    time.Time
-	searchTotal  int
-	latencies    []float64
-	cacheHits    int
-	cacheMisses  int
+	mu             sync.Mutex
+	ingestTotal    int
+	startTime      time.Time
+	searchTotal    int
+	latencies      []float64
+	cacheHits      int
+	cacheMisses    int
+	searchRejected int
+}
+
+func (m *Metrics) IncSearchRejected() {
+	m.mu.Lock()
+	m.searchRejected++
+	m.mu.Unlock()
 }
 
 func NewMetrics() *Metrics {
@@ -1057,7 +1064,6 @@ func (m *Metrics) RecordSearch(latencyMs float64, hit bool) {
 	m.searchTotal++
 	m.latencies = append(m.latencies, latencyMs)
 	if len(m.latencies) > 5000 {
-		// drop oldest 1000
 		m.latencies = m.latencies[1000:]
 	}
 	if hit {
@@ -1429,14 +1435,17 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 		return
 	}
-	// concurrency limiting
+	// concurrency limiting: strict admission control, no queueing. Over the
+	// configured ceiling we shed load with 503 rather than letting the queue grow.
 	if searchSem != nil {
 		select {
 		case searchSem <- struct{}{}:
 			defer func() { <-searchSem }()
 		default:
-			// if too many concurrent, we still allow but could block; for simplicity allow
-			// try to acquire with timeout? We'll just proceed
+			metrics.IncSearchRejected()
+			w.Header().Set("Retry-After", "0")
+			writeJSON(w, 503, map[string]string{"error": "search overloaded"})
+			return
 		}
 	}
 	start := time.Now()
@@ -1534,7 +1543,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		sortParam = "timestamp:desc"
 	}
 	sortParamLower := strings.ToLower(sortParam)
-	if sortParamLower != "timestamp:asc" && sortParamLower != "timestamp:desc" {
+	if sortParamLower != "timestamp:asc" && sortParamLower != "timestamp:desc" && sortParamLower != "relevance" {
 		writeJSON(w, 400, map[string]string{"error": "invalid sort"})
 		return
 	}
@@ -1613,13 +1622,20 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		scoredList = append(scoredList, scored{doc: doc, score: score})
 	}
 
-	// sort
-	isAsc := sortParamLower == "timestamp:asc"
+	// sort: relevance = score desc -> timestamp desc -> id asc, timestamp sorts use timestamp primary
 	sort.Slice(scoredList, func(i, j int) bool {
+		isRelevance := sortParamLower == "relevance"
+		if isRelevance && scoredList[i].score != scoredList[j].score {
+			return scoredList[i].score > scoredList[j].score
+		}
 		if !scoredList[i].doc.ParsedTime.Equal(scoredList[j].doc.ParsedTime) {
-			if isAsc {
+			if sortParamLower == "timestamp:asc" {
+				if isRelevance {
+					return scoredList[i].doc.ParsedTime.After(scoredList[j].doc.ParsedTime)
+				}
 				return scoredList[i].doc.ParsedTime.Before(scoredList[j].doc.ParsedTime)
 			}
+			// timestamp:desc and relevance both use timestamp desc
 			return scoredList[i].doc.ParsedTime.After(scoredList[j].doc.ParsedTime)
 		}
 		return scoredList[i].doc.ID < scoredList[j].doc.ID
@@ -1691,7 +1707,10 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	ingestTotal, rate, totalQueries, avgLat, p50, p99, hits, misses, hitRate := metrics.Snapshot()
-	// ensure levels etc
+	// read rejected safely
+	metrics.mu.Lock()
+	rejected := metrics.searchRejected
+	metrics.mu.Unlock()
 	resp := map[string]interface{}{
 		"ingest": map[string]interface{}{
 			"total_docs":  ingestTotal,
@@ -1708,6 +1727,8 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 			"cache_misses":   misses,
 			"cache_hit_rate": hitRate,
 			"cache_size":     cache.Size(),
+			"rejected":       rejected,
+			"max_concurrent": config.Server.MaxConcurrentSearch,
 		},
 		"index": map[string]interface{}{
 			"docs":       shardedIdx.DocCount(),
