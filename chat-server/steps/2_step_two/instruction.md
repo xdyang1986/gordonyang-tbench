@@ -59,7 +59,7 @@ All JSON files use wrapper `{"data": <Data>, "checksum": md5 canonical}` where c
 - `users_path`: `{"alice": true, ...}` global seen users
 - `ops_log`: append-only JSON-lines file (not wrapper), each line is a JSON object
 
-All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding.
+All files: atomic via `os.CreateTemp` same dir + `os.Rename`, file locking for correctness, wrapper checksum strict, corruption handling: invalid JSON, missing/empty checksum, or checksum mismatch → backup `<path>.corrupt.<nanosec>` (nanosec digits integer from `UnixNano()`), stderr warning containing "corrupt" or "checksum", recreate empty valid file. Global lock file `/app/data/global.lock` must be used for multi-shard operations and cleaned after each command. The lock is acquired by creating it with O_CREATE|O_EXCL; if it already exists the command retries and ultimately fails rather than proceeding. If the lock cannot be acquired within 3 seconds the command gives up and exits nonzero; it must not block indefinitely.
 
 ### Sharded Semantics
 
