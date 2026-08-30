@@ -11,7 +11,7 @@ workstream = "swe_public_repo"
 [metadata]
 difficulty = "hard"
 category = "software-engineering"
-category_usecase = "implement_new_feature"
+category_usecase = "new_cli_tool"
 category_subdomain = "security_and_privacy"
 reward_type = "binary"
 tags = ["iterate_on_feature", "go", "file-analysis", "pii", "classification", "concurrency", "security"]

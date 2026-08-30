@@ -24,7 +24,7 @@ file-analyzer --help, -h, help, no args -> help
 - Recursively walk `--dir`, regular files only, ignore symlinks, do not follow.
 - Empty dir → `[]`.
 - Empty or whitespace-only → non-essential.
-- Binary file containing null byte `\x00` → non-essential (unless PII – see step2 for refinement, in step1 treat as non-essential if no PII pattern, to keep simple you may treat as non-essential).
+- Binary file containing null byte `\x00` → non-essential. PII check takes precedence over binary check.
 
 ## Classification
 Priority: PII > business-critical > non-essential. If both business and PII signals, it is PII.
@@ -33,7 +33,7 @@ Priority: PII > business-critical > non-essential. If both business and PII sign
 
 - **PII (Step1 heuristic)**: Files containing patterns like SSN (xxx-xx-xxxx), email, phone (xxx-xxx-xxxx or (xxx) xxx-xxxx), credit card (xxxx-xxxx-xxxx-xxxx). Heuristic matching is acceptable in Step1; you will make it precise in Step2. Phone number with context like `Call 123-456-7890` counts as PII.
 
-- **Non-essential**: everything else. Specifically, if file content is predominantly log lines – defined as ≥50% of non-empty lines matching timestamp `yyyy-mm-dd` or `hh:mm:ss` or level `INFO|DEBUG|WARN|ERROR|TRACE` – then it is non-essential even if it contains business words. This discriminator is intentionally in Step1 to increase difficulty.
+- **Non-essential**: everything else, including logs, temporary files, empty files, and files without sensitive signals. Specifically, if file content is predominantly log lines – defined as ≥50% of non-empty lines matching timestamp `yyyy-mm-dd` or `hh:mm:ss` or level `INFO|DEBUG|WARN|ERROR|TRACE` – then it is non-essential even if it contains business words.
 
 ## Output (Step1)
 JSON array sorted lexicographically by absolute file path. Each `{"file": "<abs path>", "category": "business-critical|pii|non-essential"}`. Empty → `[]` not `null`. Atomic write via temp+rename, no residue.

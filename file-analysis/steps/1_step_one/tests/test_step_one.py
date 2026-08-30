@@ -189,7 +189,6 @@ def test_atomic_and_json_shape():
 
 
 def test_log_content_heuristic_in_step1():
-    # This discriminator moved from step2 to step1 to increase difficulty
     with tempfile.TemporaryDirectory() as tmpdir:
         content = "\n".join(
             [f"2024-01-01 INFO budget processing {i}" for i in range(10)]
@@ -203,8 +202,26 @@ def test_log_content_heuristic_in_step1():
         )
 
 
+def test_sort_trap_prefix_dash():
+    # Walk-order trap: '-' (0x2D) sorts before '/' (0x2F), so Walk visits d before d-1 but sorted order is d-1 before d
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "a"))
+        os.makedirs(os.path.join(tmpdir, "a-b"))
+        with open(os.path.join(tmpdir, "a", "b.txt"), "w") as f:
+            f.write("confidential")
+        with open(os.path.join(tmpdir, "a-b", "c.txt"), "w") as f:
+            f.write("hello")
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        files = [d["file"] for d in data]
+        assert files == sorted(files), f"must be sorted lexicographically, got {files}"
+        assert files[0].endswith("a-b/c.txt") and files[1].endswith("a/b.txt"), (
+            f"sort trap failed: expected a-b/c.txt before a/b.txt, got {files}"
+        )
+
+
 def test_randomized_differential_small():
-    # Fixed phone ambiguity: use Call 123-456-7890 with context so conservative detectors agree
+    # Use sibling dirs d, d-1, d-2 to trigger Walk vs sorted divergence ( '-' < '/' )
     random.seed(42)
     with tempfile.TemporaryDirectory() as tmpdir:
         words_pool = [
@@ -222,9 +239,13 @@ def test_randomized_differential_small():
             "Call 123-456-7890",
             "2024-01-01 INFO start",
         ]
+        sibling_dirs = ["d", "d-1", "d-2"]
+        for d in sibling_dirs:
+            os.makedirs(os.path.join(tmpdir, d), exist_ok=True)
         for i in range(30):
+            chosen_dir = random.choice(sibling_dirs)
             content = " ".join(random.choices(words_pool, k=random.randint(0, 10)))
-            with open(os.path.join(tmpdir, f"file_{i:02d}.txt"), "w") as f:
+            with open(os.path.join(tmpdir, chosen_dir, f"file_{i:02d}.txt"), "w") as f:
                 f.write(content)
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)

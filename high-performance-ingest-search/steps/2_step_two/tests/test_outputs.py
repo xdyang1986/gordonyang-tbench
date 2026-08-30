@@ -1,12 +1,5 @@
 """
 Step 2 tests: high-performance optimization
-- Config validation
-- Bulk throughput
-- Search latency
-- Cache & metrics
-- Concurrency stress
-- Persistence after high throughput
-- Correctness still holds (subset of step1)
 """
 
 import os, json, time, shutil, socket, subprocess, threading, datetime, binascii, re
@@ -130,6 +123,12 @@ def delete_doc(base, doc_id):
 # ---------------------------------------------------------------------------
 
 
+def _strip_inline_comment(s: str) -> str:
+    if "#" in s:
+        s = s.split("#", 1)[0]
+    return s.strip()
+
+
 def test_config_exists():
     assert os.path.exists(CONFIG_PATH), (
         "config.yaml must exist at /app/config.yaml for step2"
@@ -138,17 +137,9 @@ def test_config_exists():
         content = f.read()
     assert "ingest" in content.lower()
     assert "search" in content.lower()
-    # check required keys exist via simple parsing
     lower = content.lower()
     for key in ["workers", "batch_size", "cache_size", "shard_count"]:
         assert key in lower, f"config missing required key {key}"
-
-
-def _strip_inline_comment(s: str) -> str:
-    # Strip inline # comments, respecting that # inside quotes shouldn't split, but for int fields simple split is fine
-    if "#" in s:
-        s = s.split("#", 1)[0]
-    return s.strip()
 
 
 def test_config_meets_minimums():
@@ -181,8 +172,6 @@ def test_config_meets_minimums():
 
 
 def test_config_inline_comment_parsing():
-    # Ensure server can handle config with inline comments like "workers: 4  # comment"
-    # This was blocking (opus 0/5). Write a temp config with comments and restart server.
     tmp_cfg = "/tmp/test_inline_config.yaml"
     with open(tmp_cfg, "w") as f:
         f.write("""
@@ -206,7 +195,6 @@ server:
 """)
     port = find_free_port()
     env = {**os.environ, "PORT": str(port)}
-    # backup original config
     orig_content = None
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as of:
@@ -215,18 +203,13 @@ server:
     if os.path.exists(DATA_DIR):
         shutil.rmtree(DATA_DIR, ignore_errors=True)
     os.makedirs(DATA_DIR, exist_ok=True)
-    proc = subprocess.Popen(
-        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        assert wait_for_server(port, timeout=15), (
-            "server failed to start with inline-comment config"
-        )
+        assert wait_for_server(port, timeout=15), "server failed to start with inline-comment config"
         base = f"http://127.0.0.1:{port}"
         r = requests.get(f"{base}/metrics", timeout=5)
         assert r.status_code == 200
         j = r.json()
-        # should parse workers=4 etc, not fallback to 0
         assert j["ingest"]["workers"] >= 2
         assert j["index"]["shards"] >= 2
         proc.terminate()
@@ -236,7 +219,6 @@ server:
             proc.terminate()
         except:
             pass
-        # restore original config
         if orig_content is not None:
             with open(CONFIG_PATH, "w") as f:
                 f.write(orig_content)
@@ -250,7 +232,6 @@ server:
 
 
 def test_config_read_by_server(server):
-    # server should start with config and metrics should reflect config values
     base = server
     r = requests.get(f"{base}/metrics", timeout=5)
     assert r.status_code == 200, f"/metrics failed {r.text}"
@@ -267,7 +248,6 @@ def test_config_read_by_server(server):
 
 def test_step1_correctness_still_passes(server):
     base = server
-    # ingest
     r = ingest(
         base,
         [
@@ -288,18 +268,14 @@ def test_step1_correctness_still_passes(server):
         ],
     )
     assert r.status_code == 201
-    # phrase
     r = search(base, q='"login successful"')
     assert r.status_code == 200
     ids = {x["id"] for x in r.json()["results"]}
     assert ids == {"c1"}
-    # service filter
     r = search(base, service="auth")
     assert r.json()["total"] == 2
-    # level filter
     r = search(base, level="info")
     assert r.json()["total"] == 2
-    # tags filter
     ingest(
         base,
         [
@@ -315,13 +291,10 @@ def test_step1_correctness_still_passes(server):
     )
     r = search(base, tags="auth,login")
     assert r.json()["total"] == 1
-    # time range
     r = search(base, **{"from": "2026-07-20T09:00:00Z", "to": "2026-07-20T10:30:00Z"})
     assert r.json()["total"] >= 1
-    # empty phrase 400
     r = search(base, q='""')
     assert r.status_code == 400
-    # stats
     r = requests.get(f"{base}/stats", timeout=5)
     assert r.status_code == 200
     assert r.json()["docs"] >= 3
@@ -395,11 +368,9 @@ def test_bulk_throughput_10k(server):
     assert r.status_code == 201, f"bulk ingest failed {r.status_code} {r.text[:500]}"
     j = r.json()
     assert j["ingested"] == 10000, f"expected 10000 ingested, got {j}"
-    # Relaxed threshold: 2 CPUs hardware-dependent, allow up to 8 sec (was 5)
     assert elapsed < 8.0, (
         f"bulk 10k took {elapsed:.2f}s, must be <8s (relaxed from 5s for 2 CPU), got {elapsed}"
     )
-    # verify searchable
     r = search(base, q="login", limit=5)
     assert r.status_code == 200
     assert r.json()["total"] == 10000
@@ -408,7 +379,6 @@ def test_bulk_throughput_10k(server):
 def test_concurrent_bulk_throughput(server):
     base = server
 
-    # 4 concurrent bulk requests 5k each = 20k total
     def do_bulk(start_id):
         docs = generate_docs(5000, start_id)
         ndjson = "\n".join([json.dumps(d) for d in docs])
@@ -434,16 +404,12 @@ def test_concurrent_bulk_throughput(server):
     for t in threads:
         t.join()
     elapsed = time.time() - start
-    # Relaxed from 10s to 15s for 2 CPUs
-    assert elapsed < 15.0, (
-        f"concurrent 4x5k bulk took {elapsed:.2f}s, must be <15s (relaxed)"
-    )
+    assert elapsed < 15.0, f"concurrent 4x5k bulk took {elapsed:.2f}s, must be <15s (relaxed)"
     for r in results:
         assert r.status_code == 201, (
             f"concurrent bulk failed {r.status_code} {r.text[:200]}"
         )
         assert r.json()["ingested"] == 5000
-    # total docs should be 20k
     r = requests.get(f"{base}/stats", timeout=5)
     assert r.status_code == 200
     assert r.json()["docs"] == 20000, (
@@ -453,11 +419,8 @@ def test_concurrent_bulk_throughput(server):
 
 def test_search_latency_idle(server):
     base = server
-    # first ingest some data
     docs = generate_docs(2000, 0)
     bulk_ingest_ndjson(base, docs)
-    # warmup cache cleared after ingest
-    # 500 sequential searches
     queries = [
         "login",
         "successful",
@@ -473,7 +436,7 @@ def test_search_latency_idle(server):
         q = queries[i % len(queries)]
         start = time.time()
         r = search(base, q=q, limit=10)
-        elapsed = (time.time() - start) * 1000  # ms
+        elapsed = (time.time() - start) * 1000
         latencies.append(elapsed)
         assert r.status_code == 200, (
             f"search failed during latency test: {r.status_code}"
@@ -483,13 +446,8 @@ def test_search_latency_idle(server):
     p50 = latencies_sorted[int(len(latencies_sorted) * 0.5)]
     p99 = latencies_sorted[int(len(latencies_sorted) * 0.99)]
     print(f"\nIDLE latency avg={avg:.2f}ms p50={p50:.2f}ms p99={p99:.2f}ms")
-    # Relaxed thresholds for 2 CPU env: avg <100ms (was 50), p99 <500ms (was 200)
-    assert avg < 100.0, (
-        f"avg search latency {avg:.2f}ms too high, must <100ms (relaxed)"
-    )
-    assert p99 < 500.0, (
-        f"p99 search latency {p99:.2f}ms too high, must <500ms (relaxed)"
-    )
+    assert avg < 100.0, f"avg search latency {avg:.2f}ms too high, must <100ms (relaxed)"
+    assert p99 < 500.0, f"p99 search latency {p99:.2f}ms too high, must <500ms (relaxed)"
 
 
 def test_search_latency_under_concurrent_ingest(server):
@@ -497,7 +455,6 @@ def test_search_latency_under_concurrent_ingest(server):
     docs = generate_docs(2000, 0)
     bulk_ingest_ndjson(base, docs)
 
-    # start 2 bulk ingests in background (5k each)
     def background_bulk():
         more_docs = generate_docs(5000, 10000)
         ndjson = "\n".join([json.dumps(d) for d in more_docs])
@@ -514,7 +471,6 @@ def test_search_latency_under_concurrent_ingest(server):
         t.start()
         bg_threads.append(t)
 
-    # 200 searches while ingest ongoing
     latencies = []
     for i in range(200):
         start = time.time()
@@ -522,7 +478,7 @@ def test_search_latency_under_concurrent_ingest(server):
         elapsed = (time.time() - start) * 1000
         latencies.append(elapsed)
         assert r.status_code == 200, f"search failed under load {r.status_code}"
-        time.sleep(0.005)  # slight delay to intermix with ingest
+        time.sleep(0.005)
 
     for t in bg_threads:
         t.join(timeout=10)
@@ -532,13 +488,8 @@ def test_search_latency_under_concurrent_ingest(server):
     p50 = lat_sorted[int(len(lat_sorted) * 0.5)]
     p99 = lat_sorted[int(len(lat_sorted) * 0.99)]
     print(f"\nUNDER LOAD latency avg={avg:.2f}ms p50={p50:.2f}ms p99={p99:.2f}ms")
-    # Relaxed for 2 CPUs: avg <200 (was 100), p99 <1000 (was 400)
-    assert avg < 200.0, (
-        f"avg latency under load {avg:.2f}ms too high, must <200ms (relaxed)"
-    )
-    assert p99 < 1000.0, (
-        f"p99 latency under load {p99:.2f}ms too high, must <1000ms (relaxed)"
-    )
+    assert avg < 200.0, f"avg latency under load {avg:.2f}ms too high, must <200ms (relaxed)"
+    assert p99 < 1000.0, f"p99 latency under load {p99:.2f}ms too high, must <1000ms (relaxed)"
 
 
 def test_cache_hit_rate(server):
@@ -555,10 +506,8 @@ def test_cache_hit_rate(server):
             },
         ],
     )
-    # first search = miss
     r = search(base, q="cache")
     assert r.status_code == 200
-    # repeated same query 20 times should hit cache
     for _ in range(20):
         r = search(base, q="cache", limit=10, offset=0, sort="timestamp:desc")
         assert r.status_code == 200
@@ -579,7 +528,6 @@ def test_cache_hit_rate(server):
 
 def test_sharding_and_concurrency_stress(server):
     base = server
-    # 10 writers bulk 1k each + 20 readers
     errors = []
 
     def writer(start_id):
@@ -623,7 +571,6 @@ def test_sharding_and_concurrency_stress(server):
         t.join()
 
     assert not errors, f"concurrency stress errors: {errors}"
-    # server should still be healthy
     r = requests.get(f"{base}/health", timeout=5)
     assert r.status_code == 200
     r = requests.get(f"{base}/stats", timeout=5)
@@ -654,8 +601,7 @@ def test_persistence_after_high_throughput():
             timeout=10,
         )
         assert r.status_code == 201
-        time.sleep(1.5)  # allow async flush
-        # check stats
+        time.sleep(1.5)
         r = requests.get(f"{base}/stats", timeout=5)
         assert r.json()["docs"] == 5000
         proc.terminate()
@@ -664,7 +610,6 @@ def test_persistence_after_high_throughput():
         except subprocess.TimeoutExpired:
             proc.kill()
         time.sleep(1)
-        # restart, should recover at least 5k docs via index.json or WAL
         proc2 = subprocess.Popen(
             [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -696,28 +641,22 @@ def test_persistence_after_high_throughput():
 
 def test_invalid_inputs_still_400(server):
     base = server
-    # empty phrase
     r = search(base, q='""')
     assert r.status_code == 400
-    # invalid level filter
     r = search(base, level="badlevel")
     assert r.status_code == 400
-    # invalid from
     r = search(base, **{"from": "not-time"})
     assert r.status_code == 400
-    # invalid sort
     r = search(base, sort="invalid")
     assert r.status_code == 400
-    # invalid limit
     r = search(base, limit=-1)
     assert r.status_code == 400
-    # float limit
     r = requests.get(f"{base}/search", params={"limit": "10.5"}, timeout=5)
     assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------
-# Additional AFTR coverage gap tests
+# Additional coverage gap tests - behavioral, not source grep
 # ---------------------------------------------------------------------------
 
 
@@ -731,16 +670,7 @@ def test_go_mod_forbidden_libs():
         pytest.skip("go.mod not found")
     with open(go_mod) as f:
         content = f.read().lower()
-    forbidden = [
-        "bleve",
-        "elastic",
-        "elasticsearch",
-        "algolia",
-        "meilisearch",
-        "sonic",
-        "tantivy",
-        "lucene",
-    ]
+    forbidden = ["bleve", "elastic", "elasticsearch", "algolia", "meilisearch", "sonic", "tantivy", "lucene"]
     for lib in forbidden:
         assert lib not in content, f"go.mod contains forbidden lib {lib}"
 
@@ -755,43 +685,22 @@ def test_data_file_env_handling():
         shutil.rmtree(DATA_DIR, ignore_errors=True)
     os.makedirs(custom_dir, exist_ok=True)
     env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_data_file}
-    proc = subprocess.Popen(
-        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        assert wait_for_server(port, timeout=15), (
-            "server failed to start with DATA_FILE env"
-        )
+        assert wait_for_server(port, timeout=15), "server failed to start with DATA_FILE env"
         base = f"http://127.0.0.1:{port}"
-        r = ingest(
-            base,
-            [
-                {
-                    "id": "df1",
-                    "timestamp": "2026-07-20T10:00:00Z",
-                    "service": "s",
-                    "level": "info",
-                    "message": "data file test",
-                }
-            ],
-        )
+        r = ingest(base, [{"id": "df1", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "data file test"}])
         assert r.status_code == 201
         time.sleep(0.8)
         custom_wal = os.path.join(custom_dir, "wal.log")
-        assert os.path.exists(custom_data_file) or os.path.exists(custom_wal), (
-            f"DATA_FILE handling failed"
-        )
+        assert os.path.exists(custom_data_file) or os.path.exists(custom_wal), f"DATA_FILE handling failed"
         proc.terminate()
         proc.wait(timeout=5)
         time.sleep(0.5)
-        proc2 = subprocess.Popen(
-            [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         assert wait_for_server(port, timeout=15), "server should recover with DATA_FILE"
         r = get_doc(f"http://127.0.0.1:{port}", "df1")
-        assert r.status_code == 200, (
-            f"doc should persist via DATA_FILE, got {r.status_code}"
-        )
+        assert r.status_code == 200, f"doc should persist via DATA_FILE, got {r.status_code}"
         proc2.terminate()
         proc2.wait(timeout=5)
     finally:
@@ -807,7 +716,6 @@ def test_data_file_env_handling():
             shutil.rmtree(custom_dir, ignore_errors=True)
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
-
 
 
 def test_wal_checksum_rejection():
@@ -919,7 +827,6 @@ def test_cache_invalidation_after_writes(server):
     assert r.status_code == 200
     r = requests.get(f"{base}/metrics", timeout=5)
     assert r.status_code == 200
-    # now ingest another doc with same term, should invalidate cache
     r = ingest(base, [{"id": "cacheinv2", "timestamp": "2026-07-20T11:00:00Z", "service": "s", "level": "info", "message": "cache invalidation test second"}])
     assert r.status_code == 201
     r = search(base, q="invalidation")
@@ -934,12 +841,20 @@ def test_cache_invalidation_after_writes(server):
     assert "cacheinv2" in ids
 
 
-def test_actual_sharding_not_fake(server):
+def test_actual_sharding_behavioral(server):
+    """
+    Replace previous source-grep test_actual_sharding_not_fake.
+    Behavioral check: shards reported must match config, bulk ingest works,
+    and changing shard_count in config is honored after restart.
+    This avoids false negatives for implementations that put sharding logic in index.go
+    and is not spoofable via comment.
+    """
     base = server
     r = requests.get(f"{base}/metrics", timeout=5)
     assert r.status_code == 200
     shards_reported = r.json()["index"]["shards"]
-    assert shards_reported >= 2
+    assert shards_reported >= 2, f"shards should be >=2, got {shards_reported}"
+
     cfg_shards = None
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH) as f:
@@ -955,19 +870,54 @@ def test_actual_sharding_not_fake(server):
                     except:
                         pass
     if cfg_shards:
-        assert shards_reported == cfg_shards, f"metrics shards {shards_reported} should match config {cfg_shards}"
-    main_go = os.path.join(APP, "main.go")
-    if not os.path.exists(main_go):
-        import pytest
-        pytest.skip("main.go not found for sharding inspection")
-    with open(main_go) as f:
-        code = f.read()
-    code_lower = code.lower()
-    assert "shard" in code_lower, "main.go should contain 'shard'"
-    has_hash = any(x in code_lower for x in ["fnv", "crc32", "hash", "shardid", "shard_count", "shardcount"])
-    assert has_hash, "should use hash for shard assignment"
-    assert "rwmutex" in code_lower
-    assert "waitgroup" in code_lower or "go func" in code_lower
+        assert shards_reported == cfg_shards, f"metrics shards {shards_reported} should match config {cfg_shards}, not fake static"
+
+    # Behavioral: bulk ingest of 2000 docs should be quick and searchable (scatter-gather)
+    docs = generate_docs(2000, 100000)
+    start = time.time()
+    r = bulk_ingest_ndjson(base, docs)
+    elapsed = time.time() - start
+    assert r.status_code == 201, f"bulk failed {r.status_code}"
+    assert r.json()["ingested"] == 2000
+    assert elapsed < 5.0, f"bulk 2k took {elapsed:.2f}s, too slow for sharded impl"
+    r = search(base, q="operation", limit=10)
+    assert r.status_code == 200
+    assert r.json()["total"] >= 2000
+
+    # Verify config change is honored (not hardcoded)
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    with open(CONFIG_PATH) as f:
+        orig = f.read()
+    try:
+        new_cfg = re.sub(r'shard_count\s*:\s*\d+', 'shard_count: 8', orig, flags=re.IGNORECASE)
+        with open(CONFIG_PATH, 'w') as f:
+            f.write(new_cfg)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15), "server should start with shard_count 8"
+        base2 = f"http://127.0.0.1:{port}"
+        r = requests.get(f"{base2}/metrics", timeout=5)
+        assert r.status_code == 200
+        assert r.json()["index"]["shards"] == 8, f"expected shards 8 after config change, got {r.json()['index']['shards']}"
+        docs2 = generate_docs(1000, 200000)
+        ndjson = "\n".join([json.dumps(d) for d in docs2])
+        r = requests.post(f"{base2}/ingest/bulk", data=ndjson, headers={"Content-Type": "application/x-ndjson"}, timeout=15)
+        assert r.status_code == 201
+        assert r.json()["ingested"] == 1000
+        proc.terminate()
+        proc.wait(timeout=5)
+    finally:
+        with open(CONFIG_PATH, 'w') as f:
+            f.write(orig)
+        try:
+            proc.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
 
 
 def test_worker_pool_and_batching_config_semantics(server):
@@ -1005,3 +955,120 @@ def test_config_all_fields_present():
     for k in ["server:", "read_timeout_ms", "write_timeout_ms"]:
         assert k in lower, f"config missing server field {k}"
 
+
+def test_search_unclosed_quote_400(server):
+    base = server
+    # Unclosed quote should be 400, not 200 or 500
+    r = search(base, q='"unclosed')
+    assert r.status_code == 400, f"unclosed quote should 400, got {r.status_code}"
+    r = search(base, q=' "login ')
+    assert r.status_code == 400
+    r = search(base, q='"')
+    assert r.status_code == 400
+
+
+def test_bulk_application_json_content_type(server):
+    base = server
+    docs = generate_docs(100, 300000)
+    ndjson = "\n".join([json.dumps(d) for d in docs])
+    # Send with application/json content-type but body is still NDJSON lines
+    r = requests.post(
+        f"{base}/ingest/bulk",
+        data=ndjson,
+        headers={"Content-Type": "application/json"},
+        timeout=10,
+    )
+    assert r.status_code == 201, f"bulk with application/json should be accepted, got {r.status_code} {r.text[:200]}"
+    assert r.json()["ingested"] == 100
+
+
+def test_persistence_sigkill_immediate():
+    """
+    SIGKILL immediately after ack durability: kill -9 right after bulk ingest returns 201,
+    without sleep, then verify WAL replay recovers.
+    """
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert wait_for_server(port, timeout=15)
+        base = f"http://127.0.0.1:{port}"
+        docs = generate_docs(2000, 400000)
+        ndjson = "\n".join([json.dumps(d) for d in docs])
+        r = requests.post(
+            f"{base}/ingest/bulk",
+            data=ndjson,
+            headers={"Content-Type": "application/x-ndjson"},
+            timeout=10,
+        )
+        assert r.status_code == 201
+        assert r.json()["ingested"] == 2000
+        # Immediate SIGKILL, no sleep
+        proc.kill()
+        proc.wait(timeout=5)
+        time.sleep(1)
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15), "server should restart after SIGKILL"
+        base2 = f"http://127.0.0.1:{port}"
+        r = requests.get(f"{base2}/stats", timeout=5)
+        assert r.status_code == 200
+        # At least 2000 docs should be recovered via WAL, even without graceful shutdown
+        assert r.json()["docs"] >= 2000, f"SIGKILL durability failed, expected >=2000 got {r.json()['docs']}"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc.kill()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_worker_pool_backpressure(server):
+    base = server
+    # Burst of bulk requests without waiting, should not crash and queue_depth metric should exist
+    def burst_bulk(start_id):
+        docs = generate_docs(500, start_id)
+        ndjson = "\n".join([json.dumps(d) for d in docs])
+        return requests.post(
+            f"{base}/ingest/bulk",
+            data=ndjson,
+            headers={"Content-Type": "application/x-ndjson"},
+            timeout=15,
+        )
+
+    threads = []
+    results = []
+
+    def worker(sid):
+        r = burst_bulk(sid)
+        results.append(r)
+
+    # 10 concurrent bursts
+    for i in range(10):
+        t = threading.Thread(target=worker, args=(500000 + i * 500,))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+    for r in results:
+        assert r.status_code == 201, f"backpressure test failed {r.status_code}"
+    r = requests.get(f"{base}/stats", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["docs"] >= 5000
+    r = requests.get(f"{base}/metrics", timeout=5)
+    assert r.status_code == 200
+    assert "queue_depth" in r.json()["ingest"]

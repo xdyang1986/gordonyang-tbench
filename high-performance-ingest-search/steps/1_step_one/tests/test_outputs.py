@@ -1210,3 +1210,120 @@ def test_wal_corrupt_line_replay():
         if os.path.exists(DATA_DIR):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
 
+
+def test_search_unclosed_quote_400(server):
+    base = server
+    r = search(base, q='"unclosed')
+    assert r.status_code == 400, f"unclosed quote should 400, got {r.status_code}"
+    r = search(base, q='"')
+    assert r.status_code == 400
+    r = search(base, q=' "login ')
+    assert r.status_code == 400
+
+
+def test_bulk_application_json_content_type(server):
+    base = server
+    ndjson = '{"id":"bulkjson1","timestamp":"2026-07-20T10:00:00Z","service":"s","level":"info","message":"bulk json test"}\n'
+    r = requests.post(
+        f"{base}/ingest/bulk",
+        data=ndjson,
+        headers={"Content-Type": "application/json"},
+        timeout=5,
+    )
+    if r.status_code == 404:
+        import pytest
+        pytest.skip("bulk endpoint not implemented in step1 (optional)")
+    assert r.status_code == 201, f"bulk with application/json should be accepted, got {r.status_code}"
+    assert r.json()["ingested"] >= 1
+
+
+def test_persistence_sigkill_immediate():
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert wait_for_server(port, timeout=15)
+        base = f"http://127.0.0.1:{port}"
+        r = ingest(base, [{"id": "sigkill1", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "sigkill test"}])
+        assert r.status_code == 201
+        # Immediate SIGKILL without sleep
+        proc.kill()
+        proc.wait(timeout=5)
+        time.sleep(1)
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15), "server should restart after SIGKILL"
+        base2 = f"http://127.0.0.1:{port}"
+        r = get_doc(base2, "sigkill1")
+        assert r.status_code == 200, f"SIGKILL durability failed, expected recovered doc, got {r.status_code}"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc.kill()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_index_json_mid_record_truncation():
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert wait_for_server(port, timeout=15)
+        base = f"http://127.0.0.1:{port}"
+        r = ingest(base, [{"id": "midtrunc1", "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "first"}])
+        assert r.status_code == 201
+        r = ingest(base, [{"id": "midtrunc2", "timestamp": "2026-07-20T11:00:00Z", "service": "s", "level": "info", "message": "second"}])
+        assert r.status_code == 201
+        time.sleep(0.8)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        idx_path = os.path.join(DATA_DIR, "index.json")
+        if os.path.exists(idx_path):
+            with open(idx_path, "rb") as f:
+                data = f.read()
+            # Truncate in middle of second record
+            # Find second id occurrence
+            if len(data) > 100:
+                # Cut off last 20 bytes to simulate mid-record truncation
+                with open(idx_path, "wb") as f:
+                    f.write(data[:-20])
+                    f.write(b'{"truncated_mid":')
+        proc2 = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15), "server should recover from mid-record truncation"
+        base2 = f"http://127.0.0.1:{port}"
+        r = requests.get(f"{base2}/search", timeout=5)
+        assert r.status_code == 200
+        # At least first doc should be recovered
+        r = get_doc(base2, "midtrunc1")
+        assert r.status_code == 200, "first doc should survive mid-record truncation"
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)

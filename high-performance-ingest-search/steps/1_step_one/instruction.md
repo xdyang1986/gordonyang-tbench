@@ -1,6 +1,6 @@
 # Step 1: Log Ingest and Search Service
 
-Build a log ingest and full-text search HTTP service in Go. This will be the correctness baseline for Step 2.
+Build a log ingest and full-text search HTTP service in Go. This is the correctness baseline for Step 2.
 
 ## Working Directory
 
@@ -63,7 +63,7 @@ Message tokenization: split on `[^A-Za-z0-9]+`, lowercase tokens, drop empty. Ex
 ### GET /search
 Query params:
 - `q`: full-text on message. Space-separated terms, AND semantics. Empty/missing → match-all.
-  Phrase: `"user login"` must be adjacent tokens in order. Mixed `q=error "login failed"` → term AND phrase. Tokenization same as indexing. Empty phrase `""` or whitespace-only `"   "` → 400. Support unclosed quote handling as 400.
+  Phrase: `"user login"` must be adjacent tokens in order. Mixed `q=error "login failed"` → term AND phrase. Tokenization same as indexing. Empty phrase `""` or whitespace-only `"   "` → 400. **Unclosed quote** e.g. `"login` or `"` or `"user` without closing `"` → 400.
 - `service`: exact match filter case-insensitive.
 - `level`: exact match filter case-insensitive, must be valid else 400.
 - `tags`: comma-separated AND filter, case-insensitive.
@@ -84,20 +84,41 @@ Response 200:
 ### GET /health
 200 `{"status":"ok"}`
 
-### POST /ingest/bulk (Optional in Step 1)
-NDJSON body. Each line JSON doc, empty lines ignored. Per-line errors allowed: ingest valid, skip invalid with error list. Response 201 `{"ingested":10,"failed":2,"errors":[{"line":3,"error":"..."}]}`. If not implemented, may return 404 — tests will skip, but Step 2 requires it.
+### POST /ingest/bulk (Optional in Step 1, required in Step 2)
+- NDJSON body, but **must accept both** `Content-Type: application/x-ndjson` and `application/json` (treat body as NDJSON lines regardless of header).
+- Each line JSON doc, empty lines ignored.
+- Per-line errors allowed: ingest valid lines, skip invalid with error list `{"ingested":10,"failed":2,"errors":[{"line":3,"error":"..."}]}`.
+- If not implemented in Step 1, may return 404 — tests will skip, but Step 2 requires it.
 
-## Persistence & WAL
+## Persistence & WAL — Core discriminator for Step 1
 
-- On ingest/delete, persist docs to data file (array or map) atomically and append WAL.
-- WAL line: `{"op":"index","doc":{...},"ts":"RFC3339","checksum":"<crc32 hex of doc JSON>"}`, delete: `{"op":"delete","id":"xxx","ts":"...","checksum":"<crc32 hex of id>"}`. IEEE CRC32 hex 8 chars lower.
-- `DATA_FILE` env var overrides index path; WAL is `Dir(DATA_FILE)/wal.log` else `/app/data/wal.log`.
-- Startup: load index.json if exists. If corrupted/truncated, recover best-effort (streaming decoder). Replay WAL line-by-line: skip invalid JSON, invalid checksum, corrupt/truncated lines, log to stderr, do not crash. Rebuild indexes.
+This is the main correctness lever where many naive implementations fail.
+
+- On ingest/delete, persist docs to data file (array) atomically: write temp file then rename.
+- WAL line format (one JSON per line):
+  - Index: `{"op":"index","doc":{"id":"...","timestamp":"...","service":"...","level":"...","message":"...","tags":[...]},"ts":"RFC3339","checksum":"<crc32 hex>"}`
+    Checksum = IEEE CRC32 (lower 8 hex chars) of the **raw bytes** of the `doc` JSON object as it appears in WAL line (compact, no spaces if you use `json.Marshal`).
+  - Delete: `{"op":"delete","id":"xxx","ts":"...","checksum":"<crc32 hex of id string bytes>"}`
+- `DATA_FILE` env var overrides index path; WAL is `Dir(DATA_FILE)/wal.log` else `/app/data/wal.log`. Must create dir if needed.
+- Startup recovery (critical):
+  1. Try load `index.json` if exists. If corrupted/truncated mid-array or mid-object (e.g. file ends with `{"truncated":`), **recover best-effort** using streaming `json.Decoder` to parse up to last valid doc, skip truncated tail, do not crash.
+  2. Then replay `wal.log` line-by-line **in order**:
+     - Skip empty lines.
+     - If line invalid JSON → skip (log to stderr, continue).
+     - If line truncated (e.g. `{"truncated":` ) → skip.
+     - Verify checksum: for `index` op, compute CRC32 of raw `doc` JSON bytes (`json.RawMessage`) and compare to `checksum` field; if mismatch → skip (reject). For `delete` op, CRC32 of id string bytes.
+     - If checksum OK, apply op (upsert or delete).
+     - Valid entries after corrupt/bad-checksum lines must still be replayed.
+  3. Rebuild indexes from final doc set.
+  - Must NOT crash on any corrupt file. Log errors to stderr.
+- Durability: WAL must be written reliably per batch (fsync not required but file must contain entry after ack). After `POST /ingest` returns 201, killing server **immediately with SIGKILL (-9)** (no graceful shutdown, no sleep) must still recover doc via WAL replay. Tests cover this.
+
+Tests inject: bad checksum line, non-JSON line, truncated JSON line, mid-record truncation in index.json, and SIGKILL-immediately-after-ack.
 
 ## Failure Handling
 
-400 invalid JSON/fields, level, timestamp, empty phrase, limit/offset, from/to, sort, tags not array. 404 missing doc. 201 ingest success. 200 others.
+400 invalid JSON/fields, level, timestamp, empty phrase, unclosed quote, limit/offset, from/to, sort, tags not array. 404 missing doc. 201 ingest success. 200 others.
 
 ## Success Criteria
 
-Tests build binary and start on random PORT, check CRUD, upsert, AND semantics, phrase adjacency, filters, time range, sort, pagination, stats, persistence (index+WAL replay, truncated recovery, checksum rejection, corrupt-line skip), DATA_FILE handling, go.mod forbidden libs, concurrency (multiple ingest+search, no crash/race), invalid inputs 400.
+Tests build binary and start on random PORT, check CRUD, upsert, AND semantics, phrase adjacency incl unclosed quote 400, filters, time range, sort, pagination, stats, bulk optional accepts both content-types, persistence (index+WAL replay, truncated recovery mid-record, checksum rejection, corrupt-line skip, SIGKILL durability), DATA_FILE handling, go.mod forbidden libs, concurrency, invalid inputs.
