@@ -1,0 +1,60 @@
+schema_version = "1.1"
+
+[task]
+name = "codimango/database-reliability"
+description = "Build a database reliability monitoring system in Go: reactive monitoring with alerting, then enhanced with proactive health scoring and failure prediction."
+authors = [{ name = "Gordon Yang", email = "gordonyang@meta.com" }]
+keywords = ["go", "database", "reliability", "monitoring", "reactive", "proactive", "health-score"]
+format = "terminal_bench_multi_turn"
+workstream = "swe_public_repo"
+
+[metadata]
+difficulty = "hard"
+category = "software-engineering"
+category_usecase = "add_observability"
+category_subdomain = "distributed_systems"
+tags = ["iterate_on_feature", "go", "database", "reliability", "monitoring", "alerting", "health-scoring"]
+author_name = "Gordon Yang"
+author_email = "gordonyang@meta.com"
+expert_time_estimate_min = 120.0
+junior_time_estimate_min = 240.0
+languages = ["go"]
+reward_type = "binary"
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 20480
+gpus = 0
+allow_internet = true
+mcp_servers = []
+
+[[steps]]
+name = "1_step_one"
+dependencies = []
+min_reward = 1.0
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
+
+[[steps]]
+name = "2_step_two"
+dependencies = ["1_step_one"]
+min_reward = 1.0
+inherit_prior_session = true
+
+[steps.verifier]
+timeout_sec = 600.0
+
+[steps.agent]
+timeout_sec = 600.0
