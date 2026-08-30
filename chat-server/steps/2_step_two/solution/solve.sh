@@ -1227,7 +1227,7 @@ func readOpsLog(logPath string) ([]map[string]interface{}, error) {
 		return nil, err
 	}
 	defer f.Close()
-	var entries []map[string]interface{}
+	entries := []map[string]interface{}{}
 	dec := json.NewDecoder(f)
 	// Need to read line by line because file is JSON lines, not array
 	// Use buf scanning
@@ -3599,6 +3599,9 @@ func main() {
 		entries, err := readOpsLog(opsLogPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to read ops log: %v\n", err)
+			entries = []map[string]interface{}{}
+		}
+		if entries == nil {
 			entries = []map[string]interface{}{}
 		}
 		enc := json.NewEncoder(os.Stdout)
