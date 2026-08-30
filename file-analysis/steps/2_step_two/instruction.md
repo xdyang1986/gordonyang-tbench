@@ -24,7 +24,7 @@ Improve detection to reject structurally impossible identifiers and reduce false
 
 - **Predominantly log files are not business-critical**: if a file's content is predominantly log lines (timestamp + level), it should be considered non-essential even if it contains business words.
 
-- **Extension-aware with precedence inversion**: backup files with `.bak` extension are always considered non-essential, even if they contain valid PII. This is intentional and contradicts the natural "PII always wins" rule. You must implement this inversion.
+- **Extension-aware with precedence inversion**: files with extensions `.log`, `.tmp`, `.cache`, `.old`, `.swp`, `.temp` that would otherwise be business-critical are downgraded to non-essential, but valid PII still wins. Backup files with `.bak` extension are always considered non-essential, even if they contain valid PII – this is intentional precedence inversion that contrasts with the rest of the list.
 
 - **Sibling-dependent reclassification**: if more than 70% of files in the scanned root directory are log files (by `.log` extension), then any file in that directory that would otherwise be business-critical is downgraded to non-essential. This requires a two-phase pass: first count file types, then decide categories. It defeats per-file decomposition and gives concurrency teeth.
 

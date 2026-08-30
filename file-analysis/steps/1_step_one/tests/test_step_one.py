@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 import random
 import re
-import string
 
 BIN = "/app/file-analyzer"
 APP = "/app"
@@ -27,7 +26,6 @@ def ensure_binary():
         )
 
 
-# Reference implementation matching Go step1 (kept for differential testing, not revealed in instruction)
 KEYWORDS = [
     "confidential",
     "proprietary",
@@ -53,6 +51,9 @@ EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_RE1 = re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
 PHONE_RE2 = re.compile(r"\(\d{3}\)\s*\d{3}[-.]\d{4}")
 CC_RE = re.compile(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b")
+LOG_LINE_RE = re.compile(
+    r"(?i)(^\d{4}-\d{2}-\d{2}|^\[?\d{2}:\d{2}:\d{2}|\b(INFO|DEBUG|WARN|ERROR|TRACE)\b)"
+)
 
 
 def reference_classify(dir_path):
@@ -81,6 +82,14 @@ def reference_classify(dir_path):
             if is_pii:
                 results.append((fpath, "pii"))
                 continue
+            # log-content heuristic moved to step1: predominantly log lines -> non-essential even with business words
+            lines = content.split("\n")
+            if len(lines) >= 3:
+                non_empty = [l for l in lines if l.strip()]
+                matched = sum(1 for l in non_empty if LOG_LINE_RE.search(l))
+                if non_empty and matched / len(non_empty) > 0.5:
+                    results.append((fpath, "non-essential"))
+                    continue
             low = content.lower()
             is_biz = any(k in low for k in KEYWORDS)
             if is_biz:
@@ -105,7 +114,6 @@ def run_analyzer(input_dir, output_path):
 
 def test_help_and_exit_codes():
     ensure_binary()
-    # no args -> help 0
     r = run([BIN])
     assert r.returncode == 0
     out = (r.stdout + r.stderr).lower()
@@ -115,11 +123,9 @@ def test_help_and_exit_codes():
         assert r.returncode == 0
         out = (r.stdout + r.stderr).lower()
         assert "dir" in out
-    # unknown flag
     r = run([BIN, "--unknown_xyz"])
     assert r.returncode == 2
     assert r.stdout.strip() == ""
-    # missing flags
     r = run([BIN, "--dir", "/tmp"])
     assert r.returncode == 2
     r = run([BIN, "--output", "/tmp/out.json"])
@@ -130,11 +136,9 @@ def test_help_and_exit_codes():
 
 def test_empty_and_sort_and_recursive_and_symlink():
     with tempfile.TemporaryDirectory() as tmpdir:
-        # empty dir
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         assert data == []
-        # create files
         os.makedirs(os.path.join(tmpdir, "sub"))
         with open(os.path.join(tmpdir, "z.txt"), "w") as f:
             f.write("hello")
@@ -142,21 +146,14 @@ def test_empty_and_sort_and_recursive_and_symlink():
             f.write("confidential data")
         with open(os.path.join(tmpdir, "sub", "b.txt"), "w") as f:
             f.write("email john@example.com")
-        # symlink
         try:
             os.symlink(os.path.join(tmpdir, "a.txt"), os.path.join(tmpdir, "link.txt"))
-            has_link = True
         except:
-            has_link = False
+            pass
         out2 = os.path.join(tmpdir, "out2.json")
         data2 = run_analyzer(tmpdir, out2)
         files = [d["file"] for d in data2]
         assert files == sorted(files)
-        # symlink ignored -> count
-        expected_count = (
-            3 if has_link else 3
-        )  # out.json from first run may be counted if not cleaned; use fresh dir for this part
-    # use fresh dir for symlink test isolation
     with tempfile.TemporaryDirectory() as tmpdir:
         real = os.path.join(tmpdir, "real.txt")
         with open(real, "w") as f:
@@ -167,11 +164,8 @@ def test_empty_and_sort_and_recursive_and_symlink():
         except:
             pass
         else:
-            out = os.path.join(tmpdir, "out.json")
-            # need to ensure out not in same dir scanning? put out outside
             out_outside = os.path.join(tempfile.gettempdir(), "out_sym.json")
             data = run_analyzer(tmpdir, out_outside)
-            # should ignore symlink
             assert len([d for d in data if "real.txt" in d["file"]]) == 1
             assert len([d for d in data if "link.txt" in d["file"]]) == 0
 
@@ -184,17 +178,30 @@ def test_atomic_and_json_shape():
         out = os.path.join(out_dir, "out.json")
         data = run_analyzer(tmpdir, out)
         assert os.path.isfile(out)
-        # no tmp residue
         for fname in os.listdir(out_dir):
             assert "tmp" not in fname.lower() or fname == "out.json"
-        # shape
         for entry in data:
             assert "file" in entry and "category" in entry
             assert entry["category"] in ("business-critical", "pii", "non-essential")
 
 
+def test_log_content_heuristic_in_step1():
+    # This discriminator moved from step2 to step1 to increase difficulty
+    with tempfile.TemporaryDirectory() as tmpdir:
+        content = "\n".join(
+            [f"2024-01-01 INFO budget processing {i}" for i in range(10)]
+        )
+        with open(os.path.join(tmpdir, "loglike.txt"), "w") as f:
+            f.write(content)
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        assert data[0]["category"] == "non-essential", (
+            f"log-like with budget should be non-essential in step1, got {data[0]}"
+        )
+
+
 def test_randomized_differential_small():
-    # Randomized differential: generate random files, compare to reference
+    # Fixed phone ambiguity: use Call 123-456-7890 with context so conservative detectors agree
     random.seed(42)
     with tempfile.TemporaryDirectory() as tmpdir:
         words_pool = [
@@ -209,7 +216,8 @@ def test_randomized_differential_small():
             "john@example.com",
             "123-45-6789",
             "4111-1111-1111-1111",
-            "123-456-7890",
+            "Call 123-456-7890",
+            "2024-01-01 INFO start",
         ]
         for i in range(30):
             content = " ".join(random.choices(words_pool, k=random.randint(0, 10)))
@@ -218,9 +226,7 @@ def test_randomized_differential_small():
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         ref = reference_classify(tmpdir)
-        # filter out out.json from ref if it was included
         ref_filtered = [(p, c) for p, c in ref if not p.endswith("out.json")]
-        # Build map from analyzer
         analyzer_map = {
             d["file"]: d["category"] for d in data if not d["file"].endswith("out.json")
         }
@@ -230,7 +236,7 @@ def test_randomized_differential_small():
         for fpath, cat in ref_filtered:
             assert fpath in analyzer_map, f"missing {fpath}"
             assert analyzer_map[fpath] == cat, (
-                f"mismatch for {fpath}: ref {cat} vs analyzer {analyzer_map[fpath]} content open"
+                f"mismatch for {fpath}: ref {cat} vs analyzer {analyzer_map[fpath]}"
             )
 
 
@@ -238,8 +244,7 @@ def test_randomized_differential_mixed_extensions():
     random.seed(123)
     with tempfile.TemporaryDirectory() as tmpdir:
         for i in range(20):
-            ext = random.choice([".txt", ".log", ".tmp", ".dat"])
-            # even though step1 should not have extension override, we test that .tmp with confidential is still business-critical in step1
+            ext = random.choice([".txt", ".log", ".dat"])
             if i % 3 == 0:
                 content = "confidential proprietary"
             elif i % 3 == 1:

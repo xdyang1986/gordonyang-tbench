@@ -111,6 +111,7 @@ func main() {
 	phoneRe1 := regexp.MustCompile(`\b\d{3}[-.]?\d{3}[-.]?\d{4}\b`)
 	phoneRe2 := regexp.MustCompile(`\(\d{3}\)\s*\d{3}[-.]\d{4}`)
 	ccRe := regexp.MustCompile(`\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b`)
+	logLineRe := regexp.MustCompile(`(?i)(^\d{4}-\d{2}-\d{2}|^\[?\d{2}:\d{2}:\d{2}|\b(INFO|DEBUG|WARN|ERROR|TRACE)\b)`)
 
 	keywords := []string{
 		"confidential",
@@ -164,6 +165,26 @@ func main() {
 		if isPII {
 			results = append(results, Result{File: path, Category: "pii"})
 			return nil
+		}
+
+		// predominantly log lines -> non-essential (moved from step2 to step1 per feedback)
+		lines := strings.Split(content, "\n")
+		if len(lines) >= 3 {
+			nonEmpty := 0
+			matched := 0
+			for _, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				nonEmpty++
+				if logLineRe.MatchString(line) {
+					matched++
+				}
+			}
+			if nonEmpty > 0 && float64(matched)/float64(nonEmpty) > 0.5 {
+				results = append(results, Result{File: path, Category: "non-essential"})
+				return nil
+			}
 		}
 
 		lower := strings.ToLower(content)

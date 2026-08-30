@@ -174,6 +174,7 @@ func validateAndNormalizeRaw(raw map[string]json.RawMessage) (*Doc, error) {
 
 type Index struct {
 	mu       sync.RWMutex
+	persist  sync.Mutex // serializes index.json/wal.log writers
 	docs     map[string]*Doc
 	inv      map[string]map[string]int // term -> docID -> tf
 	dataFile string
@@ -272,10 +273,20 @@ func (idx *Index) SaveIndex() error {
 	if err := os.MkdirAll(filepath.Dir(idx.dataFile), 0755); err != nil {
 		return err
 	}
+	// Snapshot under the read lock: iterating idx.docs while another request
+	// holds the write lock is a fatal "concurrent map iteration and map write".
+	idx.mu.RLock()
 	var list []docJSON
 	for _, d := range idx.docs {
 		list = append(list, d.ToJSON())
 	}
+	idx.mu.RUnlock()
+
+	// One writer at a time: the tmp path is shared, so concurrent saves would
+	// otherwise rename a half-written file over index.json.
+	idx.persist.Lock()
+	defer idx.persist.Unlock()
+
 	data, err := json.Marshal(list)
 	if err != nil {
 		return err
@@ -309,6 +320,8 @@ func (idx *Index) AppendWAL(op string, doc *Doc, id string) error {
 		}
 	}
 	b, _ := json.Marshal(entry)
+	idx.persist.Lock()
+	defer idx.persist.Unlock()
 	f, err := os.OpenFile(idx.walFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -325,6 +338,8 @@ func (idx *Index) AppendWALBatch(docs []*Doc) error {
 	if err := os.MkdirAll(filepath.Dir(idx.walFile), 0755); err != nil {
 		return err
 	}
+	idx.persist.Lock()
+	defer idx.persist.Unlock()
 	f, err := os.OpenFile(idx.walFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
