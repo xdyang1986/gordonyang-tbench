@@ -1197,7 +1197,6 @@ func main() {
 		_ = enc.Encode(entries)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", cmd)
-		printHelp()
 		os.Exit(2)
 	}
 }
