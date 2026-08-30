@@ -84,11 +84,11 @@ Response 200:
 ### GET /health
 200 `{"status":"ok"}`
 
-### POST /ingest/bulk (Optional in Step 1, required in Step 2)
-- NDJSON body, but **must accept both** `Content-Type: application/x-ndjson` and `application/json` (treat body as NDJSON lines regardless of header).
-- Each line JSON doc, empty lines ignored.
-- Per-line errors allowed: ingest valid lines, skip invalid with error list `{"ingested":10,"failed":2,"errors":[{"line":3,"error":"..."}]}`.
-- If not implemented in Step 1, may return 404 — tests will skip, but Step 2 requires it.
+### POST /ingest/bulk
+- NDJSON body, must accept both `Content-Type: application/x-ndjson` and `application/json` (treat body as NDJSON lines regardless of header).
+- Each line JSON doc, empty lines ignored, `{"truncated":` or non-JSON lines are invalid.
+- Success 201: `{"ingested":10,"failed":2,"errors":[{"line":3,"error":"..."}]}`. Per-line errors allowed: ingest valid lines, skip invalid ones. Empty body → 201 with ingested 0.
+- Must be implemented in Step 1 (scoring better when implemented) and is required in Step 2. Do not return 404.
 
 ## Persistence & WAL — Core discriminator for Step 1
 
@@ -121,4 +121,4 @@ Tests inject: bad checksum line, non-JSON line, truncated JSON line, mid-record 
 
 ## Success Criteria
 
-Tests build binary and start on random PORT, check CRUD, upsert, AND semantics, phrase adjacency incl unclosed quote 400, filters, time range, sort, pagination, stats, bulk optional accepts both content-types, persistence (index+WAL replay, truncated recovery mid-record, checksum rejection, corrupt-line skip, SIGKILL durability), DATA_FILE handling, go.mod forbidden libs, concurrency, invalid inputs.
+Tests build binary and start on random PORT, check CRUD, upsert, AND semantics, phrase adjacency incl unclosed quote 400, filters, time range, sort, pagination, stats, bulk (required) accepts both content-types, persistence (index+WAL replay, truncated recovery mid-record, checksum rejection, corrupt-line skip, SIGKILL durability), DATA_FILE handling, go.mod forbidden libs, concurrency, invalid inputs.

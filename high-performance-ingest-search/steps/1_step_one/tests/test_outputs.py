@@ -635,9 +635,7 @@ def test_bulk_endpoint(server):
     base = server
     ndjson = '{"id":"b1","timestamp":"2026-07-20T10:00:00Z","service":"s","level":"info","message":"bulk one"}\n{"id":"b2","timestamp":"2026-07-20T11:00:00Z","service":"s","level":"info","message":"bulk two"}\n'
     r = bulk_ingest(base, ndjson)
-    # bulk may be 404 if not implemented in step1, but we encourage implementation
-    if r.status_code == 404:
-        pytest.skip("bulk endpoint not implemented in step1 (optional)")
+    assert r.status_code == 201, f"bulk failed {r.status_code} {r.text} - bulk is required in step1, must not return 404"
     assert r.status_code == 201, f"bulk failed {r.status_code} {r.text}"
     j = r.json()
     assert j["ingested"] == 2
@@ -1230,10 +1228,7 @@ def test_bulk_application_json_content_type(server):
         headers={"Content-Type": "application/json"},
         timeout=5,
     )
-    if r.status_code == 404:
-        import pytest
-        pytest.skip("bulk endpoint not implemented in step1 (optional)")
-    assert r.status_code == 201, f"bulk with application/json should be accepted, got {r.status_code}"
+    assert r.status_code == 201, f"bulk with application/json must be accepted (required), got {r.status_code} {r.text[:200]} - bulk is required in step1"
     assert r.json()["ingested"] >= 1
 
 
