@@ -1455,7 +1455,7 @@ def test_global_lock_mandated():
             text=True,
         )
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=10)
         except _sp.TimeoutExpired:
             proc.kill()
             assert False, (

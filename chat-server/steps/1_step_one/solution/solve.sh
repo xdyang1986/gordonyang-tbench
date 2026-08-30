@@ -66,13 +66,19 @@ type RateBucket struct {
 func loadRateLimitData(path string) (map[string]*RateBucket, bool, error) {
 	empty := map[string]*RateBucket{}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			_ = atomicWriteGeneric(path, empty)
+			return empty, false, nil
+		}
 		return empty, false, err
 	}
 	if strings.TrimSpace(string(b)) == "" {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	var raw map[string]interface{}
@@ -185,16 +191,19 @@ func loadChatData(path string) (ChatData, bool, error) {
 		SeenUsers:    map[string]bool{},
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			_ = atomicWriteGeneric(path, empty)
 			return empty, false, nil
 		}
 		return empty, false, err
 	}
 	if strings.TrimSpace(string(b)) == "" {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	var raw map[string]interface{}
@@ -253,16 +262,19 @@ func loadChatData(path string) (ChatData, bool, error) {
 func loadPrivateData(path string) (PrivateData, bool, error) {
 	empty := PrivateData{PrivateMessages: []Message{}}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			_ = atomicWriteGeneric(path, empty)
 			return empty, false, nil
 		}
 		return empty, false, err
 	}
 	if strings.TrimSpace(string(b)) == "" {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	var raw map[string]interface{}
@@ -315,16 +327,19 @@ func loadPrivateData(path string) (PrivateData, bool, error) {
 func loadCounterData(path string) (CounterData, bool, error) {
 	empty := CounterData{NextID: 1}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			_ = atomicWriteGeneric(path, empty)
 			return empty, false, nil
 		}
 		return empty, false, err
 	}
 	if strings.TrimSpace(string(b)) == "" {
+		_ = atomicWriteGeneric(path, empty)
 		return empty, false, nil
 	}
 	var raw map[string]interface{}
@@ -529,6 +544,11 @@ func main() {
 	privatePath := filepath.Join(dir, "private.json")
 	counterPath := filepath.Join(dir, "counter.json")
 	rateLimitPath := filepath.Join(dir, "rate_limit.json")
+	// Ensure all split files exist with empty containers on first use (covers missing-file init)
+	_, _, _ = loadChatData(dataPath)
+	_, _, _ = loadPrivateData(privatePath)
+	_, _, _ = loadCounterData(counterPath)
+	_, _, _ = loadRateLimitData(rateLimitPath)
 
 	switch cmd {
 	case "create-room":

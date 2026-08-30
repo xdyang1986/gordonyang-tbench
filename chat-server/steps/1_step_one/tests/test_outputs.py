@@ -493,7 +493,9 @@ def test_atomic_behavior_concurrent():
         time.sleep(0.0005)
     for proc in procs:
         proc.wait(timeout=180)
-    assert torn == 0, f"Atomicity violated: observed {torn} torn reads during concurrent burst (file was invalid JSON or missing wrapper) - must use CreateTemp+Rename"
+    assert torn == 0, (
+        f"Atomicity violated: observed {torn} torn reads during concurrent burst (file was invalid JSON or missing wrapper) - must use CreateTemp+Rename"
+    )
     r = _cli("get-messages", "general")
     assert r.returncode == 0
     msgs = json.loads(r.stdout.strip())
@@ -502,6 +504,7 @@ def test_atomic_behavior_concurrent():
     )
     assert len({m["id"] for m in msgs}) == len(msgs)
     import glob as _glob
+
     tmp_residue = _glob.glob(os.path.join(os.path.dirname(DATA_PATH), "tmp-*.json"))
     assert len(tmp_residue) == 0, (
         f"tmp residue left in data dir after concurrent burst: {tmp_residue}"
@@ -1240,8 +1243,12 @@ def test_rate_limit_rejection_exit1_no_side_effects():
         "msg3 should be limited",
     )
     assert r.returncode == 1, f"should be rate limited, got {r.returncode}"
-    assert r.stdout.strip() == "", f"rate-limited send must have empty stdout, got {r.stdout!r}"
-    assert "rate limit" in r.stderr.lower(), f"stderr must contain 'rate limit', got {r.stderr!r}"
+    assert r.stdout.strip() == "", (
+        f"rate-limited send must have empty stdout, got {r.stdout!r}"
+    )
+    assert "rate limit" in r.stderr.lower(), (
+        f"stderr must contain 'rate limit', got {r.stderr!r}"
+    )
     # counter must not advance
     counter_after = json.load(open(os.path.join(dirn, "counter.json")))["data"][
         "next_id"
@@ -1480,31 +1487,83 @@ def test_invalid_rate_burst_args():
         == 2
     )
 
+
 def test_rate_limit_not_consumed_by_rejected_send():
     _reset_data()
     _cli("create-room", "general")
     _cli("join", "general", "alice")
     rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
     # prime the bucket with one successful send, then snapshot the file
-    _cli("--messages-per-second", "0.01", "--burst", "3", "send", "general", "alice", "one")
+    _cli(
+        "--messages-per-second",
+        "0.01",
+        "--burst",
+        "3",
+        "send",
+        "general",
+        "alice",
+        "one",
+    )
     before = open(rate_path, "rb").read()
     # 10 rejected sends: non-member, blank user, missing message
     for _ in range(10):
-        assert _cli("--messages-per-second", "0.01", "--burst", "3",
-                    "send", "general", "mallory", "hi").returncode == 2
-    assert _cli("--messages-per-second", "0.01", "--burst", "3",
-                "send", "general", "", "hi").returncode == 2
-    assert _cli("--messages-per-second", "0.01", "--burst", "3",
-                "send", "general", "alice").returncode == 2
-    assert open(rate_path, "rb").read() == before, "rejected send must not touch rate_limit.json"
-    # the two remaining tokens must still be there 
+        assert (
+            _cli(
+                "--messages-per-second",
+                "0.01",
+                "--burst",
+                "3",
+                "send",
+                "general",
+                "mallory",
+                "hi",
+            ).returncode
+            == 2
+        )
+    assert (
+        _cli(
+            "--messages-per-second", "0.01", "--burst", "3", "send", "general", "", "hi"
+        ).returncode
+        == 2
+    )
+    assert (
+        _cli(
+            "--messages-per-second", "0.01", "--burst", "3", "send", "general", "alice"
+        ).returncode
+        == 2
+    )
+    assert open(rate_path, "rb").read() == before, (
+        "rejected send must not touch rate_limit.json"
+    )
+    # the two remaining tokens must still be there
     for i in range(2):
-        assert _cli("--messages-per-second", "0.01", "--burst", "3",
-                    "send", "general", "alice", f"ok{i}").returncode == 0
-    r_over = _cli("--messages-per-second", "0.01", "--burst", "3",
-                "send", "general", "alice", "over")
+        assert (
+            _cli(
+                "--messages-per-second",
+                "0.01",
+                "--burst",
+                "3",
+                "send",
+                "general",
+                "alice",
+                f"ok{i}",
+            ).returncode
+            == 0
+        )
+    r_over = _cli(
+        "--messages-per-second",
+        "0.01",
+        "--burst",
+        "3",
+        "send",
+        "general",
+        "alice",
+        "over",
+    )
     assert r_over.returncode == 1
-    assert r_over.stdout.strip() == "", f"rate-limited must have empty stdout, got {r_over.stdout!r}"
+    assert r_over.stdout.strip() == "", (
+        f"rate-limited must have empty stdout, got {r_over.stdout!r}"
+    )
     assert "rate limit" in r_over.stderr.lower()
 
 
@@ -1515,20 +1574,36 @@ def test_rate_limit_future_last_refill_clamped():
     rate_path = os.path.join(os.path.dirname(DATA_PATH), "rate_limit.json")
     future = time.time_ns() + 5_000_000_000
     _write_with_checksum(rate_path, {"alice": {"tokens": 3, "last_refill": future}})
-    assert _cli("--messages-per-second", "1", "--burst", "10",
-                "send", "general", "alice", "hi").returncode == 0
+    assert (
+        _cli(
+            "--messages-per-second",
+            "1",
+            "--burst",
+            "10",
+            "send",
+            "general",
+            "alice",
+            "hi",
+        ).returncode
+        == 0
+    )
     data = json.load(open(rate_path))["data"]
-    assert abs(data["alice"]["tokens"] - 2.0) < 0.01, \
+    assert abs(data["alice"]["tokens"] - 2.0) < 0.01, (
         f"future last_refill must clamp elapsed to 0, got {data['alice']['tokens']}"
+    )
     assert data["alice"]["last_refill"] <= time.time_ns()
 
 
 def test_empty_containers_never_null():
     _reset_data()
+
     def _expect_empty_array(*args):
         r = _cli(*args)
         assert r.returncode == 0, f"{args} exited {r.returncode}"
-        assert r.stdout.strip() == "[]", f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+        assert r.stdout.strip() == "[]", (
+            f"{args} must print [] when empty, got {r.stdout.strip()!r}"
+        )
+
     _expect_empty_array("list-rooms")
     _expect_empty_array("list-all-users")
     _expect_empty_array("get-private", "alice", "bob")
@@ -1548,5 +1623,100 @@ def test_empty_containers_never_null():
     data = json.load(open(DATA_PATH))["data"]
     for k in ("rooms", "deleted_rooms"):
         assert data[k] == {}, f"{k} must serialize as {{}} when empty, got {data[k]!r}"
-    assert isinstance(data["seen_users"], dict), f"seen_users must be dict not null, got {data['seen_users']!r}"
-    assert json.load(open(os.path.join(os.path.dirname(DATA_PATH), "private.json")))["data"]["private_messages"] == []
+    assert isinstance(data["seen_users"], dict), (
+        f"seen_users must be dict not null, got {data['seen_users']!r}"
+    )
+    assert (
+        json.load(open(os.path.join(os.path.dirname(DATA_PATH), "private.json")))[
+            "data"
+        ]["private_messages"]
+        == []
+    )
+
+
+def test_empty_containers_after_recovery_and_init():
+    dirn = os.path.dirname(DATA_PATH)
+    paths = {
+        n: os.path.join(dirn, n)
+        for n in ("chat.json", "private.json", "counter.json", "rate_limit.json")
+    }
+
+    def _check_all_empty(stage):
+        # For missing/empty init, all files must be recreated with empty containers (not null)
+        d = json.load(open(paths["chat.json"]))["data"]
+        for k in ("rooms", "deleted_rooms", "seen_users"):
+            assert d[k] == {}, f"{stage}: chat.{k} must be {{}}, got {d[k]!r}"
+        assert (
+            json.load(open(paths["private.json"]))["data"]["private_messages"] == []
+        ), f"{stage}: private_messages must be []"
+        assert json.load(open(paths["counter.json"]))["data"] == {"next_id": 1}, (
+            f"{stage}: counter must be {{'next_id': 1}}"
+        )
+        assert json.load(open(paths["rate_limit.json"]))["data"] == {}, (
+            f"{stage}: rate_limit data must be {{}}"
+        )
+
+    def _check_single_empty(name, stage):
+        # After corrupting a single file, that file must be recreated with empty containers (not null)
+        # Other files may retain data – we only check the corrupted file's empty shape plus that all files are valid wrappers (no null)
+        if name == "chat.json":
+            d = json.load(open(paths["chat.json"]))["data"]
+            for k in ("rooms", "deleted_rooms", "seen_users"):
+                assert d[k] == {}, f"{stage}: chat.{k} must be {{}}, got {d[k]!r}"
+        elif name == "private.json":
+            assert (
+                json.load(open(paths["private.json"]))["data"]["private_messages"] == []
+            ), f"{stage}: private_messages must be []"
+        elif name == "counter.json":
+            assert json.load(open(paths["counter.json"]))["data"] == {"next_id": 1}, (
+                f"{stage}: counter must be {{'next_id': 1}}"
+            )
+        elif name == "rate_limit.json":
+            assert json.load(open(paths["rate_limit.json"]))["data"] == {}, (
+                f"{stage}: rate_limit data must be {{}}"
+            )
+        # All files must be valid wrappers with {} / [] not null (nil-container trap)
+        for fn in paths:
+            obj = json.load(open(paths[fn]))
+            assert "data" in obj and "checksum" in obj, (
+                f"{stage}: {fn} must have wrapper"
+            )
+            data = obj["data"]
+            if fn == "chat.json":
+                for k in ("rooms", "deleted_rooms", "seen_users"):
+                    assert data[k] is not None, f"{stage}: {fn} {k} must not be null"
+                    assert isinstance(data[k], dict), f"{stage}: {fn} {k} must be dict"
+            elif fn == "private.json":
+                assert data["private_messages"] is not None, (
+                    f"{stage}: private_messages must not be null"
+                )
+                assert isinstance(data["private_messages"], list)
+
+    # 1. missing files -> created with empty containers (covers file-initialisation path at L57)
+    _reset_data()
+    for p in paths.values():
+        if os.path.exists(p):
+            os.remove(p)
+    assert _cli("list-rooms").stdout.strip() == "[]"
+    _check_all_empty("missing-file init")
+
+    # 2. empty files (TrimSpace empty) -> same
+    for p in paths.values():
+        open(p, "w").write("   \n")
+    assert _cli("list-rooms").stdout.strip() == "[]"
+    _check_all_empty("empty-file init")
+
+    # 3. corruption recovery, one file at a time, with live tombstone state (covers L57 corruption path)
+    for name, p in paths.items():
+        _reset_data()
+        _cli("create-room", "general")
+        _cli("join", "general", "alice")
+        _cli("send", "general", "alice", "hi")
+        _cli("send-private", "alice", "bob", "psst")
+        _cli("delete-room", "general")
+        open(p, "w").write("{invalid json")
+        # Any command must trigger recovery of the corrupted file (via early load-all in reference)
+        assert _cli("list-rooms").stdout.strip() == "[]", (
+            f"{name} corruption should give empty rooms"
+        )
+        _check_single_empty(name, f"after {name} corruption")
