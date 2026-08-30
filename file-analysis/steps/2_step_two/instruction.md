@@ -29,7 +29,7 @@ Inherit prior session (Step1 code at `/app`). Make system more efficient and acc
 
 - **Structurally impossible SSNs must be rejected**: SSN pattern `###-##-####` is PII only if valid: area ≠ `000` and ≠ `666` and < `900`, group ≠ `00`, serial ≠ `0000`. Example invalid that must be non-essential: `000-12-3456`.
 
-- **Structurally valid credit cards**: CC is PII only if 13-19 digits after stripping non-digits, Luhn valid, not all same digit (e.g., `1111-1111-1111-1111` not PII). Invalid checksum like `4111-1111-1111-1112` must be non-essential.
+- **Structurally valid credit cards**: CC is PII only if 13-19 digits after stripping non-digits, Luhn valid, not all same digit (e.g., `1111-1111-1111-1111` not PII). Invalid checksum like `4111-1111-1111-1112` must be non-essential. Each CC candidate in a file is validated independently on its own: a single Luhn-valid card makes the file PII regardless of how many Luhn-invalid candidates sit beside it. Example mixed case that must be PII: file containing `"budget data 4111-1111-1111-1111 4111-1111-1111-1112 4111-1111-1111-1111 financial"` has three candidates, two valid, one invalid, and must be classified as PII (not business-critical).
 
 - **Email validation**: email rejected as PII if contains consecutive dots `..` or domain missing dot (e.g., `a@b` or `a@b..c` not PII).
 

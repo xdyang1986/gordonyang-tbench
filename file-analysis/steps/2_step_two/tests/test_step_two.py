@@ -364,6 +364,39 @@ def test_structurally_impossible_ssn_and_luhn():
             assert m[name] == exp, f"{name} expected {exp} got {m[name]}"
 
 
+def test_mixed_valid_invalid_cc_independent():
+    # Blocker 2: each CC candidate validated independently, single valid makes file PII
+    # f29.txt from seed(99): budget data 4111-1111-1111-1111 4111-1111-1111-1112 4111-1111-1111-1111 financial
+    # Two valid, one invalid Luhn -> must be PII, not business-critical
+    with tempfile.TemporaryDirectory() as tmpdir:
+        content = "budget data 4111-1111-1111-1111 4111-1111-1111-1112 4111-1111-1111-1111 financial"
+        with open(os.path.join(tmpdir, "f29.txt"), "w") as f:
+            f.write(content)
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        m = {os.path.basename(d["file"]): d["category"] for d in data}
+        assert m["f29.txt"] == "pii", (
+            f"mixed valid+invalid CC should be pii, got {m['f29.txt']}: each candidate independent, one valid sufficient"
+        )
+        # also test file with only invalid should be non-essential / business-critical depending on keywords
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            with open(os.path.join(tmpdir2, "only_invalid.txt"), "w") as f:
+                f.write("budget data 4111-1111-1111-1112 financial")
+            out2 = os.path.join(tmpdir2, "out.json")
+            data2 = run_analyzer(tmpdir2, out2)
+            # single keyword + financial would be business-critical, but CC invalid => not PII, so business-critical
+            # Here budget alone + financial? "budget" + "$"? Actually "budget data ... financial" has distinct 2 (budget, financial) => business-critical
+            # For pure invalid CC without business keywords, should be non-essential
+            with open(os.path.join(tmpdir2, "only_invalid_nokey.txt"), "w") as fw:
+                fw.write("4111-1111-1111-1112")
+            out3 = os.path.join(tmpdir2, "out3.json")
+            data3 = run_analyzer(tmpdir2, out3)
+            m3 = {os.path.basename(d["file"]): d["category"] for d in data3}
+            assert m3["only_invalid_nokey.txt"] == "non-essential", (
+                f"only invalid CC without keywords should be non-essential, got {m3['only_invalid_nokey.txt']}"
+            )
+
+
 def test_email_and_phone_validation():
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "bad_email_dots.txt"), "w") as f:
@@ -448,33 +481,54 @@ def test_confidence_and_reasons_and_performance():
             assert "confidence" in entry and "reasons" in entry
             assert 0 <= entry["confidence"] <= 1
             assert isinstance(entry["reasons"], list) and len(entry["reasons"]) > 0
-        # performance
-        for i in range(500):
+        # performance: 1000 files <5s with workers, verifies worker-pool (R07)
+        for i in range(1000):
             with open(os.path.join(tmpdir, f"file_{i}.txt"), "w") as f:
                 f.write(f"file {i} confidential revenue $100")
         out2 = os.path.join(tmpdir, "out2.json")
         start = time.time()
         run_analyzer(tmpdir, out2, workers=4)
-        assert time.time() - start < 5
+        elapsed = time.time() - start
+        assert elapsed < 5, f"1000 files should be <5s, got {elapsed:.2f}s"
+        # verify workers=1 vs 4 produce same results (determinism) with 1000 files
+        out3 = os.path.join(tmpdir, "out3.json")
+        run_analyzer(tmpdir, out3, workers=1)
+        with open(out2) as fa, open(out3) as fb:
+            da = {
+                d["file"]: d["category"]
+                for d in json.load(fa)
+                if d["file"].endswith(".txt")
+            }
+            db = {
+                d["file"]: d["category"]
+                for d in json.load(fb)
+                if d["file"].endswith(".txt")
+            }
+            assert da == db
 
 
 # --- Step1 preservation tests (required since step2 says preserve step1) ---
 
 
 def test_preserve_bounded_memory_large_file():
+    # True memory test: 96 MB digit-bearing padding, 64 MiB RLIMIT_DATA, 120s timeout – identical to step1
+    # Verified: slurp rc=2, streaming rc=0 ~26s with byte-level sans-regexp, 512MB A-padded at ~6MB/s is 67-87s against 60s budget (TimeoutExpired)
     import resource
 
     with tempfile.TemporaryDirectory() as tmpdir:
         large_path = os.path.join(tmpdir, "large.dat")
-        size = 512 * 1024 * 1024
+        size = 96 * 1024 * 1024
         ssn = "123-45-6789"
-        chunk = b"A" * (1024 * 1024)
+        # Digit-bearing block removes byte prefilter short-circuit that lets A-padding pass in <1s
+        pad_chunk = b"1234 abcd 5678 efgh " * (
+            1024 * 1024 // 20
+        )  # ~1MiB chunk with digits
         remaining = size - len(ssn) - 10
         written = 0
         with open(large_path, "wb") as f:
             while written < remaining:
-                to_write = min(len(chunk), remaining - written)
-                f.write(chunk[:to_write])
+                to_write = min(len(pad_chunk), remaining - written)
+                f.write(pad_chunk[:to_write])
                 written += to_write
             f.write(b"\n")
             f.write(ssn.encode())
@@ -482,20 +536,24 @@ def test_preserve_bounded_memory_large_file():
         out = os.path.join(tmpdir, "out.json")
 
         def limit():
+            # Use RLIMIT_DATA not RLIMIT_AS for Go (Go reserves large virtual arena); do not go below 64MiB
             resource.setrlimit(
-                resource.RLIMIT_DATA, (256 * 1024 * 1024, 256 * 1024 * 1024)
+                resource.RLIMIT_DATA, (64 * 1024 * 1024, 64 * 1024 * 1024)
             )
 
         ensure_binary()
+        env = os.environ.copy()
+        env["GOMAXPROCS"] = "1"
         r = subprocess.run(
-            [BIN, "--dir", tmpdir, "--output", out, "--workers", "4"],
+            [BIN, "--dir", tmpdir, "--output", out],
             preexec_fn=limit,
+            env=env,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
         )
         assert r.returncode == 0, (
-            f"large file must be processed with 256MiB limit in step2, rc={r.returncode} stderr={r.stderr}"
+            f"large file must be processed with 64MiB limit in step2, rc={r.returncode} stderr={r.stderr}"
         )
         with open(out) as f:
             data = json.load(f)
