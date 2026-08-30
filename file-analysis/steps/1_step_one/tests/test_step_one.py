@@ -82,6 +82,9 @@ def reference_classify(dir_path):
             if is_pii:
                 results.append((fpath, "pii"))
                 continue
+            if "\x00" in content:
+                results.append((fpath, "non-essential"))
+                continue
             # log-content heuristic moved to step1: predominantly log lines -> non-essential even with business words
             lines = content.split("\n")
             if len(lines) >= 3:

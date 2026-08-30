@@ -167,7 +167,11 @@ func main() {
 			return nil
 		}
 
-		// predominantly log lines -> non-essential (moved from step2 to step1 per feedback)
+		if strings.Contains(content, "\x00") {
+			results = append(results, Result{File: path, Category: "non-essential"})
+			return nil
+		}
+
 		lines := strings.Split(content, "\n")
 		if len(lines) >= 3 {
 			nonEmpty := 0

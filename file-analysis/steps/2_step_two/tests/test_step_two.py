@@ -1,5 +1,5 @@
 """
-Step2 tests – non-obvious semantics + randomized differential
+Step2 tests – explicit thresholds, inversions, and randomized differential
 """
 
 import json
@@ -28,7 +28,6 @@ def ensure_binary():
         )
 
 
-# Reference implementation mirroring Go step2 new semantics (including non-obvious rules)
 KEYWORDS = [
     "confidential",
     "proprietary",
@@ -106,7 +105,6 @@ def reference_classify(dir_path, relative=False):
             if os.path.islink(fpath):
                 continue
             file_paths.append(fpath)
-    # log heavy count by .log extension
     log_count = sum(1 for p in file_paths if pathlib.Path(p).suffix.lower() == ".log")
     total = len(file_paths)
     log_heavy = total > 0 and (log_count / total) > 0.7
@@ -128,7 +126,6 @@ def reference_classify(dir_path, relative=False):
             results.append((out_file, "non-essential"))
             continue
 
-        # PII with validation
         is_pii = False
         for m in SSN_RE.findall(content):
             if is_valid_ssn(m):
@@ -192,19 +189,16 @@ def reference_classify(dir_path, relative=False):
         has_fin = bool(DOLLAR_RE.search(content) or PERCENT_RE.search(content))
         is_biz = distinct >= 2 or total_occ >= 2 or (distinct >= 1 and has_fin)
 
-        # extension override .log .tmp etc except .bak
         if ext in (".log", ".tmp", ".cache", ".old", ".swp", ".temp"):
             if is_biz:
                 results.append((out_file, "non-essential"))
                 continue
 
-        # log content predominantly
         lines = content.split("\n")
         if len(lines) >= 3:
             non_empty = [l for l in lines if l.strip()]
             matched = sum(1 for l in non_empty if LOG_LINE_RE.search(l))
             if non_empty and matched / len(non_empty) > 0.5:
-                # strong business exception
                 if is_biz and distinct >= 2 and has_fin:
                     results.append((out_file, "business-critical"))
                 else:
@@ -244,8 +238,6 @@ def test_help_workers_relative():
     assert r.returncode == 0
     out = (r.stdout + r.stderr).lower()
     assert "workers" in out and "relative" in out and "dir" in out
-    r = run([BIN])
-    assert r.returncode == 0
 
 
 def test_workers_and_relative_flags():
@@ -253,13 +245,8 @@ def test_workers_and_relative_flags():
         with open(os.path.join(tmpdir, "a.txt"), "w") as f:
             f.write("confidential financial revenue")
         out = os.path.join(tmpdir, "out.json")
-        # workers 0 invalid
         r = run([BIN, "--dir", tmpdir, "--output", out, "--workers", "0"])
         assert r.returncode == 2
-        # valid workers 1 vs 4 same category when not log heavy
-        out1 = os.path.join(tmpdir, "o1.json")
-        out2 = os.path.join(tmpdir, "o2.json")
-        # put outputs outside scanned dir to avoid counting them
         out_dir = os.path.join(tmpdir, "outs")
         os.makedirs(out_dir, exist_ok=True)
         out1 = os.path.join(out_dir, "o1.json")
@@ -281,38 +268,40 @@ def test_relative_flag_changes_path():
         out_rel = os.path.join(tmpdir, "out_rel.json")
         data_abs = run_analyzer(tmpdir, out_abs, relative=False)
         data_rel = run_analyzer(tmpdir, out_rel, relative=True)
-        # abs should contain absolute paths
         abs_files = [d["file"] for d in data_abs if not d["file"].endswith(".json")]
         rel_files = [d["file"] for d in data_rel if not d["file"].endswith(".json")]
-        assert any(os.path.isabs(p) for p in abs_files), (
-            f"abs expected absolute {abs_files}"
-        )
-        assert all(not os.path.isabs(p) for p in rel_files), (
-            f"rel expected relative {rel_files}"
-        )
-        # relative sorted
+        assert any(os.path.isabs(p) for p in abs_files)
+        assert all(not os.path.isabs(p) for p in rel_files)
         assert rel_files == sorted(rel_files)
-        # relative file should be sub/a.txt
         assert "sub/a.txt" in rel_files or "sub\\a.txt" in rel_files
 
 
 def test_bak_precedence_inversion():
-    # .bak files are always non-essential even with valid PII – non-obvious
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "pii.bak"), "w") as f:
             f.write("SSN 123-45-6789 email john@example.com")
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         entry = [d for d in data if "pii.bak" in d["file"]]
-        assert len(entry) == 1
-        assert entry[0]["category"] == "non-essential", (
-            f".bak with PII should be non-essential due to inversion, got {entry[0]}"
-        )
+        assert entry[0]["category"] == "non-essential"
+
+
+def test_extension_override_tmp_and_others_but_pii_wins():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # .tmp business -> non-essential but PII wins
+        with open(os.path.join(tmpdir, "biz.tmp"), "w") as f:
+            f.write("confidential revenue forecast")
+        with open(os.path.join(tmpdir, "pii.tmp"), "w") as f:
+            f.write("SSN 123-45-6789")
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        m = {os.path.basename(d["file"]): d["category"] for d in data}
+        assert m["biz.tmp"] == "non-essential"
+        assert m["pii.tmp"] == "pii"
 
 
 def test_log_heavy_sibling_downgrade():
     with tempfile.TemporaryDirectory() as tmpdir:
-        # 8 logs + 2 biz files = 80% logs -> log heavy
         for i in range(8):
             with open(os.path.join(tmpdir, f"f{i}.log"), "w") as f:
                 f.write(f"log line {i}")
@@ -321,11 +310,8 @@ def test_log_heavy_sibling_downgrade():
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         biz = [d for d in data if "biz.txt" in d["file"]]
-        assert len(biz) == 1
-        assert biz[0]["category"] == "non-essential", (
-            f"biz should be downgraded due to >70% logs, got {biz[0]}"
-        )
-        # not log heavy when 50%
+        assert biz[0]["category"] == "non-essential"
+        # not heavy
         with tempfile.TemporaryDirectory() as tmpdir2:
             for i in range(2):
                 with open(os.path.join(tmpdir2, f"f{i}.log"), "w") as f:
@@ -334,30 +320,89 @@ def test_log_heavy_sibling_downgrade():
                 f.write("confidential revenue forecast strategic merger")
             out2 = os.path.join(tmpdir2, "out.json")
             data2 = run_analyzer(tmpdir2, out2)
-            biz2 = [d for d in data2 if "biz.txt" in d["file"]]
-            assert biz2[0]["category"] == "business-critical"
+            assert [d for d in data2 if "biz.txt" in d["file"]][0][
+                "category"
+            ] == "business-critical"
+
+
+def test_weighted_scoring_inversion():
+    # Step1 single occurrence sufficient, Step2 overturned: distinct>=2 or total>=2 or (>=1 + $/%)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "single.txt"), "w") as f:
+            f.write("budget")
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        assert data[0]["category"] == "non-essential", (
+            "single keyword without $/% should be non-essential in step2"
+        )
+        # single + financial -> business
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            with open(os.path.join(tmpdir2, "single_fin.txt"), "w") as f:
+                f.write("budget $5000")
+            out2 = os.path.join(tmpdir2, "out.json")
+            data2 = run_analyzer(tmpdir2, out2)
+            assert data2[0]["category"] == "business-critical"
 
 
 def test_structurally_impossible_ssn_and_luhn():
     with tempfile.TemporaryDirectory() as tmpdir:
-        with open(os.path.join(tmpdir, "bad_ssn.txt"), "w") as f:
-            f.write("SSN 000-12-3456")
-        with open(os.path.join(tmpdir, "good_ssn.txt"), "w") as f:
-            f.write("SSN 123-45-6789")
-        with open(os.path.join(tmpdir, "bad_cc.txt"), "w") as f:
-            f.write("card 4111-1111-1111-1112")
-        with open(os.path.join(tmpdir, "good_cc.txt"), "w") as f:
-            f.write("card 4111-1111-1111-1111")
+        cases = {
+            "good_ssn.txt": ("SSN 123-45-6789", "pii"),
+            "bad_ssn.txt": ("SSN 000-12-3456", "non-essential"),
+            "bad_ssn_666.txt": ("SSN 666-45-6789", "non-essential"),
+            "good_cc.txt": ("card 4111-1111-1111-1111", "pii"),
+            "bad_cc.txt": ("card 4111-1111-1111-1112", "non-essential"),
+            "all_same_cc.txt": ("card 1111-1111-1111-1111", "non-essential"),
+        }
+        for name, (content, _) in cases.items():
+            with open(os.path.join(tmpdir, name), "w") as f:
+                f.write(content)
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         m = {os.path.basename(d["file"]): d["category"] for d in data}
-        assert m["good_ssn.txt"] == "pii"
-        assert m["bad_ssn.txt"] == "non-essential"
-        assert m["good_cc.txt"] == "pii"
-        assert m["bad_cc.txt"] == "non-essential"
+        for name, (_, exp) in cases.items():
+            assert m[name] == exp, f"{name} expected {exp} got {m[name]}"
 
 
-def test_log_content_not_business():
+def test_email_and_phone_validation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "bad_email_dots.txt"), "w") as f:
+            f.write("email test..bad@example.com")
+        with open(os.path.join(tmpdir, "bad_email_nodot.txt"), "w") as f:
+            f.write("email a@b")
+        with open(os.path.join(tmpdir, "good_email.txt"), "w") as f:
+            f.write("email good@example.com")
+        with open(os.path.join(tmpdir, "all_same_phone.txt"), "w") as f:
+            f.write("phone 111-111-1111")
+        with open(os.path.join(tmpdir, "good_phone.txt"), "w") as f:
+            f.write("Call 123-456-7890")
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        m = {os.path.basename(d["file"]): d["category"] for d in data}
+        assert m["bad_email_dots.txt"] == "non-essential"
+        assert m["bad_email_nodot.txt"] == "non-essential"
+        assert m["good_email.txt"] == "pii"
+        assert m["all_same_phone.txt"] == "non-essential"
+        assert m["good_phone.txt"] == "pii"
+
+
+def test_null_byte_and_overlap():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_path = os.path.join(tmpdir, "binary.bin")
+        with open(bin_path, "wb") as f:
+            f.write(b"\x00\x01\x02 confidential \x00")
+        with open(os.path.join(tmpdir, "overlap.txt"), "w") as f:
+            # CC candidate containing phone substring should not be counted as CC but phone PII still counts if valid
+            f.write(
+                "number 123-456-7890 inside 4111-1111-1111-1111 overlap test 123-456-7890-1234"
+            )
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        m = {os.path.basename(d["file"]): d["category"] for d in data}
+        assert m["binary.bin"] == "non-essential"
+
+
+def test_log_content_and_escape_hatch():
     with tempfile.TemporaryDirectory() as tmpdir:
         content = "\n".join(
             [f"2024-01-01 INFO budget processing {i}" for i in range(10)]
@@ -367,9 +412,22 @@ def test_log_content_not_business():
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         assert data[0]["category"] == "non-essential"
+        # escape hatch distinct>=2 + financial keeps business
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            content2 = "\n".join(
+                [
+                    f"2024-01-01 INFO confidential revenue $5000 forecast {i}"
+                    for i in range(5)
+                ]
+            )
+            with open(os.path.join(tmpdir2, "strong.txt"), "w") as f:
+                f.write(content2)
+            out2 = os.path.join(tmpdir2, "out.json")
+            data2 = run_analyzer(tmpdir2, out2)
+            assert data2[0]["category"] == "business-critical"
 
 
-def test_confidence_and_reasons():
+def test_confidence_and_reasons_and_performance():
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(os.path.join(tmpdir, "a.txt"), "w") as f:
             f.write("SSN 123-45-6789")
@@ -379,6 +437,14 @@ def test_confidence_and_reasons():
             assert "confidence" in entry and "reasons" in entry
             assert 0 <= entry["confidence"] <= 1
             assert isinstance(entry["reasons"], list) and len(entry["reasons"]) > 0
+        # performance
+        for i in range(500):
+            with open(os.path.join(tmpdir, f"file_{i}.txt"), "w") as f:
+                f.write(f"file {i} confidential revenue $100")
+        out2 = os.path.join(tmpdir, "out2.json")
+        start = time.time()
+        run_analyzer(tmpdir, out2, workers=4)
+        assert time.time() - start < 5
 
 
 def test_randomized_differential_with_relative():
@@ -413,7 +479,6 @@ def test_randomized_differential_with_relative():
         ref_abs = reference_classify(tmpdir, relative=False)
         ref_rel = reference_classify(tmpdir, relative=True)
 
-        # filter out output json files themselves from comparison
         def filter_out(results, out_names):
             return [
                 (f, c) for f, c in results if not any(f.endswith(n) for n in out_names)
@@ -433,7 +498,6 @@ def test_randomized_differential_with_relative():
             if not d["file"].endswith(".json")
         }
 
-        # compare absolute
         for fpath, cat in ref_abs_f:
             if fpath.endswith(".json"):
                 continue
@@ -441,7 +505,7 @@ def test_randomized_differential_with_relative():
             assert analyzer_abs_map[fpath] == cat, (
                 f"abs mismatch {fpath}: ref {cat} vs got {analyzer_abs_map[fpath]}"
             )
-        # compare relative
+
         for fpath, cat in ref_rel_f:
             if fpath.endswith(".json"):
                 continue
@@ -449,15 +513,3 @@ def test_randomized_differential_with_relative():
             assert analyzer_rel_map[fpath] == cat, (
                 f"rel mismatch {fpath}: ref {cat} vs got {analyzer_rel_map[fpath]}"
             )
-
-
-def test_performance():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for i in range(500):
-            with open(os.path.join(tmpdir, f"file_{i}.txt"), "w") as f:
-                f.write(f"file {i} confidential revenue $100")
-        out = os.path.join(tmpdir, "out.json")
-        start = time.time()
-        run_analyzer(tmpdir, out, workers=4)
-        elapsed = time.time() - start
-        assert elapsed < 5

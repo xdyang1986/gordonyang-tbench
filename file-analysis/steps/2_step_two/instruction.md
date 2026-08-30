@@ -1,44 +1,59 @@
-# Step 2: Improve – Efficiency & Accuracy with Non-Obvious Rules
+# Step 2: Improve – Efficiency & Accuracy with Explicit Thresholds and Inversions
 
-Inherit prior session (Step1 code at `/app`). Make system more efficient and accurate, and introduce semantics that contradict obvious implementation.
+Inherit prior session (Step1 code at `/app`). Make system more efficient and accurate. Step2 overturns a Step1 rule and adds non-obvious precedence.
 
 ## Preserve Step1
 - Still support `--dir`, `--output`, help, exit codes, recursive scan ignoring symlinks, atomic write, sorted output.
 - Binary `./file-analyzer`, stdlib only.
 
 ## New Flags
-- `--workers <int>` default `runtime.NumCPU()`, must be >0 else exit 2. Help must contain `workers`.
-- `--relative` bool flag (no value, just presence, also support `--relative=true`). When present, output file paths are relative to `--dir` (e.g., `--dir /data` file `/data/sub/a.txt` → output `sub/a.txt`). When absent, absolute paths as before. Sorting is by the path that is output (relative when flag present). Help must contain `relative`. This invalidates Step1's absolute-path assumption and forces refactor.
+- `--workers <int>` default `runtime.NumCPU()`, >0 else exit 2. Help must contain `workers`.
+- `--relative` bool flag (presence or `--relative=true`). When present, output file paths are relative to `--dir` (e.g., `/data/sub/a.txt` → `sub/a.txt`). When absent, absolute. Sorting by output path. Help must contain `relative`. This invalidates Step1 absolute-path assumption.
+- Support both `--flag value` and `--flag=value`.
 
-## Efficiency Requirements
-- Use worker-pool concurrency with `--workers` goroutines, deterministic sorted output regardless of concurrency.
-- Handle 1000 files efficiently (<5s). Use buffered streaming, not loading whole directory blob.
+## Efficiency
+- Worker-pool concurrency with `--workers`, deterministic sorted output.
+- Handle 1000 files <5s. Buffered streaming.
 
-## Accuracy – Goal Oriented (not literal regexes)
+## Accuracy – Explicit Thresholds (restored)
 
-Improve detection to reject structurally impossible identifiers and reduce false positives:
+**Step1→Step2 inversion (key discriminator):**
+- In Step1, a single occurrence of a business term was sufficient for business-critical.
+- In Step2, this rule is overturned. Business-critical now requires weighted thresholds:
+  - distinct keywords ≥2, OR
+  - total keyword occurrences ≥2, OR
+  - (≥1 keyword AND financial pattern present: `$` followed by digit like `$5000` or number with `%` like `10%`)
+  Otherwise, even with 1 keyword, file is non-essential. Documented reversal forces refactor of Turn-1 logic.
 
-- **Structurally impossible SSNs**: reject SSNs with impossible area/group/serial (e.g., all-zero groups, well-known invalid area codes). Goal: reduce false positives from syntactically correct but impossible SSNs.
+- **Keyword set remains fixed and closed** to: confidential, proprietary, trade secret, financial, revenue, budget, forecast, strategic, merger, acquisition, contract, nda, intellectual property, earnings, profit, balance sheet, board meeting, shareholder. Case-insensitive.
 
-- **Structurally valid credit cards**: require Luhn check and reasonable length, not all same digit. Goal: invalid checksum cards should not be considered PII.
+- **Structurally impossible SSNs must be rejected**: SSN pattern `###-##-####` is PII only if valid: area ≠ `000` and ≠ `666` and < `900`, group ≠ `00`, serial ≠ `0000`. Example invalid that must be non-essential: `000-12-3456`.
 
-- **Predominantly log files are not business-critical**: if a file's content is predominantly log lines (timestamp + level), it should be considered non-essential even if it contains business words.
+- **Structurally valid credit cards**: CC is PII only if 13-19 digits after stripping non-digits, Luhn valid, not all same digit (e.g., `1111-1111-1111-1111` not PII). Invalid checksum like `4111-1111-1111-1112` must be non-essential.
 
-- **Extension-aware with precedence inversion**: files with extensions `.log`, `.tmp`, `.cache`, `.old`, `.swp`, `.temp` that would otherwise be business-critical are downgraded to non-essential, but valid PII still wins. Backup files with `.bak` extension are always considered non-essential, even if they contain valid PII – this is intentional precedence inversion that contrasts with the rest of the list.
+- **Email validation**: email rejected as PII if contains consecutive dots `..` or domain missing dot (e.g., `a@b` or `a@b..c` not PII).
 
-- **Sibling-dependent reclassification**: if more than 70% of files in the scanned root directory are log files (by `.log` extension), then any file in that directory that would otherwise be business-critical is downgraded to non-essential. This requires a two-phase pass: first count file types, then decide categories. It defeats per-file decomposition and gives concurrency teeth.
+- **Phone validation**: phone is PII only if ≥10 digits and not all same digit (e.g., `111-111-1111` not PII). Pattern `xxx-xxx-xxxx` or `(xxx) xxx-xxxx` with context `Call xxx-xxx-xxxx` counts.
 
-- **Phone vs credit card overlap**: if a 16-digit candidate overlaps with phone pattern context, careful span handling is needed; do not double-count.
+- **Null byte / binary**: any file containing null byte `\x00` is non-essential unless valid PII was already found (PII check before binary check).
+
+- **Extension-aware**: files with extensions `.log`, `.tmp`, `.cache`, `.old`, `.swp`, `.temp` that would otherwise be business-critical are downgraded to non-essential, but valid PII still wins.
+
+- **Precedence inversion for .bak**: backup files `.bak` are always non-essential even if they contain valid PII. This contrasts with rest of extension list where PII wins. Intentionally contradicts obvious "PII always wins".
+
+- **Predominantly log files are not business-critical**: if ≥50% of non-empty lines match log pattern (`yyyy-mm-dd` or `hh:mm:ss` or `INFO|DEBUG|WARN|ERROR|TRACE`), file is non-essential even with business words, except escape hatch: if distinct keywords ≥2 AND financial pattern present, keep as business-critical.
+
+- **Sibling-dependent reclassification**: if >70% of files in scanned root are `.log` extension, then any file in that directory that would otherwise be business-critical is downgraded to non-essential. Requires two-phase: count first, then classify.
+
+- **Phone vs CC overlap**: if a CC candidate string contains phone pattern, resolve to phone handling only (do not double-count as CC).
 
 ## Output (Step2)
-JSON array sorted by output path (absolute or relative depending on flag). Each element must have:
+JSON array sorted by output path (absolute or relative). Each element:
 `{"file": "<path>", "category": "...", "confidence": 0.0-1.0, "reasons": ["..."]}`
-- `file`: absolute when `--relative` absent, relative to `--dir` when present.
+- `file`: absolute unless `--relative` set → relative to `--dir`
 - `category`: `business-critical|pii|non-essential`
-- `confidence`: float 0-1, `reasons`: non-empty array explaining decision.
-- Empty → `[]`.
-
-Backward compat: `--dir` and `--output` still work, output still sorted and valid JSON.
+- `confidence`: 0-1, `reasons`: non-empty
+- Empty → `[]`
 
 Example:
 ```
@@ -46,4 +61,4 @@ go build -o file-analyzer .
 ./file-analyzer --dir /data --output /tmp/out.json --workers 4 --relative
 ```
 
-Implement improvements extending Step1 at `/app`.
+Implement at `/app`.
