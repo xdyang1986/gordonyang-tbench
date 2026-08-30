@@ -85,12 +85,12 @@ def reference_classify(dir_path):
             if "\x00" in content:
                 results.append((fpath, "non-essential"))
                 continue
-            # log-content heuristic moved to step1: predominantly log lines -> non-essential even with business words
+            # log heuristic: at least 3 non-empty lines, >50% match per spec
             lines = content.split("\n")
-            if len(lines) >= 3:
-                non_empty = [l for l in lines if l.strip()]
+            non_empty = [l for l in lines if l.strip()]
+            if len(non_empty) >= 3:
                 matched = sum(1 for l in non_empty if LOG_LINE_RE.search(l))
-                if non_empty and matched / len(non_empty) > 0.5:
+                if matched / len(non_empty) > 0.5:
                     results.append((fpath, "non-essential"))
                     continue
             low = content.lower()

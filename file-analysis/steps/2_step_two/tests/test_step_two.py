@@ -195,10 +195,10 @@ def reference_classify(dir_path, relative=False):
                 continue
 
         lines = content.split("\n")
-        if len(lines) >= 3:
-            non_empty = [l for l in lines if l.strip()]
+        non_empty = [l for l in lines if l.strip()]
+        if len(non_empty) >= 3:
             matched = sum(1 for l in non_empty if LOG_LINE_RE.search(l))
-            if non_empty and matched / len(non_empty) > 0.5:
+            if matched / len(non_empty) > 0.5:
                 if is_biz and distinct >= 2 and has_fin:
                     results.append((out_file, "business-critical"))
                 else:
@@ -394,12 +394,23 @@ def test_null_byte_and_overlap():
         with open(os.path.join(tmpdir, "overlap.txt"), "w") as f:
             # CC candidate containing phone substring should not be counted as CC but phone PII still counts if valid
             f.write(
-                "number 123-456-7890 inside 4111-1111-1111-1111 overlap test 123-456-7890-1234"
+                "number Call 123-456-7890 inside card 4111-1111-1111-1111 overlap test"
             )
+        # PII should win over null byte
+        with open(os.path.join(tmpdir, "binary_pii.bin"), "wb") as f:
+            f.write(b"\x00\x01\x02 SSN 123-45-6789 \x00")
         out = os.path.join(tmpdir, "out.json")
         data = run_analyzer(tmpdir, out)
         m = {os.path.basename(d["file"]): d["category"] for d in data}
-        assert m["binary.bin"] == "non-essential"
+        assert m["binary.bin"] == "non-essential", (
+            "binary without PII should be non-essential"
+        )
+        assert m["binary_pii.bin"] == "pii", (
+            "binary with valid PII should be pii (PII precedence over binary)"
+        )
+        assert m["overlap.txt"] == "pii", (
+            f"overlap file with phone and CC should be pii (phone wins over CC), got {m['overlap.txt']}"
+        )
 
 
 def test_log_content_and_escape_hatch():
@@ -445,6 +456,140 @@ def test_confidence_and_reasons_and_performance():
         start = time.time()
         run_analyzer(tmpdir, out2, workers=4)
         assert time.time() - start < 5
+
+
+# --- Step1 preservation tests (required since step2 says preserve step1) ---
+
+
+def test_preserve_bounded_memory_large_file():
+    import resource
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        large_path = os.path.join(tmpdir, "large.dat")
+        size = 512 * 1024 * 1024
+        ssn = "123-45-6789"
+        chunk = b"A" * (1024 * 1024)
+        remaining = size - len(ssn) - 10
+        written = 0
+        with open(large_path, "wb") as f:
+            while written < remaining:
+                to_write = min(len(chunk), remaining - written)
+                f.write(chunk[:to_write])
+                written += to_write
+            f.write(b"\n")
+            f.write(ssn.encode())
+            f.write(b"\n")
+        out = os.path.join(tmpdir, "out.json")
+
+        def limit():
+            resource.setrlimit(
+                resource.RLIMIT_DATA, (256 * 1024 * 1024, 256 * 1024 * 1024)
+            )
+
+        ensure_binary()
+        r = subprocess.run(
+            [BIN, "--dir", tmpdir, "--output", out, "--workers", "4"],
+            preexec_fn=limit,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert r.returncode == 0, (
+            f"large file must be processed with 256MiB limit in step2, rc={r.returncode} stderr={r.stderr}"
+        )
+        with open(out) as f:
+            data = json.load(f)
+        assert [d for d in data if "large.dat" in d["file"]][0]["category"] == "pii"
+
+
+def test_preserve_no_newline_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "nonl.txt")
+        content = "!" * (512 * 1024) + " 123-45-6789 " + "!" * (512 * 1024)
+        with open(path, "w") as f:
+            f.write(content)
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        assert [d for d in data if "nonl.txt" in d["file"]][0]["category"] == "pii"
+
+
+def test_preserve_boundary_sweep():
+    ssn = "123-45-6789"
+    for k in range(12, 17):  # fewer for speed, 4096..65536
+        offset = (1 << k) - 5
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "boundary.txt")
+            with open(path, "wb") as f:
+                f.write(b"!" * offset)
+                f.write(b" ")
+                f.write(ssn.encode())
+                f.write(b" ")
+                f.write(b"!" * 100)
+            out = os.path.join(tmpdir, "out.json")
+            data = run_analyzer(tmpdir, out)
+            assert [d for d in data if "boundary.txt" in d["file"]][0][
+                "category"
+            ] == "pii"
+
+
+def test_preserve_symlink_atomic_unknown_stdlib():
+    # symlink exclusion
+    with tempfile.TemporaryDirectory() as tmpdir:
+        real = os.path.join(tmpdir, "real.txt")
+        with open(real, "w") as f:
+            f.write("confidential financial")
+        link = os.path.join(tmpdir, "link.txt")
+        try:
+            os.symlink(real, link)
+        except:
+            pass
+        else:
+            out = os.path.join(tempfile.gettempdir(), "out_symlink_preserve.json")
+            data = run_analyzer(tmpdir, out)
+            assert len([d for d in data if "real.txt" in d["file"]]) == 1
+            assert len([d for d in data if "link.txt" in d["file"]]) == 0
+    # atomic write and json shape
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "a.txt"), "w") as f:
+            f.write("confidential financial")
+        out_dir = os.path.join(tmpdir, "nested", "outdir")
+        out = os.path.join(out_dir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        assert os.path.isfile(out)
+        for fname in os.listdir(out_dir):
+            assert "tmp" not in fname.lower() or fname == "out.json"
+    # unknown flag
+    r = run([BIN, "--unknown_xyz"])
+    assert r.returncode == 2
+    assert r.stdout.strip() == ""
+    # stdlib only
+    go_mod = os.path.join(APP, "go.mod")
+    if os.path.isfile(go_mod):
+        with open(go_mod) as f:
+            assert "github.com" not in f.read()
+    r = run(["go", "list", "-f", '{{join .Imports " "}}', "."], timeout=5)
+    if r.returncode == 0:
+        for imp in r.stdout.split():
+            assert "." not in imp
+
+
+def test_nested_log_heavy_global():
+    # Clarify sibling log-heavy rule is global across tree, not per-directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # root has 8 logs in subdir logs/, and business file in subdir biz/
+        os.makedirs(os.path.join(tmpdir, "logs"))
+        os.makedirs(os.path.join(tmpdir, "biz"))
+        for i in range(8):
+            with open(os.path.join(tmpdir, "logs", f"f{i}.log"), "w") as f:
+                f.write("log")
+        with open(os.path.join(tmpdir, "biz", "biz.txt"), "w") as f:
+            f.write("confidential revenue forecast strategic merger")
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        biz = [d for d in data if "biz.txt" in d["file"]]
+        assert biz[0]["category"] == "non-essential", (
+            f"global log heavy should downgrade nested biz, got {biz[0]}"
+        )
 
 
 def test_randomized_differential_with_relative():

@@ -41,9 +41,9 @@ Inherit prior session (Step1 code at `/app`). Make system more efficient and acc
 
 - **Precedence inversion for .bak**: backup files `.bak` are always non-essential even if they contain valid PII. This contrasts with rest of extension list where PII wins. Intentionally contradicts obvious "PII always wins".
 
-- **Predominantly log files are not business-critical**: if ≥50% of non-empty lines match log pattern (`yyyy-mm-dd` or `hh:mm:ss` or `INFO|DEBUG|WARN|ERROR|TRACE`), file is non-essential even with business words, except escape hatch: if distinct keywords ≥2 AND financial pattern present, keep as business-critical.
+- **Predominantly log files are not business-critical**: applies only to files with at least 3 non-empty lines; if >50% of non-empty lines match log pattern (`yyyy-mm-dd` anchored at line start `^` or `hh:mm:ss` anchored at start `^`, or level tokens `INFO|DEBUG|WARN|ERROR|TRACE` anywhere), file is non-essential even with business words, except escape hatch: if distinct keywords ≥2 AND financial pattern present, keep as business-critical.
 
-- **Sibling-dependent reclassification**: if >70% of files in scanned root are `.log` extension, then any file in that directory that would otherwise be business-critical is downgraded to non-essential. Requires two-phase: count first, then classify.
+- **Sibling-dependent reclassification (global)**: if >70% of files across the entire scanned tree (global count, not per-directory) are `.log` extension, then any file that would otherwise be business-critical (anywhere in tree, non-log) is downgraded to non-essential. Requires two-phase: first count all files, then classify.
 
 - **Phone vs CC overlap**: if a CC candidate string contains phone pattern, resolve to phone handling only (do not double-count as CC).
 
@@ -58,7 +58,7 @@ JSON array sorted by output path (absolute or relative). Each element:
 Example:
 ```
 go build -o file-analyzer .
-./file-analyzer --dir /data --output /tmp/out.json --workers 4 --relative
+./file-analyzer --dir /data --output ./out.json --workers 4 --relative
 ```
 
 Implement at `/app`.
