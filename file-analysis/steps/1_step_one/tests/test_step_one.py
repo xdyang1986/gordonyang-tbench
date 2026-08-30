@@ -295,3 +295,92 @@ def test_stdlib_only():
     if r.returncode == 0:
         for imp in r.stdout.split():
             assert "." not in imp, f"dotted import {imp}"
+
+
+# --- New bounded-memory streaming tests (must be new functions with own fixtures) ---
+
+
+def test_bounded_memory_large_file():
+    # 512 MB file with SSN near end, RLIMIT_DATA 256 MiB - only streaming with overlap passes
+    import resource
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        large_path = os.path.join(tmpdir, "large.dat")
+        size = 512 * 1024 * 1024
+        ssn = "123-45-6789"
+        # Write in 1MiB chunks to avoid large memory in test itself
+        chunk = b"A" * (1024 * 1024)
+        remaining = size - len(ssn) - 10
+        written = 0
+        with open(large_path, "wb") as f:
+            while written < remaining:
+                to_write = min(len(chunk), remaining - written)
+                f.write(chunk[:to_write])
+                written += to_write
+            f.write(b"\n")
+            f.write(ssn.encode())
+            f.write(b"\n")
+        out = os.path.join(tmpdir, "out.json")
+
+        def limit():
+            # Use RLIMIT_DATA not RLIMIT_AS for Go (Go reserves large virtual arena)
+            resource.setrlimit(
+                resource.RLIMIT_DATA, (256 * 1024 * 1024, 256 * 1024 * 1024)
+            )
+
+        ensure_binary()
+        r = subprocess.run(
+            [BIN, "--dir", tmpdir, "--output", out],
+            preexec_fn=limit,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert r.returncode == 0, (
+            f"large file must be processed with 256MiB DATA limit, rc={r.returncode} stderr={r.stderr}"
+        )
+        with open(out) as f:
+            data = json.load(f)
+        entry = [d for d in data if "large.dat" in d["file"]]
+        assert len(entry) == 1
+        assert entry[0]["category"] == "pii", (
+            f"large file with SSN near end should be pii, got {entry[0]}"
+        )
+
+
+def test_no_newline_file():
+    # 1 MB single line containing SSN - kills bufio.Scanner default token 64k, uses non-word padding for word boundaries
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "nonl.txt")
+        content = "!" * (512 * 1024) + " 123-45-6789 " + "!" * (512 * 1024)
+        with open(path, "w") as f:
+            f.write(content)
+        out = os.path.join(tmpdir, "out.json")
+        data = run_analyzer(tmpdir, out)
+        entry = [d for d in data if "nonl.txt" in d["file"]]
+        assert len(entry) == 1
+        assert entry[0]["category"] == "pii", (
+            f"1MB no-newline file with SSN should be pii, got {entry[0]}"
+        )
+
+
+def test_pattern_straddles_buffer_boundary():
+    # Sweep offset 2^k -5 for k=12..20, SSN at boundary - requires overlap carry, use non-word padding for boundaries
+    ssn = "123-45-6789"
+    for k in range(12, 21):  # 4096 to ~1M
+        offset = (1 << k) - 5
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "boundary.txt")
+            with open(path, "wb") as f:
+                f.write(b"!" * offset)
+                f.write(b" ")
+                f.write(ssn.encode())
+                f.write(b" ")
+                f.write(b"!" * 100)
+            out = os.path.join(tmpdir, "out.json")
+            data = run_analyzer(tmpdir, out)
+            entry = [d for d in data if "boundary.txt" in d["file"]]
+            assert len(entry) == 1
+            assert entry[0]["category"] == "pii", (
+                f"SSN at offset {offset} (2^{k}-5) should be pii, got {entry[0]['category']}"
+            )

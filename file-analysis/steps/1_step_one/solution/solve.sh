@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -44,9 +45,23 @@ Examples:
   file-analyzer --help`)
 }
 
+const (
+	bufSize = 1 * 1024 * 1024
+	overlap = 256
+	maxLineFrag = 8192
+)
+
+func containsDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	args := os.Args[1:]
-
 	if len(args) == 0 {
 		printHelp()
 		os.Exit(0)
@@ -57,10 +72,7 @@ func main() {
 			os.Exit(0)
 		}
 	}
-
-	known := map[string]bool{
-		"--dir": true, "--output": true, "--help": true, "-h": true,
-	}
+	known := map[string]bool{"--dir": true, "--output": true, "--help": true, "-h": true}
 	for _, a := range args {
 		if strings.HasPrefix(a, "-") {
 			key := a
@@ -76,7 +88,6 @@ func main() {
 			}
 		}
 	}
-
 	fset := flag.NewFlagSet("file-analyzer", flag.ContinueOnError)
 	dirFlag := fset.String("dir", "", "Directory to scan")
 	outputFlag := fset.String("output", "", "Output JSON file")
@@ -84,12 +95,10 @@ func main() {
 	if err := fset.Parse(args); err != nil {
 		os.Exit(2)
 	}
-
 	if *dirFlag == "" || *outputFlag == "" {
 		fmt.Fprintln(os.Stderr, "missing required --dir and --output")
 		os.Exit(2)
 	}
-
 	info, err := os.Stat(*dirFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dir error: %v\n", err)
@@ -99,7 +108,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "dir is not a directory")
 		os.Exit(2)
 	}
-
 	outDir := filepath.Dir(*outputFlag)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create output dir: %v\n", err)
@@ -114,29 +122,13 @@ func main() {
 	logLineRe := regexp.MustCompile(`(?i)(^\d{4}-\d{2}-\d{2}|^\[?\d{2}:\d{2}:\d{2}|\b(INFO|DEBUG|WARN|ERROR|TRACE)\b)`)
 
 	keywords := []string{
-		"confidential",
-		"proprietary",
-		"trade secret",
-		"financial",
-		"revenue",
-		"budget",
-		"forecast",
-		"strategic",
-		"merger",
-		"acquisition",
-		"contract",
-		"nda",
-		"intellectual property",
-		"earnings",
-		"profit",
-		"balance sheet",
-		"board meeting",
-		"shareholder",
+		"confidential", "proprietary", "trade secret", "financial", "revenue", "budget",
+		"forecast", "strategic", "merger", "acquisition", "contract", "nda",
+		"intellectual property", "earnings", "profit", "balance sheet", "board meeting", "shareholder",
 	}
 
-	results := []Result{}
-
-	err = filepath.WalkDir(*dirFlag, func(path string, d fs.DirEntry, err error) error {
+	var filePaths []string
+	filepath.WalkDir(*dirFlag, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -146,104 +138,143 @@ func main() {
 		if d.IsDir() {
 			return nil
 		}
-		contentBytes, err := os.ReadFile(path)
+		filePaths = append(filePaths, path)
+		return nil
+	})
+
+	results := make([]Result, 0, len(filePaths))
+
+	for _, path := range filePaths {
+		f, err := os.Open(path)
 		if err != nil {
 			results = append(results, Result{File: path, Category: "non-essential"})
-			return nil
-		}
-		content := string(contentBytes)
-		trimmed := strings.TrimSpace(content)
-		if trimmed == "" {
-			results = append(results, Result{File: path, Category: "non-essential"})
-			return nil
+			continue
 		}
 
+		hasNonWhitespace := false
+		hasNull := false
 		isPII := false
-		if ssnRe.MatchString(content) || emailRe.MatchString(content) || phoneRe1.MatchString(content) || phoneRe2.MatchString(content) || ccRe.MatchString(content) {
-			isPII = true
+		isBiz := false
+		totalLines := 0
+		matchedLines := 0
+		lineRemainder := ""
+		patternCarry := ""
+		buf := make([]byte, bufSize)
+
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				if !hasNonWhitespace {
+					for _, r := range chunk {
+						if r != ' ' && r != '\n' && r != '\r' && r != '\t' {
+							hasNonWhitespace = true
+							break
+						}
+					}
+				}
+				if !hasNull && strings.Contains(chunk, "\x00") {
+					hasNull = true
+				}
+				searchBuf := patternCarry + chunk
+				if !isPII {
+					hasDigit := containsDigit(searchBuf)
+					hasAt := strings.Contains(searchBuf, "@")
+					if hasDigit {
+						if ssnRe.MatchString(searchBuf) || phoneRe1.MatchString(searchBuf) || phoneRe2.MatchString(searchBuf) || ccRe.MatchString(searchBuf) {
+							isPII = true
+						}
+					}
+					if !isPII && hasAt {
+						if emailRe.MatchString(searchBuf) {
+							isPII = true
+						}
+					}
+				}
+				if !isBiz {
+					low := strings.ToLower(searchBuf)
+					for _, kw := range keywords {
+						if strings.Contains(low, kw) {
+							isBiz = true
+							break
+						}
+					}
+				}
+				combined := lineRemainder + chunk
+				parts := strings.Split(combined, "\n")
+				for i := 0; i < len(parts)-1; i++ {
+					line := parts[i]
+					if strings.TrimSpace(line) == "" {
+						continue
+					}
+					totalLines++
+					if logLineRe.MatchString(line) {
+						matchedLines++
+					}
+				}
+				lineRemainder = parts[len(parts)-1]
+				if len(lineRemainder) > maxLineFrag {
+					lineRemainder = lineRemainder[:maxLineFrag]
+				}
+				if len(chunk) >= overlap {
+					patternCarry = chunk[len(chunk)-overlap:]
+				} else {
+					tmp := patternCarry + chunk
+					if len(tmp) > overlap {
+						patternCarry = tmp[len(tmp)-overlap:]
+					} else {
+						patternCarry = tmp
+					}
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				break
+			}
+		}
+		f.Close()
+		if strings.TrimSpace(lineRemainder) != "" {
+			totalLines++
+			if logLineRe.MatchString(lineRemainder) {
+				matchedLines++
+			}
+		}
+
+		if !hasNonWhitespace {
+			results = append(results, Result{File: path, Category: "non-essential"})
+			continue
 		}
 		if isPII {
 			results = append(results, Result{File: path, Category: "pii"})
-			return nil
+			continue
 		}
-
-		if strings.Contains(content, "\x00") {
+		if hasNull {
 			results = append(results, Result{File: path, Category: "non-essential"})
-			return nil
+			continue
 		}
-
-		lines := strings.Split(content, "\n")
-		if len(lines) >= 3 {
-			nonEmpty := 0
-			matched := 0
-			for _, line := range lines {
-				if strings.TrimSpace(line) == "" {
-					continue
-				}
-				nonEmpty++
-				if logLineRe.MatchString(line) {
-					matched++
-				}
-			}
-			if nonEmpty > 0 && float64(matched)/float64(nonEmpty) > 0.5 {
-				results = append(results, Result{File: path, Category: "non-essential"})
-				return nil
-			}
-		}
-
-		lower := strings.ToLower(content)
-		isBiz := false
-		for _, kw := range keywords {
-			if strings.Contains(lower, kw) {
-				isBiz = true
-				break
-			}
+		if totalLines >= 3 && float64(matchedLines)/float64(totalLines) > 0.5 {
+			results = append(results, Result{File: path, Category: "non-essential"})
+			continue
 		}
 		if isBiz {
 			results = append(results, Result{File: path, Category: "business-critical"})
 		} else {
 			results = append(results, Result{File: path, Category: "non-essential"})
 		}
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "walk error: %v\n", err)
-		os.Exit(2)
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].File < results[j].File
-	})
-
+	sort.Slice(results, func(i, j int) bool { return results[i].File < results[j].File })
 	if results == nil {
 		results = []Result{}
 	}
-
-	data, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "marshal error: %v\n", err)
-		os.Exit(2)
-	}
-
-	tmpFile, err := os.CreateTemp(outDir, "out-*.tmp")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "temp file error: %v\n", err)
-		os.Exit(2)
-	}
+	data, _ := json.MarshalIndent(results, "", "  ")
+	tmpFile, _ := os.CreateTemp(outDir, "out-*.tmp")
 	tmpPath := tmpFile.Name()
-	_, err = tmpFile.Write(data)
-	if err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "write error: %v\n", err)
-		os.Exit(2)
-	}
+	tmpFile.Write(data)
 	tmpFile.Close()
-	if err := os.Rename(tmpPath, *outputFlag); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(os.Stderr, "rename error: %v\n", err)
-		os.Exit(2)
-	}
+	os.Rename(tmpPath, *outputFlag)
 }
 GOMAIN
 
