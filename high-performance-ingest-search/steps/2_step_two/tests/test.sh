@@ -3,19 +3,10 @@ mkdir -p /logs/verifier
 rm -f /logs/verifier/ctrf.json
 printf '0' > /logs/verifier/reward.txt
 
-apt-get update
-apt-get install -y curl > /dev/null 2>&1 || true
+# Use preinstalled python3 + pytest (installed in Dockerfile)
+python3 -m pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -s
 
-curl -LsSf https://astral.sh/uv/0.9.7/install.sh | sh > /dev/null 2>&1
-source $HOME/.local/bin/env
-
-uvx \
-  --with pytest==8.4.1 \
-  --with pytest-json-ctrf==0.3.5 \
-  --with requests==2.32.3 \
-  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA -s
-
-uv run --no-project python -I -S - /logs/verifier/ctrf.json /logs/verifier/reward.txt <<'PY'
+python3 -I -S - /logs/verifier/ctrf.json /logs/verifier/reward.txt <<'PY'
 import json, sys
 CTRF, REWARD = sys.argv[1], sys.argv[2]
 try:

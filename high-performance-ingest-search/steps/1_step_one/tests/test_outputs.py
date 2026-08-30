@@ -3,7 +3,7 @@ Step 1 tests for high-performance ingest-search.
 Builds Go project at /app and runs HTTP server.
 """
 
-import os, json, time, shutil, socket, subprocess, threading
+import os, json, time, shutil, socket, subprocess, threading, binascii
 import pytest, requests
 
 APP = "/app"
@@ -968,3 +968,245 @@ def test_concurrency(server):
     r = search(base, q="concurrent", limit=100)
     assert r.status_code == 200
     assert r.json()["total"] >= 50
+
+
+# ---------------------------------------------------------------------------
+# AFTR coverage gap tests (were missing)
+# ---------------------------------------------------------------------------
+
+
+def test_go_mod_forbidden_libs():
+    go_mod = os.path.join(APP, "go.mod")
+    if not os.path.exists(go_mod):
+        pytest.skip("go.mod not found")
+    with open(go_mod) as f:
+        content = f.read().lower()
+    forbidden = [
+        "bleve",
+        "elastic",
+        "elasticsearch",
+        "algolia",
+        "meilisearch",
+        "sonic",
+        "tantivy",
+        "lucene",
+    ]
+    for lib in forbidden:
+        assert lib not in content, f"go.mod contains forbidden lib {lib}"
+
+
+def test_data_file_env_handling():
+    port = find_free_port()
+    custom_dir = "/tmp/customdata_test"
+    custom_data_file = os.path.join(custom_dir, "myindex.json")
+    # clean
+    if os.path.exists(custom_dir):
+        shutil.rmtree(custom_dir, ignore_errors=True)
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(custom_dir, exist_ok=True)
+    env = {**os.environ, "PORT": str(port), "DATA_FILE": custom_data_file}
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        assert wait_for_server(port, timeout=15), (
+            "server failed to start with DATA_FILE env"
+        )
+        base = f"http://127.0.0.1:{port}"
+        r = ingest(
+            base,
+            [
+                {
+                    "id": "df1",
+                    "timestamp": "2026-07-20T10:00:00Z",
+                    "service": "s",
+                    "level": "info",
+                    "message": "data file test",
+                }
+            ],
+        )
+        assert r.status_code == 201
+        time.sleep(0.8)
+        # should have created custom file or WAL at same dir
+        custom_wal = os.path.join(custom_dir, "wal.log")
+        assert os.path.exists(custom_data_file) or os.path.exists(custom_wal), (
+            f"DATA_FILE handling failed: neither {custom_data_file} nor {custom_wal} exists. ls {custom_dir}: {os.listdir(custom_dir) if os.path.exists(custom_dir) else 'no dir'}"
+        )
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        # restart with same DATA_FILE, should recover
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert wait_for_server(port, timeout=15), "server should recover with DATA_FILE"
+        r = get_doc(f"http://127.0.0.1:{port}", "df1")
+        assert r.status_code == 200, (
+            f"doc should persist via DATA_FILE, got {r.status_code}"
+        )
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(custom_dir):
+            shutil.rmtree(custom_dir, ignore_errors=True)
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def _compute_crc32_hex(data_bytes: bytes) -> str:
+    return format(binascii.crc32(data_bytes) & 0xFFFFFFFF, "08x")
+
+
+def test_wal_checksum_rejection():
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        assert wait_for_server(port, timeout=15)
+        base = f"http://127.0.0.1:{port}"
+        r = ingest(
+            base,
+            [
+                {
+                    "id": "walgood1",
+                    "timestamp": "2026-07-20T10:00:00Z",
+                    "service": "s",
+                    "level": "info",
+                    "message": "good one",
+                }
+            ],
+        )
+        assert r.status_code == 201
+        time.sleep(0.5)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        wal_path = os.path.join(DATA_DIR, "wal.log")
+        assert os.path.exists(wal_path), "wal.log should exist"
+        with open(wal_path, "a") as f:
+            from collections import OrderedDict
+            # invalid checksum line
+            bad_od = OrderedDict([("id", "badchecksum"), ("timestamp", "2026-07-20T10:00:00Z"), ("service", "s"), ("level", "info"), ("message", "should be rejected")])
+            bad_doc_json = json.dumps(bad_od, separators=(",", ":"))
+            bad_entry_str = '{"op":"index","doc":' + bad_doc_json + ',"ts":"2026-07-20T10:00:00Z","checksum":"deadbeef"}'
+            f.write(bad_entry_str + "\n")
+            # valid entry with correct checksum
+            good_od = OrderedDict([("id", "walgood2"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "good two")])
+            doc_json_str = json.dumps(good_od, separators=(",", ":"))
+            checksum = _compute_crc32_hex(doc_json_str.encode())
+            good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
+            f.write(good_entry_str + "\n")
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert wait_for_server(port, timeout=15), (
+            "server should start after injecting bad checksum"
+        )
+        base2 = f"http://127.0.0.1:{port}"
+        r = get_doc(base2, "walgood1")
+        assert r.status_code == 200, "original WAL doc should survive"
+        r = get_doc(base2, "badchecksum")
+        assert r.status_code == 404, (
+            f"WAL line with bad checksum should be rejected, but got {r.status_code}"
+        )
+        r = get_doc(base2, "walgood2")
+        assert r.status_code == 200, (
+            f"valid WAL entry after bad line should be replayed, got {r.status_code}"
+        )
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+def test_wal_corrupt_line_replay():
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR, ignore_errors=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    proc = subprocess.Popen(
+        [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        assert wait_for_server(port, timeout=15)
+        base = f"http://127.0.0.1:{port}"
+        r = ingest(
+            base,
+            [
+                {
+                    "id": "corrupttest1",
+                    "timestamp": "2026-07-20T10:00:00Z",
+                    "service": "s",
+                    "level": "info",
+                    "message": "before corrupt",
+                }
+            ],
+        )
+        assert r.status_code == 201
+        time.sleep(0.5)
+        proc.terminate()
+        proc.wait(timeout=5)
+        time.sleep(0.5)
+        wal_path = os.path.join(DATA_DIR, "wal.log")
+        assert os.path.exists(wal_path)
+        with open(wal_path, "a") as f:
+            f.write("this is not json at all\n")
+            f.write('{"truncated":\n')
+            f.write("\n")
+            from collections import OrderedDict
+            od = OrderedDict([("id", "aftercorrupt"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "after corrupt")])
+            doc_json_str = json.dumps(od, separators=(",", ":"))
+            checksum = _compute_crc32_hex(doc_json_str.encode())
+            good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
+            f.write(good_entry_str + "\n")
+        proc2 = subprocess.Popen(
+            [BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert wait_for_server(port, timeout=15), (
+            "server should recover despite corrupt WAL lines"
+        )
+        base2 = f"http://127.0.0.1:{port}"
+        r = get_doc(base2, "corrupttest1")
+        assert r.status_code == 200, "doc before corrupt line should survive"
+        r = get_doc(base2, "aftercorrupt")
+        assert r.status_code == 200, (
+            "valid WAL entry after corrupt lines should be replayed"
+        )
+        proc2.terminate()
+        proc2.wait(timeout=5)
+    finally:
+        try:
+            proc.terminate()
+        except:
+            pass
+        try:
+            proc2.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+

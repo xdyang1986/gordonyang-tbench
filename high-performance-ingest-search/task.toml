@@ -13,19 +13,13 @@ author_name = "Gordon Yang"
 author_email = "gordonyang@meta.com"
 difficulty = "hard"
 category = "iterate_on_feature"
-category_usecase = "new_feature"
+category_usecase = "new_application"
 category_subdomain = "database_internals"
 reward_type = "binary"
 languages = ["go"]
 tags = ["multi-turn", "go", "ingest", "search", "high-performance", "concurrency", "sharding", "caching", "wal", "bulk"]
 expert_time_estimate_min = 90.0
 junior_time_estimate_min = 240.0
-
-[verifier]
-timeout_sec = 600.0
-
-[agent]
-timeout_sec = 1800.0
 
 [environment]
 build_timeout_sec = 600.0
@@ -35,10 +29,6 @@ storage_mb = 10240
 gpus = 0
 allow_internet = true
 mcp_servers = []
-
-[verifier.env]
-[environment.env]
-[solution.env]
 
 [[steps]]
 name = "1_step_one"

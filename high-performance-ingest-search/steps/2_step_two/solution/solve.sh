@@ -1122,6 +1122,16 @@ type Config struct {
 	} `yaml:"server"`
 }
 
+func stripInlineComment(s string) string {
+	// Strip inline comments starting with # that are not inside quotes.
+	// Simple heuristic: if # present, take substring before first #.
+	// This handles cases like "4  # comment" or "4 # comment"
+	if idx := strings.Index(s, "#"); idx != -1 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return strings.TrimSpace(s)
+}
+
 func LoadConfig(path string) Config {
 	cfg := Config{}
 	// defaults
@@ -1144,22 +1154,21 @@ func LoadConfig(path string) Config {
 		return cfg
 	}
 	content := string(data)
-	// naive parsing: extract values via scanning lines
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		// split key: value
 		parts := strings.SplitN(trimmed, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		key := strings.TrimSpace(strings.ToLower(parts[0]))
-		valStr := strings.TrimSpace(parts[1])
-		// remove possible quotes
-		valStr = strings.Trim(valStr, "\"'")
+		valPart := strings.TrimSpace(parts[1])
+		// Strip inline comments before parsing value — fixes cases like "workers: 4  # comment"
+		valPart = stripInlineComment(valPart)
+		valStr := strings.Trim(valPart, "\"'")
 		if valStr == "" {
 			continue
 		}
@@ -1220,7 +1229,6 @@ func LoadConfig(path string) Config {
 			}
 		}
 	}
-	// enforce minimums for perf
 	if cfg.Ingest.Workers < 2 {
 		cfg.Ingest.Workers = 2
 	}
@@ -1799,7 +1807,7 @@ func main() {
 }
 GO
 
-# create config for step1 (optional but helpful)
+# create config for step2 (high-perf)
 cat > /app/config.yaml <<'YAML'
 ingest:
   workers: 4
@@ -1821,4 +1829,4 @@ server:
 YAML
 
 go mod tidy
-echo "Step1 solution built"
+echo "Step2 high-perf solution built"
