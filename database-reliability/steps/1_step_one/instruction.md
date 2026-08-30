@@ -66,7 +66,7 @@ Config: zero/negative → default (100, 0.05, 500, 100, 3, 10).
 
 - **NodeDown:** when consec == DownThreshold (transition only). Critical, Value=consec, Message contains "down" case-insensitive. IsHealthy = consec < DownThreshold. Once down, further fails don't re-alert until recovered (success resets).
 
-- **HighLatency with hysteresis (prior-violating):** after high_latency fires for a node, suppress further high_latency alerts until metric drops **below 80%** of threshold. Reset only when latency < threshold*0.8. Suppression is per-node, survives other alerts, cleared on Reset. Terse.
+- **HighLatency with hysteresis (prior-violating):** after high_latency fires for a node, suppress further high_latency alerts until metric drops **well below** threshold (see hysteresis worked example – suppressed range vs reset). Suppression is per-node, survives other alerts, cleared on Reset. Infer reset watermark from examples (e.g., 90 vs 70). Terse.
 
 - **ReplicationLag:** if repLag > ReplicationLagThreshold → warning
 - **ConnectionExhaustion:** if conns > ConnectionThreshold → warning
