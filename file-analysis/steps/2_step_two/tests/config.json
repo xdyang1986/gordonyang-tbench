@@ -1,0 +1,11 @@
+{
+  "repo": "<owner>/<repo>",
+  "instance_id": "",
+  "base_commit": "<base_commit_sha>",
+  "patch": "",
+  "test_patch": "",
+  "fail_to_pass": [],
+  "pass_to_pass": [],
+  "selected_test_files_to_run": [],
+  "before_repo_set_cmd": ""
+}
