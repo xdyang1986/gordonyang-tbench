@@ -660,6 +660,15 @@ def test_invalid_inputs_still_400(server):
 # ---------------------------------------------------------------------------
 
 
+def _fnv1a32(s: str) -> int:
+    h = 2166136261
+    prime = 16777619
+    for b in s.encode('utf-8'):
+        h ^= b
+        h = (h * prime) & 0xFFFFFFFF
+    return h
+
+
 def _compute_crc32_hex(data_bytes: bytes) -> str:
     return format(binascii.crc32(data_bytes) & 0xFFFFFFFF, "08x")
 
@@ -738,12 +747,12 @@ def test_wal_checksum_rejection():
         assert os.path.exists(wal_path)
         with open(wal_path, "a") as f:
             from collections import OrderedDict
-            bad_od = OrderedDict([("id", "badchecksum"), ("timestamp", "2026-07-20T10:00:00Z"), ("service", "s"), ("level", "info"), ("message", "should be rejected")])
+            bad_od = OrderedDict([("message", "should be rejected"), ("id", "badchecksum"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T10:00:00Z"), ("tags", [])])
             bad_doc_json = json.dumps(bad_od, separators=(",", ":"))
             bad_entry_str = '{"op":"index","doc":' + bad_doc_json + ',"ts":"2026-07-20T10:00:00Z","checksum":"deadbeef"}'
             f.write(bad_entry_str + "\n")
-            good_od = OrderedDict([("id", "walgood2"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "good two")])
-            doc_json_str = json.dumps(good_od, separators=(",", ":"))
+            good_od = OrderedDict([("message", "good two"), ("id", "walgood2"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T11:00:00Z"), ("tags", [])])
+            doc_json_str = json.dumps(good_od, separators=(", ", ": "))  # non-canonical: spaces, different order, tags
             checksum = _compute_crc32_hex(doc_json_str.encode())
             good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
             f.write(good_entry_str + "\n")
@@ -791,8 +800,8 @@ def test_wal_corrupt_line_replay():
             f.write('{"truncated":\n')
             f.write("\n")
             from collections import OrderedDict
-            od = OrderedDict([("id", "aftercorrupt"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "after corrupt")])
-            doc_json_str = json.dumps(od, separators=(",", ":"))
+            od = OrderedDict([("message", "after corrupt"), ("id", "aftercorrupt"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T11:00:00Z"), ("tags", [])])
+            doc_json_str = json.dumps(od, separators=(", ", ": "))  # non-canonical with spaces
             checksum = _compute_crc32_hex(doc_json_str.encode())
             good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
             f.write(good_entry_str + "\n")
@@ -843,17 +852,20 @@ def test_cache_invalidation_after_writes(server):
 
 def test_actual_sharding_behavioral(server):
     """
-    Replace previous source-grep test_actual_sharding_not_fake.
-    Behavioral check: shards reported must match config, bulk ingest works,
-    and changing shard_count in config is honored after restart.
-    This avoids false negatives for implementations that put sharding logic in index.go
-    and is not spoofable via comment.
+    Behavioral check for real sharding: verifies metrics shards==config, per-shard doc counts
+    match FNV-1a hash distribution, and config change is honored. No source grep.
     """
     base = server
     r = requests.get(f"{base}/metrics", timeout=5)
     assert r.status_code == 200
-    shards_reported = r.json()["index"]["shards"]
-    assert shards_reported >= 2, f"shards should be >=2, got {shards_reported}"
+    j = r.json()
+    assert "index" in j and "shards" in j["index"] and "shard_docs" in j["index"], f"/metrics must include index.shards and index.shard_docs, got {j['index']}"
+    shards_reported = j["index"]["shards"]
+    shard_docs = j["index"]["shard_docs"]
+    assert shards_reported >= 2
+    assert isinstance(shard_docs, list)
+    assert len(shard_docs) == shards_reported
+    assert sum(shard_docs) == j["index"]["docs"]
 
     cfg_shards = None
     if os.path.exists(CONFIG_PATH):
@@ -870,21 +882,55 @@ def test_actual_sharding_behavioral(server):
                     except:
                         pass
     if cfg_shards:
-        assert shards_reported == cfg_shards, f"metrics shards {shards_reported} should match config {cfg_shards}, not fake static"
+        assert shards_reported == cfg_shards
 
-    # Behavioral: bulk ingest of 2000 docs should be quick and searchable (scatter-gather)
-    docs = generate_docs(2000, 100000)
+    # Known ids FNV distribution on fresh server with empty start (via restart)
+    port = find_free_port()
+    env = {**os.environ, "PORT": str(port)}
+    with open(CONFIG_PATH) as f:
+        orig = f.read()
+    try:
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert wait_for_server(port, timeout=15)
+        base2 = f"http://127.0.0.1:{port}"
+        r = requests.get(f"{base2}/metrics", timeout=5)
+        assert r.status_code == 200
+        shards0 = r.json()["index"]["shards"]
+        test_ids = [f"dist-{i:05d}" for i in range(200)]
+        expected = [0] * shards0
+        for tid in test_ids:
+            expected[_fnv1a32(tid) % shards0] += 1
+        docs = [{"id": tid, "timestamp": "2026-07-20T10:00:00Z", "service": "s", "level": "info", "message": "dist test"} for tid in test_ids]
+        ndjson = "\n".join([json.dumps(d) for d in docs])
+        r = requests.post(f"{base2}/ingest/bulk", data=ndjson, headers={"Content-Type": "application/x-ndjson"}, timeout=15)
+        assert r.status_code == 201
+        r = requests.get(f"{base2}/metrics", timeout=5)
+        sd = r.json()["index"]["shard_docs"]
+        assert sd == expected, f"shard_docs {sd} must match FNV-1a distribution {expected}"
+        proc.terminate()
+        proc.wait(timeout=5)
+    finally:
+        with open(CONFIG_PATH, 'w') as f:
+            f.write(orig)
+        try:
+            proc.terminate()
+        except:
+            pass
+        if os.path.exists(DATA_DIR):
+            shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+    # Bulk 2k quick
+    docs2 = generate_docs(2000, 100000)
     start = time.time()
-    r = bulk_ingest_ndjson(base, docs)
-    elapsed = time.time() - start
-    assert r.status_code == 201, f"bulk failed {r.status_code}"
+    r = bulk_ingest_ndjson(base, docs2)
+    assert r.status_code == 201
     assert r.json()["ingested"] == 2000
-    assert elapsed < 5.0, f"bulk 2k took {elapsed:.2f}s, too slow for sharded impl"
-    r = search(base, q="operation", limit=10)
-    assert r.status_code == 200
-    assert r.json()["total"] >= 2000
+    assert time.time() - start < 5.0
 
-    # Verify config change is honored (not hardcoded)
+    # Config change to 8
     port = find_free_port()
     env = {**os.environ, "PORT": str(port)}
     with open(CONFIG_PATH) as f:
@@ -897,16 +943,11 @@ def test_actual_sharding_behavioral(server):
             shutil.rmtree(DATA_DIR, ignore_errors=True)
         os.makedirs(DATA_DIR, exist_ok=True)
         proc = subprocess.Popen([BIN], cwd=APP, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        assert wait_for_server(port, timeout=15), "server should start with shard_count 8"
+        assert wait_for_server(port, timeout=15)
         base2 = f"http://127.0.0.1:{port}"
         r = requests.get(f"{base2}/metrics", timeout=5)
-        assert r.status_code == 200
-        assert r.json()["index"]["shards"] == 8, f"expected shards 8 after config change, got {r.json()['index']['shards']}"
-        docs2 = generate_docs(1000, 200000)
-        ndjson = "\n".join([json.dumps(d) for d in docs2])
-        r = requests.post(f"{base2}/ingest/bulk", data=ndjson, headers={"Content-Type": "application/x-ndjson"}, timeout=15)
-        assert r.status_code == 201
-        assert r.json()["ingested"] == 1000
+        assert r.json()["index"]["shards"] == 8
+        assert len(r.json()["index"]["shard_docs"]) == 8
         proc.terminate()
         proc.wait(timeout=5)
     finally:

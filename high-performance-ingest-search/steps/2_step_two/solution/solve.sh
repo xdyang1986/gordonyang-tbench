@@ -559,6 +559,16 @@ func (si *ShardedIndex) DistinctTerms() int {
 	return len(set)
 }
 
+func (si *ShardedIndex) ShardDocCounts() []int {
+	counts := make([]int, si.shardCount)
+	for i, shard := range si.shards {
+		shard.mu.RLock()
+		counts[i] = len(shard.docs)
+		shard.mu.RUnlock()
+	}
+	return counts
+}
+
 func (si *ShardedIndex) markDirty() {
 	si.dirtyMu.Lock()
 	si.dirty = true
@@ -1700,9 +1710,10 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 			"cache_size":     cache.Size(),
 		},
 		"index": map[string]interface{}{
-			"docs":   shardedIdx.DocCount(),
-			"shards": shardedIdx.shardCount,
-			"terms":  shardedIdx.DistinctTerms(),
+			"docs":       shardedIdx.DocCount(),
+			"shards":     shardedIdx.shardCount,
+			"shard_docs": shardedIdx.ShardDocCounts(),
+			"terms":      shardedIdx.DistinctTerms(),
 		},
 	}
 	writeJSON(w, 200, resp)

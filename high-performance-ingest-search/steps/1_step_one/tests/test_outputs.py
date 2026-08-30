@@ -1098,13 +1098,13 @@ def test_wal_checksum_rejection():
         with open(wal_path, "a") as f:
             from collections import OrderedDict
             # invalid checksum line
-            bad_od = OrderedDict([("id", "badchecksum"), ("timestamp", "2026-07-20T10:00:00Z"), ("service", "s"), ("level", "info"), ("message", "should be rejected")])
+            bad_od = OrderedDict([("message", "should be rejected"), ("id", "badchecksum"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T10:00:00Z"), ("tags", [])])
             bad_doc_json = json.dumps(bad_od, separators=(",", ":"))
             bad_entry_str = '{"op":"index","doc":' + bad_doc_json + ',"ts":"2026-07-20T10:00:00Z","checksum":"deadbeef"}'
             f.write(bad_entry_str + "\n")
             # valid entry with correct checksum
-            good_od = OrderedDict([("id", "walgood2"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "good two")])
-            doc_json_str = json.dumps(good_od, separators=(",", ":"))
+            good_od = OrderedDict([("message", "good two"), ("id", "walgood2"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T11:00:00Z"), ("tags", [])])
+            doc_json_str = json.dumps(good_od, separators=(", ", ": "))  # non-canonical: spaces, different order, tags
             checksum = _compute_crc32_hex(doc_json_str.encode())
             good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
             f.write(good_entry_str + "\n")
@@ -1176,8 +1176,8 @@ def test_wal_corrupt_line_replay():
             f.write('{"truncated":\n')
             f.write("\n")
             from collections import OrderedDict
-            od = OrderedDict([("id", "aftercorrupt"), ("timestamp", "2026-07-20T11:00:00Z"), ("service", "s"), ("level", "info"), ("message", "after corrupt")])
-            doc_json_str = json.dumps(od, separators=(",", ":"))
+            od = OrderedDict([("message", "after corrupt"), ("id", "aftercorrupt"), ("service", "s"), ("level", "info"), ("timestamp", "2026-07-20T11:00:00Z"), ("tags", [])])
+            doc_json_str = json.dumps(od, separators=(", ", ": "))  # non-canonical with spaces
             checksum = _compute_crc32_hex(doc_json_str.encode())
             good_entry_str = '{"op":"index","doc":' + doc_json_str + ',"ts":"2026-07-20T11:00:00Z","checksum":"' + checksum + '"}'
             f.write(good_entry_str + "\n")
