@@ -1,62 +1,30 @@
-# Database Reliability Monitoring — Step 2: Proactive Scoring Mechanism
+# Database Reliability Monitoring — Step 2: Proactive Scoring (Hardened v2)
 
-This step extends Step 1's reactive monitor with proactive health scoring, trend analysis, failure prediction, and reliability reporting.
+Extends Step1 reactive monitor. Keep backward compat: Step1 tests still pass.
 
-You inherit all files from Step 1. Keep backward compatibility: all Step 1 functionality must continue to pass.
-
-## Extended Package Layout
-
+## Layout
 ```
 /app/
   go.mod (module db-reliability)
   reliability/
-    monitor.go   (from step1, extended or kept)
-    scoring.go   (new file for scoring logic, or you can keep all in monitor.go)
+    monitor.go
+    scoring.go (optional)
 ```
+Import `db-reliability/reliability`.
 
-You may split into multiple files but package must remain `reliability` and import path `db-reliability/reliability`.
-
-## New Types to Add (must match exactly)
-
+## Types (exact – same as before plus extras)
 ```go
 type HealthScore struct {
-    NodeID      string
-    Score       float64            // 0-100
-    Factors     map[string]float64 // breakdown: error_rate, latency, replication_lag, consecutive_failures, connections
-    LastUpdated time.Time
-    Trend       string // "improving", "degrading", "stable"
+    NodeID string; Score float64; Factors map[string]float64; LastUpdated time.Time; Trend string
 }
-
 type RiskLevel string
-const (
-    RiskLow      RiskLevel = "low"
-    RiskMedium   RiskLevel = "medium"
-    RiskHigh     RiskLevel = "high"
-    RiskCritical RiskLevel = "critical"
-)
-
+const (RiskLow RiskLevel="low"; RiskMedium RiskLevel="medium"; RiskHigh RiskLevel="high"; RiskCritical RiskLevel="critical")
 type FailurePrediction struct {
-    NodeID                 string
-    RiskLevel              RiskLevel
-    Probability            float64       // 0.0-1.0
-    PredictedFailureWithin time.Duration
-    Reasons                []string
-    Timestamp              time.Time
+    NodeID string; RiskLevel RiskLevel; Probability float64; PredictedFailureWithin time.Duration; Reasons []string; Timestamp time.Time
 }
-
 type ReliabilityReport struct {
-    Timestamp       time.Time
-    OverallScore    float64 // avg of all nodes, 100 if no nodes
-    Nodes           []HealthScore
-    Predictions     []FailurePrediction
-    ClusterHealth   string // "healthy", "degraded", "unhealthy", "critical"
-    Recommendations []string
+    Timestamp time.Time; OverallScore float64; Nodes []HealthScore; Predictions []FailurePrediction; ClusterHealth string; Recommendations []string
 }
-```
-
-## New Methods to Add to Monitor
-
-```go
 func (m *Monitor) GetHealthScore(nodeID string) (HealthScore, bool)
 func (m *Monitor) GetAllHealthScores() []HealthScore
 func (m *Monitor) PredictFailure(nodeID string) (FailurePrediction, bool)
@@ -64,192 +32,124 @@ func (m *Monitor) GetReliabilityReport() ReliabilityReport
 func (m *Monitor) GetTrend(nodeID string, metric string) string
 ```
 
-`metric` for GetTrend is one of: "latency", "error_rate", "replication_lag", "connections". Return "stable" for unknown metric or unknown node or insufficient history (<4 checks).
+Metric for GetTrend: "latency", "error_rate", "replication_lag", "connections". Return "stable" if unknown metric/node or history<4.
 
-## Scoring Algorithm (must implement exactly for deterministic tests)
+## Proactive rules – hardened
 
-This algorithm defines expected behavior. Tests will verify your scoring follows these rules (with tolerance).
+### Data
+Per node history up to max(WindowSize*2,20). Store normalized latency, lag, connections, success.
 
-### Data you must track per node (beyond Step1)
+- AvgLatency for status and scoring: **count window** last WindowSize.
+- ErrorRate for alerts and scoring: **time window** last 60s (ts >= cur-60s). Mixed semantics – models unify.
+- CurrentConnections = last check's conns.
 
-- Keep history of last WindowSize entries (or more to compute trend, up to maybe 20, but at least WindowSize). For trend analysis, you need enough history. To make it deterministic, maintain slice of last up to 20 checks (or WindowSize*2). But for average we already use WindowSize. For trend we need to split history into older half and newer half.
-- For each check, store normalized values: LatencyMs (negative=>0), ReplicationLagMs (neg=>0), Connections (neg=>0), Success bool.
+### HealthScore
 
-### HealthScore calculation
+Invariant: Score = 100 - sum(independent per-factor penalties). Each penalty saturates. Factors map must contain all 5 keys: error_rate, latency, replication_lag, consecutive_failures, connections (even if 0). LastUpdated=Now. Trend overall: if any of latency/error_rate/replication_lag is degrading → degrading, else if any improving and none degrading → improving, else stable.
 
-Start with 100.
+**Instead of formulas, derive penalties from worked examples below. Examples use defaults: LatencyThreshold=100, LagThreshold=500, ConnThreshold=100, DownThreshold=3, WindowSize=10, ErrorThreshold=0.05.**
 
-Compute per-node aggregates over window (last WindowSize, or fewer if not enough history):
-- `errorRate` = failed in window / windowLen (0 if windowLen 0)
-- `avgLatency` = average latency in window
-- `avgReplicationLag` = average replication lag in window
-- `currentConnections` = last check's connections (or 0 if no checks)
-- `consecutiveFailures` = as tracked in Step1
-- `windowLen` = number of entries in window (min(total, WindowSize))
+Single-factor examples (others zero, consec 0, conn 10, latency 50, lag 100, errorRate 0 → Score 100):
 
-Deductions:
-- **error_rate**: if errorRate>0 => deduction = errorRate * 50. Cap not specified, but can be up to 50. Factor["error_rate"] = deduction. If errorRate==0, factor 0.
-- **latency**:
-  if avgLatency > cfg.LatencyThresholdMs:
-    over := (avgLatency - threshold)/threshold
-    deduction := over * 20
-    if deduction >30 { deduction=30 }
-    Factor["latency"]=deduction
-  else if avgLatency > threshold*0.8:
-    Factor["latency"]=5
-  else:
-    Factor["latency"]=0
-- **replication_lag**:
-  if avgReplicationLag > cfg.ReplicationLagThresholdMs:
-    over := (avg - threshold)/threshold
-    deduction := over*15
-    if deduction>20 { deduction=20 }
-    Factor["replication_lag"]=deduction
-  else if avgReplicationLag > threshold*0.8:
-    Factor["replication_lag"]=3
-  else:
-    Factor["replication_lag"]=0
-- **consecutive_failures**:
-  deduction := float64(consecutiveFailures)*10
-  if deduction>40 { deduction=40 }
-  Factor["consecutive_failures"]=deduction
-- **connections**:
-  if currentConnections > cfg.ConnectionThreshold:
-    Factor["connections"]=15
-  else if currentConnections > int(float64(cfg.ConnectionThreshold)*0.8):
-    Factor["connections"]=5
-  else:
-    Factor["connections"]=0
+- errorRate 0.2 → Score 90
+- errorRate 0.5 → Score 75
+- errorRate 1.0 → Score 50
+- avgLatency 120 → Score 96
+- avgLatency 150 → Score 90
+- avgLatency 250 → Score 70
+- avgLatency 85 → Score 95
+- avgLag 600 → Score 97
+- avgLag 1000 → Score 85
+- avgLag 2000 → Score 80
+- consec 1 → Score 90
+- consec 2 → Score 80
+- consec 4 → Score 60
+- consec 5 → Score 60
+- conn 150 → Score 85
+- conn 90 → Score 95
+- conn 70 → Score 100
 
-Score = 100 - sum(deductions). Clamped 0-100.
-If windowLen==0 (no checks) Score=100? Actually if node exists but no checks? That cannot happen because node created only on check. But for safety, 100.
+Combined examples:
+- errorRate 0.2 (deduction 10) + avgLatency 120 (4) + avgLag 600 (3) + consec 1 (10) + conn 90 (5) = deductions 32 → Score 68
+- errorRate 0.0 + avgLatency 50 + avgLag 100 + consec 0 + conn 10 → Score 100
+- errorRate 0.5 (25) + avgLatency 250 (30 cap) + avgLag 2000 (20 cap) + consec 4 (40 cap) + conn 150 (15) =130 → Score clamped 0
 
-Factors map must contain all 5 keys above (even if 0).
+From these, infer:
+- error_rate penalty = errorRate*50
+- latency: if avg > threshold: over=(avg-thresh)/thresh, penalty=over*20 cap 30; else if avg > thresh*0.8 penalty 5 else 0
+- lag: if avg > thresh: over*15 cap20 else if >0.8*thresh 3 else 0
+- consec: *10 cap40
+- conn: > thresh 15 else >0.8*thresh 5 else 0
 
-LastUpdated = time.Now()
+Score clamped 0-100.
 
-Trend overall:
-Use GetTrend for metrics "latency", "error_rate", "replication_lag". If any of those is "degrading" => HealthScore.Trend = "degrading". Else if any is "improving" and none degrading => "improving". Else "stable".
+### GetTrend – with outage exclusion (prior-violating)
 
-### GetTrend implementation
+- history <4 → stable, unknown metric/node → stable
+- Metric: latency (history lat), replication_lag (lag), connections (conns), error_rate (fail bool as 1/0)
+- **Outage exclusion:** GetTrend must skip checks recorded while node was down (consec >= DownThreshold), since outage skews halves.
+- Split filtered history into older = first n/2, newer = last n/2 (middle ignored when odd). Compute avg older vs newer.
+- If newer==0 && older==0 → stable; older==0 && newer>0 → degrading; newer==0 && older>0 → improving; else newer > older*1.1 → degrading, newer < older*0.9 → improving, else stable.
 
-Signature: GetTrend(nodeID, metric) string
-
-- If node not found or history <4 => "stable"
-- Metric cases:
-  - "latency": use history latencies
-  - "replication_lag": use replication lags
-  - "connections": use connections
-  - "error_rate": need per-window error? Simpler: use success bool converted to error (0 for success,1 for fail) and compute trend of error occurrence? Approach: take error values (1 for fail) history and compare averages.
-- Algorithm generic:
-  Take stored history slice (in order of occurrence, old to new). Let n = len(history). If n<4, stable.
-  Split into two halves: older = first n/2, newer = last n/2 (if odd, middle element ignored or included? For determinism: older = history[:n/2], newer = history[n-n/2:] so both size floor(n/2). Example n=5 => older 2, newer 2 (middle ignored). n=4 => 2 and 2.
-  Compute avg older vs avg newer.
-  If metric is error_rate: avg is error rate (failed/total) in each half? Or average of error bool. Equivalent to fail count / halfLen.
-  For other metrics: average value.
-  Then:
-    if newerAvg > olderAvg*1.1 => "degrading" (increase)
-    if newerAvg < olderAvg*0.9 => "improving" (decrease)
-    else "stable"
-  Special for error_rate: same logic (increasing error = degrading)
-  Edge when olderAvg ==0:
-    - If newerAvg==0 => stable
-    - If newerAvg>0 && olderAvg==0 => if newerAvg>0.1? Actually if older 0 and newer >0, consider degrading if newer>0. For latency: if older 0 and newer >0, degrading. For robustness: if older==0 and newer==0 => stable, else if older==0 and newer>0 => degrading, else if newer==0 and older>0 => improving.
-- Unknown metric string => "stable"
-- Return one of three strings exactly.
+Worked:
+```
+latency history [10,20,30,40,50,60,70,80] → older avg (10+20+30+40)/4=25, newer avg (50+60+70+80)/4=65 → 65>25*1.1 → degrading
+latency [80,70,60,50,40,30,20,10] → improving
+With outage: fails make node down, those checks skipped in trend
+```
 
 ### PredictFailure
 
-Returns FailurePrediction and bool (false if node not found).
+Returns bool false if node missing. Compute HealthScore then:
 
-- Compute HealthScore for node.
-- Determine RiskLevel and Probability based on Score and ConsecutiveFailures and Trend:
+Priority order:
+1. consec >= DownThreshold → critical 0.95
+2. score <20 → critical 0.9
+3. score <40 → critical 0.8
+4. score <50 → high 0.7
+5. score <60 → high 0.6
+6. score <75: degrading→medium 0.4 else low 0.2
+7. >=75: degrading→medium 0.35 else low 0.1
 
-Rules in priority order (first matching):
-1. If ConsecutiveFailures >= DownThreshold => RiskCritical, Probability 0.95, Reason must include "consecutive failures" or "approaching failure" or "already down"
-2. Else if Score <20 => RiskCritical, Probability 0.9
-3. Else if Score <40 => RiskCritical, Probability 0.8
-4. Else if Score <50 => RiskHigh, Probability 0.7
-5. Else if Score <60 => RiskHigh, Probability 0.6
-6. Else if Score <75:
-   - if Trend=="degrading" => RiskMedium, Probability 0.4
-   - else => RiskLow, Probability 0.2
-7. Else (>=75):
-   - if Trend=="degrading" => RiskMedium, Probability 0.35
-   - else => RiskLow, Probability 0.1
+Within: critical 5m, high 15m, medium 1h, low 4h.
 
-- PredictedFailureWithin based on RiskLevel:
-  Critical => 5 * time.Minute
-  High => 15 * time.Minute
-  Medium => 1 * time.Hour
-  Low => 4 * time.Hour
+Reasons: built from time-window errorRate, count-window avgLatency/avgLag, consec, conn>0.8*thresh, and degrading trends. If low risk and no issues → ["no significant issues"] or empty allowed; high/medium/critical must have ≥1 reason.
 
-- Reasons: slice of strings explaining issues. Build based on factors:
-  - if errorRate > cfg.ErrorRateThreshold => add fmt.Sprintf("high error rate: %.1f%%", errorRate*100)
-  - if avgLatency > cfg.LatencyThresholdMs => fmt.Sprintf("high latency: %.1fms > %.1fms", avgLatency, threshold)
-  - if avgReplicationLag > cfg.ReplicationLagThresholdMs => "high replication lag: Xms"
-  - if consecutiveFailures>0 => fmt.Sprintf("consecutive failures: %d", consecutiveFailures)
-  - if currentConnections > int(float64(cfg.ConnectionThreshold)*0.8) => "high connection usage"
-  - if GetTrend(node, "latency")=="degrading" => "degrading latency trend"
-  - similarly for error_rate, replication_lag, connections if degrading
-  - If no reasons (healthy node) => slice may contain "no significant issues" or be empty but tests expect at least 0? For healthy node, reasons can be empty or contain that string; we will accept either, but encourage at least one reason like "no significant issues" when low risk. To make tests pass, for low risk with no issues, Reasons can be empty or contain "no significant issues" – both accepted.
-  For higher risk, at least one reason must be present.
-
-- Timestamp = time.Now()
+Timestamp Now.
 
 ### GetAllHealthScores
 
-Returns slice copy of HealthScore for all nodes, order sorted by NodeID? Not required but make deterministic sorted for easier testing.
+Copy, sorted by NodeID.
 
 ### GetReliabilityReport
 
-- Timestamp = time.Now()
+- Timestamp Now
 - Nodes = GetAllHealthScores()
-- OverallScore = average of all Nodes Score, if no nodes => 100
-- ClusterHealth based on OverallScore:
-  >=80 => "healthy"
-  >=60 => "degraded"
-  >=40 => "unhealthy"
-  <40 => "critical"
-- Predictions = for each node, call PredictFailure and collect (order same as Nodes)
-- Recommendations: []string built from aggregated issues:
-  Must include at least one recommendation. Generate based on:
-  - if any node RiskCritical => add "immediate investigation required for nodes: <comma list of critical node ids>"
-  - if any node RiskHigh => add "proactive maintenance recommended for high-risk nodes: <list>"
-  - if any node Factors["latency"]>0 => add "consider scaling or optimizing queries for high latency nodes"
-  - if any Factors["error_rate"]>0 => add "check application logs and database connectivity"
-  - if any Factors["replication_lag"]>0 => add "check replica status and network"
-  - if any Factors["connections"]>0 => add "consider increasing connection pool or investigating connection leaks"
-  - if any Trend degrading => add "monitor degrading trends and plan capacity"
-  - if overallScore >=80 and no issues => add "cluster operating normally"
-  Order not strict but must contain substrings for relevant cases. Tests will check for presence of expected substrings.
+- OverallScore = avg Nodes Score, 100 if none
+- ClusterHealth: >=80 healthy, >=60 degraded, >=40 unhealthy, <40 critical
+- Predictions = per node PredictFailure sorted
+- Recommendations: at least one, containing substrings:
+  - any critical → "immediate investigation required for nodes: <list>"
+  - any high → "proactive maintenance recommended for high-risk nodes: <list>"
+  - any latency factor>0 → "consider scaling or optimizing queries for high latency nodes"
+  - any error_rate>0 → "check application logs and database connectivity"
+  - any repl_lag>0 → "check replica status and network"
+  - any conn>0 → "consider increasing connection pool or investigating connection leaks"
+  - any degrading → "monitor degrading trends and plan capacity"
+  - if healthy (overall>=80 no factors) → "cluster operating normally"
 
-  Ensure Recommendations non-empty.
+Order not strict but substrings checked.
 
 ### Concurrency
 
-All new methods must be concurrency-safe same mutex as Step1.
+All methods RWMutex, race detector.
 
-### Backward compatibility
+### Backward compat
 
-All Step1 methods must continue to work and produce same semantics.
+Step1 hysteresis and time-window must stay.
 
 ### Constraints
 
-- Stdlib only
-- go vet ./... and go build ./... must pass
-- Files must exist: reliability/monitor.go (or scoring.go)
-- No panics
+Stdlib only, vet pass, no panics.
 
-### Example
-
-```go
-m := reliability.NewMonitor(reliability.Config{})
-m.RecordCheck(reliability.CheckResult{NodeID:"db1", LatencyMs:150, Success:true})
-score, ok := m.GetHealthScore("db1")
-pred, ok := m.PredictFailure("db1")
-report := m.GetReliabilityReport()
-trend := m.GetTrend("db1", "latency")
-```
-
-Implement scoring carefully to match spec algorithm exactly; tests will compute expected values following this spec with tolerance.
+Implement scoring by inferring penalties from examples; don't hardcode example table, infer rule.
